@@ -1,0 +1,303 @@
+import type { Wall } from '../../shared/types.js';
+import {
+  GUN_DAMAGE_MIN,
+  GUN_DAMAGE_MAX,
+  GUN_BLOOM_RAD,
+  GUN_RANGE,
+  GUN_COOLDOWN_MS,
+  GUNSHOT_ALERT_RADIUS,
+  RETALIATE_CHANCE,
+  RETALIATE_COMMIT_MS,
+  PLAYER_ONE_SHOT_KILL,
+  MUZZLE_OFFSET_MUL,
+  WINDOW_BULLET_DAMAGE,
+  SHOT_SLOW_MS,
+  SHOT_SLOW_MULTIPLIER,
+  ENTITY_MAX_HEALTH,
+  TRACKER_DART_MS,
+  GRENADE_THROW_RANGE,
+  GRENADE_COOLDOWN_MS,
+} from '../../shared/constants.js';
+import { throwGrenade } from './heli.js';
+import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
+import { segmentCircleT, segmentRectT } from './geometry.js';
+import {
+  damageWindow,
+  isInGrapple,
+  isWindowIntact,
+  newAiState,
+  rollSpeedMul,
+  type Entity,
+  type World,
+} from './world.js';
+import { heldGunSlot, heldItem } from './inventory.js';
+
+/**
+ * Gunfire is loud: every zombie in earshot investigates the shooter's position
+ * whether or not it can see them. This is what stops a bush from being a
+ * perfect firing blind.
+ */
+function alertZombies(world: World, x: number, y: number, now: number): void {
+  const heard = world.entityGrid.queryCircle(x, y, GUNSHOT_ALERT_RADIUS, new Set<Entity>());
+  for (const zombie of heard) {
+    if (zombie.type !== 'zombie') continue;
+    if (world.playerIds.has(zombie.id)) continue;
+    if (Math.hypot(zombie.x - x, zombie.y - y) > GUNSHOT_ALERT_RADIUS) continue;
+
+    let state = world.ai.get(zombie.id);
+    if (!state) {
+      state = newAiState(now, zombie.x, zombie.y);
+      world.ai.set(zombie.id, state);
+    }
+    // Don't pull a zombie off a target it can actually see.
+    if (state.targetId) continue;
+    state.lastSeenX = x;
+    state.lastSeenY = y;
+    state.path = null;
+    state.nextPathAt = 0;
+  }
+}
+
+/** Hitscan along the muzzle line: nearest zombie, but only if no wall first. */
+export function fire(
+  world: World,
+  shooter: Entity,
+  aim: number,
+  bloom: number,
+  now: number,
+  def?: ItemDef,
+): void {
+  const angle = aim + (Math.random() * 2 - 1) * bloom;
+  const range = def?.range ?? GUN_RANGE;
+  // Start the round at the drawn barrel tip rather than the body centre.
+  const muzzleX = shooter.x + Math.cos(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
+  const muzzleY = shooter.y + Math.sin(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
+  const endX = muzzleX + Math.cos(angle) * range;
+  const endY = muzzleY + Math.sin(angle) * range;
+
+  const minX = Math.min(muzzleX, endX);
+  const maxX = Math.max(muzzleX, endX);
+  const minY = Math.min(muzzleY, endY);
+  const maxY = Math.max(muzzleY, endY);
+
+  let wallT = 1;
+  const walls = world.wallGrid.queryRect(minX, minY, maxX, maxY, new Set<Wall>());
+  for (const wall of walls) {
+    const t = segmentRectT(muzzleX, muzzleY, endX, endY, wall);
+    if (t !== null && t < wallT) wallT = t;
+  }
+
+  // Rounds punch through glass: the pane takes damage, the bullet carries on.
+  const panes = world.windowGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
+  for (const index of panes) {
+    if (!isWindowIntact(world, index)) continue;
+    const t = segmentRectT(muzzleX, muzzleY, endX, endY, world.map.windows[index]);
+    if (t !== null && t <= wallT) damageWindow(world, index, WINDOW_BULLET_DAMAGE);
+  }
+
+  let victim: Entity | null = null;
+  let victimT = wallT;
+  const candidates = world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>());
+  for (const other of candidates) {
+    if (other.type !== 'zombie' || other.id === shooter.id) continue;
+    const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
+    if (t !== null && t < victimT) {
+      victimT = t;
+      victim = other;
+    }
+  }
+
+  const stopT = victim ? victimT : wallT;
+  world.shots.push({
+    x1: Math.round(muzzleX),
+    y1: Math.round(muzzleY),
+    x2: Math.round(muzzleX + (endX - muzzleX) * stopT),
+    y2: Math.round(muzzleY + (endY - muzzleY) * stopT),
+    hit: victim !== null,
+  });
+
+  alertZombies(world, shooter.x, shooter.y, now);
+
+  if (!victim) return;
+
+  const oneShot = PLAYER_ONE_SHOT_KILL && world.playerIds.has(shooter.id);
+  const lo = def?.damageMin ?? GUN_DAMAGE_MIN;
+  const hi = def?.damageMax ?? GUN_DAMAGE_MAX;
+  const damage = oneShot ? victim.health : lo + Math.floor(Math.random() * (hi - lo + 1));
+  victim.health -= damage;
+
+  if (victim.health > 0) {
+    // A zombie mid-grapple keeps its grip and its facing — it doesn't look up.
+    // Otherwise it spins toward the shot, and may break off to hunt the shooter.
+    if (!world.playerIds.has(victim.id) && !isInGrapple(world, victim.id)) {
+      let state = world.ai.get(victim.id);
+      if (!state) {
+        state = newAiState(now, victim.x, victim.y);
+        world.ai.set(victim.id, state);
+      }
+      const toShooter = Math.atan2(shooter.y - victim.y, shooter.x - victim.x);
+      state.heading = toShooter;
+      victim.facing = toShooter;
+
+      // Taking a round staggers them for a moment.
+      state.slowUntil = Math.max(state.slowUntil, now + SHOT_SLOW_MS);
+      state.slowMul = SHOT_SLOW_MULTIPLIER;
+
+      if (Math.random() < RETALIATE_CHANCE) {
+        state.lastSeenX = shooter.x;
+        state.lastSeenY = shooter.y;
+        state.targetId = null;
+        state.path = null;
+        state.nextPathAt = 0;
+        // Commit briefly so the next perception tick doesn't undo it.
+        state.nextSenseAt = now + RETALIATE_COMMIT_MS;
+      } else if (!state.targetId) {
+        state.lastSeenX = shooter.x;
+        state.lastSeenY = shooter.y;
+        state.path = null;
+        state.nextPathAt = 0;
+      }
+    }
+    return;
+  }
+
+  if (world.playerIds.has(victim.id)) {
+    // Infection is permanent — a downed player comes back as a zombie.
+    victim.health = victim.maxHealth;
+    victim.x = world.map.width / 2;
+    victim.y = world.map.height / 2;
+  } else {
+    world.entities.delete(victim.id);
+    world.ai.delete(victim.id);
+  }
+
+  world.grapples.delete(victim.id);
+  for (const [targetId, session] of world.grapples) {
+    session.zombieIds.delete(victim.id);
+    if (session.zombieIds.size === 0) world.grapples.delete(targetId);
+  }
+}
+
+/** Turns a zombie back into a civilian. */
+function cure(world: World, victim: Entity, now: number): void {
+  victim.type = 'human';
+  victim.health = ENTITY_MAX_HEALTH.human;
+  victim.maxHealth = ENTITY_MAX_HEALTH.human;
+  victim.speedMul = rollSpeedMul('human');
+  world.pendingInfections.delete(victim.id);
+  world.grappleCounts.delete(victim.id);
+  world.ai.set(victim.id, newAiState(now, victim.x, victim.y));
+}
+
+/** Hitscan that heals instead of harming, and darts that only mark. */
+function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, kind: 'cure' | 'dart', now: number): void {
+  const angle = aim + (Math.random() * 2 - 1) * (def.bloom ?? 0.05);
+  const range = def.range ?? GUN_RANGE;
+  const muzzleX = shooter.x + Math.cos(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
+  const muzzleY = shooter.y + Math.sin(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
+  const endX = muzzleX + Math.cos(angle) * range;
+  const endY = muzzleY + Math.sin(angle) * range;
+
+  const minX = Math.min(muzzleX, endX);
+  const maxX = Math.max(muzzleX, endX);
+  const minY = Math.min(muzzleY, endY);
+  const maxY = Math.max(muzzleY, endY);
+
+  let wallT = 1;
+  for (const wall of world.wallGrid.queryRect(minX, minY, maxX, maxY, new Set<Wall>())) {
+    const t = segmentRectT(muzzleX, muzzleY, endX, endY, wall);
+    if (t !== null && t < wallT) wallT = t;
+  }
+
+  let victim: Entity | null = null;
+  let victimT = wallT;
+  for (const other of world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>())) {
+    if (other.type !== 'zombie' || other.id === shooter.id) continue;
+    const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
+    if (t !== null && t < victimT) {
+      victimT = t;
+      victim = other;
+    }
+  }
+
+  const stopT = victim ? victimT : wallT;
+  world.shots.push({
+    x1: Math.round(muzzleX),
+    y1: Math.round(muzzleY),
+    x2: Math.round(muzzleX + (endX - muzzleX) * stopT),
+    y2: Math.round(muzzleY + (endY - muzzleY) * stopT),
+    hit: victim !== null,
+    kind,
+  });
+
+  if (!victim) return;
+  if (kind === 'cure') {
+    if (!world.playerIds.has(victim.id)) cure(world, victim, now);
+  } else {
+    // Tracker dart: marks the target for the zombie-player hunt later on.
+    world.trackedTargets.set(victim.id, now + TRACKER_DART_MS);
+  }
+}
+
+export function processShooting(world: World, now: number, frozen: Set<string>): void {
+  for (const id of world.playerIds) {
+    const shooter = world.entities.get(id);
+    if (!shooter || shooter.type !== 'officer') continue;
+    if (frozen.has(id)) continue;
+
+    const command = world.commands.get(id);
+    if (!command?.shooting) continue;
+
+    const inv = world.inventories.get(id);
+    if (!inv) continue;
+    const held = heldItem(inv);
+    if (!held) continue;
+
+    // Smoke goes underarm toward the cursor, then calls in the helicopter.
+    if (held === 'smokeGrenade') {
+      const last = world.lastShotAt.get(id) ?? 0;
+      if (now - last < GRENADE_COOLDOWN_MS) continue;
+      world.lastShotAt.set(id, now);
+
+      const range = Math.min(GRENADE_THROW_RANGE, GRENADE_THROW_RANGE);
+      throwGrenade(
+        world,
+        shooter.x,
+        shooter.y,
+        shooter.x + Math.cos(command.aim) * range,
+        shooter.y + Math.sin(command.aim) * range,
+        now,
+      );
+      const at = inv.utilities.indexOf('smokeGrenade');
+      if (at >= 0) inv.utilities.splice(at, 1);
+      inv.activeSlot = 0;
+      continue;
+    }
+
+    if (!isGun(held)) continue;
+
+    const def = ITEMS[held];
+    const last = world.lastShotAt.get(id) ?? 0;
+    if (now - last < (def.cooldownMs ?? GUN_COOLDOWN_MS)) continue;
+
+    // Everything but the pistol burns rounds.
+    const slot = heldGunSlot(inv);
+    if (slot) {
+      if (slot.ammo <= 0) continue;
+      slot.ammo--;
+    }
+
+    world.lastShotAt.set(id, now);
+
+    if (held === 'cureGun') {
+      fireSpecial(world, shooter, command.aim, def, 'cure', now);
+    } else if (held === 'trackerDart') {
+      fireSpecial(world, shooter, command.aim, def, 'dart', now);
+    } else {
+      const pellets = def.pellets ?? 1;
+      for (let i = 0; i < pellets; i++) {
+        fire(world, shooter, command.aim, def.bloom ?? GUN_BLOOM_RAD, now, def);
+      }
+    }
+  }
+}

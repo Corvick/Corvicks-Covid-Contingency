@@ -1,0 +1,26 @@
+﻿top-down, action, Multiplayer 5v1, WEB Game
+See photo for reference on basic design and look for game
+Map:
+The playable area will be filled with simple houses ( square and tetris shapes with 1-2 openings serving as entrances ). Some houses will have Windows ( walls of houses that are transparent and can be seen through for line of sight purposes for humans and zombies ). If more than 7 zombies are standing extremely close to a window it will disappear / shatter and serve as another entrance to the house. Bushes can be moved through at reduced speed and block line of sight. Sometimes bushes will be placed on either side of the outside entrance of a house. One area of the map will have many bushes to imitate a park or forest.
+The map will be mostly randomly generated on every playthrough
+ZOMBIES: NPC
+Design:
+  Color red top down view of arms outstretched
+Behavior:
+   Zombies will Search (using pathfinding to find humans) the map. Upon seeing a human the zombie will attempt to approach the human and place themselves right next to the human and then Grapple ( the front of the zombie entity and the human NPC are touching, they will then become locked in place both will not move ) the human. If the human continues to be grappled ( a random duration of being grappled is 1-5 seconds) uninterrupted the human will become Infected. Upon being infected the human will either instantly turn into a zombie ( the human npc is transformed from a human into a zombie) or continue being a human for a random amount of time ( 1- 45 seconds ) until ultimately they turn into a zombie. If the human is not instantly turned into a zombie after it is grappled it will gain a brief boost in speed ( faster than the zombie ) to escape. If the zombie loses line of sight of the human it was chasing it will look for the human where it last saw them. If it does not see the human it was chasing it will continue searching for other humans to Grapple. If at any point another human is closer while it is Chasing ( has sight of a human and is actively trying to Grapple them ) it will chase them instead. If the human it is chasing dies or turns into a zombie will search for a new target instead. If a human is Grappled and infected more than once the chances of instantly becoming infected rises. Zombies will slightly prioritise humans that are not infected when choosing to chase a human.
+           If a zombie can see a human through a window some will try to find an entrance to reach said human and some will stand up against the window and continue facing the human ( if the human breaks line of sight the zombie(s) will continue searching for humans ). If the window breaks the zombie (s) will try to Chase / Grapple any humans they see or any human they have been looking at /facing.
+        The speed of zombies is varied
+        There is a 3 percent chance of a human not being infected after being grappled
+      
+HUMANS: NPC
+Design:
+    Color green
+Behavior:
+        Humans will have random Traits inside each npc to determine some behaviors            which I will specify when needed.
+   Humans will slowly and with many pauses travel around the map. They will tend to become  groups of 2-5 humans to imitate socialising or talking (they will have a trait if they prefer to be in a group or be alone(around 50 percent will want to be alone and 50 percent will want to be in a group of 2-5 people)). Most Humans will want to be in a building or travel from building to building( they will have a trait if they want to prefer to be outside or inside ) (40 percent will prefer being inside and 30 percent will prefer being outside, 30 percent will have no preference and will travel randomly)). Some humans will have a trait to travel in pairs. Upon seeing a zombie 14% of humans will freeze in place ( As the total infected humans become closer to 50% the percentage of the trait that makes humans freeze upon seeing a zombie will turn off until it reaches 0%. In other words as more humans become infected those with the trait to freeze in place will no longer be active (all humans will run upon seeing a zombie). Those without the trait to freeze when seeing a zombie will run away from the zombie. Some humans upon seeing a zombie will run away into a nearby or far away building. Very few humans will have the trait to hide, and place themselves in a bush or corner of a building when running from a zombie. When other humans see a human running most will have the trait to not react at all and others will have the trait to walk TOWARDS where they are running from, others will walk away from the direction they are running. Very few humans will have the trait to stand near a Human Officer.
+HUMAN OFFICERS: Player controlled character, and NPC’s
+Design: top down view around character.  arms pointing a hand gun straight in front of the character.
+ Blue
+ZOMBIE MASTER: Player controlled character
+Design:
+ Dark red, slightly larger than zombie

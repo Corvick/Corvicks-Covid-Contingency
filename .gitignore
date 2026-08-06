@@ -1,0 +1,19 @@
+# Dependencies — reinstalled with `npm install`, never committed.
+node_modules/
+
+# Build output
+dist/
+client/dist/
+server/dist/
+*.tsbuildinfo
+
+# Logs and editor noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local Claude Code settings (keep the shared ones, drop the personal ones)
+.claude/settings.local.json

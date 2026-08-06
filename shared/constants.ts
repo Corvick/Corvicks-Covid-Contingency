@@ -1,0 +1,388 @@
+import type { EntityType } from './types.js';
+
+// ---------------------------------------------------------------- world
+export const WORLD_WIDTH = 4600;
+export const WORLD_HEIGHT = 3400;
+export const VIEWPORT_WIDTH = 960;
+export const VIEWPORT_HEIGHT = 600;
+export const TICK_RATE = 30;
+
+// ---------------------------------------------------------------- map gen
+export const TILE = 28;
+export const WALL_THICKNESS = 10;
+export const BOUNDARY_THICKNESS = 40;
+export const BLOCK_SIZE = 300;
+export const ROAD_SIZE = 88;
+/** Flush with the boundary wall, so the city reaches the edges of the map. */
+export const MAP_MARGIN = BOUNDARY_THICKNESS;
+/** Plain rectangular blocks built straight onto the perimeter wall. */
+export const EDGE_BUILDING_COUNT = 18;
+export const EDGE_BUILDING_MIN_TILES = 5;
+export const EDGE_BUILDING_MAX_TILES = 11;
+export const EMPTY_LOT_CHANCE = 0.07;
+/**
+ * Rows and columns are each nudged sideways by up to this much, so streets
+ * stagger and jog instead of running dead straight across the whole map.
+ */
+export const BLOCK_STAGGER = 96;
+
+// ---------------------------------------------------------------- windows
+/** Chance a long enough wall run gets a pane set into it. Kept low. */
+export const WINDOW_CHANCE = 0.16;
+/** Length of a pane, in tiles. */
+export const WINDOW_TILES = 2;
+export const WINDOW_HEALTH = 100;
+export const WINDOW_ZOMBIE_DAMAGE = 5;
+export const WINDOW_BULLET_DAMAGE = 25;
+/** How often a zombie can claw at a pane. */
+export const WINDOW_ATTACK_INTERVAL_MS = 600;
+/** The park is the one dense thicket; everywhere else bushes stay sparse. */
+export const PARK_BUSHES_PER_BLOCK = 34;
+export const SCATTER_BUSH_COUNT = 16;
+
+// ---------------------------------------------------------------- entities
+export const PLAYER_RADIUS = 14;
+/**
+ * Everything that moves — players, civilians, zombies — has been scaled by a
+ * further 0.8 here. Sprint, flee bursts, lunges and the escape boost are all
+ * multipliers on these, so every relative pace is untouched.
+ */
+export const PLAYER_SPEED = 160;
+/** Big enough to cover the viewport — fog is about occlusion, not range. */
+export const PLAYER_SIGHT_RADIUS = 640;
+
+// ---------------------------------------------------------------- fog of war
+/** Visibility is recomputed on this cadence rather than every frame. */
+export const FOG_UPDATE_MS = 80; // ~12.5Hz
+/**
+ * ...or sooner, once the viewer has moved this far. Large enough that walking
+ * no longer outpaces FOG_UPDATE_MS, so the time-based cadence governs instead
+ * of movement. The cost is that shadows are cast from a position up to this
+ * many pixels stale — mostly hidden by the penumbra, but raise it further and
+ * shadow edges start visibly lagging near walls.
+ */
+export const FOG_MOVE_EPSILON = TILE * 0.75;
+/** The mask is rasterised at this fraction of viewport size, then upscaled. */
+export const FOG_MASK_SCALE = 0.5;
+/** Penumbra width in screen pixels. */
+export const FOG_BLUR_PX = 9;
+/** Entities ease in and out instead of snapping at the fog boundary. */
+export const ENTITY_FADE_MS = 160;
+
+export const HUMAN_RADIUS = 13;
+export const HUMAN_COUNT = 400;
+/**
+ * NPC footspeeds are scaled down together by 0.8 from their original values,
+ * so every human/zombie ratio — chase closing rate, escape bursts, lunges —
+ * is unchanged. Player speed is deliberately left alone.
+ */
+export const HUMAN_WALK_SPEED = 35;
+export const HUMAN_FLEE_SPEED = 83; // deliberately slower than a zombie
+export const HUMAN_SIGHT_RADIUS = 300;
+export const HUMAN_TURN_RATE = 8; // rad/s — caps how fast a human can swing its heading
+export const HUMAN_PAUSE_MIN_MS = 700;
+export const HUMAN_PAUSE_MAX_MS = 3200;
+export const HUMAN_WANDER_RADIUS = 420;
+/** Just enough spread that a crowd doesn't move in lockstep. */
+export const HUMAN_SPEED_MUL_MIN = 0.97;
+export const HUMAN_SPEED_MUL_MAX = 1.03;
+
+export const ZOMBIE_RADIUS = 14;
+export const ZOMBIE_SPEED = 102;
+export const ZOMBIE_SEARCH_SPEED = 48;
+export const ZOMBIE_SIGHT_RADIUS = 420;
+export const ZOMBIE_MAX_HEALTH = 100;
+export const ZOMBIE_TURN_RATE = 10;
+/**
+ * Noticeably uneven — some shamble, some are quick — but the floor is kept
+ * above HUMAN_FLEE_SPEED so even a slow one eventually runs its victim down.
+ * Yields roughly 147-208 px/s against a 130 px/s sprinting civilian.
+ */
+export const ZOMBIE_SPEED_MUL_MIN = 0.92;
+export const ZOMBIE_SPEED_MUL_MAX = 1.3;
+
+/** Short burst to close the last few metres onto a victim. */
+export const ZOMBIE_LUNGE_RANGE = 150;
+export const ZOMBIE_LUNGE_MULTIPLIER = 1.5;
+export const ZOMBIE_LUNGE_MS = 850;
+export const ZOMBIE_LUNGE_COOLDOWN_MS = 2600;
+
+/** Winded after wrestling someone. */
+export const ZOMBIE_POST_GRAPPLE_SLOW = 0.5;
+export const ZOMBIE_POST_GRAPPLE_MS = 2600;
+
+/**
+ * Final surge once a zombie is right on someone's heels. Stacks on top of the
+ * lunge and stops chasers from trailing a hair behind their victim forever.
+ * Measured as the gap between the two bodies, not centre-to-centre.
+ */
+export const ZOMBIE_CLOSE_RANGE = 12;
+export const ZOMBIE_CLOSE_BOOST = 1.3;
+
+/** Slack added to the contact test so grabs land instead of grazing. */
+export const GRAPPLE_REACH_BONUS = 5;
+
+/** Effective-distance multiplier for a victim who is already infected. */
+export const INFECTED_TARGET_PENALTY = 3;
+
+/** AI perception runs on its own budget rather than every tick. */
+export const SENSE_INTERVAL_MS = 100;
+
+export const ENTITY_RADIUS: Record<EntityType, number> = {
+  officer: PLAYER_RADIUS,
+  human: HUMAN_RADIUS,
+  zombie: ZOMBIE_RADIUS,
+  zombieMaster: 18,
+};
+
+export const ENTITY_COLOR: Record<EntityType, string> = {
+  officer: '#3b82f6',
+  human: '#22c55e',
+  zombie: '#ef4444',
+  zombieMaster: '#7f1d1d',
+};
+
+export const ENTITY_MAX_HEALTH: Record<EntityType, number> = {
+  officer: 100,
+  human: 100,
+  zombie: ZOMBIE_MAX_HEALTH,
+  zombieMaster: 200,
+};
+
+// ---------------------------------------------------------------- infection
+export const GRAPPLE_MIN_MS = 1000;
+export const GRAPPLE_MAX_MS = 3000;
+/** Once a victim has this many attackers, other zombies go find their own. */
+export const MAX_GRAPPLERS = 3;
+
+/** The outbreak arrives as a tight group along one randomly chosen map edge. */
+export const INITIAL_ZOMBIES = 5;
+export const INITIAL_ZOMBIE_SPREAD = 110;
+export const MATERIALIZE_MS = 1400;
+/** Rare clean getaway with no infection at all. */
+export const BASE_ESCAPE_CHANCE = 0.05;
+export const ESCAPE_CHANCE_PER_EXTRA_ZOMBIE = 0.01;
+/** Slight, and gone quickly — just enough to break contact. */
+export const ESCAPE_SPEED_MULTIPLIER = 1.35;
+export const ESCAPE_BOOST_MS = 1400;
+
+/** The common outcome is a bite that incubates while the victim runs. */
+export const INSTANT_INFECT_BASE = 0.05;
+export const INSTANT_INFECT_PER_EXTRA_ZOMBIE = 0.07;
+export const INSTANT_INFECT_PER_PRIOR_GRAPPLE = 0.1;
+export const TURN_DELAY_MIN_MS = 4000;
+export const TURN_DELAY_MAX_MS = 45000;
+
+// ---------------------------------------------------------------- flee / settle
+export const FLEE_DIRECTIONS = 16; // candidate headings sampled when escaping
+export const FLEE_PROBE_DIST = 130;
+export const RETREAT_MS = 7000; // keep running after losing sight
+export const RETREAT_DISTANCE = 520;
+export const PANIC_MS = 7000; // agitated wandering before looking for cover
+export const PANIC_SPEED_MULTIPLIER = 1.5;
+export const SEEK_TIMEOUT_MS = 20000;
+export const ROAM_MS = 120000; // "keep wandering for a couple of minutes"
+export const GROUP_RADIUS = 90;
+export const GROUP_MIN_PEERS = 2;
+/** Share of civilians who dive for the nearest bush the moment they see one. */
+export const BUSH_HIDER_CHANCE = 0.14;
+/** A hider only counts a bush as cover if it can fit wholly inside it. */
+export const BUSH_MIN_FIT_RADIUS = HUMAN_RADIUS + 7;
+/** Spacing used to work out how many people one bush can actually hold. */
+export const BUSH_OCCUPANT_SPACING = HUMAN_RADIUS * 1.9;
+/** Cover choice is re-evaluated on this cadence, not every tick. */
+export const BUSH_SCAN_INTERVAL_MS = 500;
+
+/**
+ * Some people don't think — they just bolt the other way, which indoors
+ * usually means backing themselves into a corner.
+ */
+export const BOLT_FLEE_CHANCE = 0.22;
+/** How far outside a building an escapee aims for once they're through the door. */
+export const INDOOR_EXIT_MARGIN = 52;
+/** A zombie this near an exit means that way out is not an option. */
+export const DOOR_BLOCK_RADIUS = 115;
+/**
+ * Share of people already indoors who sit tight when the zombie is still
+ * outside. Only the remainder panic and run for the door.
+ */
+export const INDOOR_STAY_CHANCE = 0.85;
+/** How many nearby buildings a fleeing civilian will consider hiding in. */
+export const REFUGE_CANDIDATES = 16;
+/** Sidestep a zombie only when it's this close and roughly in the way. */
+export const SKIRT_RANGE = 155;
+export const SKIRT_CONE = 0.9; // radians off-heading that still counts as "in the way"
+/** Reactions to spotting someone else running for their life. */
+export const WITNESS_FOLLOW_CHANCE = 0.18;
+export const WITNESS_INVESTIGATE_CHANCE = 0.1;
+export const WITNESS_SIGHT_RADIUS = 260;
+export const WITNESS_REACT_MS = 5000;
+
+/** Couples move together and panic together. */
+export const COUPLE_SHARE = 0.16;
+export const COUPLE_FOLLOW_DIST = 74;
+
+/** Clusters of people stood around chatting at the start of a round. */
+export const SOCIAL_GROUP_SHARE = 0.22;
+export const SOCIAL_GROUP_MIN = 2;
+export const SOCIAL_GROUP_MAX = 5;
+export const SOCIAL_CIRCLE_RADIUS = 34;
+/**
+ * Share of civilians who begin the round indoors — raised so the extra 100
+ * added to the population all land inside buildings rather than on the street.
+ */
+export const BUILDING_START_SHARE = 0.48;
+
+/** Being shot staggers a zombie for a moment. */
+export const SHOT_SLOW_MS = 400;
+export const SHOT_SLOW_MULTIPLIER = 0.45;
+/** How long a grey officer keeps running after being grabbed. */
+export const OFFICER_FLEE_MS = 20000;
+
+/** Detecting a runner scraping along a wall instead of getting anywhere. */
+export const UNSTICK_CHECK_MS = 700;
+export const UNSTICK_MIN_PROGRESS = 16;
+export const UNSTICK_COMMIT_MS = 1100;
+/** Flee scoring pushes away from the map edge before they can hug it. */
+export const BOUNDARY_AVOID_DIST = 150;
+
+// ---------------------------------------------------------------- terrain
+export const BUSH_SPEED_MULTIPLIER = 0.55;
+
+// ---------------------------------------------------------------- stamina
+export const STAMINA_MAX = 100;
+export const STAMINA_DRAIN_PER_SEC = 34; // ~3 seconds of sprint from full
+export const STAMINA_REGEN_PER_SEC = 12;
+export const STAMINA_SPRINT_FLOOR = 8; // can't start a sprint below this
+/** Once fully drained you're locked out until the bar climbs back to here. */
+export const STAMINA_RECOVERY_THRESHOLD = 75;
+export const SPRINT_MULTIPLIER = 1.7;
+
+// ---------------------------------------------------------------- gun
+export const GUN_DAMAGE_MIN = 15;
+export const GUN_DAMAGE_MAX = 25;
+export const GUN_BLOOM_RAD = 0.06; // ~±3.5 degrees of spread
+export const GUN_RANGE = 720;
+export const GUN_COOLDOWN_MS = 1000;
+/**
+ * TESTING: player officers drop a zombie in a single hit. Turned off now that
+ * the pistol does real damage — flip back to true to restore test-kill mode.
+ */
+export const PLAYER_ONE_SHOT_KILL = false;
+/** Muzzle sits at the drawn barrel tip, not the body centre. */
+export const MUZZLE_OFFSET_MUL = 2.2;
+/** TESTING: how close player one spawns to their designated start point. */
+export const PLAYER_ONE_SPAWN_RANGE = 180;
+/**
+ * TESTING: drop player one in the middle of town rather than on the outbreak,
+ * so there are civilians around to test orders on. Set false to spawn on the
+ * incoming horde instead.
+ */
+export const PLAYER_ONE_SPAWN_AT_CENTER = true;
+export const TRACER_LIFETIME_MS = 90;
+/** Gunfire carries through walls and bushes — zombies investigate the noise. */
+export const GUNSHOT_ALERT_RADIUS = 900;
+/** Chance a wounded zombie breaks off and hunts whoever shot it. */
+export const RETALIATE_CHANCE = 0.45;
+export const RETALIATE_COMMIT_MS = 1600;
+
+// ---------------------------------------------------------------- NPC officers
+export const NPC_OFFICER_MIN = 4;
+export const NPC_OFFICER_MAX = 7;
+export const NPC_OFFICER_SHOOT_INTERVAL_MS = 2000;
+export const NPC_OFFICER_BLOOM_RAD = 0.22; // still poor, but less wild
+/** They give ground to hold the far edge of their sight line. */
+export const NPC_OFFICER_RETREAT_DIST = 360;
+export const NPC_OFFICER_SIGHT = 420;
+export const NPC_OFFICER_COLOR = '#9ca3af';
+
+// ---------------------------------------------------------------- landmarks
+/** One or two oversized buildings partitioned into rooms. */
+export const BIG_BUILDING_MIN = 2;
+export const BIG_BUILDING_MAX = 4;
+export const BIG_BUILDING_MIN_TILES = 17;
+export const BIG_BUILDING_MAX_TILES = 24;
+
+// ---------------------------------------------------------------- abilities
+/** Everyone on screen hears the shout. */
+export const RALLY_RADIUS = 560;
+export const RALLY_STARTING_CHARGES = 1;
+export const RALLY_SHOUT = 'GET OVER THERE!';
+export const RALLY_SHOUT_MS = 3700;
+export const RALLY_NO_CHARGE_LINE = "I can't yell right now I need a lozenge";
+export const RALLY_NO_CHARGE_MS = 5000;
+/** Close enough to the rally point to count as arrived and hold. */
+export const RALLY_ARRIVE_DIST = 46;
+/** Idle fidgeting so a held crowd doesn't look like a row of statues. */
+export const RALLY_LOOK_MIN_MS = 900;
+export const RALLY_LOOK_MAX_MS = 3400;
+export const RALLY_LOOK_TURN_RATE = 1.6; // rad/s
+/** How often someone considers grumbling, and how likely they are to. */
+export const RALLY_CHATTER_MIN_MS = 9000;
+export const RALLY_CHATTER_MAX_MS = 22000;
+export const RALLY_CHATTER_CHANCE = 0.28;
+export const RALLY_CHATTER_MS = 3600;
+export const RALLY_CHATTER_LINES = [
+  "I wonder how long they'll have us stand here",
+  "I wonder what's going on…",
+];
+
+// ---------------------------------------------------------------- inventory
+export const GUN_SLOTS = 3;
+export const UTILITY_SLOTS = 6; // keys 4-9
+/** How close you must be to a pickup to grab it. */
+export const PICKUP_REACH = 46;
+/** Hold E this long to drop what you're holding. */
+export const DROP_HOLD_MS = 900;
+/** Anything shorter than this counts as a tap, not a hold. */
+export const TAP_MAX_MS = 220;
+/** Most houses are empty — this is the chance a building contains loot. */
+export const BUILDING_LOOT_CHANCE = 0.22;
+/** Hits a kevlar vest soaks before it's spent. */
+export const KEVLAR_POINTS = 2;
+/** How long a tracker dart keeps a target lit up. */
+export const TRACKER_DART_MS = 30000;
+/** TESTING: scatter one of every item around player one's start point. */
+export const TEST_DROP_ALL_ITEMS = true;
+export const TEST_DROP_RADIUS = 90;
+
+// ---------------------------------------------------------------- air support
+export const GRENADE_THROW_RANGE = 400;
+export const GRENADE_FLIGHT_MS = 850;
+export const GRENADE_COOLDOWN_MS = 700;
+export const SMOKE_DURATION_MS = 9000;
+export const SMOKE_RADIUS = 72;
+
+export const HELI_SPEED = 250;
+export const HELI_HOVER_MS = 4000;
+export const HELI_MATERIALIZE_MS = 1700;
+/** Time it takes to fade away completely once it starts its exit run. */
+export const HELI_DEPART_FADE_MS = 2400;
+/** Rotor-disc radius of the shadow — the aircraft itself is never drawn. */
+export const HELI_RADIUS = 205;
+export const HELI_SOLDIERS = 4;
+export const HELI_DROP_INTERVAL_MS = 520;
+/** How dark the shadow lies on the ground at full strength. */
+export const HELI_SHADOW_ALPHA = 0.5;
+
+/** Dropped troops shoot far better than the beat officers. */
+export const SOLDIER_BLOOM_RAD = 0.07;
+export const SOLDIER_SHOOT_INTERVAL_MS = 850;
+export const SOLDIER_SIGHT = 520;
+export const SOLDIER_COLOR = '#4d7c3f';
+
+// ---------------------------------------------------------------- HUD
+/** Once this few humans remain, point the way to each of them. */
+export const BEACON_THRESHOLD = 10;
+
+// ---------------------------------------------------------------- pathfinding
+export const NAV_CELL = 14;
+export const NAV_INFLATE = 10; // wall padding; below entity radius so doorways stay open
+export const PATH_BUDGET_PER_TICK = 10;
+export const REPATH_INTERVAL_MS = 700;
+/**
+ * Node budget for one A* search. At 14px cells a cross-district route expands
+ * a lot of nodes; too low a cap makes findPath give up and the caller fall
+ * back to walking straight into whatever wall is in the way.
+ */
+export const PATH_MAX_NODES = 14000;
