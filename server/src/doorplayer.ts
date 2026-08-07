@@ -67,7 +67,7 @@ function optionsFor(
 
   if (door.locked) {
     return inside
-      ? { tap: 'unlock', hold: null, label: 'Press E to unlock' }
+      ? { tap: null, hold: 'unlock', label: 'Hold E to unlock' }
       : { tap: null, hold: 'kick', label: 'Hold E to kick down' };
   }
 
@@ -84,12 +84,20 @@ function applyAction(world: World, id: string, index: number, action: DoorAction
     case 'close':
       shutDoor(world, index, now);
       break;
-    case 'lock':
+    case 'lock': {
       lockDoor(world, index);
+      // A door an officer bolted stays bolted: no civilian talks themselves
+      // into opening it and letting the street in behind them.
+      const door = world.doors[index];
+      if (door) door.playerLocked = true;
       break;
-    case 'unlock':
+    }
+    case 'unlock': {
       unlockDoor(world, index);
+      const door = world.doors[index];
+      if (door) door.playerLocked = false;
       break;
+    }
     case 'kick':
       // Straight off its hinges, whatever was left in it.
       damageDoor(world, index, Number.MAX_SAFE_INTEGER);
@@ -116,6 +124,21 @@ export function processPlayerDoors(
 ): boolean {
   const active = world.doorHolds.get(id);
 
+  // Finishing an action latches the key until it's let go. Without this,
+  // still holding E after the bolt goes across immediately starts drawing it
+  // back again, and the door flaps between locked and unlocked.
+  if (!held) world.doorSpent.delete(id);
+  else if (world.doorSpent.has(id)) {
+    if (active) {
+      releaseDoor(world, active.index, id);
+      world.doorHolds.delete(id);
+    }
+    const idle = doorAt(world, entity.x, entity.y);
+    if (idle < 0) return false;
+    world.doorPrompts.set(id, { text: optionsFor(world, idle, entity.x, entity.y).label, progress: -1 });
+    return true;
+  }
+
   if (active) {
     const options = optionsFor(world, active.index, entity.x, entity.y);
     const stillOffered = options.tap === active.action || options.hold === active.action;
@@ -123,6 +146,7 @@ export function processPlayerDoors(
 
     // Let go, or walked away, or somebody else changed the door.
     if (!held || !stillOffered) {
+      releaseDoor(world, active.index, id);
       world.doorHolds.delete(id);
       if (held || !stillOffered) return true;
       if (elapsed <= TAP_MAX_MS && options.tap) applyAction(world, id, active.index, options.tap, now);
@@ -130,8 +154,10 @@ export function processPlayerDoors(
     }
 
     if (elapsed >= durationOf(active.action)) {
+      releaseDoor(world, active.index, id);
       world.doorHolds.delete(id);
       applyAction(world, id, active.index, active.action, now);
+      world.doorSpent.add(id);
       return true;
     }
 
@@ -156,8 +182,19 @@ export function processPlayerDoors(
   if (!held) return true;
 
   const action = options.hold ?? options.tap;
-  if (action) world.doorHolds.set(id, { index, startedAt: now, action });
+  if (action) {
+    world.doorHolds.set(id, { index, startedAt: now, action });
+    // Claim it, so no civilian works the same handle mid-action.
+    const door = world.doors[index];
+    if (door) door.busyBy = id;
+  }
   return true;
+}
+
+/** Give up a claim on a door, if we still hold it. */
+function releaseDoor(world: World, index: number, id: string): void {
+  const door = world.doors[index];
+  if (door && door.busyBy === id) door.busyBy = null;
 }
 
 export function doorPromptFor(world: World, id: string): DoorPrompt | null {

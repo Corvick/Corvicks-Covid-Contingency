@@ -23,6 +23,8 @@ import type {
   MapData,
   PickupState,
   SmokeState,
+  SpeechState,
+  Wall,
 } from '../../shared/types.js';
 import { connect } from './net.js';
 import { trackInput } from './input.js';
@@ -44,7 +46,7 @@ import {
   drawSmoke,
   drawStamina,
   drawTracers,
-  drawSpeech,
+  drawSpeechBubbles,
   drawWalls,
   drawWindows,
   type Tracer,
@@ -95,12 +97,15 @@ let brokenWindows = new Set<number>();
 /** Door state as last reported, keyed by index into map.doors. */
 const doorStates = new Map<number, DoorState>();
 let doorPrompt: DoorPrompt | null = null;
+/** Bumped whenever a door opens or shuts, to invalidate the fog occluders. */
+let doorEpoch = 0;
 let rallyCharges = 0;
 let pickups: PickupState[] = [];
 let inventory: InventoryState | null = null;
 let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
 let helicopters: HelicopterState[] = [];
+let speech: SpeechState[] = [];
 const wheel = newWheelState();
 /** Ability picked from the wheel and waiting for the player to click a spot. */
 let armedAbility: AbilityId | null = null;
@@ -130,6 +135,7 @@ const { send } = connect((msg) => {
     brokenWindows = new Set();
     doorStates.clear();
     doorPrompt = null;
+    doorEpoch++;
     gameOver = false;
     victory = false;
     gameOverPanel.classList.add('hidden');
@@ -146,8 +152,13 @@ const { send } = connect((msg) => {
       brokenWindows = new Set(msg.brokenWindows);
     }
     // Only doors near the viewer are sent, so this merges rather than replaces
-    // — a door left behind keeps whatever state it was last seen in.
-    for (const door of msg.doors) doorStates.set(door.i, door);
+    // — a door left behind keeps whatever state it was last seen in. Anything
+    // that changes whether a door blocks sight invalidates the fog occluders.
+    for (const door of msg.doors) {
+      const had = doorStates.get(door.i);
+      if (!had || had.open !== door.open || had.broken !== door.broken) doorEpoch++;
+      doorStates.set(door.i, door);
+    }
     doorPrompt = msg.doorPrompt;
     rallyCharges = msg.rallyCharges;
     pickups = msg.pickups;
@@ -155,6 +166,7 @@ const { send } = connect((msg) => {
     grenades = msg.grenades;
     smokes = msg.smokes;
     helicopters = msg.helicopters;
+    speech = msg.speech;
     exhausted = msg.exhausted;
     serverTickMs = msg.tickMs;
     beacons = msg.beacons;
@@ -364,6 +376,30 @@ let cachedX = Number.NaN;
 let cachedY = Number.NaN;
 let fogComputeMs = 0;
 
+/**
+ * Walls plus every shut door, for the fog to cast shadows from — a closed door
+ * occludes exactly as the wall it hangs in does.
+ *
+ * Rebuilt only when a door actually opens or shuts, not on every recompute:
+ * the fog runs at ~12Hz and rebuilding meant copying the whole wall list each
+ * time for a handful of slabs that rarely change.
+ */
+let occluders: Wall[] = [];
+let occludersEpoch = -1;
+
+function occludersFor(map: MapData): Wall[] {
+  if (occludersEpoch === doorEpoch && occluders.length > 0) return occluders;
+  occludersEpoch = doorEpoch;
+
+  occluders = map.walls.slice();
+  for (const [index, state] of doorStates) {
+    if (state.open || state.broken) continue;
+    const door = map.doors[index];
+    if (door) occluders.push(doorSlab(door));
+  }
+  return occluders;
+}
+
 function visibilityFor(me: EntityState, now: number): FogPoint[] {
   if (!map) return [];
   const moved = Math.hypot(me.x - cachedX, me.y - cachedY);
@@ -371,19 +407,8 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     return cachedPoly;
   }
 
-  // Shut doors occlude exactly as the wall they hang in does, so the fog has
-  // to see them too — otherwise you'd see straight through a closed door.
-  const occluders = map.walls.slice();
-  for (const [index, state] of doorStates) {
-    if (state.open || state.broken) continue;
-    const door = map.doors[index];
-    if (!door) continue;
-    if (Math.hypot(door.x - me.x, door.y - me.y) > PLAYER_SIGHT_RADIUS + door.halfSpan) continue;
-    occluders.push(doorSlab(door));
-  }
-
   const t0 = performance.now();
-  cachedPoly = visibilityPolygon(me.x, me.y, PLAYER_SIGHT_RADIUS, occluders, map.bushes);
+  cachedPoly = visibilityPolygon(me.x, me.y, PLAYER_SIGHT_RADIUS, occludersFor(map), map.bushes);
   fogComputeMs = performance.now() - t0;
   cachedAt = now;
   cachedX = me.x;
@@ -520,9 +545,7 @@ function render() {
   // The wheel sits over your character, so hold bubbles back until Q is
   // released rather than drawing them underneath it.
   if (!wheel.open) {
-    for (const entry of tracked.values()) {
-      if (entry.state.say) drawSpeech(ctx, entry.state);
-    }
+    drawSpeechBubbles(ctx, speech, view);
   }
 
   ctx.restore();

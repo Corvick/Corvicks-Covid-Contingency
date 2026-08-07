@@ -83,6 +83,15 @@ Hung in every way into a building and in `INTERIOR_DOOR_SHARE` of the openings
 between rooms; half start open. Shut doors are solid to movement, sight and
 gunfire, and carry 1000 HP.
 
+A door an officer bolted (`playerLocked`) is one no civilian will unlock or
+open. Civilians can draw the bolt on each other's locks from the inside, taking
+`DOOR_NPC_UNLOCK_MS`, which is what keeps a locked city from seizing up.
+
+Player actions all run on one key: the press arms the *hold* action and a
+release inside `TAP_MAX_MS` performs the tap instead. Completing an action
+latches the key (`doorSpent`) until it is physically released — otherwise still
+holding E after the bolt goes across immediately starts drawing it back.
+
 **Doors are deliberately not in the nav grid.** Routes are planned as though
 every door were open, and whoever is walking deals with the door when they
 reach it. That is what makes finding one locked a discovery rather than

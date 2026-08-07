@@ -1,6 +1,13 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
-import type { ClientMessage, EntityState, PickupState, ServerMessage, Shot } from '../../shared/types.js';
+import type {
+  ClientMessage,
+  EntityState,
+  PickupState,
+  ServerMessage,
+  Shot,
+  SpeechState,
+} from '../../shared/types.js';
 import { collect, dropHeld, nearestPickup, newInventory, toWireInventory } from './inventory.js';
 import { grenadesToWire, helicoptersToWire, smokesToWire, updateAirSupport } from './heli.js';
 import {
@@ -346,6 +353,19 @@ function tick(): void {
   const airSmokes = smokesToWire(world, now);
   const airHelis = helicoptersToWire(world, now);
 
+  // Speech carries through fog: someone hammering on a door is heard whether
+  // or not there's a line of sight to them.
+  const speech: SpeechState[] = [];
+  for (const [id, line] of world.speech) {
+    if (now >= line.until) {
+      world.speech.delete(id);
+      continue;
+    }
+    const speaker = world.entities.get(id);
+    if (!speaker) continue;
+    speech.push({ x: Math.round(speaker.x), y: Math.round(speaker.y), text: line.text });
+  }
+
   // Once only a handful of humans are left, point the way to each of them.
   const humans = humanPositions(world);
   const beacons = humans.length > 0 && humans.length <= BEACON_THRESHOLD ? humans : [];
@@ -365,6 +385,7 @@ function tick(): void {
         ? doorsToWire(world, viewer.x, viewer.y, PLAYER_SIGHT_RADIUS + 220)
         : allDoorsToWire(world),
       doorPrompt: doorPromptFor(world, id),
+      speech,
       rallyCharges: world.rallyCharges.get(id) ?? 0,
       pickups: viewer ? visiblePickups(viewer) : Array.from(world.pickups.values()),
       inventory: toWireInventory(

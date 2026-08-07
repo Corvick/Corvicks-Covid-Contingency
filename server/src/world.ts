@@ -46,6 +46,7 @@ import {
   DOOR_BEG_CHANCE,
   DOOR_BEG_HOLD_CHANCE,
   DOOR_OPENS_FOR_STRANGERS_CHANCE,
+  DOOR_SLAM_CHANCE,
   RALLY_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
   BOLT_FLEE_CHANCE,
@@ -221,12 +222,17 @@ export interface AiState {
   doorBusyUntil: number;
   /** Door being worked, and what is being done to it. */
   doorIndex: number;
-  doorAction: 'open' | 'close' | 'lock' | null;
+  doorAction: 'open' | 'close' | 'lock' | 'unlock' | null;
   /** Door to deal with once through it, and whether to lock it too. */
   doorFollowUp: number;
   doorFollowUpLock: boolean;
   /** Which face of the follow-up door they set out from. */
   doorFollowUpSide: number;
+  /** Slams doors shut the moment a zombie comes into view. */
+  slamsDoors: boolean;
+  /** Open door this person is rushing to shut, or -1. */
+  doorSlam: number;
+  nextSlamCheck: number;
   /** Doors found locked, so they don't queue at the same one forever. */
   refusedDoors: number[];
   /** Begging to be let in: which door, and until when. */
@@ -301,6 +307,8 @@ export interface World {
   doorPrompts: Map<string, DoorPrompt>;
   /** Door action a player is part-way through: id -> start time. */
   doorHolds: Map<string, { index: number; startedAt: number; action: DoorAction }>;
+  /** Players whose E must be released before it counts again. */
+  doorSpent: Set<string>;
   /** id -> when a materialising entity finishes fading in. */
   materializeUntil: Map<string, number>;
   /** id -> active speech bubble. */
@@ -460,6 +468,9 @@ export function newAiState(now: number, x: number, y: number): AiState {
     doorFollowUp: -1,
     doorFollowUpLock: false,
     doorFollowUpSide: 0,
+    slamsDoors: Math.random() < DOOR_SLAM_CHANCE,
+    doorSlam: -1,
+    nextSlamCheck: 0,
     refusedDoors: [],
     begDoor: -1,
     begUntil: 0,
@@ -692,6 +703,7 @@ export function createWorld(): World {
     doorPleas: new Map(),
     doorPrompts: new Map(),
     doorHolds: new Map(),
+    doorSpent: new Set(),
     entities: new Map(),
     playerIds: new Set(),
     spectators: new Set(),
@@ -744,6 +756,7 @@ export function resetWorld(world: World): void {
   initDoors(world);
   world.doorPrompts.clear();
   world.doorHolds.clear();
+  world.doorSpent.clear();
 
   world.entities.clear();
   world.ai.clear();

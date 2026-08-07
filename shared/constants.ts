@@ -170,7 +170,7 @@ export const ESCAPE_BOOST_MS = 1400;
 export const INSTANT_INFECT_BASE = 0.05;
 export const INSTANT_INFECT_PER_EXTRA_ZOMBIE = 0.07;
 export const INSTANT_INFECT_PER_PRIOR_GRAPPLE = 0.1;
-export const TURN_DELAY_MIN_MS = 4000;
+export const TURN_DELAY_MIN_MS = 9000;
 export const TURN_DELAY_MAX_MS = 45000;
 
 // ---------------------------------------------------------------- flee / settle
@@ -223,7 +223,7 @@ export const REFUGE_CANDIDATES = 16;
  * moment they see a zombie, instead of running for open ground and only
  * looking for cover once they've calmed down.
  */
-export const SHELTER_SEEK_CHANCE = 0.7;
+export const SHELTER_SEEK_CHANCE = 0.8;
 /** How far a frightened civilian will look for a building to get inside. */
 export const SHELTER_SEARCH_RADIUS = 620;
 /**
@@ -375,7 +375,7 @@ export const DOOR_LOCK_MAX_MS = 2000;
 /** Share of wanderers who shut the door behind them. */
 export const DOOR_CLOSE_BEHIND_CHANCE = 0.75;
 /** Share of those sheltering from a zombie who shut *and* lock it. */
-export const DOOR_LOCK_BEHIND_CHANCE = 0.85;
+export const DOOR_LOCK_BEHIND_CHANCE = 0.9;
 /** Finding it locked: beg to be let in, or go and find somewhere else. */
 export const DOOR_BEG_CHANCE = 0.45;
 /** Beggars who hold their ground at the door even with a zombie on them. */
@@ -406,6 +406,40 @@ export const DOOR_BEG_LINES = [
   'Anybody — open the door!',
   'Unlock it! Hurry!',
   'Please, it’s coming!',
+];
+
+/** Somebody indoors can throw the bolt back, but it takes them a moment. */
+export const DOOR_NPC_UNLOCK_MS = 2000;
+/** Seeing a zombie sends most people straight for the nearest door to shut it. */
+export const DOOR_SLAM_CHANCE = 0.85;
+export const DOOR_SLAM_RANGE = 130;
+
+/** Having bolted the door, some tell the room to stay put. */
+export const DOOR_WARN_CHANCE = 0.4;
+/** Share of those who hear it and heed it. */
+export const DOOR_WARN_HEEDED = 0.9;
+/** ...and of the rest, the very few who answer back. */
+export const DOOR_WARN_DEFIED_CHANCE = 0.06;
+export const DOOR_WARN_MS = 3200;
+
+export const DOOR_WARN_LINES = [
+  "Don't go outside.",
+  'Nobody goes out there.',
+  'Stay inside — all of you.',
+  "Don't open that door.",
+  'We stay put. Everyone.',
+  "Don't go out there, please.",
+  'Keep away from the doors.',
+  'Nobody leaves. Not now.',
+  "It's not safe out there.",
+  'Stay in here where it’s safe.',
+];
+
+export const DOOR_DEFY_LINES = [
+  "You can't tell me what to do.",
+  "Don't tell me what to do.",
+  "You don't decide that for me.",
+  "I'm not staying in here.",
 ];
 
 /** How near a player has to stand to work a door. */

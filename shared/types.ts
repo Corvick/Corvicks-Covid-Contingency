@@ -78,6 +78,16 @@ export interface DoorState {
   hp?: number;
 }
 
+/**
+ * A speech bubble, sent with its own position so it carries through fog —
+ * you hear someone hammering on a door whether or not you can see them.
+ */
+export interface SpeechState {
+  x: number;
+  y: number;
+  text: string;
+}
+
 /** What pressing or holding E would do to the door you're stood at. */
 export interface DoorPrompt {
   text: string;
@@ -221,6 +231,8 @@ export type ServerMessage =
       doors: DoorState[];
       /** The door prompt under the crosshair, when stood at one. */
       doorPrompt: DoorPrompt | null;
+      /** Every active speech bubble, fog or no fog. */
+      speech: SpeechState[];
       /** Remaining uses of the rally shout. */
       rallyCharges: number;
       pickups: PickupState[];

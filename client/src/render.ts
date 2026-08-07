@@ -10,6 +10,7 @@ import type {
   MapData,
   PickupState,
   SmokeState,
+  SpeechState,
   Wall,
   Window as WindowPane,
 } from '../../shared/types.js';
@@ -586,21 +587,39 @@ export function drawStamina(
   }
 }
 
-/** Speech bubble above a character. Drawn in world space. */
-export function drawSpeech(ctx: CanvasRenderingContext2D, e: EntityState): void {
-  if (!e.say) return;
-  const radius = ENTITY_RADIUS[e.type];
+/**
+ * Speech bubbles, drawn in world space from the server's list rather than off
+ * the entities — a bubble carries through fog even when whoever is shouting
+ * doesn't, so you can hear someone hammering on a door you can't see.
+ */
+export function drawSpeechBubbles(
+  ctx: CanvasRenderingContext2D,
+  lines: SpeechState[],
+  view: Viewport,
+): void {
+  for (const line of lines) {
+    if (!visible(view, line.x, line.y, 90)) continue;
+    drawBubble(ctx, line.x, line.y, ENTITY_RADIUS.human, line.text);
+  }
+}
 
+function drawBubble(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  radius: number,
+  text: string,
+): void {
   ctx.font = 'bold 13px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
   const padX = 9;
   const padY = 6;
-  const w = ctx.measureText(e.say).width + padX * 2;
+  const w = ctx.measureText(text).width + padX * 2;
   const h = 13 + padY * 2;
-  const x = e.x - w / 2;
-  const y = e.y - radius - 16 - h;
+  const x = px - w / 2;
+  const y = py - radius - 16 - h;
 
   ctx.fillStyle = 'rgba(248, 250, 252, 0.95)';
   ctx.strokeStyle = 'rgba(15, 23, 42, 0.65)';
@@ -612,15 +631,15 @@ export function drawSpeech(ctx: CanvasRenderingContext2D, e: EntityState): void 
 
   // Tail
   ctx.beginPath();
-  ctx.moveTo(e.x - 5, y + h);
-  ctx.lineTo(e.x + 5, y + h);
-  ctx.lineTo(e.x, y + h + 7);
+  ctx.moveTo(px - 5, y + h);
+  ctx.lineTo(px + 5, y + h);
+  ctx.lineTo(px, y + h + 7);
   ctx.closePath();
   ctx.fillStyle = 'rgba(248, 250, 252, 0.95)';
   ctx.fill();
 
   ctx.fillStyle = '#0f172a';
-  ctx.fillText(e.say, e.x, y + h / 2);
+  ctx.fillText(text, px, y + h / 2);
 }
 
 /** Grenade mid-flight, with its own little ground shadow for the arc. */

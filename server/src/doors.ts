@@ -24,6 +24,8 @@ export interface DoorRuntime {
   /** Closed doors block; open ones are scenery. */
   open: boolean;
   locked: boolean;
+  /** Bolted by a player: civilians will not unlock or open it. */
+  playerLocked: boolean;
   broken: boolean;
   health: number;
   /** Cached slab rectangle, so collision isn't rebuilding it per query. */
@@ -47,6 +49,7 @@ export function initDoors(world: World): void {
     return {
       open: Math.random() < DOOR_START_OPEN_CHANCE,
       locked: false,
+      playerLocked: false,
       broken: false,
       health: DOOR_HEALTH,
       rect: doorRect(door),
@@ -170,6 +173,7 @@ export function damageDoor(world: World, index: number, amount: number): boolean
   door.broken = true;
   door.open = true;
   door.locked = false;
+  door.playerLocked = false;
   door.busyBy = null;
   return true;
 }
@@ -183,6 +187,9 @@ export function addPlea(world: World, index: number, until: number): void {
 export function clearExpiredPleas(world: World, now: number): void {
   for (const [index, until] of world.doorPleas) {
     if (now >= until) world.doorPleas.delete(index);
+  }
+  for (const [index, until] of world.doorAlerts) {
+    if (now >= until) world.doorAlerts.delete(index);
   }
 }
 
