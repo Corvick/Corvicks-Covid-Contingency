@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
 import type { ClientMessage, EntityState, PickupState, ServerMessage, Shot } from '../../shared/types.js';
-import { collect, dropHeld, newInventory, toWireInventory } from './inventory.js';
+import { collect, dropHeld, nearestPickup, newInventory, toWireInventory } from './inventory.js';
 import { grenadesToWire, helicoptersToWire, smokesToWire, updateAirSupport } from './heli.js';
 import {
   TICK_RATE,
@@ -46,6 +46,8 @@ import {
 } from './world.js';
 import { computeFrozen, rallyHumans, updateAi } from './ai.js';
 import { processShooting } from './combat.js';
+import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
+import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 
 const PORT = 8080;
 const TICK_MS = 1000 / TICK_RATE;
@@ -242,11 +244,30 @@ function visibleShots(viewer: Entity): Shot[] {
  * holding it past DROP_HOLD_MS throws away what you're carrying.
  */
 function processInteractions(now: number): void {
+  world.doorPrompts.clear();
+
   for (const id of world.playerIds) {
     const entity = world.entities.get(id);
     const command = world.commands.get(id);
     const inv = world.inventories.get(id);
     if (!entity || !command || !inv) continue;
+
+    // A door under your nose takes the key before the floor does — unless
+    // there's loot lying closer, or dropping a crate in a doorway would put it
+    // permanently out of reach.
+    const loot = nearestPickup(world, entity.x, entity.y);
+    const doorIndex = doorAt(world, entity.x, entity.y);
+    const doorFirst =
+      doorIndex >= 0 &&
+      (!loot ||
+        Math.hypot(world.map.doors[doorIndex].x - entity.x, world.map.doors[doorIndex].y - entity.y) <
+          Math.hypot(loot.x - entity.x, loot.y - entity.y));
+
+    if (doorFirst && processPlayerDoors(world, entity, id, command.interact, now)) {
+      inv.holdSince = null;
+      inv.holdConsumed = false;
+      continue;
+    }
 
     if (command.interact) {
       if (inv.holdSince === null) {
@@ -338,6 +359,12 @@ function tick(): void {
       entities: spectating ? allEntities : visibleTo(viewer, now),
       shots: spectating ? world.shots : visibleShots(viewer),
       brokenWindows: world.brokenWindows,
+      // Doors are static geometry the client already has; only their state
+      // travels, and only for the ones near enough to matter.
+      doors: viewer
+        ? doorsToWire(world, viewer.x, viewer.y, PLAYER_SIGHT_RADIUS + 220)
+        : allDoorsToWire(world),
+      doorPrompt: doorPromptFor(world, id),
       rallyCharges: world.rallyCharges.get(id) ?? 0,
       pickups: viewer ? visiblePickups(viewer) : Array.from(world.pickups.values()),
       inventory: toWireInventory(

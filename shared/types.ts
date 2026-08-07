@@ -57,6 +57,32 @@ export interface Door {
   building: number;
   /** Half the width of the opening, for clearance checks. */
   halfSpan: number;
+  /** True when the opening sits in a horizontal run, so the slab spans x. */
+  horiz: boolean;
+  /** Between two rooms rather than to the street. */
+  interior: boolean;
+}
+
+/**
+ * Runtime state of a door, sent only for doors near the viewer. Doorways with
+ * no door hung in them never appear here at all.
+ */
+export interface DoorState {
+  /** Index into MapData.doors. */
+  i: number;
+  open: boolean;
+  locked: boolean;
+  /** Knocked off its hinges — permanently open, drawn as wreckage. */
+  broken: boolean;
+  /** Remaining health as a fraction, omitted while undamaged. */
+  hp?: number;
+}
+
+/** What pressing or holding E would do to the door you're stood at. */
+export interface DoorPrompt {
+  text: string;
+  /** 0-1 while an action is under way, -1 when idle. */
+  progress: number;
 }
 
 /**
@@ -191,6 +217,10 @@ export type ServerMessage =
       stamina: number;
       /** Indices into map.windows that have been smashed open. */
       brokenWindows: number[];
+      /** State of every door near the viewer. */
+      doors: DoorState[];
+      /** The door prompt under the crosshair, when stood at one. */
+      doorPrompt: DoorPrompt | null;
       /** Remaining uses of the rally shout. */
       rallyCharges: number;
       pickups: PickupState[];

@@ -138,12 +138,18 @@ function punchDoors(segments: Segment[], rand: Rng): { segments: Segment[]; gaps
 }
 
 /** World-space centre of a doorway gap. */
-function gapToDoor(gap: Segment, originX: number, originY: number, building: number): Door {
+function gapToDoor(
+  gap: Segment,
+  originX: number,
+  originY: number,
+  building: number,
+  interior = false,
+): Door {
   const mid = (gap.a + gap.b) / 2;
   const halfSpan = ((gap.b - gap.a) * TILE) / 2;
   return gap.horiz
-    ? { x: originX + mid * TILE, y: originY + gap.line * TILE, building, halfSpan }
-    : { x: originX + gap.line * TILE, y: originY + mid * TILE, building, halfSpan };
+    ? { x: originX + mid * TILE, y: originY + gap.line * TILE, building, halfSpan, horiz: true, interior }
+    : { x: originX + gap.line * TILE, y: originY + mid * TILE, building, halfSpan, horiz: false, interior };
 }
 
 /**
@@ -377,7 +383,7 @@ function partitionRooms(
     pushRun(walls, seg, lo, start, originX, originY, t);
     pushRun(walls, seg, start + GAP, hi, originX, originY, t);
     doorIds.push(doors.length);
-    doors.push(gapToDoor({ ...seg, a: start, b: start + GAP }, originX, originY, index));
+    doors.push(gapToDoor({ ...seg, a: start, b: start + GAP }, originX, originY, index, true));
   };
 
   for (let i = 1; i < xs.length - 1; i++) {
@@ -852,7 +858,15 @@ function repairEnclosures(map: MapData, protectedWalls: number): void {
       const building = buildingAtPoint(map, cell.x, cell.y);
       if (building >= 0) {
         map.buildings[building].doors.push(map.doors.length);
-        map.doors.push({ x: midX, y: midY, building, halfSpan: CLEAR / 2 });
+        map.doors.push({
+          x: midX,
+          y: midY,
+          building,
+          halfSpan: CLEAR / 2,
+          // The slab spans across the direction we cut through.
+          horiz: !horiz,
+          interior: buildingAtPoint(map, best.x, best.y) === building,
+        });
       }
       cuts++;
 

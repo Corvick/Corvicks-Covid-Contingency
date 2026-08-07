@@ -349,6 +349,78 @@ export const NPC_OFFICER_COLOR = '#9ca3af';
 
 // ---------------------------------------------------------------- landmarks
 /** One or two oversized buildings partitioned into rooms. */
+// ---------------------------------------------------------------- doors
+/**
+ * Doors hang in every way into a building and in some of the openings between
+ * rooms. They are deliberately *not* in the nav grid: routes are planned as
+ * though every door were open, and whoever is walking deals with the door when
+ * they reach it. That is what makes finding one locked a discovery rather than
+ * something the pathfinder quietly routes around.
+ */
+export const INTERIOR_DOOR_SHARE = 0.55;
+export const DOOR_START_OPEN_CHANCE = 0.5;
+export const DOOR_HEALTH = 1000;
+/** ~33 seconds of work for a single zombie. */
+export const DOOR_ZOMBIE_DAMAGE = 18;
+export const DOOR_ATTACK_INTERVAL_MS = 600;
+export const DOOR_BULLET_DAMAGE = 20;
+
+/** How long working the handle takes. Nobody moves while they're at it. */
+export const DOOR_OPEN_MIN_MS = 1000;
+export const DOOR_OPEN_MAX_MS = 2000;
+export const DOOR_CLOSE_MS = 1000;
+export const DOOR_LOCK_MIN_MS = 1000;
+export const DOOR_LOCK_MAX_MS = 2000;
+
+/** Share of wanderers who shut the door behind them. */
+export const DOOR_CLOSE_BEHIND_CHANCE = 0.75;
+/** Share of those sheltering from a zombie who shut *and* lock it. */
+export const DOOR_LOCK_BEHIND_CHANCE = 0.85;
+/** Finding it locked: beg to be let in, or go and find somewhere else. */
+export const DOOR_BEG_CHANCE = 0.45;
+/** Beggars who hold their ground at the door even with a zombie on them. */
+export const DOOR_BEG_HOLD_CHANCE = 0.8;
+/** Share of people indoors who would open up for a stranger. Most won't. */
+export const DOOR_OPENS_FOR_STRANGERS_CHANCE = 0.2;
+export const DOOR_BEG_MS = 22000;
+export const DOOR_BEG_SPEECH_MS = 2600;
+export const DOOR_BEG_SPEECH_MIN_MS = 2600;
+export const DOOR_BEG_SPEECH_MAX_MS = 4800;
+/** How near a plea has to be for someone indoors to hear it. */
+export const DOOR_PLEA_HEARING = 340;
+
+export const DOOR_BEG_LINES = [
+  'Let me in!',
+  'Open the door!',
+  'Please — open up!',
+  'Somebody open this door!',
+  "I know you're in there!",
+  'Open up, please!',
+  "Don't leave me out here!",
+  'For the love of God, open it!',
+  "There's one behind me!",
+  'Please, I can hear you!',
+  'Open the door, I beg you!',
+  'Let me in, please!',
+  "I'm not one of them!",
+  'Anybody — open the door!',
+  'Unlock it! Hurry!',
+  'Please, it’s coming!',
+];
+
+/** How near a player has to stand to work a door. */
+export const DOOR_USE_RANGE = 54;
+export const DOOR_PLAYER_OPEN_MS = 1000;
+export const DOOR_PLAYER_CLOSE_MS = 1000;
+export const DOOR_PLAYER_LOCK_MS = 1500;
+export const DOOR_PLAYER_UNLOCK_MS = 1000;
+/** Deliberately slow — kicking one in is a commitment. */
+export const DOOR_KICK_MS = 4200;
+
+/** How long a zombie remembers a door it watched someone shut. */
+export const DOOR_ALERT_MS = 25000;
+export const DOOR_ALERT_RADIUS = 430;
+
 /** Smallest room a partition is allowed to leave behind, in tiles. */
 export const ROOM_MIN_TILES = 4;
 /** Rooms are connected by a spanning tree; this adds openings on top of it. */

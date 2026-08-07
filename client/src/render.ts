@@ -1,5 +1,8 @@
 import type {
   Bush,
+  Door,
+  DoorPrompt,
+  DoorState,
   EntityState,
   GrenadeState,
   HelicopterState,
@@ -19,6 +22,7 @@ import {
   SOLDIER_COLOR,
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
+  WALL_THICKNESS,
 } from '../../shared/constants.js';
 
 export interface Viewport {
@@ -117,6 +121,169 @@ function hashId(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
   return Math.abs(h);
+}
+
+/**
+ * The slab that fills a doorway when it's shut. Mirrors `doorRect` on the
+ * server — both sides derive it from the same door record.
+ */
+export function doorSlab(door: Door): Wall {
+  const t = WALL_THICKNESS;
+  return door.horiz
+    ? { x: door.x - door.halfSpan, y: door.y - t / 2, w: door.halfSpan * 2, h: t }
+    : { x: door.x - t / 2, y: door.y - door.halfSpan, w: t, h: door.halfSpan * 2 };
+}
+
+/**
+ * Doors, drawn from the map geometry plus whatever state the server last sent.
+ * An open one swings back against the jamb; a shut one fills the opening, with
+ * a bolt shown when it's locked and splintering as it takes damage.
+ */
+export function drawDoors(
+  ctx: CanvasRenderingContext2D,
+  doors: Door[],
+  states: Map<number, DoorState>,
+  view: Viewport,
+): void {
+  for (const [index, state] of states) {
+    const door = doors[index];
+    if (!door) continue;
+    if (!visible(view, door.x, door.y, door.halfSpan + 24)) continue;
+
+    const span = door.halfSpan * 2;
+    const t = WALL_THICKNESS;
+
+    if (state.broken) {
+      // Wreckage: a couple of splinters left hanging in the frame.
+      ctx.strokeStyle = 'rgba(120, 84, 52, 0.75)';
+      ctx.lineWidth = 3;
+      for (const side of [-1, 1]) {
+        ctx.beginPath();
+        if (door.horiz) {
+          ctx.moveTo(door.x + door.halfSpan * side, door.y);
+          ctx.lineTo(door.x + door.halfSpan * side * 0.55, door.y + side * 7);
+        } else {
+          ctx.moveTo(door.x, door.y + door.halfSpan * side);
+          ctx.lineTo(door.x + side * 7, door.y + door.halfSpan * side * 0.55);
+        }
+        ctx.stroke();
+      }
+      continue;
+    }
+
+    if (state.open) {
+      // Swung back flat against the wall, on the hinge end.
+      ctx.strokeStyle = '#7a5433';
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'butt';
+      ctx.beginPath();
+      if (door.horiz) {
+        ctx.moveTo(door.x - door.halfSpan, door.y);
+        ctx.lineTo(door.x - door.halfSpan, door.y - span * 0.72);
+      } else {
+        ctx.moveTo(door.x, door.y - door.halfSpan);
+        ctx.lineTo(door.x - span * 0.72, door.y - door.halfSpan);
+      }
+      ctx.stroke();
+      continue;
+    }
+
+    const slab = doorSlab(door);
+    const hp = state.hp ?? 1;
+    ctx.fillStyle = state.locked ? '#6d4a2c' : '#8a6039';
+    ctx.fillRect(slab.x, slab.y, slab.w, slab.h);
+    ctx.strokeStyle = '#4a3120';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(slab.x + 0.5, slab.y + 0.5, slab.w - 1, slab.h - 1);
+
+    // Panelling, so a door doesn't read as a plain plank of wall.
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.22)';
+    ctx.beginPath();
+    if (door.horiz) {
+      ctx.moveTo(door.x, slab.y + 1);
+      ctx.lineTo(door.x, slab.y + slab.h - 1);
+    } else {
+      ctx.moveTo(slab.x + 1, door.y);
+      ctx.lineTo(slab.x + slab.w - 1, door.y);
+    }
+    ctx.stroke();
+
+    if (state.locked) {
+      // Brass bolt across the middle.
+      ctx.strokeStyle = '#e0b45c';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      if (door.horiz) {
+        ctx.moveTo(door.x - 6, door.y);
+        ctx.lineTo(door.x + 6, door.y);
+      } else {
+        ctx.moveTo(door.x, door.y - 6);
+        ctx.lineTo(door.x, door.y + 6);
+      }
+      ctx.stroke();
+    }
+
+    if (hp < 1) {
+      // Cracks spreading as it takes a beating.
+      ctx.strokeStyle = `rgba(20, 12, 6, ${0.25 + (1 - hp) * 0.6})`;
+      ctx.lineWidth = 1.5;
+      const cracks = Math.min(5, 1 + Math.floor((1 - hp) * 6));
+      for (let i = 0; i < cracks; i++) {
+        const along = (-0.5 + (i + 0.5) / cracks) * span * 0.86;
+        ctx.beginPath();
+        if (door.horiz) {
+          ctx.moveTo(door.x + along, slab.y);
+          ctx.lineTo(door.x + along + (i % 2 ? 4 : -4), slab.y + t);
+        } else {
+          ctx.moveTo(slab.x, door.y + along);
+          ctx.lineTo(slab.x + t, door.y + along + (i % 2 ? 4 : -4));
+        }
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+/** Ring filling around the E prompt while a door action runs. */
+export function drawDoorPrompt(
+  ctx: CanvasRenderingContext2D,
+  prompt: DoorPrompt,
+  screenX: number,
+  screenY: number,
+): void {
+  const y = screenY - 46;
+
+  if (prompt.progress >= 0) {
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(screenX, y, 15, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(screenX, y, 15, -Math.PI / 2, -Math.PI / 2 + prompt.progress * Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
+  ctx.beginPath();
+  ctx.arc(screenX, y, 11, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('E', screenX, y + 0.5);
+
+  ctx.font = '12px sans-serif';
+  const width = ctx.measureText(prompt.text).width + 14;
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
+  ctx.fillRect(screenX - width / 2, y + 20, width, 19);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText(prompt.text, screenX, y + 30);
 }
 
 /**

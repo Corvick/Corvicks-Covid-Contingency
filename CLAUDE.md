@@ -48,6 +48,8 @@ Server modules and what each owns:
   early
 - `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string pulling
 - `danger.ts` — coarse geodesic distance-to-nearest-zombie field
+- `doors.ts` — door state, geometry, open/shut/lock/damage, wire serialisation
+- `doorplayer.ts` — the player's press-and-hold of E at a door, and its prompt
 - `combat.ts` — hitscan, weapons, window damage
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — smoke grenade → helicopter → dropped soldiers
@@ -68,6 +70,25 @@ list they reach, so crowds fan out instead of funnelling into one doorway.
 
 `sawZombie` latches once someone has seen one, and gates the things only a
 naive person does — chasing after a running neighbour to find out why.
+
+Door traits sit alongside them: `closesDoors` shuts it behind them when merely
+wandering · `locksDoors` shuts *and* bolts it when getting away from something ·
+`begsAtDoors` hammers on a locked one rather than going elsewhere · `begHolds`
+stays there even with a zombie on them · `opensForStrangers` would let a
+stranger in, which most people would not.
+
+### Doors
+
+Hung in every way into a building and in `INTERIOR_DOOR_SHARE` of the openings
+between rooms; half start open. Shut doors are solid to movement, sight and
+gunfire, and carry 1000 HP.
+
+**Doors are deliberately not in the nav grid.** Routes are planned as though
+every door were open, and whoever is walking deals with the door when they
+reach it. That is what makes finding one locked a discovery rather than
+something the pathfinder quietly steers around — and it keeps opening a door
+off the "rebuild the grid" path, which flipping cells 30 times a second would
+otherwise demand.
 
 ## Performance rules (these matter — 400+ entities)
 
@@ -113,6 +134,18 @@ naive person does — chasing after a running neighbour to find out why.
   with its one door opening into it, a door onto a pocket too narrow to walk,
   and a door on an L-notch leading nowhere. **Fix new cases there, not by
   special-casing the generator.** It never cuts the perimeter wall.
+- **Shutting a door is what draws attention to it**, and the zombies who saw it
+  happen are worked out *before* the door shuts — line of sight to a door is
+  blocked by that very door the moment it closes, so checking afterwards alerts
+  nobody and the doors become an impenetrable fortress.
+- **Going through a doorway is what makes someone shut it**, not having been
+  the one who opened it. Tie it to opening and every door ends up standing open
+  within a couple of minutes, because passers-by never close anything.
+- **Only open a door you are walking into.** Proximity plus facing means people
+  open every door they stroll past along a wall and then never go through to
+  shut it. The test is whether the next step intersects the slab.
+- **Which side of a door someone is on is a face test, not "are they indoors".**
+  Both sides of a door between two rooms are indoors.
 - **Couples have one leader and one follower.** The follower doesn't steer at
   all — it holds a position at the leader's shoulder, so the pair moves as one
   thing. Don't give both halves their own flee logic and a mutual attraction:

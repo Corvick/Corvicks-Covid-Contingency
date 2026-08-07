@@ -11,6 +11,7 @@ import {
   PLAYER_ONE_SHOT_KILL,
   MUZZLE_OFFSET_MUL,
   WINDOW_BULLET_DAMAGE,
+  DOOR_BULLET_DAMAGE,
   SHOT_SLOW_MS,
   SHOT_SLOW_MULTIPLIER,
   ENTITY_MAX_HEALTH,
@@ -31,6 +32,7 @@ import {
   type World,
 } from './world.js';
 import { heldGunSlot, heldItem } from './inventory.js';
+import { damageDoor } from './doors.js';
 
 /**
  * Gunfire is loud: every zombie in earshot investigates the shooter's position
@@ -93,6 +95,18 @@ export function fire(
     if (!isWindowIntact(world, index)) continue;
     const t = segmentRectT(muzzleX, muzzleY, endX, endY, world.map.windows[index]);
     if (t !== null && t <= wallT) damageWindow(world, index, WINDOW_BULLET_DAMAGE);
+  }
+
+  // A shut door stops the round, and wears down under fire. Chewing one open
+  // this way is slow enough that kicking it in is still the sane option.
+  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
+  for (const index of slabs) {
+    const door = world.doors[index];
+    if (!door || door.open || door.broken) continue;
+    const t = segmentRectT(muzzleX, muzzleY, endX, endY, door.rect);
+    if (t === null || t > wallT) continue;
+    wallT = t;
+    damageDoor(world, index, DOOR_BULLET_DAMAGE);
   }
 
   let victim: Entity | null = null;

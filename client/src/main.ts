@@ -14,6 +14,8 @@ import {
   MATERIALIZE_MS,
 } from '../../shared/constants.js';
 import type {
+  DoorPrompt,
+  DoorState,
   EntityState,
   GrenadeState,
   HelicopterState,
@@ -28,6 +30,9 @@ import {
   drawBeacons,
   drawBushes,
   drawCrosshair,
+  doorSlab,
+  drawDoorPrompt,
+  drawDoors,
   drawEntity,
   drawGrenades,
   drawGround,
@@ -87,6 +92,9 @@ let exhausted = false;
 let serverTickMs = 0;
 let beacons: Array<{ x: number; y: number }> = [];
 let brokenWindows = new Set<number>();
+/** Door state as last reported, keyed by index into map.doors. */
+const doorStates = new Map<number, DoorState>();
+let doorPrompt: DoorPrompt | null = null;
 let rallyCharges = 0;
 let pickups: PickupState[] = [];
 let inventory: InventoryState | null = null;
@@ -120,6 +128,8 @@ const { send } = connect((msg) => {
     cachedX = Number.NaN;
     cachedY = Number.NaN;
     brokenWindows = new Set();
+    doorStates.clear();
+    doorPrompt = null;
     gameOver = false;
     victory = false;
     gameOverPanel.classList.add('hidden');
@@ -135,6 +145,10 @@ const { send } = connect((msg) => {
     if (msg.brokenWindows.length !== brokenWindows.size) {
       brokenWindows = new Set(msg.brokenWindows);
     }
+    // Only doors near the viewer are sent, so this merges rather than replaces
+    // — a door left behind keeps whatever state it was last seen in.
+    for (const door of msg.doors) doorStates.set(door.i, door);
+    doorPrompt = msg.doorPrompt;
     rallyCharges = msg.rallyCharges;
     pickups = msg.pickups;
     inventory = msg.inventory;
@@ -357,8 +371,19 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     return cachedPoly;
   }
 
+  // Shut doors occlude exactly as the wall they hang in does, so the fog has
+  // to see them too — otherwise you'd see straight through a closed door.
+  const occluders = map.walls.slice();
+  for (const [index, state] of doorStates) {
+    if (state.open || state.broken) continue;
+    const door = map.doors[index];
+    if (!door) continue;
+    if (Math.hypot(door.x - me.x, door.y - me.y) > PLAYER_SIGHT_RADIUS + door.halfSpan) continue;
+    occluders.push(doorSlab(door));
+  }
+
   const t0 = performance.now();
-  cachedPoly = visibilityPolygon(me.x, me.y, PLAYER_SIGHT_RADIUS, map.walls, map.bushes);
+  cachedPoly = visibilityPolygon(me.x, me.y, PLAYER_SIGHT_RADIUS, occluders, map.bushes);
   fogComputeMs = performance.now() - t0;
   cachedAt = now;
   cachedX = me.x;
@@ -467,6 +492,7 @@ function render() {
     drawGround(ctx, map);
     drawWalls(ctx, map.walls, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
+    drawDoors(ctx, map.doors, doorStates, view);
     drawPickups(ctx, pickups, view, now);
   }
 
@@ -508,7 +534,12 @@ function render() {
 
   if (!spectating) {
     if (inventory && me) {
-      drawInteractPrompt(ctx, inventory, (me.x - view.x) * scale, (me.y - view.y) * scale);
+      // A door under your nose owns the E key, so it owns the prompt too.
+      if (doorPrompt) {
+        drawDoorPrompt(ctx, doorPrompt, (me.x - view.x) * scale, (me.y - view.y) * scale);
+      } else {
+        drawInteractPrompt(ctx, inventory, (me.x - view.x) * scale, (me.y - view.y) * scale);
+      }
       drawInventory(ctx, inventory, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     }
     drawStamina(ctx, stamina, STAMINA_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, exhausted);

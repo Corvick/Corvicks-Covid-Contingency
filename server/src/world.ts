@@ -1,6 +1,7 @@
 import type {
   Bush,
   Door,
+  DoorPrompt,
   EntityState,
   EntityType,
   InputState,
@@ -9,6 +10,10 @@ import type {
   Shot,
   Wall,
 } from '../../shared/types.js';
+import type { DoorRuntime } from './doors.js';
+
+/** What a player's press or hold of E is doing to a door. */
+export type DoorAction = 'open' | 'close' | 'lock' | 'unlock' | 'kick';
 import type { Inventory } from './inventory.js';
 import type { Grenade, Helicopter, Smoke } from './heli.js';
 import {
@@ -36,6 +41,11 @@ import {
   SHELTER_FAR_CHANCE,
   PANIC_SCALE_MIN,
   PANIC_SCALE_MAX,
+  DOOR_CLOSE_BEHIND_CHANCE,
+  DOOR_LOCK_BEHIND_CHANCE,
+  DOOR_BEG_CHANCE,
+  DOOR_BEG_HOLD_CHANCE,
+  DOOR_OPENS_FOR_STRANGERS_CHANCE,
   RALLY_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
   BOLT_FLEE_CHANCE,
@@ -62,6 +72,7 @@ import { generateMap } from './mapgen.js';
 import { newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
+import { doorRect, initDoors } from './doors.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -194,6 +205,40 @@ export interface AiState {
   nextWindowHitAt: number;
   /** Cooldown on scanning for panicking neighbours. */
   nextWitnessCheck: number;
+
+  // ------------------------------------------------------------ doors
+  /** Shuts the door behind them when they're only wandering about. */
+  closesDoors: boolean;
+  /** Shuts *and* locks it when they're getting away from something. */
+  locksDoors: boolean;
+  /** Begs at a locked door rather than going to find another way in. */
+  begsAtDoors: boolean;
+  /** Holds their ground at the door even with a zombie on them. */
+  begHolds: boolean;
+  /** Would let a stranger in. Most people, sensibly, would not. */
+  opensForStrangers: boolean;
+  /** Working a handle right now: nothing else happens until this passes. */
+  doorBusyUntil: number;
+  /** Door being worked, and what is being done to it. */
+  doorIndex: number;
+  doorAction: 'open' | 'close' | 'lock' | null;
+  /** Door to deal with once through it, and whether to lock it too. */
+  doorFollowUp: number;
+  doorFollowUpLock: boolean;
+  /** Which face of the follow-up door they set out from. */
+  doorFollowUpSide: number;
+  /** Doors found locked, so they don't queue at the same one forever. */
+  refusedDoors: number[];
+  /** Begging to be let in: which door, and until when. */
+  begDoor: number;
+  begUntil: number;
+  nextBegSpeechAt: number;
+  /** Answering someone else's plea at this door. */
+  answeringDoor: number;
+  /** Door this zombie means to break down, and when it forgets about it. */
+  doorTarget: number;
+  doorTargetUntil: number;
+  nextDoorHitAt: number;
 }
 
 export interface GrappleSession {
@@ -242,6 +287,20 @@ export interface World {
   windowGrid: SpatialGrid<number>;
   windowHealth: number[];
   brokenWindows: number[];
+  /**
+   * Doors, index-aligned with `map.doors`. A null entry is a plain archway
+   * with nothing hung in it.
+   */
+  doors: Array<DoorRuntime | null>;
+  doorGrid: SpatialGrid<number>;
+  /** Doors a zombie was alerted to, and when that memory lapses. */
+  doorAlerts: Map<number, number>;
+  /** Doors somebody outside is currently begging at, and when they give up. */
+  doorPleas: Map<number, number>;
+  /** Per-player door prompt, rebuilt each tick. */
+  doorPrompts: Map<string, DoorPrompt>;
+  /** Door action a player is part-way through: id -> start time. */
+  doorHolds: Map<string, { index: number; startedAt: number; action: DoorAction }>;
   /** id -> when a materialising entity finishes fading in. */
   materializeUntil: Map<string, number>;
   /** id -> active speech bubble. */
@@ -389,6 +448,26 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextShotAt: now + Math.random() * 2000,
     nextWindowHitAt: 0,
     nextWitnessCheck: now + Math.random() * 500,
+
+    closesDoors: Math.random() < DOOR_CLOSE_BEHIND_CHANCE,
+    locksDoors: Math.random() < DOOR_LOCK_BEHIND_CHANCE,
+    begsAtDoors: Math.random() < DOOR_BEG_CHANCE,
+    begHolds: Math.random() < DOOR_BEG_HOLD_CHANCE,
+    opensForStrangers: Math.random() < DOOR_OPENS_FOR_STRANGERS_CHANCE,
+    doorBusyUntil: 0,
+    doorIndex: -1,
+    doorAction: null,
+    doorFollowUp: -1,
+    doorFollowUpLock: false,
+    doorFollowUpSide: 0,
+    refusedDoors: [],
+    begDoor: -1,
+    begUntil: 0,
+    nextBegSpeechAt: 0,
+    answeringDoor: -1,
+    doorTarget: -1,
+    doorTargetUntil: 0,
+    nextDoorHitAt: 0,
   };
 }
 
@@ -403,6 +482,14 @@ function buildStaticGrids(world: World): void {
   for (const bush of world.map.bushes) {
     world.bushGrid.insertRect(bush, bush.x - bush.r, bush.y - bush.r, bush.x + bush.r, bush.y + bush.r);
   }
+
+  // Every doorway goes in the grid; whether its door is shut is checked at
+  // query time, exactly as panes are.
+  world.doorGrid.clear();
+  world.map.doors.forEach((door, i) => {
+    const rect = doorRect(door);
+    world.doorGrid.insertRect(i, rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
+  });
 
   world.windowHealth = world.map.windows.map(() => WINDOW_HEALTH);
   world.brokenWindows = [];
@@ -486,6 +573,14 @@ export function hasLineOfSight(world: World, x1: number, y1: number, x2: number,
     if (segmentRectT(x1, y1, x2, y2, wall) !== null) return false;
   }
 
+  // A shut door is opaque, unlike the glass beside it.
+  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
+  for (const index of slabs) {
+    const door = world.doors[index];
+    if (!door || door.open || door.broken) continue;
+    if (segmentRectT(x1, y1, x2, y2, door.rect) !== null) return false;
+  }
+
   const bushes = world.bushGrid.queryRect(minX, minY, maxX, maxY, new Set<Bush>());
   for (const bush of bushes) {
     // The bush you're standing in doesn't block your own view out of it —
@@ -517,6 +612,13 @@ export function hasWallClearPath(world: World, x1: number, y1: number, x2: numbe
   for (const index of panes) {
     if (!isWindowIntact(world, index)) continue;
     if (segmentRectT(x1, y1, x2, y2, world.map.windows[index]) !== null) return false;
+  }
+
+  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
+  for (const index of slabs) {
+    const door = world.doors[index];
+    if (!door || door.open || door.broken) continue;
+    if (segmentRectT(x1, y1, x2, y2, door.rect) !== null) return false;
   }
   return true;
 }
@@ -584,6 +686,12 @@ export function createWorld(): World {
     danger: new DangerField(map, nav),
     nextDangerRebuild: 0,
     navDirty: false,
+    doors: [],
+    doorGrid: new SpatialGrid<number>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
+    doorAlerts: new Map(),
+    doorPleas: new Map(),
+    doorPrompts: new Map(),
+    doorHolds: new Map(),
     entities: new Map(),
     playerIds: new Set(),
     spectators: new Set(),
@@ -619,6 +727,7 @@ export function createWorld(): World {
     outbreakOrigin: { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 },
   };
   buildStaticGrids(world);
+  initDoors(world);
   populate(world);
   spawnPickups(world, playerOneStart(world));
   return world;
@@ -632,6 +741,9 @@ export function resetWorld(world: World): void {
   world.nextDangerRebuild = 0;
   world.navDirty = false;
   buildStaticGrids(world);
+  initDoors(world);
+  world.doorPrompts.clear();
+  world.doorHolds.clear();
 
   world.entities.clear();
   world.ai.clear();
@@ -923,6 +1035,7 @@ export function resolveCollisions(world: World): void {
 
   const walls = new Set<Wall>();
   const panes = new Set<number>();
+  const slabs = new Set<number>();
   for (const e of world.entities.values()) {
     walls.clear();
     world.wallGrid.queryCircle(e.x, e.y, e.radius + 4, walls);
@@ -933,6 +1046,14 @@ export function resolveCollisions(world: World): void {
     world.windowGrid.queryCircle(e.x, e.y, e.radius + 4, panes);
     for (const index of panes) {
       if (isWindowIntact(world, index)) resolveCircleRect(e, world.map.windows[index]);
+    }
+
+    // A shut door is as solid as the wall it hangs in.
+    slabs.clear();
+    world.doorGrid.queryCircle(e.x, e.y, e.radius + 4, slabs);
+    for (const index of slabs) {
+      const door = world.doors[index];
+      if (door && !door.open && !door.broken) resolveCircleRect(e, door.rect);
     }
 
     e.x = clamp(e.x, e.radius, WORLD_WIDTH - e.radius);
