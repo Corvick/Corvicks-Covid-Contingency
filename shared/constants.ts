@@ -176,9 +176,18 @@ export const TURN_DELAY_MAX_MS = 45000;
 // ---------------------------------------------------------------- flee / settle
 export const FLEE_DIRECTIONS = 16; // candidate headings sampled when escaping
 export const FLEE_PROBE_DIST = 130;
-export const RETREAT_MS = 7000; // keep running after losing sight
-export const RETREAT_DISTANCE = 520;
-export const PANIC_MS = 7000; // agitated wandering before looking for cover
+export const RETREAT_MS = 15000; // keep running after losing sight
+export const RETREAT_DISTANCE = 950;
+export const PANIC_MS = 16000; // agitated wandering before looking for cover
+/**
+ * Per-person scaling on both of the above, rolled once. Most people run a long
+ * way and stay rattled; a few gather themselves quickly. Widening this spreads
+ * the newly bitten much further across the map before they turn.
+ */
+export const PANIC_SCALE_MIN = 0.65;
+export const PANIC_SCALE_MAX = 1.75;
+/** Once someone has seen a zombie they never quite stroll again. */
+export const SHAKEN_WALK_MULTIPLIER = 1.3;
 export const PANIC_SPEED_MULTIPLIER = 1.5;
 export const SEEK_TIMEOUT_MS = 20000;
 export const ROAM_MS = 120000; // "keep wandering for a couple of minutes"
@@ -209,6 +218,24 @@ export const DOOR_BLOCK_RADIUS = 115;
 export const INDOOR_STAY_CHANCE = 0.85;
 /** How many nearby buildings a fleeing civilian will consider hiding in. */
 export const REFUGE_CANDIDATES = 16;
+/**
+ * Share of civilians who make straight for the inside of a nearby building the
+ * moment they see a zombie, instead of running for open ground and only
+ * looking for cover once they've calmed down.
+ */
+export const SHELTER_SEEK_CHANCE = 0.7;
+/** How far a frightened civilian will look for a building to get inside. */
+export const SHELTER_SEARCH_RADIUS = 620;
+/**
+ * Some people don't make for the nearest door — they have somewhere specific
+ * in mind, blocks away, and run the whole distance to get to it.
+ */
+export const SHELTER_FAR_CHANCE = 0.28;
+export const SHELTER_FAR_RADIUS = 1900;
+/** Buildings actually examined per scan — the rest is a distance sort. */
+export const SHELTER_CANDIDATES = 8;
+/** Shelter choice is re-evaluated on this cadence, not every tick. */
+export const SHELTER_SCAN_INTERVAL_MS = 600;
 /** Sidestep a zombie only when it's this close and roughly in the way. */
 export const SKIRT_RANGE = 155;
 export const SKIRT_CONE = 0.9; // radians off-heading that still counts as "in the way"
@@ -218,9 +245,33 @@ export const WITNESS_INVESTIGATE_CHANCE = 0.1;
 export const WITNESS_SIGHT_RADIUS = 260;
 export const WITNESS_REACT_MS = 5000;
 
-/** Couples move together and panic together. */
-export const COUPLE_SHARE = 0.16;
+/**
+ * Couples hold hands, move as one, and almost never let go — a handful per
+ * city rather than a share of the population, so each pair reads as a story
+ * rather than as crowd texture.
+ */
+export const COUPLE_COUNT_MIN = 2;
+export const COUPLE_COUNT_MAX = 4;
+/** How far apart the two of them start — just touching. */
+export const COUPLE_SPAWN_GAP = HUMAN_RADIUS * 2 + 2;
+/** The follower closes back to this before falling into step alongside. */
+export const HAND_HOLD_DIST = HUMAN_RADIUS * 2 + 6;
+/** Extra pace the follower can find to close a gap, and the leader's restraint. */
+export const HAND_CATCHUP_MULTIPLIER = 1.3;
+export const HAND_LEADER_WAIT_MULTIPLIER = 0.72;
+/** Rolled once, the first time this person ever lays eyes on a zombie. */
+export const HAND_RELEASE_ON_SIGHT_CHANCE = 0.06;
+/** Rolled once, the moment their partner is seized. Most stay and hold on. */
+export const HAND_RELEASE_ON_GRAPPLE_CHANCE = 0.1;
+/** Follow distance for a pair who have let go of each other. */
 export const COUPLE_FOLLOW_DIST = 74;
+
+/**
+ * Share of civilians who start the round indoors and simply stay there,
+ * pottering about inside rather than strolling out into the street. Only the
+ * remainder treat their building as somewhere they were passing through.
+ */
+export const INDOOR_HOMEBODY_SHARE = 0.88;
 
 /** Clusters of people stood around chatting at the start of a round. */
 export const SOCIAL_GROUP_SHARE = 0.22;
@@ -240,7 +291,7 @@ export const SHOT_SLOW_MULTIPLIER = 0.45;
 export const OFFICER_FLEE_MS = 20000;
 
 /** Detecting a runner scraping along a wall instead of getting anywhere. */
-export const UNSTICK_CHECK_MS = 700;
+export const UNSTICK_CHECK_MS = 420;
 export const UNSTICK_MIN_PROGRESS = 16;
 export const UNSTICK_COMMIT_MS = 1100;
 /** Flee scoring pushes away from the map edge before they can hug it. */
@@ -298,6 +349,21 @@ export const NPC_OFFICER_COLOR = '#9ca3af';
 
 // ---------------------------------------------------------------- landmarks
 /** One or two oversized buildings partitioned into rooms. */
+/** Smallest room a partition is allowed to leave behind, in tiles. */
+export const ROOM_MIN_TILES = 4;
+/** Rooms are connected by a spanning tree; this adds openings on top of it. */
+export const INTERIOR_EXTRA_DOOR_CHANCE = 0.28;
+
+/**
+ * The corner complex: one oversized, many-roomed building pushed flush into a
+ * randomly chosen corner of the map, so its two outer walls read as part of
+ * the perimeter.
+ */
+export const CORNER_COMPLEX_MIN_TILES = 26;
+export const CORNER_COMPLEX_MAX_TILES = 34;
+export const CORNER_COMPLEX_ROOM_MIN = 5;
+export const CORNER_COMPLEX_MAX_CUTS = 4;
+
 export const BIG_BUILDING_MIN = 2;
 export const BIG_BUILDING_MAX = 4;
 export const BIG_BUILDING_MIN_TILES = 17;
@@ -386,3 +452,19 @@ export const REPATH_INTERVAL_MS = 700;
  * back to walking straight into whatever wall is in the way.
  */
 export const PATH_MAX_NODES = 14000;
+
+// ---------------------------------------------------------------- danger field
+/**
+ * Coarse grid for the geodesic danger field. One BFS per rebuild serves every
+ * entity, which is what keeps hundreds of them affordable.
+ */
+export const DANGER_CELL = 28;
+export const DANGER_REBUILD_MS = 160; // ~6Hz
+/** Distances beyond this are treated as "safe" and not mapped. */
+export const DANGER_MAX_DISTANCE = 900;
+
+/** Flee destination search. */
+export const ESCAPE_SAMPLES = 16;
+export const ESCAPE_DISTANCE = 420;
+/** Commit to a chosen escape for this long so they don't dither. */
+export const ESCAPE_COMMIT_MS = 1200;

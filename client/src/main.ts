@@ -31,6 +31,7 @@ import {
   drawEntity,
   drawGrenades,
   drawGround,
+  drawHandLinks,
   drawHelicopters,
   drawInteractPrompt,
   drawInventory,
@@ -468,6 +469,8 @@ function render() {
     drawWindows(ctx, map.windows, brokenWindows, view);
     drawPickups(ctx, pickups, view, now);
   }
+
+  drawHandLinks(ctx, Array.from(tracked.values()), view);
 
   for (const entry of tracked.values()) {
     // Your own character never fades — it's always fully in view.

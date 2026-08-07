@@ -37,6 +37,11 @@ import {
   BUSH_OCCUPANT_SPACING,
   BUSH_SCAN_INTERVAL_MS,
   COUPLE_FOLLOW_DIST,
+  HAND_HOLD_DIST,
+  HAND_CATCHUP_MULTIPLIER,
+  HAND_LEADER_WAIT_MULTIPLIER,
+  HAND_RELEASE_ON_SIGHT_CHANCE,
+  HAND_RELEASE_ON_GRAPPLE_CHANCE,
   WITNESS_SIGHT_RADIUS,
   BOUNDARY_AVOID_DIST,
   UNSTICK_CHECK_MS,
@@ -48,9 +53,19 @@ import {
   SKIRT_CONE,
   DOOR_BLOCK_RADIUS,
   REFUGE_CANDIDATES,
+  SHELTER_SEARCH_RADIUS,
+  SHELTER_FAR_RADIUS,
+  SHELTER_CANDIDATES,
+  SHELTER_SCAN_INTERVAL_MS,
+  SHAKEN_WALK_MULTIPLIER,
   SOLDIER_BLOOM_RAD,
   SOLDIER_SHOOT_INTERVAL_MS,
   SOLDIER_SIGHT,
+  DANGER_REBUILD_MS,
+  DANGER_MAX_DISTANCE,
+  ESCAPE_SAMPLES,
+  ESCAPE_DISTANCE,
+  ESCAPE_COMMIT_MS,
   SENSE_INTERVAL_MS,
   GRAPPLE_MIN_MS,
   GRAPPLE_MAX_MS,
@@ -84,7 +99,9 @@ import {
 } from '../../shared/constants.js';
 import { angleDelta, clamp, turnToward } from './geometry.js';
 import {
+  buildingIndexAt,
   damageWindow,
+  doorsOf,
   hasLineOfSight,
   hasWallClearPath,
   isInBush,
@@ -158,8 +175,15 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
  */
 function slideToward(world: World, e: Entity, gx: number, gy: number): number {
   const direct = Math.atan2(gy - e.y, gx - e.x);
-  const clear = (angle: number) =>
-    !world.nav.isBlocked(e.x + Math.cos(angle) * 42, e.y + Math.sin(angle) * 42);
+  // The probe has to be reachable in a straight line, not merely empty. Testing
+  // only the far end called a direction clear whenever the open ground on the
+  // other side of a wall happened to be walkable — which is exactly how people
+  // ended up grinding face-first into that wall.
+  const clear = (angle: number) => {
+    const px = e.x + Math.cos(angle) * 42;
+    const py = e.y + Math.sin(angle) * 42;
+    return !world.nav.isBlocked(px, py) && world.nav.lineClear(e.x, e.y, px, py);
+  };
 
   if (clear(direct)) return direct;
   for (const offset of [0.55, -0.55, 1.1, -1.1, 1.7, -1.7, 2.4, -2.4]) {
@@ -234,6 +258,74 @@ function safestHeading(world: World, e: Entity, state: AiState): number {
   return bestAngle;
 }
 
+/**
+ * A bearing to break out on after scraping along something. Only directions
+ * that are genuinely walkable are considered, and the heading that just failed
+ * is penalised — the old random turn was as likely to point back into the wall
+ * as away from it, which is what left people grinding there for seconds.
+ */
+function breakoutHeading(world: World, e: Entity, state: AiState): number {
+  let bestAngle = state.heading + Math.PI;
+  let bestScore = -Infinity;
+  const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
+
+  for (let i = 0; i < FLEE_DIRECTIONS; i++) {
+    const angle = (i / FLEE_DIRECTIONS) * Math.PI * 2;
+    const px = e.x + Math.cos(angle) * FLEE_PROBE_DIST;
+    const py = e.y + Math.sin(angle) * FLEE_PROBE_DIST;
+    if (world.nav.isBlocked(px, py) || !world.nav.lineClear(e.x, e.y, px, py)) continue;
+
+    let score = Math.cos(angle - away) * 120;
+    score -= Math.cos(angle - state.heading) * 90;
+    score += world.danger.opennessAt(px, py) * 60;
+
+    const edgeGap = Math.min(px, py, WORLD_WIDTH - px, WORLD_HEIGHT - py);
+    if (edgeGap < BOUNDARY_AVOID_DIST) score -= (BOUNDARY_AVOID_DIST - edgeGap) * 2;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestAngle = angle;
+    }
+  }
+  return bestAngle;
+}
+
+/**
+ * Notice when someone running for their life is getting nowhere, and commit
+ * them to a bearing that actually goes somewhere. Returns true when it has
+ * taken the tick over.
+ */
+function unstickTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+  dt: number,
+  speed: number,
+): boolean {
+  if (now >= state.lastUnstickCheck) {
+    state.lastUnstickCheck = now + UNSTICK_CHECK_MS;
+    const progress = Math.hypot(e.x - state.unstickX, e.y - state.unstickY);
+    if (progress < UNSTICK_MIN_PROGRESS && now >= state.unstickUntil) {
+      state.unstickHeading = breakoutHeading(world, e, state);
+      state.unstickUntil = now + UNSTICK_COMMIT_MS;
+      // Whatever they were making for, they couldn't get to it from here.
+      state.path = null;
+      state.escapeX = null;
+      state.escapeY = null;
+      state.escapeUntil = 0;
+    }
+    state.unstickX = e.x;
+    state.unstickY = e.y;
+  }
+
+  if (now < state.unstickUntil) {
+    step(world, e, state, state.unstickHeading, speed, HUMAN_TURN_RATE, dt, now);
+    return true;
+  }
+  return false;
+}
+
 function pickWanderTarget(
   world: World,
   e: Entity,
@@ -243,6 +335,29 @@ function pickWanderTarget(
   radius = HUMAN_WANDER_RADIUS,
 ): void {
   const ATTEMPTS = 6;
+
+  // Someone who lives here potters about their own rooms. Picking from the
+  // open-world ring instead is what emptied every building within a minute of
+  // the round starting.
+  const home = state.homeBuilding >= 0 ? world.map.buildings[state.homeBuilding] : undefined;
+  if (home) {
+    for (let i = 0; i < ATTEMPTS; i++) {
+      const r = home.rects[Math.floor(Math.random() * home.rects.length)];
+      const x = r.x + 12 + Math.random() * Math.max(1, r.w - 24);
+      const y = r.y + r.h / 2;
+      if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+      state.wanderX = x;
+      state.wanderY = y;
+      break;
+    }
+    state.path = null;
+    state.nextPathAt = 0;
+    state.pauseUntil = pause
+      ? now + HUMAN_PAUSE_MIN_MS + Math.random() * (HUMAN_PAUSE_MAX_MS - HUMAN_PAUSE_MIN_MS)
+      : 0;
+    return;
+  }
+
   for (let i = 0; i < ATTEMPTS; i++) {
     const angle = Math.random() * Math.PI * 2;
     const dist = 80 + Math.random() * radius;
@@ -308,8 +423,128 @@ function peersNearby(world: World, e: Entity): number {
 }
 
 function insideBuilding(world: World, x: number, y: number): boolean {
-  for (const b of world.map.buildings) {
-    if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) return true;
+  return buildingIndexAt(world, x, y) >= 0;
+}
+
+/**
+ * A reachable spot genuinely inside a building, as far from `awayFromX/Y` as
+ * the footprint allows. The bounding-box centre is no good on its own: on an
+ * L or T footprint it often lands in the outdoor notch, or on an interior
+ * partition of a big building, and people then "settle" out in the street.
+ */
+function interiorPointOf(
+  world: World,
+  buildingIndex: number,
+  awayFromX: number,
+  awayFromY: number,
+): { x: number; y: number } | null {
+  const b = world.map.buildings[buildingIndex];
+  if (!b) return null;
+
+  let best: { x: number; y: number } | null = null;
+  let bestDist = -Infinity;
+
+  for (const r of b.rects) {
+    // Row rects can span the whole building, so sample along them rather than
+    // trusting one midpoint that may sit on a partition wall.
+    for (const fx of [0.5, 0.25, 0.75]) {
+      // Strictly inside a footprint rect is indoors by construction, so this
+      // needs no point-in-building test — only that it's stood on and can be
+      // walked to, which rules out interior partitions and sealed-off rooms.
+      const x = r.x + r.w * fx;
+      const y = r.y + r.h / 2;
+      if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+      const d = Math.hypot(x - awayFromX, y - awayFromY);
+      if (d > bestDist) {
+        bestDist = d;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Nearest doorway into a building that no visible zombie is standing in or
+ * closer to than we are. Mirrors `exitPointFor`, which does the same test on
+ * the way out.
+ */
+function openDoorInto(world: World, buildingIndex: number, e: Entity, state: AiState): boolean {
+  const candidates = doorsOf(world, buildingIndex)
+    .map((d) => ({ x: d.x, y: d.y, d: Math.hypot(d.x - e.x, d.y - e.y) }))
+    .filter((c) => world.nav.isReachable(c.x, c.y))
+    .sort((a, b) => a.d - b.d);
+
+  for (const c of candidates) {
+    let covered = false;
+    for (const threat of state.threatPoints) {
+      const threatDist = Math.hypot(c.x - threat.x, c.y - threat.y);
+      if (threatDist < DOOR_BLOCK_RADIUS || threatDist < c.d - 20) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) return true;
+  }
+  return false;
+}
+
+/**
+ * Pick a building to run inside of. Candidates are the nearest few that aren't
+ * back past the zombie, don't already have one in them, and still have a way
+ * in that isn't covered. `refugeBias` decides where in that shortlist this
+ * person starts looking, so a crowd scatters into several doorways instead of
+ * funnelling into one.
+ */
+function chooseShelter(world: World, e: Entity, state: AiState): boolean {
+  state.shelterBuilding = -1;
+  state.shelterX = null;
+  state.shelterY = null;
+
+  const awayX = e.x - state.threatX;
+  const awayY = e.y - state.threatY;
+
+  // Not everyone makes for the nearest door — some have somewhere particular
+  // in mind, blocks away, and will run the whole way to it.
+  const radius = state.shelterFar ? SHELTER_FAR_RADIUS : SHELTER_SEARCH_RADIUS;
+
+  const near: Array<{ i: number; d: number }> = [];
+  const list = world.map.buildings;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    const dx = b.x + b.w / 2 - e.x;
+    const dy = b.y + b.h / 2 - e.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > radius) continue;
+    // Doubling back past the thing chasing us is worse than staying outside.
+    if (dist > 90 && dx * awayX + dy * awayY < 0) continue;
+    near.push({ i, d: dist });
+  }
+  if (near.length === 0) return false;
+
+  near.sort((a, b) => a.d - b.d);
+  const shortlist = state.shelterFar
+    ? near.slice(-SHELTER_CANDIDATES) // the far end of what's in range
+    : near.slice(0, SHELTER_CANDIDATES);
+  const start = Math.min(shortlist.length - 1, Math.floor(state.refugeBias * shortlist.length));
+
+  // Which buildings the visible zombies are in, resolved once rather than per
+  // candidate — this test walks the whole building list.
+  const occupiedBy = state.threatPoints.map((t) => buildingIndexAt(world, t.x, t.y));
+
+  for (let k = 0; k < shortlist.length; k++) {
+    const index = shortlist[(start + k) % shortlist.length].i;
+
+    if (occupiedBy.includes(index)) continue;
+    if (!openDoorInto(world, index, e, state)) continue;
+
+    const goal = interiorPointOf(world, index, state.threatX, state.threatY);
+    if (!goal) continue;
+
+    state.shelterBuilding = index;
+    state.shelterX = goal.x;
+    state.shelterY = goal.y;
+    return true;
   }
   return false;
 }
@@ -331,17 +566,24 @@ function chooseSettleGoal(world: World, e: Entity, state: AiState): { x: number;
         return { x: state.refugeX, y: state.refugeY };
       }
       const candidates = world.map.buildings
-        .map((b) => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 }))
-        .map((c) => ({ ...c, d: Math.hypot(c.x - e.x, c.y - e.y) }))
-        .filter((c) => world.nav.isReachable(c.x, c.y))
+        .map((b, i) => ({ i, d: Math.hypot(b.x + b.w / 2 - e.x, b.y + b.h / 2 - e.y) }))
         .sort((a, b) => a.d - b.d)
         .slice(0, REFUGE_CANDIDATES);
       if (candidates.length === 0) return null;
 
-      const pick = candidates[Math.min(candidates.length - 1, Math.floor(state.refugeBias * candidates.length))];
-      state.refugeX = pick.x;
-      state.refugeY = pick.y;
-      return { x: pick.x, y: pick.y };
+      // Aim at a spot actually inside the footprint. Aiming at the bounding-box
+      // centre left people standing in the notch of L-shaped blocks, never
+      // registering as indoors and so never settling.
+      const start = Math.min(candidates.length - 1, Math.floor(state.refugeBias * candidates.length));
+      for (let k = 0; k < candidates.length; k++) {
+        const index = candidates[(start + k) % candidates.length].i;
+        const goal = interiorPointOf(world, index, state.threatX, state.threatY);
+        if (!goal) continue;
+        state.refugeX = goal.x;
+        state.refugeY = goal.y;
+        return goal;
+      }
+      return null;
     }
     case 'bush': {
       let best: { x: number; y: number } | null = null;
@@ -413,12 +655,61 @@ function nearestBushAwayFrom(world: World, e: Entity, state: AiState): { x: numb
   return best;
 }
 
-/** The building footprint a point sits inside, if any. */
-function buildingContaining(world: World, x: number, y: number): { x: number; y: number; w: number; h: number } | null {
-  for (const b of world.map.buildings) {
-    if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) return b;
+/**
+ * Choose a place to run *to*. Candidates are sampled on a ring, kept only if
+ * they're walkable and connected, and scored on how far they are from danger
+ * once walls are taken into account. The chosen spot is held for a beat so
+ * they commit to it instead of dithering between two equally good options.
+ */
+function escapeDestination(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+): { x: number; y: number } | null {
+  if (state.escapeX !== null && state.escapeY !== null && now < state.escapeUntil) {
+    // Drop it early if we've arrived, or if it stopped being safe.
+    const reached = Math.hypot(state.escapeX - e.x, state.escapeY - e.y) < 60;
+    if (!reached) return { x: state.escapeX, y: state.escapeY };
   }
-  return null;
+
+  let best: { x: number; y: number } | null = null;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < ESCAPE_SAMPLES; i++) {
+    const angle = (i / ESCAPE_SAMPLES) * Math.PI * 2;
+    const x = clamp(e.x + Math.cos(angle) * ESCAPE_DISTANCE, 70, WORLD_WIDTH - 70);
+    const y = clamp(e.y + Math.sin(angle) * ESCAPE_DISTANCE, 70, WORLD_HEIGHT - 70);
+    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+
+    // Geodesic danger: how far this spot is from the nearest zombie *through
+    // walkable space*, so cover between us and them actually counts.
+    let clearance = world.danger.distanceAt(x, y);
+    if (clearance === Infinity) clearance = DANGER_MAX_DISTANCE;
+
+    let score = Math.min(clearance, DANGER_MAX_DISTANCE);
+    // Prefer not doubling back past the thing chasing us.
+    const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
+    score += Math.cos(angle - away) * 60;
+    // And prefer somewhere we can actually keep moving from.
+    score += world.danger.opennessAt(x, y) * 40;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = { x, y };
+    }
+  }
+
+  if (!best) return null;
+  state.escapeX = best.x;
+  state.escapeY = best.y;
+  state.escapeUntil = now + ESCAPE_COMMIT_MS;
+  return best;
+}
+
+/** Index of the building a point genuinely sits inside, or -1. */
+function buildingContaining(world: World, x: number, y: number): number {
+  return buildingIndexAt(world, x, y);
 }
 
 /**
@@ -428,21 +719,16 @@ function buildingContaining(world: World, x: number, y: number): { x: number; y:
  */
 function exitPointFor(
   world: World,
-  b: { x: number; y: number; w: number; h: number },
+  buildingIndex: number,
   e: Entity,
   state: AiState,
 ): { x: number; y: number } | null {
-  const m = INDOOR_EXIT_MARGIN;
-  const candidates = [
-    { x: e.x, y: b.y - m },
-    { x: e.x, y: b.y + b.h + m },
-    { x: b.x - m, y: e.y },
-    { x: b.x + b.w + m, y: e.y },
-  ]
-    .map((c) => ({ x: clamp(c.x, 60, WORLD_WIDTH - 60), y: clamp(c.y, 60, WORLD_HEIGHT - 60) }))
-    .filter((c) => !world.nav.isBlocked(c.x, c.y) && world.nav.isReachable(c.x, c.y))
-    .map((c) => ({ ...c, d: Math.hypot(c.x - e.x, c.y - e.y) }))
-    .sort((a, b2) => a.d - b2.d);
+  // Aim at the actual doorways now that mapgen records them, rather than
+  // guessing at points beyond the building's edges.
+  const candidates = doorsOf(world, buildingIndex)
+    .map((d) => ({ x: d.x, y: d.y, d: Math.hypot(d.x - e.x, d.y - e.y) }))
+    .filter((c) => world.nav.isReachable(c.x, c.y))
+    .sort((a, b) => a.d - b.d);
 
   // Never break for a way out that a zombie is standing in or closer to than
   // we are — that's just running into its arms.
@@ -485,6 +771,100 @@ function skirtThreat(world: World, e: Entity, state: AiState, desired: number): 
   if (clearAt(desired + side * swing)) return desired + side * swing;
   if (clearAt(desired - side * swing)) return desired - side * swing;
   return desired;
+}
+
+/** Both halves of a pair let go at once — a hand-hold has two ends. */
+function releaseHands(world: World, state: AiState, partnerId: string): void {
+  state.handHeld = false;
+  const partnerState = world.ai.get(partnerId);
+  if (partnerState) partnerState.handHeld = false;
+}
+
+/**
+ * Everything to do with holding on to someone. Returns true when it has taken
+ * this tick over — the follower staying in step, or either half refusing to
+ * let go of a partner who has been seized.
+ *
+ * Letting go is rolled once per moment that would test it, never per tick, so
+ * "rare" stays rare rather than compounding to a certainty over a few seconds.
+ */
+function updateHandHold(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  if (!state.handHeld || !state.partnerId) return false;
+
+  const partner = world.entities.get(state.partnerId);
+  if (!partner || partner.type !== 'human') {
+    // Dead, or turned. Nothing left to hold.
+    state.handHeld = false;
+    return false;
+  }
+
+  // First sight of a zombie. The follower never reaches the flee branch that
+  // normally sets `sawZombie`, so set it here — otherwise this roll comes up
+  // again every tick and "rare" becomes a certainty within a second.
+  if (state.threatCount > 0 && !state.sawZombie) {
+    state.sawZombie = true;
+    if (Math.random() < HAND_RELEASE_ON_SIGHT_CHANCE) {
+      releaseHands(world, state, partner.id);
+      return false;
+    }
+  }
+
+  const seized = world.grapples.has(partner.id);
+  if (seized && !state.sawPartnerSeized) {
+    state.sawPartnerSeized = true;
+    if (Math.random() < HAND_RELEASE_ON_GRAPPLE_CHANCE) {
+      releaseHands(world, state, partner.id);
+      return false;
+    }
+  } else if (!seized) {
+    state.sawPartnerSeized = false;
+  }
+
+  // Held on through it: they stay at their partner's side while the thing
+  // works at them, which is usually the end of them both.
+  if (seized) {
+    const gap = Math.hypot(partner.x - e.x, partner.y - e.y);
+    state.heading = Math.atan2(partner.y - e.y, partner.x - e.x);
+    e.facing = state.heading;
+    if (gap > HAND_HOLD_DIST) {
+      step(world, e, state, state.heading, HUMAN_WALK_SPEED, HUMAN_TURN_RATE * 2, dt, now);
+    }
+    return true;
+  }
+
+  const partnerState = world.ai.get(partner.id);
+
+  if (state.coupleLead) {
+    // Don't outrun the person you're holding on to.
+    const gap = Math.hypot(partner.x - e.x, partner.y - e.y);
+    if (gap > HAND_HOLD_DIST * 1.6) {
+      state.slowUntil = now + 100;
+      state.slowMul = HAND_LEADER_WAIT_MULTIPLIER;
+    }
+    return false; // the leader goes on deciding where they both go
+  }
+
+  // The follower walks at their partner's shoulder rather than steering for
+  // itself, so the pair reads as one thing moving.
+  const lead = partnerState ? partnerState.heading : partner.facing;
+  const side = lead + (Math.PI / 2) * state.handSide;
+  const holdX = partner.x + Math.cos(side) * HAND_HOLD_DIST;
+  const holdY = partner.y + Math.sin(side) * HAND_HOLD_DIST;
+  const toHold = Math.hypot(holdX - e.x, holdY - e.y);
+
+  if (toHold > 8) {
+    const fleeing =
+      partnerState !== undefined && (partnerState.mode === 'flee' || partnerState.mode === 'retreat');
+    const base = fleeing ? HUMAN_FLEE_SPEED : HUMAN_WALK_SPEED;
+    const speed = toHold > HAND_HOLD_DIST ? base * HAND_CATCHUP_MULTIPLIER : base;
+    const desired = headingToward(world, e, state, holdX, holdY, now);
+    step(world, e, state, desired, speed, HUMAN_TURN_RATE * 2, dt, now);
+  } else {
+    // In step and level with them — face the way they're both going.
+    state.heading = turnToward(state.heading, lead, HUMAN_TURN_RATE * dt);
+    e.facing = state.heading;
+  }
+  return true;
 }
 
 /** A visible neighbour who is currently running for their life. */
@@ -530,13 +910,27 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     senseThreats(world, e, state, HUMAN_SIGHT_RADIUS);
   }
 
+  // Couples move as one and hardly ever let go, so this comes ahead of
+  // everything else the follower might otherwise decide to do.
+  if (updateHandHold(world, e, state, now, dt)) return;
+
   // Seeing a zombie overrides whatever else was happening.
   if (state.threatCount > 0) {
     state.mode = 'flee';
+    state.sawZombie = true;
+    // Driven out of the house: it stops being somewhere to go back to.
+    if (state.homeBuilding >= 0 && buildingIndexAt(world, e.x, e.y) !== state.homeBuilding) {
+      state.homeBuilding = -1;
+    }
     const boostUntil = world.speedBoosts.get(e.id);
     const boosted = boostUntil !== undefined && now < boostUntil;
     if (boostUntil !== undefined && !boosted) world.speedBoosts.delete(e.id);
     const speed = HUMAN_FLEE_SPEED * (boosted ? ESCAPE_SPEED_MULTIPLIER : 1);
+
+    // Scraping along a wall counts as not escaping. Checked ahead of
+    // everything else a frightened person might do, since any of those
+    // branches can be the one walking them into the wall.
+    if (unstickTick(world, e, state, now, dt, speed)) return;
 
     // Bush-hiders don't run blindly — they bolt for the nearest cover, so
     // long as it isn't back toward whatever is chasing them.
@@ -561,25 +955,6 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
       }
     }
 
-    // Scraping along a wall counts as not escaping — commit to a new bearing.
-    if (now >= state.lastUnstickCheck) {
-      state.lastUnstickCheck = now + UNSTICK_CHECK_MS;
-      const progress = Math.hypot(e.x - state.unstickX, e.y - state.unstickY);
-      if (progress < UNSTICK_MIN_PROGRESS && now >= state.unstickUntil) {
-        const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
-        const turn = (Math.random() < 0.5 ? -1 : 1) * (Math.PI / 3 + Math.random() * (Math.PI / 3));
-        state.unstickHeading = away + turn;
-        state.unstickUntil = now + UNSTICK_COMMIT_MS;
-      }
-      state.unstickX = e.x;
-      state.unstickY = e.y;
-    }
-
-    if (now < state.unstickUntil) {
-      step(world, e, state, state.unstickHeading, speed, HUMAN_TURN_RATE, dt, now);
-      return;
-    }
-
     // Couples run together: the partner steers toward whoever bolted first.
     const partner = state.partnerId ? world.entities.get(state.partnerId) : undefined;
     if (partner && partner.type === 'human') {
@@ -596,23 +971,42 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     // squeezing past the zombie rather than backing into a wall.
     if (state.fleeStyle !== 'bolt') {
       const building = buildingContaining(world, e.x, e.y);
-      if (building) {
+      if (building >= 0) {
         const threatIndoors = state.threatPoints.some(
-          (t) =>
-            t.x > building.x &&
-            t.x < building.x + building.w &&
-            t.y > building.y &&
-            t.y < building.y + building.h,
+          (t) => buildingIndexAt(world, t.x, t.y) === building,
         );
 
         // A zombie prowling outside is a reason to stay put, not to run into
-        // the street. Only the jumpy minority bolts for the door.
-        if (!threatIndoors && state.staysIndoors) {
+        // the street. Only the jumpy minority bolts for the door — and someone
+        // who deliberately ran in here isn't about to run back out.
+        if (!threatIndoors && (state.staysIndoors || state.shelterSeeker)) {
+          // Carry on to the back of the building first. Settling the moment
+          // the threshold is crossed leaves people stood in the doorway, in
+          // plain view of the thing they just ran from.
+          if (
+            building === state.shelterBuilding &&
+            state.shelterX !== null &&
+            state.shelterY !== null &&
+            Math.hypot(state.shelterX - e.x, state.shelterY - e.y) > 34
+          ) {
+            const toShelter = headingToward(world, e, state, state.shelterX, state.shelterY, now);
+            step(world, e, state, toShelter, speed, HUMAN_TURN_RATE, dt, now);
+            return;
+          }
+          // Holed up — next scare picks a fresh building.
+          state.shelterBuilding = -1;
+          state.shelterX = null;
+          state.shelterY = null;
           state.mode = 'settled';
           return;
         }
 
         if (threatIndoors) {
+          // This place isn't safe after all; look elsewhere once outside.
+          state.shelterBuilding = -1;
+          state.shelterX = null;
+          state.shelterY = null;
+
           const exit = exitPointFor(world, building, e, state);
           if (exit) {
             const toExit = headingToward(world, e, state, exit.x, exit.y, now);
@@ -620,6 +1014,32 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
             return;
           }
         }
+      } else if (state.shelterSeeker) {
+        // Most people's first instinct is to get behind a door, not to run
+        // down the middle of the street. Hold the choice between scans — this
+        // sweeps every building in range, which is far too costly per tick.
+        if (now >= state.nextShelterScanAt) {
+          state.nextShelterScanAt = now + SHELTER_SCAN_INTERVAL_MS;
+          const stale =
+            state.shelterBuilding < 0 ||
+            state.threatPoints.some((t) => buildingIndexAt(world, t.x, t.y) === state.shelterBuilding);
+          if (stale) chooseShelter(world, e, state);
+        }
+        if (state.shelterX !== null && state.shelterY !== null) {
+          const toShelter = headingToward(world, e, state, state.shelterX, state.shelterY, now);
+          step(world, e, state, skirtThreat(world, e, state, toShelter), speed, HUMAN_TURN_RATE, dt, now);
+          return;
+        }
+      }
+
+      // Out in the open: pick somewhere to run *to* and path there, rather
+      // than picking a bearing. Steering by direction alone is what walked
+      // people into walls that happened to be away from the zombie.
+      const escape = escapeDestination(world, e, state, now);
+      if (escape) {
+        const toEscape = headingToward(world, e, state, escape.x, escape.y, now);
+        step(world, e, state, skirtThreat(world, e, state, toEscape), speed, HUMAN_TURN_RATE, dt, now);
+        return;
       }
     }
 
@@ -665,20 +1085,29 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     case 'flee': {
       // Lost sight of them — keep going, don't just stop dead.
       state.mode = 'retreat';
-      state.retreatUntil = now + RETREAT_MS;
+      state.retreatUntil = now + RETREAT_MS * state.panicScale;
       break;
     }
     case 'retreat': {
       const away = Math.hypot(e.x - state.threatX, e.y - state.threatY);
-      if (now >= state.retreatUntil || away >= RETREAT_DISTANCE) {
+      if (now >= state.retreatUntil || away >= RETREAT_DISTANCE * state.panicScale) {
         state.mode = 'panic';
-        state.panicUntil = now + PANIC_MS;
+        state.panicUntil = now + PANIC_MS * state.panicScale;
         pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.4);
       } else {
-        const desired = Math.atan2(e.y - state.threatY, e.x - state.threatX);
         const boostUntil = world.speedBoosts.get(e.id);
         const boosted = boostUntil !== undefined && now < boostUntil;
         const speed = HUMAN_FLEE_SPEED * (boosted ? ESCAPE_SPEED_MULTIPLIER : 1);
+
+        // Retreat runs a long way now, so it can't be a raw bearing away from
+        // the threat — that walked people into the first wall behind them and
+        // held them there for the whole retreat.
+        if (unstickTick(world, e, state, now, dt, speed)) return;
+
+        const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
+        const goalX = clamp(e.x + Math.cos(away) * 320, 70, WORLD_WIDTH - 70);
+        const goalY = clamp(e.y + Math.sin(away) * 320, 70, WORLD_HEIGHT - 70);
+        const desired = headingToward(world, e, state, goalX, goalY, now);
         step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
         return;
       }
@@ -738,8 +1167,16 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
       break;
   }
 
-  // No zombie in view, but a neighbour sprinting past is its own signal.
-  if (state.witness !== 'ignore' && state.mode === 'wander' && now >= state.nextWitnessCheck) {
+  // No zombie in view, but a neighbour sprinting past is its own signal — to
+  // someone who hasn't seen one yet. Anyone who has already laid eyes on a
+  // zombie knows exactly what the running is about and doesn't go and look.
+  if (
+    !state.sawZombie &&
+    state.homeBuilding < 0 &&
+    state.witness !== 'ignore' &&
+    state.mode === 'wander' &&
+    now >= state.nextWitnessCheck
+  ) {
     state.nextWitnessCheck = now + 500;
     const runner = spotRunner(world, e);
     if (runner) {
@@ -784,8 +1221,10 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     state.lastY = e.y;
   }
 
+  // Someone who has seen one of those things never quite strolls again.
+  const pace = HUMAN_WALK_SPEED * (state.sawZombie ? SHAKEN_WALK_MULTIPLIER : 1);
   const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
-  step(world, e, state, desired, HUMAN_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
+  step(world, e, state, desired, pace, HUMAN_TURN_RATE, dt, now);
 }
 
 // ---------------------------------------------------------------- NPC officers
@@ -1087,7 +1526,7 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   const state = world.ai.get(target.id);
   if (state) {
     state.mode = 'retreat';
-    state.retreatUntil = now + RETREAT_MS;
+    state.retreatUntil = now + RETREAT_MS * state.panicScale;
   }
 }
 
@@ -1104,6 +1543,17 @@ export function processPendingInfections(world: World, now: number): void {
 }
 
 export function updateAi(world: World, now: number, dt: number, frozen: Set<string>): void {
+  // One BFS serves every fleeing human this tick, instead of each of them
+  // running its own search.
+  if (now >= world.nextDangerRebuild) {
+    world.nextDangerRebuild = now + DANGER_REBUILD_MS;
+    const sources: Array<{ x: number; y: number }> = [];
+    for (const e of world.entities.values()) {
+      if (e.type === 'zombie') sources.push({ x: e.x, y: e.y });
+    }
+    world.danger.rebuild(sources);
+  }
+
   for (const [targetId, session] of Array.from(world.grapples)) {
     if (now < session.endsAt) continue;
     resolveGrapple(world, targetId, session, now);

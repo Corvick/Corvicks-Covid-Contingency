@@ -62,10 +62,13 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
     if (Math.random() > BUILDING_LOOT_CHANCE) continue;
 
     const item = LOOT_TABLE[Math.floor(Math.random() * LOOT_TABLE.length)];
-    // Keep it off the walls so it's reachable from inside the room.
-    for (let attempt = 0; attempt < 14; attempt++) {
-      const x = b.x + 24 + Math.random() * Math.max(1, b.w - 48);
-      const y = b.y + 24 + Math.random() * Math.max(1, b.h - 48);
+    // Keep it off the walls, and inside the real footprint rather than the
+    // bounding box — an L-shaped building's notch is outdoors.
+    for (let attempt = 0; attempt < 18; attempt++) {
+      const rect = b.rects[Math.floor(Math.random() * b.rects.length)];
+      if (!rect) break;
+      const x = rect.x + 18 + Math.random() * Math.max(1, rect.w - 36);
+      const y = rect.y + 6 + Math.random() * Math.max(1, rect.h - 12);
       if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
       const id = `loot-${n++}`;
       world.pickups.set(id, { id, item, x, y });

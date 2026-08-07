@@ -119,6 +119,46 @@ function hashId(id: string): number {
   return Math.abs(h);
 }
 
+/**
+ * Joined arms between couples who are holding hands. Drawn under the bodies so
+ * the arms read as coming out of the shoulders, and only once per pair.
+ */
+export function drawHandLinks(
+  ctx: CanvasRenderingContext2D,
+  entries: Array<{ state: EntityState; alpha: number }>,
+  view: Viewport,
+): void {
+  const byId = new Map<string, { state: EntityState; alpha: number }>();
+  for (const entry of entries) byId.set(entry.state.id, entry);
+
+  const radius = ENTITY_RADIUS.human;
+  ctx.lineCap = 'round';
+
+  for (const entry of entries) {
+    const a = entry.state;
+    if (!a.hand || a.hand < a.id) continue; // the other half draws it
+    const other = byId.get(a.hand);
+    if (!other) continue; // partner isn't in view
+    const b = other.state;
+    if (!visible(view, (a.x + b.x) / 2, (a.y + b.y) / 2, 60)) continue;
+
+    ctx.globalAlpha = Math.min(entry.alpha, other.alpha);
+    ctx.strokeStyle = shade(ENTITY_COLOR.human, -25);
+    ctx.lineWidth = radius * 0.36;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+
+    // The clasp itself, a shade lighter so it reads as two hands, not one arm.
+    ctx.beginPath();
+    ctx.arc((a.x + b.x) / 2, (a.y + b.y) / 2, radius * 0.26, 0, Math.PI * 2);
+    ctx.fillStyle = shade(ENTITY_COLOR.human, 15);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
 export function drawEntity(
   ctx: CanvasRenderingContext2D,
   e: EntityState,

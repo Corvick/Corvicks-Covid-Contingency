@@ -37,6 +37,7 @@ import {
   makeEntity,
   playerOneStart,
   rebuildEntityGrid,
+  rebuildNav,
   resetWorld,
   resolveCollisions,
   speedAt,
@@ -284,6 +285,10 @@ function tick(): void {
   const now = Date.now();
 
   world.pathBudget = PATH_BUDGET_PER_TICK;
+
+  // Glass smashed last tick opened a new way through — take it in once here,
+  // rather than once per pane.
+  if (world.navDirty) rebuildNav(world);
 
   rebuildEntityGrid(world);
   const frozen = computeFrozen(world);

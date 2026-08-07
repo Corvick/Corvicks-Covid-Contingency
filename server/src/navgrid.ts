@@ -77,7 +77,13 @@ export class NavGrid {
   private generation = 0;
   private heap = new MinHeap();
 
-  constructor(map: MapData) {
+  /**
+   * `broken` names panes that have been smashed out. Intact glass is as solid
+   * as wall for movement — leaving it out of the grid had routes drawn
+   * straight through windows, and anyone following one pressed into the pane
+   * until something ate them.
+   */
+  constructor(map: MapData, broken: ReadonlySet<number> = new Set()) {
     this.cols = Math.ceil(map.width / NAV_CELL);
     this.rows = Math.ceil(map.height / NAV_CELL);
     const count = this.cols * this.rows;
@@ -88,6 +94,9 @@ export class NavGrid {
     this.stamp = new Int32Array(count);
 
     for (const wall of map.walls) this.markWall(wall);
+    for (let i = 0; i < map.windows.length; i++) {
+      if (!broken.has(i)) this.markWall(map.windows[i]);
+    }
     this.component = new Int32Array(count).fill(-1);
     this.labelComponents();
   }

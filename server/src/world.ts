@@ -1,5 +1,6 @@
 import type {
   Bush,
+  Door,
   EntityState,
   EntityType,
   InputState,
@@ -31,13 +32,20 @@ import {
   MATERIALIZE_MS,
   BOUNDARY_THICKNESS,
   BUSH_HIDER_CHANCE,
+  SHELTER_SEEK_CHANCE,
+  SHELTER_FAR_CHANCE,
+  PANIC_SCALE_MIN,
+  PANIC_SCALE_MAX,
   RALLY_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
   BOLT_FLEE_CHANCE,
   INDOOR_STAY_CHANCE,
   WITNESS_FOLLOW_CHANCE,
   WITNESS_INVESTIGATE_CHANCE,
-  COUPLE_SHARE,
+  COUPLE_COUNT_MIN,
+  COUPLE_COUNT_MAX,
+  COUPLE_SPAWN_GAP,
+  INDOOR_HOMEBODY_SHARE,
   SOCIAL_GROUP_SHARE,
   SOCIAL_GROUP_MIN,
   SOCIAL_GROUP_MAX,
@@ -53,6 +61,7 @@ import { clamp, resolveCircleRect, segmentCircleT, segmentRectT } from './geomet
 import { generateMap } from './mapgen.js';
 import { newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
+import { DangerField } from './danger.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -80,6 +89,21 @@ export interface AiState {
   settleTrait: SettleTrait;
   /** Bolts straight for cover the instant a zombie is spotted. */
   bushHider: boolean;
+  /** Makes for the inside of a nearby building the instant a zombie is spotted. */
+  shelterSeeker: boolean;
+  /** Runs for somewhere specific blocks away rather than the nearest door. */
+  shelterFar: boolean;
+  /**
+   * Personal scaling on how long this person keeps running and stays rattled.
+   * Most run a long way; a few gather themselves quickly.
+   */
+  panicScale: number;
+  /**
+   * Has personally laid eyes on a zombie at some point. Once true this person
+   * knows what's going on, and no longer chases after panicking neighbours to
+   * find out what they're running from.
+   */
+  sawZombie: boolean;
   /** 'bolt' runs blindly away instead of picking the roomiest lane. */
   fleeStyle: 'safest' | 'bolt';
   /** Stays put when a zombie is outside the building they're already in. */
@@ -88,6 +112,20 @@ export interface AiState {
   witness: 'ignore' | 'follow' | 'investigate';
   /** Partner they stroll and panic with, if any. */
   partnerId: string | null;
+  /** Still hand in hand. Once let go, they only loosely follow each other. */
+  handHeld: boolean;
+  /** The half of the pair that decides where they both go. */
+  coupleLead: boolean;
+  /** Which shoulder the follower walks at: +1 or -1 of the leader's heading. */
+  handSide: number;
+  /** Edge-detects their partner being seized, so the let-go roll happens once. */
+  sawPartnerSeized: boolean;
+  /**
+   * Building this person lives in and stays inside of, or -1. Set for a share
+   * of those who start the round indoors; they potter about their own rooms
+   * instead of wandering out into the street.
+   */
+  homeBuilding: number;
   /**
    * Where in the list of candidate refuges this person reaches for: 0 grabs
    * the closest building, 1 heads for the far side of the district. Fixed per
@@ -109,10 +147,19 @@ export interface AiState {
   /** Where a rally shout sent them, if any. */
   rallyX: number | null;
   rallyY: number | null;
+  /** Committed flee destination, so they don't dither between equal options. */
+  escapeX: number | null;
+  escapeY: number | null;
+  escapeUntil: number;
   /** Cached cover choice — scanning every bush every tick is far too costly. */
   bushX: number | null;
   bushY: number | null;
   nextBushScanAt: number;
+  /** Committed indoor refuge while fleeing, and the building it sits in. */
+  shelterX: number | null;
+  shelterY: number | null;
+  shelterBuilding: number;
+  nextShelterScanAt: number;
   /** Idle glancing about while standing at a rally point. */
   lookHeading: number;
   nextLookAt: number;
@@ -165,6 +212,11 @@ export interface Command {
 export interface World {
   map: MapData;
   nav: NavGrid;
+  /** Shared geodesic distance-to-nearest-zombie field. */
+  danger: DangerField;
+  nextDangerRebuild: number;
+  /** Set when glass breaks; the tick loop rebuilds the nav grid once. */
+  navDirty: boolean;
   entities: Map<string, Entity>;
   /** Socket-controlled ids. AI never drives these, whatever their type. */
   playerIds: Set<string>;
@@ -272,10 +324,19 @@ export function newAiState(now: number, x: number, y: number): AiState {
     mode: 'wander',
     settleTrait: rollSettleTrait(),
     bushHider: Math.random() < BUSH_HIDER_CHANCE,
+    shelterSeeker: Math.random() < SHELTER_SEEK_CHANCE,
+    shelterFar: Math.random() < SHELTER_FAR_CHANCE,
+    panicScale: PANIC_SCALE_MIN + Math.random() * (PANIC_SCALE_MAX - PANIC_SCALE_MIN),
+    sawZombie: false,
     fleeStyle: Math.random() < BOLT_FLEE_CHANCE ? 'bolt' : 'safest',
     staysIndoors: Math.random() < INDOOR_STAY_CHANCE,
     witness: rollWitness(),
     partnerId: null,
+    handHeld: false,
+    coupleLead: false,
+    handSide: 1,
+    sawPartnerSeized: false,
+    homeBuilding: -1,
     refugeBias: Math.random(),
     refugeX: null,
     refugeY: null,
@@ -288,9 +349,16 @@ export function newAiState(now: number, x: number, y: number): AiState {
     slowMul: ZOMBIE_POST_GRAPPLE_SLOW,
     rallyX: null,
     rallyY: null,
+    escapeX: null,
+    escapeY: null,
+    escapeUntil: 0,
     bushX: null,
     bushY: null,
     nextBushScanAt: 0,
+    shelterX: null,
+    shelterY: null,
+    shelterBuilding: -1,
+    nextShelterScanAt: 0,
     lookHeading: Math.random() * Math.PI * 2,
     nextLookAt: 0,
     nextChatterAt: now + RALLY_CHATTER_MIN_MS + Math.random() * RALLY_CHATTER_MAX_MS,
@@ -343,6 +411,34 @@ function buildStaticGrids(world: World): void {
   });
 }
 
+/**
+ * Index of the building genuinely containing this point, or -1. Tests the
+ * carved footprint, not the bounding box — the notch of an L-shaped building
+ * is outdoors, and treating it as inside made people "hide" in the street.
+ */
+export function buildingIndexAt(world: World, x: number, y: number): number {
+  const list = world.map.buildings;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    if (x <= b.x || x >= b.x + b.w || y <= b.y || y >= b.y + b.h) continue;
+    for (const r of b.rects) {
+      if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) return i;
+    }
+  }
+  return -1;
+}
+
+export function isIndoors(world: World, x: number, y: number): boolean {
+  return buildingIndexAt(world, x, y) >= 0;
+}
+
+/** Doors of a building, as world points. */
+export function doorsOf(world: World, buildingIndex: number): Door[] {
+  const b = world.map.buildings[buildingIndex];
+  if (!b) return [];
+  return b.doors.map((d) => world.map.doors[d]).filter(Boolean);
+}
+
 export function isWindowIntact(world: World, index: number): boolean {
   return (world.windowHealth[index] ?? 0) > 0;
 }
@@ -354,7 +450,21 @@ export function damageWindow(world: World, index: number, amount: number): boole
   if (world.windowHealth[index] > 0) return false;
   world.windowHealth[index] = 0;
   world.brokenWindows.push(index);
+  // A smashed pane is a new way through — the nav grid has to learn about it.
+  world.navDirty = true;
   return true;
+}
+
+/**
+ * Rebuild the nav grid and the danger field after the map's solid geometry has
+ * changed. Cheap enough at the rate glass actually breaks, and the main loop
+ * coalesces it to at most one rebuild per tick.
+ */
+export function rebuildNav(world: World): void {
+  world.nav = new NavGrid(world.map, new Set(world.brokenWindows));
+  world.danger = new DangerField(world.map, world.nav);
+  world.nextDangerRebuild = 0;
+  world.navDirty = false;
 }
 
 export function rebuildEntityGrid(world: World): void {
@@ -387,17 +497,26 @@ export function hasLineOfSight(world: World, x1: number, y1: number, x2: number,
   return true;
 }
 
-/** Walls only — bushes are walkable, so they shouldn't veto a route. */
+/**
+ * Walls and intact glass — bushes are walkable, so they shouldn't veto a
+ * route. Panes count: they're see-through but you still can't walk through
+ * one, and treating them as open steered people face-first into them.
+ */
 export function hasWallClearPath(world: World, x1: number, y1: number, x2: number, y2: number): boolean {
-  const walls = world.wallGrid.queryRect(
-    Math.min(x1, x2),
-    Math.min(y1, y2),
-    Math.max(x1, x2),
-    Math.max(y1, y2),
-    new Set<Wall>(),
-  );
+  const minX = Math.min(x1, x2);
+  const maxX = Math.max(x1, x2);
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+
+  const walls = world.wallGrid.queryRect(minX, minY, maxX, maxY, new Set<Wall>());
   for (const wall of walls) {
     if (segmentRectT(x1, y1, x2, y2, wall) !== null) return false;
+  }
+
+  const panes = world.windowGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
+  for (const index of panes) {
+    if (!isWindowIntact(world, index)) continue;
+    if (segmentRectT(x1, y1, x2, y2, world.map.windows[index]) !== null) return false;
   }
   return true;
 }
@@ -458,9 +577,13 @@ export function findSpawn(
 
 export function createWorld(): World {
   const map = generateMap();
+  const nav = new NavGrid(map);
   const world: World = {
     map,
-    nav: new NavGrid(map),
+    nav,
+    danger: new DangerField(map, nav),
+    nextDangerRebuild: 0,
+    navDirty: false,
     entities: new Map(),
     playerIds: new Set(),
     spectators: new Set(),
@@ -505,6 +628,9 @@ export function createWorld(): World {
 export function resetWorld(world: World): void {
   world.map = generateMap();
   world.nav = new NavGrid(world.map);
+  world.danger = new DangerField(world.map, world.nav);
+  world.nextDangerRebuild = 0;
+  world.navDirty = false;
   buildStaticGrids(world);
 
   world.entities.clear();
@@ -587,6 +713,34 @@ function populate(world: World): void {
 
   let placed = 0;
 
+  // A few couples, hand in hand. Spawned as actual pairs stood together —
+  // pairing off arbitrary ids after the fact left "couples" a block apart.
+  const coupleCount =
+    COUPLE_COUNT_MIN + Math.floor(Math.random() * (COUPLE_COUNT_MAX - COUPLE_COUNT_MIN + 1));
+  for (let i = 0; i < coupleCount && placed + 2 <= HUMAN_COUNT; i++) {
+    const centre = findSpawn(world, ENTITY_RADIUS.human + COUPLE_SPAWN_GAP);
+    const facing = Math.random() * Math.PI * 2;
+    // Side by side, square to the way they're walking.
+    const offX = Math.cos(facing + Math.PI / 2) * (COUPLE_SPAWN_GAP / 2);
+    const offY = Math.sin(facing + Math.PI / 2) * (COUPLE_SPAWN_GAP / 2);
+    const leadId = addHuman(placed, centre.x + offX, centre.y + offY, facing);
+    const followId = addHuman(placed + 1, centre.x - offX, centre.y - offY, facing);
+
+    const lead = world.ai.get(leadId)!;
+    const follow = world.ai.get(followId)!;
+    lead.partnerId = followId;
+    follow.partnerId = leadId;
+    lead.handHeld = true;
+    follow.handHeld = true;
+    lead.coupleLead = true;
+    // Spawned on the leader's left, and that's the shoulder they walk at.
+    follow.handSide = -1;
+    // They walk as one, so only the leader's wandering matters.
+    follow.wanderX = lead.wanderX;
+    follow.wanderY = lead.wanderY;
+    placed += 2;
+  }
+
   // Clusters stood in a ring facing inward, as if mid-conversation.
   const socialTarget = Math.floor(HUMAN_COUNT * SOCIAL_GROUP_SHARE);
   while (placed < socialTarget && placed < HUMAN_COUNT) {
@@ -610,7 +764,8 @@ function populate(world: World): void {
     placed += size;
   }
 
-  // A share of the rest start indoors.
+  // A share of the rest start indoors — and most of them live there, rather
+  // than immediately strolling out of the front door.
   const indoorTarget = placed + Math.floor(HUMAN_COUNT * BUILDING_START_SHARE);
   while (placed < indoorTarget && placed < HUMAN_COUNT) {
     const b = world.map.buildings[Math.floor(Math.random() * world.map.buildings.length)];
@@ -620,24 +775,17 @@ function populate(world: World): void {
       w: b.w - 36,
       h: b.h - 36,
     });
-    addHuman(placed, spawn.x, spawn.y);
+    const id = addHuman(placed, spawn.x, spawn.y);
+    if (Math.random() < INDOOR_HOMEBODY_SHARE) {
+      const home = buildingIndexAt(world, spawn.x, spawn.y);
+      if (home >= 0) world.ai.get(id)!.homeBuilding = home;
+    }
     placed++;
   }
 
   for (; placed < HUMAN_COUNT; placed++) {
     const spawn = findSpawn(world, ENTITY_RADIUS.human);
     addHuman(placed, spawn.x, spawn.y);
-  }
-
-  // Pair off some of them into couples who move and panic together.
-  const humanIds = Array.from({ length: HUMAN_COUNT }, (_, i) => `human-${i}`);
-  const coupleCount = Math.floor((HUMAN_COUNT * COUPLE_SHARE) / 2);
-  for (let i = 0; i < coupleCount; i++) {
-    const a = world.ai.get(humanIds[i * 2]);
-    const b = world.ai.get(humanIds[i * 2 + 1]);
-    if (!a || !b) continue;
-    a.partnerId = humanIds[i * 2 + 1];
-    b.partnerId = humanIds[i * 2];
   }
 
   const officerCount =
@@ -820,6 +968,9 @@ export function toWire(world: World, e: Entity, viewerIsZombie = false, now = Da
     if (now < until) state.materializing = true;
     else world.materializeUntil.delete(e.id);
   }
+
+  const ai = world.ai.get(e.id);
+  if (ai && ai.handHeld && ai.partnerId) state.hand = ai.partnerId;
 
   const line = world.speech.get(e.id);
   if (line !== undefined) {

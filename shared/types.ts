@@ -24,6 +24,8 @@ export interface EntityState {
   materializing?: boolean;
   /** Speech bubble text, while one is active. */
   say?: string;
+  /** Id of the partner whose hand they're holding, if any. */
+  hand?: string;
 }
 
 export interface Wall {
@@ -47,6 +49,32 @@ export interface Window {
   h: number;
 }
 
+/** A gap punched in a building's wall — where you can actually get in. */
+export interface Door {
+  x: number;
+  y: number;
+  /** Index into MapData.buildings. */
+  building: number;
+  /** Half the width of the opening, for clearance checks. */
+  halfSpan: number;
+}
+
+/**
+ * A building's real shape, not just its bounding box. L and T footprints carve
+ * tiles away, so the bbox alone reports outdoor notches as indoors.
+ */
+export interface Building {
+  /** Bounding box — cheap rejection before testing the real shape. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Solid footprint, merged into row rectangles. */
+  rects: Wall[];
+  /** Indices into MapData.doors. */
+  doors: number[];
+}
+
 export interface MapData {
   seed: number;
   width: number;
@@ -55,7 +83,8 @@ export interface MapData {
   bushes: Bush[];
   windows: Window[];
   /** Building footprints — used for "hide indoors" behaviour. */
-  buildings: Wall[];
+  buildings: Building[];
+  doors: Door[];
 }
 
 /** A shotgun blast is several tracers from one trigger pull. */
