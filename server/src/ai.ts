@@ -1128,6 +1128,13 @@ function begTick(world: World, e: Entity, state: AiState, now: number, dt: numbe
     return false;
   }
 
+  // Nobody begs to be let into a room they're already standing in — from this
+  // side they can simply work the lock, which `doorTick` will now do.
+  if (insideOfDoor(world, index, e.x, e.y)) {
+    state.begDoor = -1;
+    return false;
+  }
+
   // Most hold their ground even with one on top of them. The rest bolt.
   if (state.threatCount > 0 && !state.begHolds) {
     state.begDoor = -1;

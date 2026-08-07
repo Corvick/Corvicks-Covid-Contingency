@@ -136,6 +136,10 @@ const { send } = connect((msg) => {
     doorStates.clear();
     doorPrompt = null;
     doorEpoch++;
+    // A new city starts framed on the whole thing again.
+    spectateZoom = 1;
+    spectateX = WORLD_WIDTH / 2;
+    spectateY = WORLD_HEIGHT / 2;
     gameOver = false;
     victory = false;
     gameOverPanel.classList.add('hidden');
@@ -252,6 +256,36 @@ canvas.addEventListener('contextmenu', () => {
   armedAbility = null;
 });
 
+/**
+ * Spectator wheel zoom, anchored on the cursor: whatever is under the pointer
+ * stays under it, which is what makes zooming into a particular street feel
+ * like pulling it closer rather than like the map sliding about.
+ */
+canvas.addEventListener(
+  'wheel',
+  (e) => {
+    if (!spectating) return;
+    e.preventDefault();
+
+    const before = cameraFor(undefined);
+    const worldX = before.view.x + input.mouseX / before.scale;
+    const worldY = before.view.y + input.mouseY / before.scale;
+
+    const next = clamp(
+      spectateZoom * Math.exp(-e.deltaY * 0.0015),
+      SPECTATE_ZOOM_MIN,
+      SPECTATE_ZOOM_MAX,
+    );
+    if (next === spectateZoom) return;
+    spectateZoom = next;
+
+    const scale = SPECTATE_FIT * spectateZoom;
+    spectateX = worldX - input.mouseX / scale + VIEWPORT_WIDTH / scale / 2;
+    spectateY = worldY - input.mouseY / scale + VIEWPORT_HEIGHT / scale / 2;
+  },
+  { passive: false },
+);
+
 restartBtn.addEventListener('click', () => {
   send({ type: 'restart' });
   menu.classList.add('hidden');
@@ -316,15 +350,31 @@ function self(): EntityState | undefined {
 }
 
 /** Spectators frame the whole map; players get a follow camera at 1:1. */
+/**
+ * Spectator zoom. 1 is the whole city on screen and is deliberately the floor
+ * — there is nothing to see further out than the map, and letting it go
+ * further just shrinks the city into the middle of a black screen.
+ */
+const SPECTATE_ZOOM_MIN = 1;
+const SPECTATE_ZOOM_MAX = 7;
+const SPECTATE_FIT = Math.min(VIEWPORT_WIDTH / WORLD_WIDTH, VIEWPORT_HEIGHT / WORLD_HEIGHT);
+let spectateZoom = 1;
+let spectateX = WORLD_WIDTH / 2;
+let spectateY = WORLD_HEIGHT / 2;
+
 function cameraFor(view: EntityState | undefined): { view: Viewport; scale: number } {
   if (spectating || !view) {
-    const scale = Math.min(VIEWPORT_WIDTH / WORLD_WIDTH, VIEWPORT_HEIGHT / WORLD_HEIGHT);
+    const scale = SPECTATE_FIT * spectateZoom;
+    const w = VIEWPORT_WIDTH / scale;
+    const h = VIEWPORT_HEIGHT / scale;
+    // Centre on wherever they've zoomed to, but never past the map's edges.
+    // Once an axis is wider than the world it stays centred on it instead.
     return {
       view: {
-        x: (WORLD_WIDTH - VIEWPORT_WIDTH / scale) / 2,
-        y: (WORLD_HEIGHT - VIEWPORT_HEIGHT / scale) / 2,
-        w: VIEWPORT_WIDTH / scale,
-        h: VIEWPORT_HEIGHT / scale,
+        x: w >= WORLD_WIDTH ? (WORLD_WIDTH - w) / 2 : clamp(spectateX - w / 2, 0, WORLD_WIDTH - w),
+        y: h >= WORLD_HEIGHT ? (WORLD_HEIGHT - h) / 2 : clamp(spectateY - h / 2, 0, WORLD_HEIGHT - h),
+        w,
+        h,
       },
       scale,
     };

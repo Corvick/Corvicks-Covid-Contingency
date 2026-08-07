@@ -154,7 +154,12 @@ otherwise demand.
   open every door they stroll past along a wall and then never go through to
   shut it. The test is whether the next step intersects the slab.
 - **Which side of a door someone is on is a face test, not "are they indoors".**
-  Both sides of a door between two rooms are indoors.
+  Both sides of a door between two rooms are indoors. Each door resolves its
+  indoor face once when it is hung (`insideSign`, 0 meaning both faces count),
+  and everything asks that rather than testing the footprint under whoever is
+  stood there — that test is unreliable at the exact spot someone occupies
+  while working a handle, and it had people hammering to be let into a hallway
+  they were already standing in.
 - **Couples have one leader and one follower.** The follower doesn't steer at
   all — it holds a position at the leader's shoulder, so the pair moves as one
   thing. Don't give both halves their own flee logic and a mutual attraction:

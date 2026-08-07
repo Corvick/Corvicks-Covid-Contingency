@@ -32,6 +32,11 @@ export interface DoorRuntime {
   rect: Wall;
   /** Somebody is working this door right now; nobody else may start. */
   busyBy: string | null;
+  /**
+   * Which face of the slab the building is on: -1, +1, or 0 when both faces
+   * are indoors (a door between rooms) or neither is.
+   */
+  insideSign: number;
 }
 
 /** The slab that fills a doorway when it's shut. */
@@ -54,8 +59,16 @@ export function initDoors(world: World): void {
       health: DOOR_HEALTH,
       rect: doorRect(door),
       busyBy: null,
+      insideSign: 0,
     };
   });
+
+  // Which face is the indoor one, sampled once now that every door exists.
+  for (let i = 0; i < world.doors.length; i++) {
+    const door = world.doors[i];
+    if (door) door.insideSign = resolveInsideSign(world, i);
+  }
+
   world.doorAlerts.clear();
   world.doorPleas.clear();
 }
@@ -103,11 +116,36 @@ export function doorSide(world: World, index: number, x: number, y: number): num
   return door.horiz ? (y < door.y ? -1 : 1) : x < door.x ? -1 : 1;
 }
 
-/** Which side of the doorway a point is on: true when it's indoors. */
+/**
+ * Is this point on the inside face of the door?
+ *
+ * Answered from the door's own geometry, worked out once when the door is
+ * hung, rather than from "is this person standing inside a building" — that
+ * test is unreliable at the exact spot someone stands while working a handle,
+ * and it had people hammering to be let in while stood in the hallway.
+ *
+ * `insideSign` of 0 means both faces are indoors (a door between two rooms) or
+ * neither is, and either way anyone at it may work the lock.
+ */
 export function insideOfDoor(world: World, index: number, x: number, y: number): boolean {
+  const door = world.doors[index];
+  if (!door) return false;
+  return door.insideSign === 0 || doorSide(world, index, x, y) === door.insideSign;
+}
+
+/** Which face of a doorway the building is on: -1, +1, or 0 for both/neither. */
+function resolveInsideSign(world: World, index: number): number {
   const door = world.map.doors[index];
-  const building = buildingIndexAt(world, x, y);
-  return building >= 0 && (door.interior || building === door.building);
+  const probe = WALL_THICKNESS / 2 + 22;
+  const near = door.horiz
+    ? { x: door.x, y: door.y - probe }
+    : { x: door.x - probe, y: door.y };
+  const far = door.horiz ? { x: door.x, y: door.y + probe } : { x: door.x + probe, y: door.y };
+
+  const nearIn = buildingIndexAt(world, near.x, near.y) >= 0;
+  const farIn = buildingIndexAt(world, far.x, far.y) >= 0;
+  if (nearIn === farIn) return 0;
+  return nearIn ? -1 : 1;
 }
 
 /**
