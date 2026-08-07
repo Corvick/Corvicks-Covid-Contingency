@@ -194,7 +194,7 @@ export const ROAM_MS = 120000; // "keep wandering for a couple of minutes"
 export const GROUP_RADIUS = 90;
 export const GROUP_MIN_PEERS = 2;
 /** Share of civilians who dive for the nearest bush the moment they see one. */
-export const BUSH_HIDER_CHANCE = 0.14;
+export const BUSH_HIDER_CHANCE = 0.1;
 /** A hider only counts a bush as cover if it can fit wholly inside it. */
 export const BUSH_MIN_FIT_RADIUS = HUMAN_RADIUS + 7;
 /** Spacing used to work out how many people one bush can actually hold. */
@@ -206,7 +206,7 @@ export const BUSH_SCAN_INTERVAL_MS = 500;
  * Some people don't think — they just bolt the other way, which indoors
  * usually means backing themselves into a corner.
  */
-export const BOLT_FLEE_CHANCE = 0.22;
+export const BOLT_FLEE_CHANCE = 0.12;
 /** How far outside a building an escapee aims for once they're through the door. */
 export const INDOOR_EXIT_MARGIN = 52;
 /** A zombie this near an exit means that way out is not an option. */
@@ -223,7 +223,7 @@ export const REFUGE_CANDIDATES = 16;
  * moment they see a zombie, instead of running for open ground and only
  * looking for cover once they've calmed down.
  */
-export const SHELTER_SEEK_CHANCE = 0.8;
+export const SHELTER_SEEK_CHANCE = 0.88;
 /** How far a frightened civilian will look for a building to get inside. */
 export const SHELTER_SEARCH_RADIUS = 620;
 /**
@@ -232,6 +232,15 @@ export const SHELTER_SEARCH_RADIUS = 620;
  */
 export const SHELTER_FAR_CHANCE = 0.28;
 export const SHELTER_FAR_RADIUS = 1900;
+/**
+ * Others want somewhere substantial — a landmark or the corner complex rather
+ * than the nearest terraced house. Ordinary blocks come in well under this;
+ * the big buildings and the complex come in well over.
+ */
+export const SHELTER_LARGE_CHANCE = 0.3;
+export const SHELTER_LARGE_MIN_AREA = 150000;
+/** A large building is worth a longer run than the house next door. */
+export const SHELTER_LARGE_RADIUS = 1500;
 /** Buildings actually examined per scan — the rest is a distance sort. */
 export const SHELTER_CANDIDATES = 8;
 /** Shelter choice is re-evaluated on this cadence, not every tick. */
@@ -366,8 +375,8 @@ export const DOOR_ATTACK_INTERVAL_MS = 600;
 export const DOOR_BULLET_DAMAGE = 20;
 
 /** How long working the handle takes. Nobody moves while they're at it. */
-export const DOOR_OPEN_MIN_MS = 1000;
-export const DOOR_OPEN_MAX_MS = 2000;
+export const DOOR_OPEN_MIN_MS = 1500;
+export const DOOR_OPEN_MAX_MS = 2800;
 export const DOOR_CLOSE_MS = 1000;
 export const DOOR_LOCK_MIN_MS = 1000;
 export const DOOR_LOCK_MAX_MS = 2000;
@@ -377,7 +386,7 @@ export const DOOR_CLOSE_BEHIND_CHANCE = 0.75;
 /** Share of those sheltering from a zombie who shut *and* lock it. */
 export const DOOR_LOCK_BEHIND_CHANCE = 0.9;
 /** Finding it locked: beg to be let in, or go and find somewhere else. */
-export const DOOR_BEG_CHANCE = 0.45;
+export const DOOR_BEG_CHANCE = 0.6;
 /** Beggars who hold their ground at the door even with a zombie on them. */
 export const DOOR_BEG_HOLD_CHANCE = 0.8;
 /** Share of people indoors who would open up for a stranger. Most won't. */

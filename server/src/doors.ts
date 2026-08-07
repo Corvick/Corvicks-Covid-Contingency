@@ -133,6 +133,22 @@ export function insideOfDoor(world: World, index: number, x: number, y: number):
   return door.insideSign === 0 || doorSide(world, index, x, y) === door.insideSign;
 }
 
+/**
+ * May somebody stood here work this door's lock?
+ *
+ * Stricter than `insideOfDoor`: where the door knows which of its faces is
+ * indoors, that face is the answer and nothing else matters. Where it doesn't
+ * — both faces indoors, or the geometry was too odd to tell — the person has
+ * to genuinely be inside a building. Without that fallback, an ambiguous door
+ * would let somebody stood in the street draw the bolt.
+ */
+export function canWorkLockFrom(world: World, index: number, x: number, y: number): boolean {
+  const door = world.doors[index];
+  if (!door) return false;
+  if (door.insideSign !== 0) return doorSide(world, index, x, y) === door.insideSign;
+  return buildingIndexAt(world, x, y) >= 0;
+}
+
 /** Which face of a doorway the building is on: -1, +1, or 0 for both/neither. */
 function resolveInsideSign(world: World, index: number): number {
   const door = world.map.doors[index];

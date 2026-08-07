@@ -55,6 +55,8 @@ import {
   REFUGE_CANDIDATES,
   SHELTER_SEARCH_RADIUS,
   SHELTER_FAR_RADIUS,
+  SHELTER_LARGE_MIN_AREA,
+  SHELTER_LARGE_RADIUS,
   SHELTER_CANDIDATES,
   SHELTER_SCAN_INTERVAL_MS,
   SHAKEN_WALK_MULTIPLIER,
@@ -127,6 +129,7 @@ import {
   damageDoor,
   doorsNear,
   doorSide,
+  canWorkLockFrom,
   insideOfDoor,
   isDoorShut,
   lockDoor,
@@ -540,22 +543,36 @@ function chooseShelter(world: World, e: Entity, state: AiState): boolean {
   const awayX = e.x - state.threatX;
   const awayY = e.y - state.threatY;
 
-  // Not everyone makes for the nearest door — some have somewhere particular
-  // in mind, blocks away, and will run the whole way to it.
-  const radius = state.shelterFar ? SHELTER_FAR_RADIUS : SHELTER_SEARCH_RADIUS;
+  // Not everyone makes for the nearest door. Some have somewhere particular in
+  // mind blocks away; others want somewhere substantial rather than the
+  // nearest terraced house, and will pass a dozen front doors to get to it.
+  const radius = state.shelterFar
+    ? SHELTER_FAR_RADIUS
+    : state.shelterLarge
+      ? SHELTER_LARGE_RADIUS
+      : SHELTER_SEARCH_RADIUS;
 
-  const near: Array<{ i: number; d: number }> = [];
   const list = world.map.buildings;
-  for (let i = 0; i < list.length; i++) {
-    const b = list[i];
-    const dx = b.x + b.w / 2 - e.x;
-    const dy = b.y + b.h / 2 - e.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist > radius) continue;
-    // Doubling back past the thing chasing us is worse than staying outside.
-    if (dist > 90 && dx * awayX + dy * awayY < 0) continue;
-    near.push({ i, d: dist });
-  }
+  const gather = (bigOnly: boolean): Array<{ i: number; d: number }> => {
+    const found: Array<{ i: number; d: number }> = [];
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i];
+      if (bigOnly && b.w * b.h < SHELTER_LARGE_MIN_AREA) continue;
+      const dx = b.x + b.w / 2 - e.x;
+      const dy = b.y + b.h / 2 - e.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > radius) continue;
+      // Doubling back past the thing chasing us is worse than staying outside.
+      if (dist > 90 && dx * awayX + dy * awayY < 0) continue;
+      found.push({ i, d: dist });
+    }
+    return found;
+  };
+
+  // Somewhere big if that's what they want, but a door is a door if there's
+  // nothing substantial within reach.
+  let near = state.shelterLarge ? gather(true) : [];
+  if (near.length === 0) near = gather(false);
   if (near.length === 0) return false;
 
   near.sort((a, b) => a.d - b.d);
@@ -1080,7 +1097,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // From the inside you can draw the bolt back — but only if you actually
     // mean to go through it. Somebody holed up, or who has been told to stay
     // in, does not unbolt the way out; between rooms is another matter.
-    if (insideOfDoor(world, ahead, e.x, e.y)) {
+    if (canWorkLockFrom(world, ahead, e.x, e.y)) {
       const wayOut = door.insideSign !== 0;
       const stayingPut = state.mode === 'settled' || (wayOut && state.homeBuilding >= 0);
       if (stayingPut) {
@@ -1221,6 +1238,7 @@ function answerPleaTick(world: World, e: Entity, state: AiState, now: number, dt
     return true;
   }
 
+  if (!canWorkLockFrom(world, index, e.x, e.y)) return true; // still on our way round
   if (door.busyBy !== null && door.busyBy !== e.id) return true; // wait their turn
   beginDoorWork(world, e, state, index, 'unlock', now);
   state.answeringDoor = -1;
