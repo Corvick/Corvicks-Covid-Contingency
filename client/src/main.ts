@@ -26,7 +26,7 @@ import type {
   SpeechState,
   Wall,
 } from '../../shared/types.js';
-import { connect } from './net.js';
+import { connect, takeNetStats } from './net.js';
 import { trackInput } from './input.js';
 import {
   drawBeacons,
@@ -564,7 +564,10 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
  */
 const SLOW_FRAME_MS = 45;
 let phaseAt = 0;
-const phases: Array<[string, number]> = [];
+let phases: Array<[string, number]> = [];
+/** The previous frame's breakdown — the gap we report on is time since then. */
+let lastPhases: Array<[string, number]> = [];
+let lastRenderMs = 0;
 let lastSlowReport = 0;
 
 function mark(label: string): void {
@@ -573,13 +576,28 @@ function mark(label: string): void {
   phaseAt = t;
 }
 
-function reportSlowFrame(total: number, now: number, drawn: number): void {
+/**
+ * Report on the gap between frames, not on render alone.
+ *
+ * `spike` on the HUD is the gap, and the expensive things need not be in the
+ * render loop at all: parsing a snapshot, applying it, or the collection that
+ * all that garbage eventually provokes. Splitting the gap into rendering,
+ * network handling and everything left over says which of the three it is.
+ */
+function reportSlowGap(gap: number, now: number, drawn: number, net: ReturnType<typeof takeNetStats>): void {
   // At most one report a second, so a bad patch doesn't flood the console.
   if (now - lastSlowReport < 1000) return;
   lastSlowReport = now;
-  const parts = phases.map(([label, cost]) => `${label} ${cost.toFixed(1)}`).join(' · ');
+
+  const netMs = net.parseMs + net.applyMs;
+  const unaccounted = gap - lastRenderMs - netMs;
+  const parts = lastPhases.map(([label, cost]) => `${label} ${cost.toFixed(1)}`).join(' · ');
+
   console.warn(
-    `[perf] slow frame ${total.toFixed(0)}ms — ${parts} · drawn ${drawn} · fogPoly ${fogComputeMs.toFixed(1)}ms`,
+    `[perf] ${gap.toFixed(0)}ms gap — render ${lastRenderMs.toFixed(1)} (${parts}) · ` +
+      `net ${netMs.toFixed(1)} (parse ${net.parseMs.toFixed(1)}, apply ${net.applyMs.toFixed(1)}, ` +
+      `${net.messages} msg, ${(net.bytes / 1024).toFixed(0)}KB) · ` +
+      `elsewhere ${unaccounted.toFixed(1)} · drawn ${drawn} · fogPoly ${fogComputeMs.toFixed(1)}`,
   );
 }
 
@@ -587,7 +605,13 @@ function render() {
   const now = performance.now();
   const frameDelta = lastFrameAt > 0 ? Math.min(100, now - lastFrameAt) : 16;
   advanceFades(frameDelta);
-  phases.length = 0;
+
+  // Everything that happened since the last frame started, attributed.
+  const gap = lastFrameAt > 0 ? now - lastFrameAt : 0;
+  const net = takeNetStats();
+  if (gap >= SLOW_FRAME_MS) reportSlowGap(gap, now, tracked.size, net);
+
+  phases = [];
   phaseAt = now;
 
   const me = self();
@@ -685,8 +709,9 @@ function render() {
   }
 
   mark('hud');
-  const frameCost = performance.now() - now;
-  if (frameCost >= SLOW_FRAME_MS) reportSlowFrame(frameCost, now, tracked.size);
+  // Hold this frame's cost and breakdown for whoever reports the next gap.
+  lastRenderMs = performance.now() - now;
+  lastPhases = phases;
 
   const fpsClass = fps >= 55 ? '' : fps >= 40 ? 'warn' : 'bad';
   const tickClass = serverTickMs < 16 ? '' : serverTickMs < 28 ? 'warn' : 'bad';
