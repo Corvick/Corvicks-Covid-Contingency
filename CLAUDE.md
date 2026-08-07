@@ -26,7 +26,16 @@ cd server && npx tsc --noEmit
 cd client && npx tsc --noEmit
 ```
 
-Node is at `C:\Program Files\nodejs` and may not be on PATH in a fresh shell.
+Node lives somewhere different on each of the two machines, and may not be on
+PATH in a fresh shell either way:
+
+- Home: `C:\Program Files\nodejs`, a normal installer build.
+- Work: `%LOCALAPPDATA%\node-portable\node-v*-win-x64`, a portable unzip. That
+  box has **no admin rights**, so MSI/winget installs fail at the UAC prompt —
+  reach for a portable build there rather than trying to install anything.
+
+`Launch Zombie Game.bat` checks both, so prefer it over invoking npm directly
+when a shell can't find node.
 
 ## Architecture
 
