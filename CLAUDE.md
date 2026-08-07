@@ -33,20 +33,41 @@ Node is at `C:\Program Files\nodejs` and may not be on PATH in a fresh shell.
 Client sends intent (`input`, `ability`, `selectSlot`); server simulates and
 broadcasts. Nothing about position or combat is trusted from the client.
 
-Tick order in `server/src/index.ts`: rebuild entity grid → compute frozen
-(grappled) set → move players → `updateAi` → resolve collisions → rebuild grid
-→ interactions → shooting → air support → per-viewer serialise.
+Tick order in `server/src/index.ts`: rebuild nav grid if `navDirty` → rebuild
+entity grid → compute frozen (grappled) set → move players → `updateAi` →
+resolve collisions → rebuild grid → interactions → shooting → air support →
+per-viewer serialise.
 
 Server modules and what each owns:
 - `world.ts` — World state container, entity/AI state, collision, spawning, `toWire`
 - `ai.ts` — all NPC behaviour (humans, zombies, NPC officers)
-- `mapgen.ts` — procedural city; returns walls, windows, bushes, buildings, doors
+- `mapgen.ts` — procedural city; returns walls, windows, bushes, buildings, doors.
+  Also guarantees every indoor space can be reached from the street. Ground is
+  claimed in order — park, corner complex, big buildings, edge buildings, then
+  ordinary blocks yield to all of it — so anything that must get its spot goes
+  early
 - `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string pulling
 - `danger.ts` — coarse geodesic distance-to-nearest-zombie field
 - `combat.ts` — hitscan, weapons, window damage
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — smoke grenade → helicopter → dropped soldiers
 - `spatial.ts` / `geometry.ts` — uniform grid broadphase, math primitives
+
+### Civilian traits
+
+Each civilian rolls a fixed personality in `newAiState`, and most odd-looking
+crowd behaviour traces back to one of these rather than to a bug:
+
+`settleTrait` where they eventually hole up · `shelterSeeker` runs for a
+building on sight · `shelterFar` picks one blocks away instead of the nearest ·
+`bushHider` dives for cover · `fleeStyle: 'bolt'` runs blindly, walls and all ·
+`staysIndoors` sits tight when the zombie is outside · `homeBuilding` lives
+here and won't wander out · `witness` reacts to someone else running ·
+`panicScale` how long they stay rattled · `refugeBias` where in the candidate
+list they reach, so crowds fan out instead of funnelling into one doorway.
+
+`sawZombie` latches once someone has seen one, and gates the things only a
+naive person does — chasing after a running neighbour to find out why.
 
 ## Performance rules (these matter — 400+ entities)
 
@@ -56,17 +77,50 @@ Server modules and what each owns:
 - **The danger field is the scaling primitive.** One BFS from all zombies at 6Hz
   serves every human in O(1). Prefer adding to it over per-entity searches.
 - Current cost: **~2.4ms median / 3.2ms p95 per 33.3ms tick at 411 entities.**
+  A headless harness driving only `updateAi` + collision measures ~1.0ms median
+  / 2.3ms p95 — not comparable to the figure above, which includes fog and
+  per-viewer serialisation.
+- `generateMap` costs ~7ms, once per round. The connectivity repair pass builds
+  a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
 
 ## Key decisions worth not re-litigating
 
 - **Nav grid, not nav mesh.** Geometry is axis-aligned rects and windows break at
   runtime; flipping grid cells is trivial, retriangulating a mesh is not.
+- **Intact glass is solid to the nav layer**, and to `hasWallClearPath`. It is
+  see-through, not walk-through, and leaving it out of the grid drew routes
+  straight through panes that collision then stopped people against — they
+  pressed into the glass until something ate them. `damageWindow` sets
+  `world.navDirty`; the tick loop rebuilds nav + danger once, not once per pane.
 - **Fleeing is goal-directed**, not direction-steered — humans pick a reachable
   destination and path to it. Direction-only steering walked them into walls.
+  This applies to `retreat` as well as `flee`: retreat runs for many seconds, so
+  a raw bearing away from the threat parks them on the first wall behind them.
+- **Anything that notices it is getting nowhere** (`unstickTick`) picks its way
+  out from directions that are actually walkable — `nav.lineClear`, not just "the
+  far end of the probe is empty", which called a direction clear whenever the
+  ground beyond a wall happened to be open.
 - **Buildings carry real footprints (`rects`), not bounding boxes.** ~1 in 3 are
-  L/T shaped; bbox tests wrongly report the outdoor notch as indoors.
+  L/T shaped; bbox tests wrongly report the outdoor notch as indoors. Anything
+  aiming at a building aims at an `interiorPointOf` it, never its bbox centre.
 - **Doors are stored** (`map.doors`) so NPCs reason about actual exits.
+- **Every indoor space is reachable from the street, by construction and then by
+  check.** Rooms are a grid joined by a spanning tree of doorways; a partition
+  laid as one long wall with a single gap in it seals off whole corners. On top
+  of that, `repairEnclosures` walks the finished map and cuts a doorway into
+  anything still stranded — it covers a block clamped flush to the perimeter
+  with its one door opening into it, a door onto a pocket too narrow to walk,
+  and a door on an L-notch leading nowhere. **Fix new cases there, not by
+  special-casing the generator.** It never cuts the perimeter wall.
+- **Couples have one leader and one follower.** The follower doesn't steer at
+  all — it holds a position at the leader's shoulder, so the pair moves as one
+  thing. Don't give both halves their own flee logic and a mutual attraction:
+  two independent steerers converging on each other is how you get a pair that
+  circles instead of escaping.
+- **Letting go of a hand is rolled once per moment that would test it**, never
+  per tick — a 6% chance re-rolled 30 times a second is a certainty. Same shape
+  of bug applies to any "rare" reaction evaluated inside the tick loop.
 - **NPC speeds are all scaled together.** Human/zombie ratios are deliberate —
   change the scale factor, never one speed alone, or chases break.
 - **Fog is server-enforced**: unseen entities are never sent. Client fog is
@@ -101,6 +155,12 @@ plus coordinates make it reproducible offline.
   connection is fog-limited and gives misleading counts. Note that `spectate`
   restarts the round, so to observe a live game use two sockets (one player, one
   spectator) or read the global counters in the state message.
+- **He usually has a server already running on 8080.** Don't kill it and don't
+  send it `spectate` — that resets the round he's playing. To check crowd
+  behaviour, drive the world headlessly instead: import `createWorld` and run
+  the tick order above in a loop under `npx tsx`. No socket, no port, no
+  disturbance, and it can measure things a spectator can't (who is pressed
+  against a wall, how far the infected have spread, per-tick cost).
 - Prefers being told plainly what was verified vs assumed, and what was left out.
 - Prefers playtesting himself over long automated verification runs.
 
