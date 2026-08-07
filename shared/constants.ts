@@ -410,6 +410,8 @@ export const DOOR_BEG_LINES = [
 
 /** Somebody indoors can throw the bolt back, but it takes them a moment. */
 export const DOOR_NPC_UNLOCK_MS = 2000;
+/** Grace period before someone will touch a door they just finished with. */
+export const DOOR_REENGAGE_MS = 6000;
 /** Seeing a zombie sends most people straight for the nearest door to shut it. */
 export const DOOR_SLAM_CHANCE = 0.85;
 export const DOOR_SLAM_RANGE = 130;
@@ -417,7 +419,7 @@ export const DOOR_SLAM_RANGE = 130;
 /** Having bolted the door, some tell the room to stay put. */
 export const DOOR_WARN_CHANCE = 0.4;
 /** Share of those who hear it and heed it. */
-export const DOOR_WARN_HEEDED = 0.9;
+export const DOOR_WARN_HEEDED = 0.96;
 /** ...and of the rest, the very few who answer back. */
 export const DOOR_WARN_DEFIED_CHANCE = 0.06;
 export const DOOR_WARN_MS = 3200;

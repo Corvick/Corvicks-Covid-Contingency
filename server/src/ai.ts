@@ -110,6 +110,7 @@ import {
   DOOR_ATTACK_INTERVAL_MS,
   DOOR_ZOMBIE_DAMAGE,
   DOOR_NPC_UNLOCK_MS,
+  DOOR_REENGAGE_MS,
   DOOR_SLAM_CHANCE,
   DOOR_SLAM_RANGE,
   DOOR_WARN_CHANCE,
@@ -817,7 +818,7 @@ function skirtThreat(world: World, e: Entity, state: AiState, desired: number): 
  * be beside — testing proximity and facing alone had people opening every door
  * they strolled past along a wall, and then never going through to shut it.
  */
-function doorInTheWay(world: World, e: Entity, state: AiState): number {
+function doorInTheWay(world: World, e: Entity, state: AiState, now: number): number {
   const probe = e.radius + 16;
   const aheadX = e.x + Math.cos(state.heading) * probe;
   const aheadY = e.y + Math.sin(state.heading) * probe;
@@ -827,6 +828,10 @@ function doorInTheWay(world: World, e: Entity, state: AiState): number {
 
   for (const index of doorsNear(world, e.x, e.y, probe + 24)) {
     if (!isDoorShut(world, index)) continue;
+    // A door we just finished working is left alone for a moment. Without
+    // this, whoever bolts a door is still stood against it facing it on the
+    // next tick, and immediately starts drawing the bolt back again.
+    if (index === state.doorIgnore && now < state.doorIgnoreUntil) continue;
     const door = world.doors[index]!;
     // Does the step we're about to take run into the slab?
     if (segmentRectT(e.x, e.y, aheadX, aheadY, door.rect) === null) continue;
@@ -897,6 +902,10 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
   const door = index >= 0 ? world.doors[index] : null;
   if (door && door.busyBy === e.id) door.busyBy = null;
   if (!door || door.broken) return;
+
+  // Done with this door for a beat, whatever we just did to it.
+  state.doorIgnore = index;
+  state.doorIgnoreUntil = now + DOOR_REENGAGE_MS;
 
   if (action === 'open') {
     openDoor(world, index);
@@ -1058,7 +1067,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     }
   }
 
-  const ahead = doorInTheWay(world, e, state);
+  const ahead = doorInTheWay(world, e, state, now);
   if (ahead < 0) return false;
 
   const door = world.doors[ahead];
@@ -1068,9 +1077,17 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // A door an officer bolted is left well alone.
     if (door.playerLocked) return false;
 
-    // From the inside you can simply draw the bolt back — it just takes a
-    // moment. From the outside, a locked door is a locked door.
+    // From the inside you can draw the bolt back — but only if you actually
+    // mean to go through it. Somebody holed up, or who has been told to stay
+    // in, does not unbolt the way out; between rooms is another matter.
     if (insideOfDoor(world, ahead, e.x, e.y)) {
+      const wayOut = door.insideSign !== 0;
+      const stayingPut = state.mode === 'settled' || (wayOut && state.homeBuilding >= 0);
+      if (stayingPut) {
+        state.doorIgnore = ahead;
+        state.doorIgnoreUntil = now + DOOR_REENGAGE_MS;
+        return false;
+      }
       beginDoorWork(world, e, state, ahead, 'unlock', now);
       return true;
     }

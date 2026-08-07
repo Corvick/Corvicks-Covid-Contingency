@@ -233,6 +233,9 @@ export interface AiState {
   /** Open door this person is rushing to shut, or -1. */
   doorSlam: number;
   nextSlamCheck: number;
+  /** Door just dealt with, left alone until this passes. */
+  doorIgnore: number;
+  doorIgnoreUntil: number;
   /** Doors found locked, so they don't queue at the same one forever. */
   refusedDoors: number[];
   /** Begging to be let in: which door, and until when. */
@@ -471,6 +474,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     slamsDoors: Math.random() < DOOR_SLAM_CHANCE,
     doorSlam: -1,
     nextSlamCheck: 0,
+    doorIgnore: -1,
+    doorIgnoreUntil: 0,
     refusedDoors: [],
     begDoor: -1,
     begUntil: 0,

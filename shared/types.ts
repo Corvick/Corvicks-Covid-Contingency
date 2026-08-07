@@ -208,7 +208,12 @@ export type ClientMessage =
     }
   | { type: 'ability'; ability: AbilityId; x: number; y: number }
   | { type: 'selectSlot'; slot: number }
-  | { type: 'spectate' }
+  /**
+   * Watch instead of play. `restart: false` joins the round already in
+   * progress rather than starting a fresh one — which is what you want when
+   * the point is to observe how a game actually unfolds.
+   */
+  | { type: 'spectate'; restart?: boolean }
   | { type: 'restart' };
 
 export type ServerMessage =

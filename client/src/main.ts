@@ -118,10 +118,19 @@ let worstResetAt = 0;
 
 const input = trackInput(canvas);
 
+/**
+ * `?spectate` on the URL drops straight into spectator mode on connect,
+ * watching the round already in progress. `?spectate=new` starts a fresh one
+ * to watch from the beginning.
+ */
+const spectateParam = new URLSearchParams(location.search).get('spectate');
+const startSpectating = spectateParam !== null;
+
 const { send } = connect((msg) => {
   if (msg.type === 'welcome') {
     selfId = msg.selfId;
     map = msg.map;
+    if (startSpectating) send({ type: 'spectate', restart: spectateParam === 'new' });
   } else if (msg.type === 'map') {
     map = msg.map;
     tracers = [];
@@ -547,10 +556,39 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
   ctx.drawImage(fogCanvas, 0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
 }
 
+/**
+ * Frame profiler. Costs a handful of `performance.now()` calls per frame, and
+ * prints a phase breakdown to the console whenever a frame blows past
+ * `SLOW_FRAME_MS` — which is the only way to tell which part of a frame is
+ * responsible for a stutter on someone else's machine.
+ */
+const SLOW_FRAME_MS = 45;
+let phaseAt = 0;
+const phases: Array<[string, number]> = [];
+let lastSlowReport = 0;
+
+function mark(label: string): void {
+  const t = performance.now();
+  phases.push([label, t - phaseAt]);
+  phaseAt = t;
+}
+
+function reportSlowFrame(total: number, now: number, drawn: number): void {
+  // At most one report a second, so a bad patch doesn't flood the console.
+  if (now - lastSlowReport < 1000) return;
+  lastSlowReport = now;
+  const parts = phases.map(([label, cost]) => `${label} ${cost.toFixed(1)}`).join(' · ');
+  console.warn(
+    `[perf] slow frame ${total.toFixed(0)}ms — ${parts} · drawn ${drawn} · fogPoly ${fogComputeMs.toFixed(1)}ms`,
+  );
+}
+
 function render() {
   const now = performance.now();
   const frameDelta = lastFrameAt > 0 ? Math.min(100, now - lastFrameAt) : 16;
   advanceFades(frameDelta);
+  phases.length = 0;
+  phaseAt = now;
 
   const me = self();
   const { view, scale } = cameraFor(me);
@@ -570,6 +608,7 @@ function render() {
     drawDoors(ctx, map.doors, doorStates, view);
     drawPickups(ctx, pickups, view, now);
   }
+  mark('map');
 
   drawHandLinks(ctx, Array.from(tracked.values()), view);
 
@@ -580,6 +619,7 @@ function render() {
     drawEntity(ctx, entry.state, isSelf, now);
   }
   ctx.globalAlpha = 1;
+  mark('entities');
 
   tracers = tracers.filter((t) => now - t.born < TRACER_LIFETIME_MS);
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
@@ -599,8 +639,10 @@ function render() {
   }
 
   ctx.restore();
+  mark('effects');
 
   if (!spectating && me) drawFog(me, view, now);
+  mark('fog');
 
   // HUD sits above the fog so guidance stays legible.
   drawBeacons(ctx, beacons, view, scale, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
@@ -641,6 +683,10 @@ function render() {
     worstResetAt = now;
     worstFrameMs = 0;
   }
+
+  mark('hud');
+  const frameCost = performance.now() - now;
+  if (frameCost >= SLOW_FRAME_MS) reportSlowFrame(frameCost, now, tracked.size);
 
   const fpsClass = fps >= 55 ? '' : fps >= 40 ? 'warn' : 'bad';
   const tickClass = serverTickMs < 16 ? '' : serverTickMs < 28 ? 'warn' : 'bad';

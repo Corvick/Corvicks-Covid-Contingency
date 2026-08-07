@@ -131,12 +131,18 @@ wss.on('connection', (socket) => {
           world.speech.set(id, { text: RALLY_NO_CHARGE_LINE, until: now + RALLY_NO_CHARGE_MS });
         }
       } else if (msg.type === 'spectate') {
-        // Fresh game, but this player watches instead of playing.
-        resetWorld(world);
+        // Normally a fresh game to watch; `restart: false` drops into the one
+        // already running, so a round can be observed as it actually plays out.
+        const restart = msg.restart !== false;
+        if (restart) resetWorld(world);
         world.spectators.add(id);
         world.entities.delete(id);
-        console.log(`[server] restart into spectator mode for ${id}`);
-        broadcast({ type: 'map', map: world.map });
+        world.playerIds.delete(id);
+        console.log(
+          `[server] ${id} is spectating${restart ? ' a fresh round' : ' the round in progress'}`,
+        );
+        if (restart) broadcast({ type: 'map', map: world.map });
+        else send(socket, { type: 'map', map: world.map });
       } else if (msg.type === 'restart') {
         resetWorld(world);
         console.log(`[server] game reset — new city seed ${world.map.seed}`);
