@@ -293,11 +293,13 @@ export function drawDoorPrompt(
  */
 export function drawHandLinks(
   ctx: CanvasRenderingContext2D,
-  entries: Array<{ state: EntityState; alpha: number }>,
+  byId: ReadonlyMap<string, { state: EntityState; alpha: number }>,
   view: Viewport,
 ): void {
-  const byId = new Map<string, { state: EntityState; alpha: number }>();
-  for (const entry of entries) byId.set(entry.state.id, entry);
+  // Takes the tracking map as it stands. Copying it into an array and then
+  // rebuilding an index from that array — once per frame, for every entity on
+  // the map — was generating a great deal of short-lived garbage for nothing.
+  const entries = byId.values();
 
   const radius = ENTITY_RADIUS.human;
   ctx.lineCap = 'round';

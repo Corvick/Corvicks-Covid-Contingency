@@ -80,7 +80,6 @@ const hud = document.getElementById('hud') as HTMLDivElement;
 const perfHud = document.getElementById('perf') as HTMLDivElement;
 
 let selfId: string | null = null;
-let entities: EntityState[] = [];
 let map: MapData | null = null;
 let tracers: Tracer[] = [];
 let spectating = false;
@@ -136,7 +135,6 @@ const { send } = connect((msg) => {
     tracers = [];
     // Drop the old snapshot too: keeping it would compute one frame of fog
     // from stale positions against the new map's walls.
-    entities = [];
     tracked.clear();
     cachedPoly = [];
     cachedX = Number.NaN;
@@ -154,7 +152,6 @@ const { send } = connect((msg) => {
     gameOverPanel.classList.add('hidden');
     victoryPanel.classList.add('hidden');
   } else if (msg.type === 'state') {
-    entities = msg.entities;
     syncTracked(msg.entities);
     spectating = msg.spectating;
     survivors = msg.survivors;
@@ -327,15 +324,40 @@ interface Tracked {
 }
 const tracked = new Map<string, Tracked>();
 
+/**
+ * Fold a freshly parsed snapshot into the objects we already hold, field by
+ * field, rather than keeping the parsed ones.
+ *
+ * Holding them means every entity the server sends — up to the whole map, for
+ * a spectator, thirty times a second — is retained by a long-lived map and
+ * survives long enough to be promoted. Copying instead lets the parsed objects
+ * die young, where collection is nearly free. The optional flags are assigned
+ * unconditionally so an absent one clears rather than lingering.
+ */
+function copyInto(into: EntityState, from: EntityState): void {
+  into.type = from.type;
+  into.x = from.x;
+  into.y = from.y;
+  into.facing = from.facing;
+  into.health = from.health;
+  into.grappling = from.grappling;
+  into.infected = from.infected;
+  into.npc = from.npc;
+  into.soldier = from.soldier;
+  into.materializing = from.materializing;
+  into.say = from.say;
+  into.hand = from.hand;
+}
+
 function syncTracked(incoming: EntityState[]): void {
   for (const entry of tracked.values()) entry.seen = false;
   for (const e of incoming) {
     const entry = tracked.get(e.id);
     if (entry) {
-      entry.state = e;
+      copyInto(entry.state, e);
       entry.seen = true;
     } else {
-      tracked.set(e.id, { state: e, alpha: 0, seen: true });
+      tracked.set(e.id, { state: { ...e }, alpha: 0, seen: true });
     }
   }
 }
@@ -355,7 +377,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function self(): EntityState | undefined {
-  return entities.find((e) => e.id === selfId);
+  return selfId === null ? undefined : tracked.get(selfId)?.state;
 }
 
 /** Spectators frame the whole map; players get a follow camera at 1:1. */
@@ -634,7 +656,7 @@ function render() {
   }
   mark('map');
 
-  drawHandLinks(ctx, Array.from(tracked.values()), view);
+  drawHandLinks(ctx, tracked, view);
 
   for (const entry of tracked.values()) {
     // Your own character never fades — it's always fully in view.
