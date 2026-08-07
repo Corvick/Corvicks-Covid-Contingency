@@ -421,6 +421,43 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
   };
 }
 
+/**
+ * WASD pans the spectator camera. The speed is in screen pixels per second and
+ * divided by the current scale, so a key held for a second slides the view the
+ * same distance across the screen whether the whole city is framed or you are
+ * zoomed right into one street — panning at 7x zoom in world units would crawl.
+ */
+const SPECTATE_PAN_SPEED = 700;
+const SPECTATE_PAN_SPRINT = 2.5;
+
+function panSpectator(dt: number): void {
+  let dx = 0;
+  let dy = 0;
+  if (input.state.up) dy -= 1;
+  if (input.state.down) dy += 1;
+  if (input.state.left) dx -= 1;
+  if (input.state.right) dx += 1;
+
+  const scale = SPECTATE_FIT * spectateZoom;
+  const w = VIEWPORT_WIDTH / scale;
+  const h = VIEWPORT_HEIGHT / scale;
+
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.hypot(dx, dy);
+    const speed = SPECTATE_PAN_SPEED * (input.sprint ? SPECTATE_PAN_SPRINT : 1);
+    const step = (speed / scale) * (dt / 1000);
+    spectateX += (dx / len) * step;
+    spectateY += (dy / len) * step;
+  }
+
+  // Hold the centre to what the camera can actually show. Letting it run past
+  // the edge looks identical on screen but banks up slack, so panning back
+  // would sit dead for as long as you overshot. An axis wider than the world
+  // is centred on it by cameraFor, so park it there rather than drifting.
+  spectateX = w >= WORLD_WIDTH ? WORLD_WIDTH / 2 : clamp(spectateX, w / 2, WORLD_WIDTH - w / 2);
+  spectateY = h >= WORLD_HEIGHT ? WORLD_HEIGHT / 2 : clamp(spectateY, h / 2, WORLD_HEIGHT - h / 2);
+}
+
 function aimAngle(): number {
   const me = self();
   if (!me) return 0;
@@ -637,6 +674,7 @@ function render() {
   phaseAt = now;
 
   const me = self();
+  if (spectating) panSpectator(frameDelta);
   const { view, scale } = cameraFor(me);
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -715,7 +753,9 @@ function render() {
 
 
   const counts = `survivors ${survivors} · incubating ${infectedCount} · zombies ${zombieCount}`;
-  hud.textContent = spectating ? `SPECTATING — ${counts}` : counts;
+  hud.textContent = spectating
+    ? `SPECTATING (WASD pan · shift faster · scroll zoom) — ${counts}`
+    : counts;
 
   // Perf readout: client frame rate, worst frame in the last second, and the
   // server's tick cost against its 33.3ms budget.
