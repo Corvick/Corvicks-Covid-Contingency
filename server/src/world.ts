@@ -223,6 +223,18 @@ export interface AiState {
   /** Loot a bot officer is walking to, and when it last looked. */
   lootId: string | null;
   nextLootScanAt: number;
+  /**
+   * A bot has broken off and is running rather than trading shots. Latched
+   * with hysteresis: it goes on inside BOT_BOLT_DIST and only off again past
+   * BOT_SAFE_DIST, or they dither on the threshold.
+   */
+  bolting: boolean;
+  /** Bot sprint reserve, spent bolting and refilled while walking. */
+  botStamina: number;
+  /** Bot has run itself out and must walk until it recovers. */
+  botWinded: boolean;
+  /** Earliest a bot will pop another smoke. */
+  nextSmokeAt: number;
 
   // ------------------------------------------------------------ doors
   /** Shuts the door behind them when they're only wandering about. */
@@ -527,6 +539,10 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextWitnessCheck: now + Math.random() * 500,
     lootId: null,
     nextLootScanAt: 0,
+    bolting: false,
+    botStamina: STAMINA_MAX,
+    botWinded: false,
+    nextSmokeAt: 0,
 
     closesDoors: Math.random() < DOOR_CLOSE_BEHIND_CHANCE,
     locksDoors: Math.random() < DOOR_LOCK_BEHIND_CHANCE,
@@ -1248,6 +1264,7 @@ export function toWire(world: World, e: Entity, viewerIsZombie = false, now = Da
   // Only the zombie side gets to see who's already carrying the infection.
   if (viewerIsZombie && world.pendingInfections.has(e.id)) state.infected = true;
   if (e.type === 'officer' && !world.playerIds.has(e.id)) state.npc = true;
+  if (world.bots.has(e.id)) state.bot = true;
   if (world.soldiers.has(e.id)) state.soldier = true;
 
   const until = world.materializeUntil.get(e.id);

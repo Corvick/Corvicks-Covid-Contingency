@@ -470,6 +470,38 @@ export const STAMINA_SPRINT_FLOOR = 8; // can't start a sprint below this
 export const STAMINA_RECOVERY_THRESHOLD = 82;
 export const SPRINT_MULTIPLIER = 1.7;
 
+// ------------------------------------------------------------- bot officers
+/**
+ * A bot officer stands in a player's slot, so it moves at a player's pace
+ * rather than a civilian's — this is deliberately *not* part of the NPC speed
+ * scale, which is tuned so civilians lose races with zombies. A bot is
+ * supposed to win them.
+ */
+export const BOT_WALK_SPEED = PLAYER_SPEED * 0.85;
+export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER;
+/** Inside this, stop shooting, turn, and run. */
+export const BOT_BOLT_DIST = 165;
+/**
+ * And keep running until this far clear. The gap between the two is what stops
+ * a bot flickering between standing and bolting on the edge of the threshold.
+ */
+export const BOT_SAFE_DIST = 400;
+/**
+ * Where a hunting bot wants to be relative to the nearest zombie. Inside
+ * NPC_OFFICER_SIGHT (420) on purpose — at the edge of its own vision a bot
+ * hovers where it can neither see nor be reached, and never actually fights.
+ */
+export const BOT_HUNT_STANDOFF = 260;
+/** Don't pop a second smoke the instant the first one lands. */
+export const BOT_SMOKE_COOLDOWN_MS = 9000;
+/** How many spots a patrolling bot considers. Cheap: one field read each. */
+export const BOT_PATROL_SAMPLES = 14;
+export const BOT_PATROL_MIN = 420;
+export const BOT_PATROL_MAX = 1100;
+/** Body and head of a bot officer: blue with a grey head. */
+export const BOT_OFFICER_COLOR = '#2563eb';
+export const BOT_OFFICER_HEAD_COLOR = '#9ca3af';
+
 // ---------------------------------------------------------------- gun
 export const GUN_DAMAGE_MIN = 15;
 export const GUN_DAMAGE_MAX = 25;

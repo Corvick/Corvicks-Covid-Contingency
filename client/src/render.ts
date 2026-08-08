@@ -24,6 +24,8 @@ import {
   ENTITY_RADIUS,
   ENTITY_MAX_HEALTH,
   NPC_OFFICER_COLOR,
+  BOT_OFFICER_COLOR,
+  BOT_OFFICER_HEAD_COLOR,
   SOLDIER_COLOR,
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
@@ -446,11 +448,16 @@ export function drawEntity(
   simple = false,
 ): void {
   const radius = ENTITY_RADIUS[e.type];
+  // A bot officer holds a player's slot, so it is picked out from the ambient
+  // grey ones rather than lumped in with them.
   const color = e.soldier
     ? SOLDIER_COLOR
-    : e.npc && e.type === 'officer'
-      ? NPC_OFFICER_COLOR
-      : ENTITY_COLOR[e.type];
+    : e.bot
+      ? BOT_OFFICER_COLOR
+      : e.npc && e.type === 'officer'
+        ? NPC_OFFICER_COLOR
+        : ENTITY_COLOR[e.type];
+  const headColor = e.bot ? BOT_OFFICER_HEAD_COLOR : shade(color, -45);
 
   // Zoomed far out: one dot instead of forty-odd path operations. With four
   // hundred entities alive at the end of a round, the difference is the whole
@@ -543,7 +550,7 @@ export function drawEntity(
   // Head, nudged forward so facing reads at a glance.
   ctx.beginPath();
   ctx.arc(x + dirX * radius * 0.28, y + dirY * radius * 0.28, radius * 0.5, 0, Math.PI * 2);
-  ctx.fillStyle = shade(color, -45);
+  ctx.fillStyle = headColor;
   ctx.fill();
 
   if (e.type === 'officer') {

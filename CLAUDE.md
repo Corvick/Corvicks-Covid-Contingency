@@ -181,6 +181,35 @@ otherwise demand.
 - **Bots walk past the dart gun and the riot shield** (`BOT_IGNORES`). Both
   already scored zero, since neither has a damage figure; the set says so out
   loud so giving the dart one later doesn't send every bot after it.
+
+### Bot officers
+
+Blue body, grey head — a separate `bot` wire flag, not the ambient grey `npc`
+one. They stand in a player's slot, so they move at **player speed**
+(`BOT_WALK_SPEED`, `BOT_SPRINT_SPEED`) and carry their own stamina; this is
+deliberately outside the NPC speed scale, which is tuned so civilians *lose*
+races with zombies. A bot is meant to win them.
+
+- **Bolting is latched and judged on the nearest zombie in sight, not the one
+  being shot at.** Those are often different, and a bot trading fire across the
+  street shouldn't ignore the one at its elbow. `state.threatPoints` is already
+  line-of-sight filtered and refreshed on the perception tick, so it costs a
+  short list walk rather than a query. The `BOT_BOLT_DIST` → `BOT_SAFE_DIST`
+  gap is hysteresis; one threshold makes them dither on the line.
+- **Running is goal-directed**, like every other flight here — it reuses
+  `escapeDestination`. A raw bearing away parks them on the wall behind.
+- **Patrol targets must be outdoors**, and that is what walks them out of a
+  house once they've stripped it: the test is whether the *target* is indoors,
+  not where they're standing, so it fires once instead of re-rolling every tick
+  they spend inside.
+- **Hunting reads the danger field** — they steer toward `BOT_HUNT_STANDOFF`
+  from the nearest zombie, one O(1) lookup per sample instead of a search. Keep
+  the standoff inside `NPC_OFFICER_SIGHT`: at the edge of their own vision they
+  hover where they can neither see nor be reached, and never fight. At 420 they
+  engaged 0% of the time; at 260, 12-27%.
+- **Smoke is cover, not a weapon.** It goes to either flank or straight behind
+  (never at the zombie) — putting it on the target only blinds the bot to the
+  thing it is watching.
 - **The pond is a radius per bearing, not a polygon.** Containment is one
   comparison and pushing a body out is a slide along the same ray; nav grid,
   collision and the drawn bank all read `pondRadiusAt`, so what you see is

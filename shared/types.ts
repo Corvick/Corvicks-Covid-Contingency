@@ -18,6 +18,8 @@ export interface EntityState {
   infected?: boolean;
   /** AI-driven officer, drawn grey to separate it from players. */
   npc?: boolean;
+  /** Standing in for a player rather than ambient — blue body, grey head. */
+  bot?: boolean;
   /** Helicopter-dropped trooper: better shot, drawn in olive. */
   soldier?: boolean;
   /** Still fading into existence — client dithers it in. */

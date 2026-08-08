@@ -447,6 +447,7 @@ const ENTITY_FIELDS = [
   'grappling',
   'infected',
   'npc',
+  'bot',
   'soldier',
   'materializing',
   'say',

@@ -102,6 +102,21 @@ import {
   NPC_OFFICER_TURN_RATE,
   BOT_LOOT_RANGE,
   BOT_LOOT_SCAN_MS,
+  BOT_WALK_SPEED,
+  BOT_SPRINT_SPEED,
+  BOT_BOLT_DIST,
+  BOT_SAFE_DIST,
+  BOT_HUNT_STANDOFF,
+  BOT_SMOKE_COOLDOWN_MS,
+  BOT_PATROL_SAMPLES,
+  BOT_PATROL_MIN,
+  BOT_PATROL_MAX,
+  STAMINA_MAX,
+  STAMINA_DRAIN_PER_SEC,
+  STAMINA_REGEN_PER_SEC,
+  STAMINA_SPRINT_FLOOR,
+  STAMINA_RECOVERY_THRESHOLD,
+  GUN_SLOTS,
   PICKUP_REACH,
   GUN_RANGE,
   BLAST_RADIUS,
@@ -2346,6 +2361,92 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
  * better guns, and fires them through the same path a player does, so its
  * shotgun behaves exactly like yours.
  */
+/**
+ * Somewhere out in the street. Bots are meant to be hunting, not sitting in a
+ * front room, so their patrol targets have to be outdoors — that is what walks
+ * them back out of a house once they've stripped it.
+ *
+ * Scored toward `BOT_HUNT_STANDOFF` on the danger field rather than away from
+ * it: the field already knows, geodesically, how far every cell is from the
+ * nearest zombie, so wanting to be near trouble costs one lookup per sample
+ * instead of a search.
+ */
+function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): void {
+  let best: { x: number; y: number } | null = null;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < BOT_PATROL_SAMPLES; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const reach = BOT_PATROL_MIN + Math.random() * (BOT_PATROL_MAX - BOT_PATROL_MIN);
+    const x = clamp(e.x + Math.cos(angle) * reach, 70, WORLD_WIDTH - 70);
+    const y = clamp(e.y + Math.sin(angle) * reach, 70, WORLD_HEIGHT - 70);
+    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+    // Indoors is where the loot is, not where the work is.
+    if (buildingIndexAt(world, x, y) >= 0) continue;
+
+    const danger = Math.min(world.danger.distanceAt(x, y), DANGER_MAX_DISTANCE);
+    // Near the trouble, not stood in it.
+    let score = -Math.abs(danger - BOT_HUNT_STANDOFF);
+    score += world.danger.opennessAt(x, y) * 30;
+    if (score > bestScore) {
+      bestScore = score;
+      best = { x, y };
+    }
+  }
+
+  if (best) {
+    state.wanderX = best.x;
+    state.wanderY = best.y;
+  } else {
+    // Nowhere outdoors came up — fall back rather than stand still.
+    pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.6);
+  }
+  state.path = null;
+  state.nextPathAt = 0;
+}
+
+/**
+ * Smoke is cover, not a weapon. It goes to either side or behind — putting it
+ * on the zombie would only blind the bot to the thing it is trying to watch.
+ */
+function popSmoke(world: World, e: Entity, state: AiState, toThreat: number, now: number): boolean {
+  if (now < state.nextSmokeAt) return false;
+  const inv = world.inventories.get(e.id);
+  if (!inv) return false;
+  const at = inv.utilities.indexOf('smokeGrenade');
+  if (at < 0) return false;
+
+  // Either flank, or straight behind. Never at the thing they want to keep
+  // looking at.
+  const options = [toThreat + Math.PI / 2, toThreat - Math.PI / 2, toThreat + Math.PI];
+  const angle = options[Math.floor(Math.random() * options.length)];
+
+  // Go through the normal trigger so it burns the grenade and takes the same
+  // cooldown a player's would.
+  const wasSlot = inv.activeSlot;
+  inv.activeSlot = GUN_SLOTS + 1 + at;
+  const thrown = fireHeld(world, e, inv, angle, now);
+  if (!thrown) {
+    inv.activeSlot = wasSlot;
+    return false;
+  }
+  state.nextSmokeAt = now + BOT_SMOKE_COOLDOWN_MS;
+  inv.activeSlot = bestGun(inv).slot;
+  return true;
+}
+
+/** Sprint reserve: spent while bolting, refilled while doing anything else. */
+function botStaminaTick(state: AiState, sprinting: boolean, dt: number): number {
+  if (sprinting && !state.botWinded) {
+    state.botStamina = Math.max(0, state.botStamina - STAMINA_DRAIN_PER_SEC * dt);
+    if (state.botStamina <= STAMINA_SPRINT_FLOOR) state.botWinded = true;
+  } else {
+    state.botStamina = Math.min(STAMINA_MAX, state.botStamina + STAMINA_REGEN_PER_SEC * dt);
+    if (state.botWinded && state.botStamina >= STAMINA_RECOVERY_THRESHOLD) state.botWinded = false;
+  }
+  return sprinting && !state.botWinded ? BOT_SPRINT_SPEED : BOT_WALK_SPEED;
+}
+
 function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
   const inv = world.inventories.get(e.id);
   if (!inv) return;
@@ -2374,8 +2475,45 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     const dy = threat.y - e.y;
     const dist = Math.hypot(dx, dy);
     const aim = Math.atan2(dy, dx);
+    state.threatX = threat.x;
+    state.threatY = threat.y;
 
-    // Hold the best thing we have before firing it.
+    // Smoke goes up the moment something is seen, before the shooting starts —
+    // it is what buys the room to back off through.
+    if (popSmoke(world, e, state, aim, now)) return;
+
+    // Judged on the *nearest* zombie in sight, not the one being shot at —
+    // those are often different, and a bot trading fire with something across
+    // the street shouldn't ignore the one at its elbow. threatPoints is
+    // already line-of-sight filtered and refreshed on the perception tick, so
+    // this costs a walk of a short list rather than another query.
+    let closest = dist;
+    for (const p of state.threatPoints) {
+      const d = Math.hypot(p.x - e.x, p.y - e.y);
+      if (d < closest) closest = d;
+    }
+
+    // Latched with a wide band: too close and they turn and run, and they keep
+    // running until they are properly clear rather than the instant they are
+    // one pixel past the line.
+    if (closest < BOT_BOLT_DIST) state.bolting = true;
+    else if (closest > BOT_SAFE_DIST) state.bolting = false;
+
+    if (state.bolting) {
+      const speed = botStaminaTick(state, true, dt);
+      // Goal-directed, like every other flight in this game. A raw bearing
+      // away from the threat parks them on the first wall behind them.
+      if (unstickTick(world, e, state, now, dt, speed)) return;
+      const to = escapeDestination(world, e, state, now);
+      const desired = to
+        ? headingToward(world, e, state, to.x, to.y, now)
+        : safestHeading(world, e, state);
+      step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
+
+    // Standing and fighting: face it, hold the best gun, and open up.
+    botStaminaTick(state, false, dt);
     const best = bestGun(inv);
     if (inv.activeSlot !== best.slot) inv.activeSlot = best.slot;
 
@@ -2390,10 +2528,11 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       if (dist <= reach && !tooClose) fireHeld(world, e, inv, state.heading, now);
     }
 
-    // Back away from anything that has closed, without turning their back.
+    // Give ground while still facing it — walking backwards, so the gun stays
+    // on target. Slide along whichever axis is open rather than stopping dead.
     if (dist < NPC_OFFICER_RETREAT_DIST) {
       const backward = Math.atan2(-dy, -dx);
-      const speed = speedAt(world, e.x, e.y, HUMAN_WALK_SPEED * 1.2);
+      const speed = speedAt(world, e.x, e.y, BOT_WALK_SPEED * 0.7);
       const stepX = Math.cos(backward) * speed * dt;
       const stepY = Math.sin(backward) * speed * dt;
       if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
@@ -2407,6 +2546,10 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     }
     return;
   }
+
+  // Nothing in sight: stop running and get the wind back.
+  state.bolting = false;
+  botStaminaTick(state, false, dt);
 
   // Nothing to shoot: go shopping. Re-checked on a cadence rather than every
   // tick, since it sweeps the loot list.
@@ -2432,21 +2575,29 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
         return;
       }
       // Scraping along something on the way to it counts as not getting there.
-      if (unstickTick(world, e, state, now, dt, HUMAN_WALK_SPEED * 1.45)) return;
+      if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
       const desired = headingToward(world, e, state, target.x, target.y, now);
-      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.45, HUMAN_TURN_RATE, dt, now);
+      step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
       return;
     }
   }
 
-  // Otherwise patrol, looking for trouble.
+  // Otherwise patrol. Targets are outdoors by construction, so a bot that has
+  // finished stripping a house walks itself back out to the street rather than
+  // pottering about in the front room.
   if (now < state.pauseUntil) return;
-  if (Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 24) {
-    pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.6);
-    return;
+  const arrived = Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 24;
+  // A destination that is itself indoors isn't a bot's destination. Testing
+  // the target rather than where they're standing means this fires once and
+  // then holds, instead of re-rolling a patrol every tick they spend inside.
+  const targetIndoors = buildingIndexAt(world, state.wanderX, state.wanderY) >= 0;
+  if (arrived || targetIndoors) {
+    botPatrolTarget(world, e, state, now);
+    if (arrived) return;
   }
+  if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
   const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
-  step(world, e, state, desired, HUMAN_WALK_SPEED * 1.25, HUMAN_TURN_RATE, dt, now);
+  step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
 }
 
 // ---------------------------------------------------------------- zombies
