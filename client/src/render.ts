@@ -329,11 +329,19 @@ export function drawHandLinks(
   ctx.globalAlpha = 1;
 }
 
+/**
+ * Below this scale a body is a couple of pixels across and the limbs, head and
+ * facing are all sub-pixel — so they cost a dozen rasterised paths each to
+ * draw something indistinguishable from a dot.
+ */
+export const ENTITY_DETAIL_SCALE = 0.5;
+
 export function drawEntity(
   ctx: CanvasRenderingContext2D,
   e: EntityState,
   isSelf: boolean,
   now = 0,
+  simple = false,
 ): void {
   const radius = ENTITY_RADIUS[e.type];
   const color = e.soldier
@@ -341,6 +349,23 @@ export function drawEntity(
     : e.npc && e.type === 'officer'
       ? NPC_OFFICER_COLOR
       : ENTITY_COLOR[e.type];
+
+  // Zoomed far out: one dot instead of forty-odd path operations. With four
+  // hundred entities alive at the end of a round, the difference is the whole
+  // frame — the commands issue in a millisecond either way, but painting them
+  // all is what stalls.
+  if (simple) {
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    if (isSelf) {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+    }
+    return;
+  }
 
   // Grappling pairs thrash back and forth so the struggle reads at a glance.
   let x = e.x;

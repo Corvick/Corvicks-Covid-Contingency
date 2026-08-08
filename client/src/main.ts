@@ -36,6 +36,7 @@ import {
   drawDoorPrompt,
   drawDoors,
   drawEntity,
+  ENTITY_DETAIL_SCALE,
   drawGrenades,
   drawGround,
   drawHandLinks,
@@ -696,11 +697,24 @@ function render() {
 
   drawHandLinks(ctx, tracked, view);
 
+  // Anything off screen still costs a path to set up, and at the end of a
+  // round there are four hundred of them.
+  const simpleEntities = scale < ENTITY_DETAIL_SCALE;
+  const cull = 40;
   for (const entry of tracked.values()) {
+    const s = entry.state;
+    if (
+      s.x + cull < view.x ||
+      s.x - cull > view.x + view.w ||
+      s.y + cull < view.y ||
+      s.y - cull > view.y + view.h
+    ) {
+      continue;
+    }
     // Your own character never fades — it's always fully in view.
-    const isSelf = entry.state.id === selfId;
+    const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;
-    drawEntity(ctx, entry.state, isSelf, now);
+    drawEntity(ctx, s, isSelf, now, simpleEntities);
   }
   ctx.globalAlpha = 1;
   mark('entities');
@@ -760,7 +774,8 @@ function render() {
   // Perf readout: client frame rate, worst frame in the last second, and the
   // server's tick cost against its 33.3ms budget.
   if (lastFrameAt > 0) {
-    const frameMs = now - lastFrameAt;
+    // Two frames can land on the same millisecond, and 1000/0 is Infinity.
+    const frameMs = Math.max(0.1, now - lastFrameAt);
     fps = fps === 0 ? 1000 / frameMs : fps * 0.92 + (1000 / frameMs) * 0.08;
     if (frameMs > worstFrameMs) worstFrameMs = frameMs;
   }
