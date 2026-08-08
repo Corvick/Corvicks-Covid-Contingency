@@ -150,6 +150,7 @@ import {
   DOOR_ATTACK_INTERVAL_MS,
   DOOR_ZOMBIE_DAMAGE,
   DOOR_NPC_UNLOCK_MS,
+  DOOR_KICK_MS,
   DOOR_REENGAGE_MS,
   DOOR_VS_HUMAN_RANGE,
   FRESH_ZOMBIE_MS,
@@ -186,6 +187,7 @@ import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { PickupState } from '../../shared/types.js';
 import {
   addPlea,
+  alertZombiesToDoor,
   clearExpiredPleas,
   damageDoor,
   doorsNear,
@@ -1086,7 +1088,7 @@ function beginDoorWork(
   e: Entity,
   state: AiState,
   index: number,
-  action: 'open' | 'close' | 'lock' | 'unlock',
+  action: 'open' | 'close' | 'lock' | 'unlock' | 'kick',
   now: number,
 ): void {
   const door = world.doors[index];
@@ -1103,7 +1105,9 @@ function beginDoorWork(
         ? DOOR_LOCK_MIN_MS + Math.random() * (DOOR_LOCK_MAX_MS - DOOR_LOCK_MIN_MS)
         : action === 'unlock'
           ? DOOR_NPC_UNLOCK_MS
-          : DOOR_CLOSE_MS);
+          : action === 'kick'
+            ? DOOR_KICK_MS
+            : DOOR_CLOSE_MS);
 
   const target = world.map.doors[index];
   state.heading = Math.atan2(target.y - e.y, target.x - e.x);
@@ -1187,6 +1191,15 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
     state.shelterX = null;
     state.shelterY = null;
     warnTheRoom(world, e, state, index, now);
+  } else if (action === 'kick') {
+    // Straight off its hinges, whatever was left in it — the same thing a
+    // player's boot does, so a bolted door isn't a wall to an officer.
+    damageDoor(world, index, Number.MAX_SAFE_INTEGER);
+    // Loud, and alerted *after* rather than before — the opposite of a slam.
+    // Shutting a door blocks the very sight line the alert needs, so that has
+    // to go first; kicking one opens it, so waiting is what lets the room
+    // beyond hear it happen at all.
+    alertZombiesToDoor(world, index, now);
   } else if (action === 'unlock') {
     unlockDoor(world, index);
     // Drawn the bolt; now actually open it.
@@ -1362,8 +1375,18 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
   }
 
   if (door.locked) {
-    // A door an officer bolted is left well alone.
+    // A door an officer bolted is left well alone — including by bot
+    // officers, who are on the same side as whoever threw the bolt. They
+    // reroute like everyone else rather than undoing a teammate's work.
     if (door.playerLocked) return false;
+
+    // An officer has a boot. Where a civilian hammers on a locked door and
+    // hopes, a bot takes it off its hinges — but only from the side it can't
+    // simply unbolt, which is the same rule the player's prompt follows.
+    if (world.bots.has(e.id) && !canWorkLockFrom(world, ahead, e.x, e.y)) {
+      beginDoorWork(world, e, state, ahead, 'kick', now);
+      return true;
+    }
 
     // From the inside you can draw the bolt back — but only if you actually
     // mean to go through it. Somebody holed up, or who has been told to stay

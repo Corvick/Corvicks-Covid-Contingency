@@ -11,6 +11,7 @@ import {
   TEST_DROP_ALL_ITEMS,
   TEST_DROP_RADIUS,
   ONE_OFF_ITEMS,
+  GUARANTEED_ITEMS,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
@@ -78,17 +79,40 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
     }
   }
 
+  // Spots that may be taken over by a placed item — anything already placed by
+  // hand is off limits, or the second placement would eat the first.
+  const placed = new Set<ItemId>([...ONE_OFF_ITEMS, ...GUARANTEED_ITEMS]);
+  const freeSpots = () => Array.from(world.pickups.values()).filter((p) => !placed.has(p.item));
+
   // Exactly one of each one-off item, placed by taking over an ordinary loot
   // spot. They are out of the loot table entirely, so this is the only way
   // either of them reaches the map.
   for (const item of ONE_OFF_ITEMS) {
-    const spots = Array.from(world.pickups.values()).filter(
-      (p) => !ONE_OFF_ITEMS.includes(p.item as (typeof ONE_OFF_ITEMS)[number]),
-    );
+    const spots = freeSpots();
     if (spots.length === 0) break;
     const at = spots[Math.floor(Math.random() * spots.length)];
     world.pickups.delete(at.id);
     const id = `loot-oneoff-${item}`;
+    world.pickups.set(id, { id, item, x: at.x, y: at.y });
+  }
+
+  // And a floor under the rare guns: if the loot table happened not to roll
+  // one anywhere, put one in. A rare gun that is missing entirely is a worse
+  // kind of rare than a scarce one.
+  for (const item of GUARANTEED_ITEMS) {
+    let already = false;
+    for (const p of world.pickups.values()) {
+      if (p.item === item) {
+        already = true;
+        break;
+      }
+    }
+    if (already) continue;
+    const spots = freeSpots();
+    if (spots.length === 0) break;
+    const at = spots[Math.floor(Math.random() * spots.length)];
+    world.pickups.delete(at.id);
+    const id = `loot-min-${item}`;
     world.pickups.set(id, { id, item, x: at.x, y: at.y });
   }
 }

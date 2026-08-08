@@ -184,6 +184,14 @@ export const FOLLOW_WAIT_SHOUT = "Wait here!";
  * construction). One of each per city — finding either should be an event.
  */
 export const ONE_OFF_ITEMS = ['grenadeLauncher', 'smokeGrenade'] as const;
+
+/**
+ * At least one of each of these exists in every city. Unlike ONE_OFF_ITEMS
+ * they are still in the loot table, so this is a floor rather than a quota —
+ * at rarity 1 a rare gun could otherwise miss a whole map, and a round where
+ * the sniper simply isn't anywhere is a worse kind of rare than a scarce one.
+ */
+export const GUARANTEED_ITEMS = ['sniper', 'heavyMg', 'chargeRifle'] as const;
 /** Its shell detonates where it lands, hurting everything close to it. */
 export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;

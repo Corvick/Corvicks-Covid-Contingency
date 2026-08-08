@@ -159,6 +159,13 @@ otherwise demand.
 - **The grenade launcher is never in the loot table.** Rarity 0 keeps it out by
   construction and it gets one roll for the whole city, so most rounds have
   none. Its shell and the smoke grenade are both real projectiles that bounce.
+- **`ONE_OFF_ITEMS` is a quota; `GUARANTEED_ITEMS` is a floor.** The one-offs
+  are out of the loot table entirely and placed exactly once. The rare guns
+  stay *in* the table and are only topped up when a city rolled none — at
+  rarity 1 a gun that is missing from the map altogether is a worse kind of
+  rare than a scarce one. Both take over an ordinary loot spot, and both skip
+  spots already holding a placed item so the second placement can't eat the
+  first.
 - **The ammo box can refuse to be picked up.** Utilities report `used`,
   `carry` or `refuse`; holding the pistol or a full gun leaves the box on the
   floor rather than wasting it.
@@ -214,6 +221,14 @@ races with zombies. A bot is meant to win them.
   only guns with rounds left and falls through to the pistol when there are
   none. Ranked on damage it beats a machine gun on paper, so bots were putting
   a loaded MG away to plink with a sidearm.
+- **A locked door is not a wall to an officer.** Where a civilian hammers and
+  hopes, a bot kicks it off its hinges — but only from the side it can't simply
+  unbolt, the same rule the player's own prompt follows. A door a *player*
+  bolted (`playerLocked`) is still left standing: a bot is on that player's
+  side and reroutes rather than undoing their work.
+  The alert fires **after** the kick, the opposite of a slam — shutting a door
+  blocks the very sight line the alert needs, so that has to go first; kicking
+  one opens it, so waiting is what lets the room beyond hear it at all.
 - **A dry gun in the bag counts as a free slot** in `lootWanted` — they ditch
   it on arrival. Otherwise a bot holding three empty rifles is "full" and walks
   past every gun in the city. On arrival they drop the dry one *then* collect,

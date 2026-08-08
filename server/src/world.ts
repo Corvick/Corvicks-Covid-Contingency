@@ -251,7 +251,7 @@ export interface AiState {
   doorBusyUntil: number;
   /** Door being worked, and what is being done to it. */
   doorIndex: number;
-  doorAction: 'open' | 'close' | 'lock' | 'unlock' | null;
+  doorAction: 'open' | 'close' | 'lock' | 'unlock' | 'kick' | null;
   /** Door to deal with once through it, and whether to lock it too. */
   doorFollowUp: number;
   doorFollowUpLock: boolean;
