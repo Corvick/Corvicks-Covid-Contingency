@@ -364,19 +364,31 @@ const tracked = new Map<string, Tracked>();
  * die young, where collection is nearly free. The optional flags are assigned
  * unconditionally so an absent one clears rather than lingering.
  */
+const ENTITY_FIELDS = [
+  'type',
+  'x',
+  'y',
+  'facing',
+  'health',
+  'grappling',
+  'infected',
+  'npc',
+  'soldier',
+  'materializing',
+  'say',
+  'hand',
+  'armour',
+  'breaking',
+] as const satisfies ReadonlyArray<keyof EntityState>;
+
 function copyInto(into: EntityState, from: EntityState): void {
-  into.type = from.type;
-  into.x = from.x;
-  into.y = from.y;
-  into.facing = from.facing;
-  into.health = from.health;
-  into.grappling = from.grappling;
-  into.infected = from.infected;
-  into.npc = from.npc;
-  into.soldier = from.soldier;
-  into.materializing = from.materializing;
-  into.say = from.say;
-  into.hand = from.hand;
+  // Driven by the list above rather than a hand-written run of assignments.
+  // Two flags were added to EntityState and never copied, so they only ever
+  // reached an entity on the frame it was first seen — kevlar's ring and the
+  // door-breaking animation were both invisible for exactly that reason.
+  const target = into as unknown as Record<string, unknown>;
+  const source = from as unknown as Record<string, unknown>;
+  for (const key of ENTITY_FIELDS) target[key] = source[key];
 }
 
 function syncTracked(incoming: EntityState[]): void {
@@ -525,6 +537,8 @@ let cachedY = Number.NaN;
 let fogComputeMs = 0;
 /** Latches the fog fault so only its edges are logged, not every frame. */
 let fogFailing = false;
+/** Visible fraction at the last computation, for spotting a sudden jump. */
+let fogLastFraction = -1;
 
 /**
  * Walls plus every shut door, for the fog to cast shadows from — a closed door
@@ -578,7 +592,14 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   const near = occluding.filter(
     (w) => w.x - R <= me.x && w.x + w.w + R >= me.x && w.y - R <= me.y && w.y + w.h + R >= me.y,
   ).length;
-  const failed = area > full * 0.93 && near > 0;
+  // Two ways of noticing: occlusion has all but vanished with walls standing
+  // right there, or the visible area jumped sharply between two computations a
+  // few pixels apart. The second is what "flicking on and off" looks like from
+  // the inside, and the first threshold alone was strict enough to miss it.
+  const fraction = area / full;
+  const jumped = fogLastFraction >= 0 && Math.abs(fraction - fogLastFraction) > 0.3;
+  fogLastFraction = fraction;
+  const failed = near > 0 && (fraction > 0.9 || jumped);
 
   // Log the edges of the fault, not every frame inside it: once when occlusion
   // drops out and once when it comes back. Two positions bracketing the spot

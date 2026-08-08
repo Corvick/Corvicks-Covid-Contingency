@@ -61,8 +61,11 @@ Server modules and what each owns:
 - `doorplayer.ts` — the player's press-and-hold of E at a door, and its prompt
 - `combat.ts` — hitscan, weapons, window damage
 - `inventory.ts` — loot spawning, slots, pickup/drop
-- `heli.ts` — smoke grenade → helicopter → dropped soldiers
+- `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
+- `ducks.ts` — the flock on the pond
 - `spatial.ts` / `geometry.ts` — uniform grid broadphase, math primitives
+- `shared/pond.ts` — the pond's radius-per-bearing, read by nav, collision and
+  the client's drawing alike
 
 ### Civilian traits
 
@@ -75,7 +78,13 @@ building on sight · `shelterFar` picks one blocks away instead of the nearest �
 `staysIndoors` sits tight when the zombie is outside · `homeBuilding` lives
 here and won't wander out · `witness` reacts to someone else running ·
 `panicScale` how long they stay rattled · `refugeBias` where in the candidate
-list they reach, so crowds fan out instead of funnelling into one doorway.
+list they reach, so crowds fan out instead of funnelling into one doorway ·
+`shelterLarge` wants a landmark rather than the nearest front door ·
+`officerSeeker` runs to whoever has a gun and stands behind them.
+
+Zombies roll two of their own: `smartZombie` leaves a room once it is empty
+rather than pacing it, and `freshUntil` makes anything newly turned ignore
+doors entirely while there is prey about.
 
 `sawZombie` latches once someone has seen one, and gates the things only a
 naive person does — chasing after a running neighbour to find out why.
@@ -108,6 +117,26 @@ something the pathfinder quietly steers around — and it keeps opening a door
 off the "rebuild the grid" path, which flipping cells 30 times a second would
 otherwise demand.
 
+### Items, orders and scenery
+
+- **Kevlar denies a grab outright** rather than soaking damage: the grapple
+  lasts half a second, ends with no infection, and spends one of three uses.
+  It is an early return in `resolveGrapple` — the escape and infection rolls
+  below it never run, which is what makes "can't be infected" absolute.
+- **The grenade launcher is never in the loot table.** Rarity 0 keeps it out by
+  construction and it gets one roll for the whole city, so most rounds have
+  none. Its shell and the smoke grenade are both real projectiles that bounce.
+- **The ammo box can refuse to be picked up.** Utilities report `used`,
+  `carry` or `refuse`; holding the pistol or a full gun leaves the box on the
+  floor rather than wasting it.
+- **"Follow me" and "wait" share one charge.** The charge is spent on release,
+  not on the call, so one buys a full cycle. The wheel takes an option list
+  with per-entry usability rather than one shared count.
+- **The pond is a radius per bearing, not a polygon.** Containment is one
+  comparison and pushing a body out is a slide along the same ray; nav grid,
+  collision and the drawn bank all read `pondRadiusAt`, so what you see is
+  exactly what you cannot cross.
+
 ## Performance rules (these matter — 400+ entities)
 
 - **Everything expensive is budgeted or cached.** A\* is capped at
@@ -122,6 +151,19 @@ otherwise demand.
 - `generateMap` costs ~7ms, once per round. The connectivity repair pass builds
   a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
+- **The endgame stall was paint, not simulation.** Four hundred entities each
+  cost ~41 canvas path operations, all rasterised at once with the whole map
+  framed. Below `ENTITY_DETAIL_SCALE` an entity draws as a single dot, and
+  anything off screen is skipped outright. Cost ramps smoothly; dropped frames
+  do not — a frame either fits the vsync budget or it does not, which is why it
+  read as a sudden onset rather than a gradual one.
+- **The frame profiler splits the gap**, not the render loop: `spike` on the
+  HUD is the gap between frames, and the expensive thing need not be in
+  rendering at all. It prints render / net / elsewhere on a frame over 45ms.
+- **The client copies snapshots into the objects it already holds** rather than
+  keeping the parsed ones, so they die young instead of being promoted. Add a
+  field to `EntityState` and you must add it to `ENTITY_FIELDS` — two flags
+  were missed once and silently never reached an entity after its first frame.
 
 ## Key decisions worth not re-litigating
 
@@ -201,7 +243,7 @@ plus coordinates make it reproducible offline.
 ## Not built yet
 
 - Zombie master (the playable zombie) — `zombieMaster` type exists, unused
-- Kevlar and riot shield are collected and shown on the HUD but have **no effect**
+- Riot shield is collected and shown on the HUD but has **no effect**
 - Tracker dart marks targets (`world.trackedTargets`) but nothing consumes it
 - Victory condition fires but has only been observed once, via a bot
 
