@@ -494,6 +494,8 @@ let cachedAt = 0;
 let cachedX = Number.NaN;
 let cachedY = Number.NaN;
 let fogComputeMs = 0;
+/** Latches the fog fault so only its edges are logged, not every frame. */
+let fogFailing = false;
 
 /**
  * Walls plus every shut door, for the fog to cast shadows from — a closed door
@@ -542,16 +544,28 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   }
   area = Math.abs(area / 2);
   const full = Math.PI * PLAYER_SIGHT_RADIUS * PLAYER_SIGHT_RADIUS;
-  if (area > full * 0.93) {
-    const R = PLAYER_SIGHT_RADIUS;
-    const near = map.walls.filter(
-      (w) => w.x - R <= me.x && w.x + w.w + R >= me.x && w.y - R <= me.y && w.y + w.h + R >= me.y,
-    ).length;
-    if (near > 0) {
+  const R = PLAYER_SIGHT_RADIUS;
+  const occluding = occludersFor(map);
+  const near = occluding.filter(
+    (w) => w.x - R <= me.x && w.x + w.w + R >= me.x && w.y - R <= me.y && w.y + w.h + R >= me.y,
+  ).length;
+  const failed = area > full * 0.93 && near > 0;
+
+  // Log the edges of the fault, not every frame inside it: once when occlusion
+  // drops out and once when it comes back. Two positions bracketing the spot
+  // are far more use than a hundred repeats of the same one.
+  if (failed !== fogFailing) {
+    fogFailing = failed;
+    if (failed) {
       console.warn(
-        `[fog] no occlusion at ${Math.round(me.x)},${Math.round(me.y)} — ` +
-          `${near} walls in range, ${cachedPoly.length} poly points, ` +
+        `[fog] OFF at ${Math.round(me.x)},${Math.round(me.y)} — ` +
+          `${near} occluders in range (${occluding.length} total), ${cachedPoly.length} poly points, ` +
           `${Math.round((area / full) * 100)}% of circle visible, seed ${map.seed}`,
+      );
+    } else {
+      console.warn(
+        `[fog] back ON at ${Math.round(me.x)},${Math.round(me.y)} — ` +
+          `${near} occluders in range, ${Math.round((area / full) * 100)}% visible, seed ${map.seed}`,
       );
     }
   }
