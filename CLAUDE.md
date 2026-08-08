@@ -79,13 +79,26 @@ in a city nobody is looking at. `?spectate` skips the shell entirely.
 you out of the world, so there is no pause panel and no in-place restart. Both
 endings go back to the front end too. A new round is a new lobby.
 
-A lobby slot is `closed | open | bot | player`, and exactly one is `player` —
-you are always sitting somewhere. Clicking a **row** seats you in it (leaving
-`open` behind you, and taking a bot's place if it had one); clicking its **tag**
-cycles closed/open/bot. Two controls, because one click can't both move you and
-cycle the thing you're moving into. `START GAME` sends the layout; the server
-counts the `bot` officer slots into `world.botOfficerCount`, which `populate`
-reads. The gamertag lives in `localStorage`, prefilled and pre-selected.
+A lobby slot is `closed | open | bot | player`. Clicking a **row** seats you in
+it (leaving `open` behind you, and taking a bot's place if it had one);
+clicking its **tag** cycles closed/open/bot. Two controls, because one click
+can't both move you and cycle the thing you're moving into. Clicking the row
+you are *already* in benches you. `START GAME` sends nothing but the command —
+the server owns the layout, counts `bot` officer slots into
+`world.botOfficerCount`, and `populate` reads it. The gamertag lives in
+`localStorage`, prefilled and pre-selected.
+
+**Spectating is a lobby state, not a URL.** A spectator holds no seat and gets
+no entity; `startLobby` puts them into `world.spectators` *after* `resetWorld`,
+which clears it. Start refuses only when there'd be no officers at all — a
+round of nothing but bots is the whole point of watching one. `?spectate` still
+exists for headless work and bypasses the front end entirely.
+
+**PLAY OFFLINE is the same lobby with `offline: true`**, which is why it needed
+almost no code: never listed in `summaries`, no chat, seats cycle closed→bot
+only, and a vacated seat goes back to `closed` rather than `open`. The one
+thing it genuinely needed was `notice` — with no chat box drawn, a refusal from
+START had nowhere to be read.
 
 ### Civilian traits
 

@@ -241,6 +241,20 @@ export interface LobbyView {
   humans: SlotWire[];
   dogs: SlotWire[];
   chat: ChatLine[];
+  /**
+   * A solo room: nobody else can join it, so it is never listed, has no chat,
+   * and its slots only offer closed or bot.
+   */
+  offline: boolean;
+  /**
+   * The latest thing the room needs to tell you. Offline draws no chat box, so
+   * refusals from START would otherwise go somewhere nobody can read.
+   */
+  notice: string;
+  /** You are watching rather than playing. */
+  spectating: boolean;
+  /** Everyone watching, yourself included. */
+  spectators: string[];
 }
 
 export type AbilityId = 'rally' | 'follow' | 'wait';
@@ -301,7 +315,9 @@ export type ClientMessage =
   // ---- front end. None of these touch the running world except `lobbyStart`.
   /** Send me the browse list, and keep sending it as it changes. */
   | { type: 'lobbyList' }
-  | { type: 'lobbyCreate'; name: string; gamertag: string }
+  | { type: 'lobbyCreate'; name: string; gamertag: string; offline?: boolean }
+  /** Sit out and watch, or come back off the bench. */
+  | { type: 'lobbySpectate'; on: boolean }
   | { type: 'lobbyJoin'; id: string; gamertag: string }
   /** Take a seat. Only 'open' and 'bot' seats can be taken. */
   | { type: 'lobbySit'; team: LobbyTeam; index: number }

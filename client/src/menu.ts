@@ -153,6 +153,19 @@ export function setupMenu(hooks: MenuHooks): Menu {
   const chatLog = el<HTMLDivElement>('chat-log');
   const chatInput = el<HTMLInputElement>('chat-input');
   const startBtn = el<HTMLButtonElement>('lobby-start');
+  const teams = document.querySelector('#lobby .teams') as HTMLDivElement;
+  const spectatorRow = el<HTMLDivElement>('spectator-row');
+  const spectatorTag = spectatorRow.querySelector('.tag') as HTMLButtonElement;
+  const spectatorLabel = spectatorRow.querySelector('span') as HTMLSpanElement;
+
+  // One control, both directions: on the bench it puts you back in a seat, in
+  // a seat it takes you out of one.
+  const toggleSpectate = () => hooks.send({ type: 'lobbySpectate', on: !view?.spectating });
+  spectatorRow.addEventListener('click', toggleSpectate);
+  spectatorTag.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleSpectate();
+  });
   const hosts: Record<LobbyTeam, HTMLDivElement> = {
     humans: el<HTMLDivElement>('slots-humans'),
     dogs: el<HTMLDivElement>('slots-dogs'),
@@ -180,10 +193,13 @@ export function setupMenu(hooks: MenuHooks): Menu {
         hooks.send({ type: 'lobbyCycle', team, index: i });
       });
 
-      // A closed seat isn't yours to take until it's been opened, and there's
-      // no point clicking one someone is already in. Taking a bot's seat is
-      // fair game for anyone — the server agrees, so don't disagree here.
-      if (seat.state === 'open' || seat.state === 'bot') {
+      if (seat.self) {
+        // Clicking the seat you're in is you standing up to watch instead.
+        row.addEventListener('click', () => hooks.send({ type: 'lobbySpectate', on: true }));
+      } else if (seat.state === 'open' || seat.state === 'bot') {
+        // A closed seat isn't yours to take until it's been opened, and there's
+        // no point clicking one someone else is already in. Taking a bot's seat
+        // is fair game — the server agrees, so don't disagree here.
         row.addEventListener('click', () => hooks.send({ type: 'lobbySit', team, index: i }));
       } else {
         row.style.cursor = 'default';
@@ -200,6 +216,19 @@ export function setupMenu(hooks: MenuHooks): Menu {
     renderSlots('humans', view.humans, view.isHost);
     renderSlots('dogs', view.dogs, view.isHost);
     startBtn.style.display = view.isHost ? '' : 'none';
+
+    // Offline is the same room with the parts that need other people removed.
+    teams.classList.toggle('solo', view.offline);
+    el('lobby-hint').textContent = view.offline
+      ? 'click a slot to cycle it CLOSED → BOT · click your own to watch instead'
+      : 'click a slot to take it · click its tag to cycle CLOSED → OPEN → BOT';
+
+    el('lobby-notice').textContent = view.notice;
+    spectatorRow.dataset.state = view.spectating ? 'spectating' : 'closed';
+    spectatorTag.textContent = view.spectating ? 'WATCHING' : 'OFF';
+    // Everyone else on the bench, so a full room still reads correctly.
+    const others = view.spectators.length - (view.spectating ? 1 : 0);
+    spectatorLabel.textContent = others > 0 ? `SPECTATOR · +${others}` : 'SPECTATOR';
 
     // Pinned to the bottom unless you've scrolled up to read something.
     const atBottom = chatLog.scrollTop + chatLog.clientHeight >= chatLog.scrollHeight - 24;
@@ -230,6 +259,20 @@ export function setupMenu(hooks: MenuHooks): Menu {
   startBtn.addEventListener('click', () => hooks.send({ type: 'lobbyStart' }));
 
   // ---- navigation ----
+  // Offline skips straight to the room. There is nobody to introduce yourself
+  // to, so it doesn't ask for a name — it reuses one if you've given it before.
+  el('btn-offline').addEventListener('click', () => {
+    if (!name) {
+      try {
+        name = (localStorage.getItem(NAME_KEY) ?? '').trim().slice(0, NAME_MAX);
+      } catch {
+        /* nothing remembered */
+      }
+      if (!name) name = 'PLAYER';
+    }
+    hooks.send({ type: 'lobbyCreate', name: 'OFFLINE', gamertag: name, offline: true });
+  });
+
   el('btn-online').addEventListener('click', askName);
   el('btn-name-back').addEventListener('click', () => show('title'));
   el('btn-online-back').addEventListener('click', askName);
@@ -246,7 +289,15 @@ export function setupMenu(hooks: MenuHooks): Menu {
     show('join');
   });
   el('btn-join-back').addEventListener('click', () => show('online'));
-  el('lobby-back').addEventListener('click', () => hooks.send({ type: 'lobbyLeave' }));
+  el('lobby-back').addEventListener('click', () => {
+    // The server answers a leave with the browse list rather than a lobbyLeft
+    // — you already know you left — so the screen change happens here. An
+    // offline room came from the title, so that's where LEAVE goes back to.
+    const solo = view?.offline === true;
+    hooks.send({ type: 'lobbyLeave' });
+    view = null;
+    show(solo ? 'title' : 'online');
+  });
 
   return {
     reopen() {

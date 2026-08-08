@@ -73,6 +73,7 @@ import {
   anyRunning,
   botCount,
   chat,
+  clearNotice,
   createLobby,
   cycle,
   inALobby,
@@ -81,6 +82,7 @@ import {
   lobbyOf,
   say,
   seatedPlayers,
+  setSpectating,
   sit,
   summaries,
   viewFor,
@@ -181,8 +183,11 @@ function startLobby(lobby: Lobby): void {
   }
 
   const seated = seatedPlayers(lobby);
-  if (seated.length === 0) {
-    say(lobby, '', 'nobody is sitting in a slot');
+  const bots = botCount(lobby);
+  // A round of nothing but bots is the point of watching one, so this only
+  // refuses when there'd be no officers in the city at all.
+  if (seated.length === 0 && bots === 0) {
+    say(lobby, '', 'nobody is playing and no bots are set — fill a slot first');
     pushLobby(lobby);
     return;
   }
@@ -194,18 +199,24 @@ function startLobby(lobby: Lobby): void {
   world.playerIds.clear();
 
   lobby.running = true;
-  world.botOfficerCount = botCount(lobby);
+  clearNotice(lobby);
+  world.botOfficerCount = bots;
   resetWorld(world);
   for (const connId of seated) spawnPlayer(connId);
+  // resetWorld clears the watchers, so they go back in afterwards. A spectator
+  // has no entity at all — they see the whole city instead of a fogged slice.
+  for (const connId of lobby.spectators) world.spectators.add(connId);
 
   const dogs = lobby.dogs.filter((s) => s.state === 'player').length;
   console.log(
     `[server] "${lobby.name}" started — ${seated.length} players, ` +
-      `${world.botOfficerCount} bot officers` +
+      `${bots} bot officers, ${lobby.spectators.size} watching` +
       (dogs > 0 ? `, ${dogs} in dog slots (spawning as officers for now)` : ''),
   );
 
-  say(lobby, '', 'the round has begun');
+  // Chat gets told; a solo room doesn't need telling, since the game is about
+  // to take the screen — and it would sit there as a stale notice.
+  if (!lobby.offline) say(lobby, '', 'the round has begun');
   pushLobby(lobby);
   broadcastLobbies();
   for (const connId of lobby.members.keys()) {
@@ -294,8 +305,11 @@ wss.on('connection', (socket) => {
         send(socket, { type: 'lobbies', lobbies: summaries() });
       } else if (msg.type === 'lobbyCreate') {
         world.names.set(id, msg.gamertag);
-        const lobby = createLobby(id, msg.name, msg.gamertag);
-        console.log(`[server] ${msg.gamertag} created lobby "${lobby.name}" (${lobby.id})`);
+        const lobby = createLobby(id, msg.name, msg.gamertag, msg.offline === true);
+        console.log(
+          `[server] ${msg.gamertag} created ${lobby.offline ? 'an offline' : 'lobby'}` +
+            ` "${lobby.name}" (${lobby.id})`,
+        );
         pushLobby(lobby);
         broadcastLobbies();
       } else if (msg.type === 'lobbyJoin') {
@@ -312,6 +326,14 @@ wss.on('connection', (socket) => {
         }
       } else if (msg.type === 'lobbySit') {
         if (sit(id, msg.team, msg.index)) {
+          const lobby = lobbyOf(id);
+          if (lobby) {
+            pushLobby(lobby);
+            broadcastLobbies();
+          }
+        }
+      } else if (msg.type === 'lobbySpectate') {
+        if (setSpectating(id, msg.on)) {
           const lobby = lobbyOf(id);
           if (lobby) {
             pushLobby(lobby);

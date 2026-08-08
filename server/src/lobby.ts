@@ -32,6 +32,16 @@ export interface Lobby {
   chat: ChatLine[];
   /** Everyone connected to this lobby, seated or not, by connection id. */
   members: Map<string, string>;
+  /** Watching rather than playing. A spectator holds no seat. */
+  spectators: Set<string>;
+  /**
+   * Solo: never listed, no chat, and its slots offer only closed or bot. It is
+   * an ordinary lobby in every other respect, which is why offline play needed
+   * almost no code of its own.
+   */
+  offline: boolean;
+  /** Latest thing the room needs to tell you, when there is no chat to say it in. */
+  notice: string;
   /** True once its round has been started. */
   running: boolean;
 }
@@ -62,7 +72,12 @@ export function anyRunning(): boolean {
   return false;
 }
 
-export function createLobby(connId: string, rawName: string, gamertag: string): Lobby {
+export function createLobby(
+  connId: string,
+  rawName: string,
+  gamertag: string,
+  offline = false,
+): Lobby {
   leaveLobby(connId);
   const tag = tidy(gamertag, NAME_MAX_LEN) || 'PLAYER';
   const lobby: Lobby = {
@@ -73,6 +88,9 @@ export function createLobby(connId: string, rawName: string, gamertag: string): 
     dogs: emptySeats(LOBBY_DOG_SLOTS),
     chat: [],
     members: new Map([[connId, tag]]),
+    spectators: new Set(),
+    offline,
+    notice: '',
     running: false,
   };
   // The host takes the first officer seat rather than standing about in a
@@ -80,7 +98,7 @@ export function createLobby(connId: string, rawName: string, gamertag: string): 
   lobby.humans[0] = { state: 'player', id: connId };
   lobbies.set(lobby.id, lobby);
   memberOf.set(connId, lobby.id);
-  say(lobby, '', `${tag} created the lobby`);
+  if (!offline) say(lobby, '', `${tag} created the lobby`);
   return lobby;
 }
 
@@ -109,6 +127,7 @@ export function leaveLobby(connId: string): { lobby: Lobby; closed: boolean } | 
   const tag = lobby.members.get(connId) ?? 'someone';
   memberOf.delete(connId);
   lobby.members.delete(connId);
+  lobby.spectators.delete(connId);
   vacate(lobby, connId);
 
   if (lobby.hostId === connId || lobby.members.size === 0) {
@@ -120,12 +139,16 @@ export function leaveLobby(connId: string): { lobby: Lobby; closed: boolean } | 
   return { lobby, closed: false };
 }
 
-/** Empty whatever seat this connection was in, on either team. */
+/**
+ * Empty whatever seat this connection was in, on either team. Offline leaves it
+ * shut rather than open — there is nobody else it could be open to.
+ */
 function vacate(lobby: Lobby, connId: string): void {
+  const empty: SlotState = lobby.offline ? 'closed' : 'open';
   for (const team of [lobby.humans, lobby.dogs]) {
     for (let i = 0; i < team.length; i++) {
       const seat = team[i];
-      if (seat.state === 'player' && seat.id === connId) team[i] = { state: 'open' };
+      if (seat.state === 'player' && seat.id === connId) team[i] = { state: empty };
     }
   }
 }
@@ -139,11 +162,43 @@ export function sit(connId: string, team: LobbyTeam, index: number): boolean {
   if (!seat || seat.state === 'closed') return false;
   if (seat.state === 'player') return false; // already someone's, yours included
   vacate(lobby, connId);
+  lobby.spectators.delete(connId); // sitting down is the opposite of watching
   seats[index] = { state: 'player', id: connId };
   return true;
 }
 
+/**
+ * Sit out and watch, or come back. Going to the bench frees your seat; coming
+ * back takes the first one going, so you are never left with nowhere to sit.
+ */
+export function setSpectating(connId: string, on: boolean): boolean {
+  const lobby = lobbyOf(connId);
+  if (!lobby) return false;
+
+  if (on) {
+    if (lobby.spectators.has(connId)) return false;
+    vacate(lobby, connId);
+    lobby.spectators.add(connId);
+    return true;
+  }
+
+  if (!lobby.spectators.has(connId)) return false;
+  lobby.spectators.delete(connId);
+  // Prefer a seat nobody wanted, then a shut one, then displace a bot — in
+  // that order there is always somewhere to land.
+  for (const want of ['open', 'closed', 'bot'] as SlotState[]) {
+    const at = lobby.humans.findIndex((s) => s.state === want);
+    if (at >= 0) {
+      lobby.humans[at] = { state: 'player', id: connId };
+      return true;
+    }
+  }
+  return true;
+}
+
 const CYCLE: Array<Exclude<SlotState, 'player'>> = ['closed', 'open', 'bot'];
+/** Offline has nobody to hold a seat open for, so it skips that rung. */
+const CYCLE_OFFLINE: Array<Exclude<SlotState, 'player'>> = ['closed', 'bot'];
 
 /** Host only: walk a seat through closed → open → bot. */
 export function cycle(connId: string, team: LobbyTeam, index: number): boolean {
@@ -155,19 +210,36 @@ export function cycle(connId: string, team: LobbyTeam, index: number): boolean {
   // Someone is sitting there. Cycling them out from under themselves is the
   // host booting them, which is a decision for later, not an accident now.
   if (seat.state === 'player') return false;
-  seats[index] = { state: CYCLE[(CYCLE.indexOf(seat.state) + 1) % CYCLE.length] };
+  const order = lobby.offline ? CYCLE_OFFLINE : CYCLE;
+  // An index of -1 (a seat vacated into a state this order doesn't contain)
+  // lands on the first rung, which is what you'd want anyway.
+  seats[index] = { state: order[(order.indexOf(seat.state) + 1) % order.length] };
   return true;
 }
 
 export function say(lobby: Lobby, from: string, text: string): void {
-  lobby.chat.push({ from, text: tidy(text, CHAT_MAX_LEN) });
+  const clean = tidy(text, CHAT_MAX_LEN);
+  // A solo room draws no chat box, so a notice posted into one would never be
+  // read. The refusals from `start` are exactly the messages you most need to
+  // see, so offline keeps the latest one somewhere the client can show it.
+  if (lobby.offline) {
+    if (!from) lobby.notice = clean;
+    return;
+  }
+  lobby.chat.push({ from, text: clean });
   if (lobby.chat.length > CHAT_HISTORY) lobby.chat.splice(0, lobby.chat.length - CHAT_HISTORY);
+}
+
+/** Wipe the standing notice — something has happened since it was posted. */
+export function clearNotice(lobby: Lobby): void {
+  lobby.notice = '';
 }
 
 export function chat(connId: string, text: string): Lobby | null {
   const lobby = lobbyOf(connId);
   const clean = tidy(text, CHAT_MAX_LEN);
-  if (!lobby || !clean) return null;
+  // Nobody to talk to in a solo room, and no chat box drawn to type into.
+  if (!lobby || lobby.offline || !clean) return null;
   say(lobby, lobby.members.get(connId) ?? 'someone', clean);
   return lobby;
 }
@@ -202,18 +274,26 @@ export function viewFor(lobby: Lobby, viewer: string): LobbyView {
     humans: lobby.humans.map((s) => seatWire(lobby, s, viewer)),
     dogs: lobby.dogs.map((s) => seatWire(lobby, s, viewer)),
     chat: lobby.chat,
+    offline: lobby.offline,
+    notice: lobby.notice,
+    spectating: lobby.spectators.has(viewer),
+    spectators: [...lobby.spectators].map((id) => lobby.members.get(id) ?? '???'),
   };
 }
 
 export function summaries(): LobbySummary[] {
-  return [...lobbies.values()].map((lobby) => ({
-    id: lobby.id,
-    name: lobby.name,
-    host: lobby.members.get(lobby.hostId) ?? '???',
-    players: seatedPlayers(lobby).length,
-    capacity: lobby.humans.length + lobby.dogs.length,
-    running: lobby.running,
-  }));
+  // Offline rooms are solo by definition — listing one would advertise a game
+  // nobody can join.
+  return [...lobbies.values()]
+    .filter((lobby) => !lobby.offline)
+    .map((lobby) => ({
+      id: lobby.id,
+      name: lobby.name,
+      host: lobby.members.get(lobby.hostId) ?? '???',
+      players: seatedPlayers(lobby).length,
+      capacity: lobby.humans.length + lobby.dogs.length,
+      running: lobby.running,
+    }));
 }
 
 /** Every connection currently in any lobby — used to know who *isn't*. */

@@ -149,7 +149,20 @@
       }
       #lobby-start:hover { background: #1a9647; }
       #lobby-back { position: absolute; left: 40px; bottom: 38px; margin: 0; }
-      .hint { margin-top: 20px; color: #4b5563; font-size: 11px; letter-spacing: 0.05em; }
+      .hint { margin-top: 14px; color: #4b5563; font-size: 11px; letter-spacing: 0.05em; }
+
+      /* The bench. Sits under the teams because it belongs to neither. */
+      #spectator-wrap { width: 250px; margin-top: 18px; }
+      #spectator-row[data-state='spectating'] {
+        color: #fff; border-color: #7c3aed; background: #17141f;
+      }
+      #spectator-row[data-state='spectating'] .tag { color: #c4b5fd; }
+      /* Offline hides the whole chat column, and the teams close up around it. */
+      .teams.solo .chat { display: none; }
+      #lobby-notice {
+        margin: 14px 0 0; min-height: 14px;
+        color: #fbbf24; font-size: 12px; letter-spacing: 0.04em;
+      }
     </style>
   </head>
   <body>
@@ -159,7 +172,7 @@
         <div id="screen-title" class="screen active">
           <h1>CORVICK'S COVID CONTINGENCY</h1>
           <p>five officers · one outbreak</p>
-          <button class="menu-btn dim" id="btn-offline" disabled>PLAY OFFLINE</button>
+          <button class="menu-btn" id="btn-offline">PLAY OFFLINE</button>
           <button class="menu-btn" id="btn-online">PLAY ONLINE</button>
         </div>
 
@@ -214,7 +227,16 @@
                      placeholder="press ENTER to say it" />
             </div>
           </div>
-          <p class="hint">click a slot to take it · click its tag to cycle CLOSED → OPEN → BOT</p>
+          <div id="spectator-wrap">
+            <div id="spectator-row" class="slot" data-state="closed">
+              <span>SPECTATOR</span>
+              <button class="tag">OFF</button>
+            </div>
+          </div>
+          <p id="lobby-notice"></p>
+          <p class="hint" id="lobby-hint">
+            click a slot to take it · click its tag to cycle CLOSED → OPEN → BOT
+          </p>
           <button class="back-btn" id="lobby-back">← LEAVE</button>
           <button class="menu-btn" id="lobby-start">START GAME</button>
         </div>
