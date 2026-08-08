@@ -24,6 +24,7 @@ import {
   HUMAN_COUNT,
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
+  BOT_OFFICER_COUNT,
   BUSH_SPEED_MULTIPLIER,
   PATH_BUDGET_PER_TICK,
   ZOMBIE_SPEED_MUL_MIN,
@@ -219,6 +220,9 @@ export interface AiState {
   nextWindowHitAt: number;
   /** Cooldown on scanning for panicking neighbours. */
   nextWitnessCheck: number;
+  /** Loot a bot officer is walking to, and when it last looked. */
+  lootId: string | null;
+  nextLootScanAt: number;
 
   // ------------------------------------------------------------ doors
   /** Shuts the door behind them when they're only wandering about. */
@@ -370,6 +374,8 @@ export interface World {
   /** Recent detonations, cleared once they have been drawn out. */
   blasts: Array<{ x: number; y: number; at: number }>;
   helicopters: Map<string, Helicopter>;
+  /** Officers played by the machine, standing in for absent players. */
+  bots: Set<string>;
   /** Ids of helicopter-dropped troops — they aim far better. */
   soldiers: Set<string>;
   pathBudget: number;
@@ -506,6 +512,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextShotAt: now + Math.random() * 2000,
     nextWindowHitAt: 0,
     nextWitnessCheck: now + Math.random() * 500,
+    lootId: null,
+    nextLootScanAt: 0,
 
     closesDoors: Math.random() < DOOR_CLOSE_BEHIND_CHANCE,
     locksDoors: Math.random() < DOOR_LOCK_BEHIND_CHANCE,
@@ -801,6 +809,7 @@ export function createWorld(): World {
     ducks: [],
     helicopters: new Map(),
     soldiers: new Set(),
+    bots: new Set(),
     pathBudget: PATH_BUDGET_PER_TICK,
     gameOver: false,
     victory: false,
@@ -847,6 +856,7 @@ export function resetWorld(world: World): void {
   world.smokes.clear();
   world.helicopters.clear();
   world.soldiers.clear();
+  world.bots.clear();
   world.trackedTargets.clear();
   world.grapples.clear();
   world.pendingInfections.clear();
@@ -1002,6 +1012,19 @@ function populate(world: World): void {
     const id = `npc-officer-${i}`;
     world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
     world.ai.set(id, newAiState(now, spawn.x, spawn.y));
+  }
+
+  // Bot officers stand in for the players who aren't here. They get the same
+  // starting kit a player does — a pistol and nothing else — and go looking
+  // for the rest of it.
+  for (let i = 0; i < BOT_OFFICER_COUNT; i++) {
+    const spawn = findSpawn(world, ENTITY_RADIUS.officer);
+    const id = `bot-${i}`;
+    world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
+    world.ai.set(id, newAiState(now, spawn.x, spawn.y));
+    world.inventories.set(id, newInventory());
+    world.stamina.set(id, STAMINA_MAX);
+    world.bots.add(id);
   }
 
   // The outbreak walks in from one randomly chosen edge, spread along it.

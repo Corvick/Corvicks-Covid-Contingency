@@ -220,6 +220,14 @@ export const TURNED_LINES = [
 /** A few shelter seekers want the far side of the city, not the near door. */
 export const SHELTER_FURTHEST_CHANCE = 0.07;
 
+/**
+ * Bot officers: the counter-force. They carry real inventories, go looking
+ * for better guns and fire them through the same path a player does.
+ */
+export const BOT_OFFICER_COUNT = 4;
+export const BOT_LOOT_RANGE = 1400;
+export const BOT_LOOT_SCAN_MS = 900;
+
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
 export const OFFICER_REFUGE_RANGE = 900;

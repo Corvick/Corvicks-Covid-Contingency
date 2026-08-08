@@ -100,6 +100,11 @@ import {
   NPC_OFFICER_RETREAT_DIST,
   NPC_OFFICER_SIGHT,
   NPC_OFFICER_TURN_RATE,
+  BOT_LOOT_RANGE,
+  BOT_LOOT_SCAN_MS,
+  PICKUP_REACH,
+  GUN_RANGE,
+  BLAST_RADIUS,
   TARGET_SWITCH_MARGIN,
   FIRST_SIGHT_WINDOW_MS,
   FIRST_SIGHT_CHANCE,
@@ -160,6 +165,9 @@ import {
   DOOR_DEFY_LINES,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
+import { collect, heldItem, type Inventory } from './inventory.js';
+import { ITEMS, type ItemId } from '../../shared/items.js';
+import type { PickupState } from '../../shared/types.js';
 import {
   addPlea,
   clearExpiredPleas,
@@ -191,7 +199,7 @@ import {
   type Entity,
   type World,
 } from './world.js';
-import { fire } from './combat.js';
+import { fire, fireHeld } from './combat.js';
 
 function getAi(world: World, e: Entity, now: number): AiState {
   let state = world.ai.get(e.id);
@@ -2248,6 +2256,189 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
   step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
 }
 
+// ---------------------------------------------------------------- bot officers
+
+/**
+ * Is this gun worth crossing the street for? Bots rank by the damage a trigger
+ * pull actually delivers, so a shotgun's eight pellets count for what they are
+ * rather than for one pellet's damage.
+ */
+function gunWorth(item: ItemId | null): number {
+  if (!item) return 0;
+  const def = ITEMS[item];
+  if (!def || def.kind !== 'gun') return 0;
+  const perShot = ((def.damageMin ?? 0) + (def.damageMax ?? 0)) / 2;
+  return perShot * (def.pellets ?? 1);
+}
+
+/** The best gun in hand, and how good it is. */
+function bestGun(inv: Inventory): { slot: number; worth: number } {
+  let slot = 0;
+  let worth = gunWorth('pistol');
+  for (let i = 0; i < inv.guns.length; i++) {
+    const g = inv.guns[i];
+    if (!g || g.ammo <= 0) continue;
+    const w = gunWorth(g.item);
+    if (w > worth) {
+      worth = w;
+      slot = i + 1;
+    }
+  }
+  return { slot, worth };
+}
+
+/**
+ * Loot this bot would cross the map for: a gun better than what it is holding,
+ * or a box of ammo when its good gun has run dry. Everything else is left for
+ * whoever wants it.
+ */
+function lootWanted(world: World, e: Entity, inv: Inventory, range: number): PickupState | null {
+  const held = bestGun(inv);
+  const dryGun = inv.guns.some((g) => g !== null && g.ammo <= 0);
+
+  let best: PickupState | null = null;
+  let bestScore = -Infinity;
+
+  for (const p of world.pickups.values()) {
+    const dist = Math.hypot(p.x - e.x, p.y - e.y);
+    if (dist > range) continue;
+    if (!world.nav.isReachable(p.x, p.y)) continue;
+
+    let want = 0;
+    if (ITEMS[p.item]?.kind === 'gun') {
+      const worth = gunWorth(p.item);
+      // An empty slot is worth taking anything for; otherwise it has to beat
+      // what we already carry.
+      const hasRoom = inv.guns.some((g) => g === null);
+      if (hasRoom) want = worth;
+      else if (worth > held.worth) want = worth - held.worth;
+    } else if (p.item === 'ammoBox' && dryGun) {
+      want = 40;
+    } else if (p.item === 'kevlar' && inv.kevlar <= 0) {
+      want = 30;
+    }
+    if (want <= 0) continue;
+
+    // Near things first: a marginally better gun across the city isn't worth
+    // the walk with the dead coming.
+    const score = want - dist * 0.06;
+    if (score > bestScore) {
+      bestScore = score;
+      best = p;
+    }
+  }
+  return best;
+}
+
+/**
+ * An officer played by the machine. Unlike the grey NPC officers — who patrol
+ * with a fixed sidearm — a bot carries a real inventory, goes looking for
+ * better guns, and fires them through the same path a player does, so its
+ * shotgun behaves exactly like yours.
+ */
+function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
+  const inv = world.inventories.get(e.id);
+  if (!inv) return;
+
+  if (now >= state.nextSenseAt) {
+    state.nextSenseAt = now + SENSE_INTERVAL_MS;
+    senseThreats(world, e, state, NPC_OFFICER_SIGHT);
+  }
+
+  // Shaken after being grabbed: get clear before thinking about anything else.
+  if (now < state.fleeUntil) {
+    const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
+    step(world, e, state, away, HUMAN_FLEE_SPEED, HUMAN_TURN_RATE, dt, now);
+    return;
+  }
+
+  // Loot lives indoors, so a bot that can't work a door never finds a gun.
+  // Same handling civilians get: opening one takes a moment and leaves
+  // whatever it was walking toward untouched.
+  if (doorTick(world, e, state, now, dt)) return;
+
+  const threat = state.targetId ? world.entities.get(state.targetId) : undefined;
+
+  if (threat && threat.type === 'zombie') {
+    const dx = threat.x - e.x;
+    const dy = threat.y - e.y;
+    const dist = Math.hypot(dx, dy);
+    const aim = Math.atan2(dy, dx);
+
+    // Hold the best thing we have before firing it.
+    const best = bestGun(inv);
+    if (inv.activeSlot !== best.slot) inv.activeSlot = best.slot;
+
+    state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
+    e.facing = state.heading;
+
+    if (Math.abs(angleDelta(state.heading, aim)) < 0.2) {
+      const held = heldItem(inv);
+      const reach = held ? ITEMS[held]?.range ?? GUN_RANGE : GUN_RANGE;
+      // Don't waste a launcher shell on something close enough to splash us.
+      const tooClose = held ? ITEMS[held]?.explosive === true && dist < BLAST_RADIUS * 1.3 : false;
+      if (dist <= reach && !tooClose) fireHeld(world, e, inv, state.heading, now);
+    }
+
+    // Back away from anything that has closed, without turning their back.
+    if (dist < NPC_OFFICER_RETREAT_DIST) {
+      const backward = Math.atan2(-dy, -dx);
+      const speed = speedAt(world, e.x, e.y, HUMAN_WALK_SPEED * 1.2);
+      const stepX = Math.cos(backward) * speed * dt;
+      const stepY = Math.sin(backward) * speed * dt;
+      if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
+        e.x += stepX;
+        e.y += stepY;
+      } else if (!world.nav.isBlocked(e.x + stepX, e.y)) {
+        e.x += stepX;
+      } else if (!world.nav.isBlocked(e.x, e.y + stepY)) {
+        e.y += stepY;
+      }
+    }
+    return;
+  }
+
+  // Nothing to shoot: go shopping. Re-checked on a cadence rather than every
+  // tick, since it sweeps the loot list.
+  if (now >= state.nextLootScanAt) {
+    state.nextLootScanAt = now + BOT_LOOT_SCAN_MS;
+    const want = lootWanted(world, e, inv, BOT_LOOT_RANGE);
+    state.lootId = want ? want.id : null;
+  }
+
+  if (state.lootId !== null) {
+    const target = world.pickups.get(state.lootId);
+    if (!target) {
+      state.lootId = null;
+    } else {
+      const gap = Math.hypot(target.x - e.x, target.y - e.y);
+      if (gap <= PICKUP_REACH) {
+        const result = collect(world, e.id, inv, e.x, e.y);
+        state.lootId = null;
+        // Bring whatever we just took to hand if it beats what we had.
+        const best = bestGun(inv);
+        inv.activeSlot = best.slot;
+        if (result) state.nextLootScanAt = now + 200;
+        return;
+      }
+      // Scraping along something on the way to it counts as not getting there.
+      if (unstickTick(world, e, state, now, dt, HUMAN_WALK_SPEED * 1.45)) return;
+      const desired = headingToward(world, e, state, target.x, target.y, now);
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.45, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
+  }
+
+  // Otherwise patrol, looking for trouble.
+  if (now < state.pauseUntil) return;
+  if (Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 24) {
+    pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.6);
+    return;
+  }
+  const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
+  step(world, e, state, desired, HUMAN_WALK_SPEED * 1.25, HUMAN_TURN_RATE, dt, now);
+}
+
 // ---------------------------------------------------------------- zombies
 
 function senseTarget(world: World, e: Entity, state: AiState): void {
@@ -2784,7 +2975,11 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
 
     const state = getAi(world, e, now);
     if (e.type === 'human') updateHuman(world, e, state, now, dt);
-    else if (e.type === 'officer') updateNpcOfficer(world, e, state, now, dt);
+    else if (e.type === 'officer') {
+      // Bots stand in for the human players; grey NPC officers are separate.
+      if (world.bots.has(e.id)) updateBotOfficer(world, e, state, now, dt);
+      else updateNpcOfficer(world, e, state, now, dt);
+    }
     else if (e.type === 'zombie') updateZombie(world, e, state, now, dt);
   }
 }

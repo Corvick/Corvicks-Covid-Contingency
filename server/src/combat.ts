@@ -31,7 +31,7 @@ import {
   type Entity,
   type World,
 } from './world.js';
-import { heldGunSlot, heldItem } from './inventory.js';
+import { heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { damageDoor } from './doors.js';
 import { scareDucks } from './ducks.js';
 
@@ -257,6 +257,87 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
   }
 }
 
+/**
+ * Pull the trigger on whatever is in hand: cooldown, ammo, and the weapon's
+ * own behaviour. Shared by players and by bot officers, so a bot's shotgun
+ * throws the same pellets and burns the same rounds as yours does.
+ *
+ * Returns true when a shot actually went off.
+ */
+export function fireHeld(world: World, shooter: Entity, inv: Inventory, aim: number, now: number): boolean {
+  const id = shooter.id;
+  const held = heldItem(inv);
+  if (!held) return false;
+
+  // Smoke goes underarm toward the aim point, then calls in the helicopter.
+  if (held === 'smokeGrenade') {
+    const last = world.lastShotAt.get(id) ?? 0;
+    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    world.lastShotAt.set(id, now);
+
+    throwGrenade(
+      world,
+      shooter.x,
+      shooter.y,
+      shooter.x + Math.cos(aim) * GRENADE_THROW_RANGE,
+      shooter.y + Math.sin(aim) * GRENADE_THROW_RANGE,
+      now,
+    );
+    const at = inv.utilities.indexOf('smokeGrenade');
+    if (at >= 0) inv.utilities.splice(at, 1);
+    inv.activeSlot = 0;
+    return true;
+  }
+
+  if (!isGun(held)) return false;
+
+  const def = ITEMS[held];
+  const last = world.lastShotAt.get(id) ?? 0;
+  if (now - last < (def.cooldownMs ?? GUN_COOLDOWN_MS)) return false;
+
+  // The launcher lobs a shell at wherever you're pointing rather than tracing
+  // a line, so it reuses the grenade's flight and detonates there.
+  if (def.explosive) {
+    const slot = heldGunSlot(inv);
+    if (slot) {
+      if (slot.ammo <= 0) return false;
+      slot.ammo--;
+    }
+    world.lastShotAt.set(id, now);
+    const reach = def.range ?? GUN_RANGE;
+    throwGrenade(
+      world,
+      shooter.x,
+      shooter.y,
+      shooter.x + Math.cos(aim) * reach,
+      shooter.y + Math.sin(aim) * reach,
+      now,
+      'frag',
+    );
+    return true;
+  }
+
+  // Everything but the pistol burns rounds.
+  const slot = heldGunSlot(inv);
+  if (slot) {
+    if (slot.ammo <= 0) return false;
+    slot.ammo--;
+  }
+  world.lastShotAt.set(id, now);
+
+  if (held === 'cureGun') {
+    fireSpecial(world, shooter, aim, def, 'cure', now);
+  } else if (held === 'trackerDart') {
+    fireSpecial(world, shooter, aim, def, 'dart', now);
+  } else {
+    const pellets = def.pellets ?? 1;
+    for (let i = 0; i < pellets; i++) {
+      fire(world, shooter, aim, def.bloom ?? GUN_BLOOM_RAD, now, def);
+    }
+  }
+  return true;
+}
+
 export function processShooting(world: World, now: number, frozen: Set<string>): void {
   for (const id of world.playerIds) {
     const shooter = world.entities.get(id);
@@ -268,76 +349,7 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
 
     const inv = world.inventories.get(id);
     if (!inv) continue;
-    const held = heldItem(inv);
-    if (!held) continue;
-
-    // Smoke goes underarm toward the cursor, then calls in the helicopter.
-    if (held === 'smokeGrenade') {
-      const last = world.lastShotAt.get(id) ?? 0;
-      if (now - last < GRENADE_COOLDOWN_MS) continue;
-      world.lastShotAt.set(id, now);
-
-      const range = Math.min(GRENADE_THROW_RANGE, GRENADE_THROW_RANGE);
-      throwGrenade(
-        world,
-        shooter.x,
-        shooter.y,
-        shooter.x + Math.cos(command.aim) * range,
-        shooter.y + Math.sin(command.aim) * range,
-        now,
-      );
-      const at = inv.utilities.indexOf('smokeGrenade');
-      if (at >= 0) inv.utilities.splice(at, 1);
-      inv.activeSlot = 0;
-      continue;
-    }
-
-    if (!isGun(held)) continue;
-
-    const def = ITEMS[held];
-    const last = world.lastShotAt.get(id) ?? 0;
-    if (now - last < (def.cooldownMs ?? GUN_COOLDOWN_MS)) continue;
-
-    // The launcher lobs a shell at wherever you're pointing rather than
-    // tracing a line, so it reuses the grenade's flight and detonates there.
-    if (def.explosive) {
-      const slot = heldGunSlot(inv);
-      if (slot) {
-        if (slot.ammo <= 0) continue;
-        slot.ammo--;
-      }
-      world.lastShotAt.set(id, now);
-      const reach = def.range ?? GUN_RANGE;
-      throwGrenade(
-        world,
-        shooter.x,
-        shooter.y,
-        shooter.x + Math.cos(command.aim) * reach,
-        shooter.y + Math.sin(command.aim) * reach,
-        now,
-        'frag',
-      );
-      continue;
-    }
-
-    // Everything but the pistol burns rounds.
-    const slot = heldGunSlot(inv);
-    if (slot) {
-      if (slot.ammo <= 0) continue;
-      slot.ammo--;
-    }
-
-    world.lastShotAt.set(id, now);
-
-    if (held === 'cureGun') {
-      fireSpecial(world, shooter, command.aim, def, 'cure', now);
-    } else if (held === 'trackerDart') {
-      fireSpecial(world, shooter, command.aim, def, 'dart', now);
-    } else {
-      const pellets = def.pellets ?? 1;
-      for (let i = 0; i < pellets; i++) {
-        fire(world, shooter, command.aim, def.bloom ?? GUN_BLOOM_RAD, now, def);
-      }
-    }
+    fireHeld(world, shooter, inv, command.aim, now);
   }
 }
+
