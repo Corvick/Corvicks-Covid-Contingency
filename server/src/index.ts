@@ -24,6 +24,9 @@ import {
   SPRINT_MULTIPLIER,
   BEACON_THRESHOLD,
   RALLY_STARTING_CHARGES,
+  FOLLOW_STARTING_CHARGES,
+  FOLLOW_SHOUT,
+  FOLLOW_WAIT_SHOUT,
   RALLY_SHOUT,
   RALLY_SHOUT_MS,
   RALLY_NO_CHARGE_LINE,
@@ -51,7 +54,7 @@ import {
   toWire,
   type Entity,
 } from './world.js';
-import { computeFrozen, rallyHumans, updateAi } from './ai.js';
+import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
 import { processShooting } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
@@ -96,6 +99,7 @@ wss.on('connection', (socket) => {
   world.inventories.set(id, newInventory());
   world.stamina.set(id, STAMINA_MAX);
   world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
+  world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
   sockets.set(id, socket);
 
   send(socket, { type: 'welcome', selfId: id, map: world.map });
@@ -116,6 +120,29 @@ wss.on('connection', (socket) => {
         const inv = world.inventories.get(id);
         if (inv && msg.slot >= 0 && msg.slot <= GUN_SLOTS + UTILITY_SLOTS) {
           inv.activeSlot = msg.slot;
+        }
+      } else if (msg.type === 'ability' && msg.ability === 'follow') {
+        const officer = world.entities.get(id);
+        const now = Date.now();
+        if (officer && officer.type === 'officer' && (world.followCharges.get(id) ?? 0) > 0) {
+          // The charge isn't spent here — it goes when they're released, so
+          // one charge buys a full follow-then-wait cycle.
+          const came = followMe(world, id, officer.x, officer.y);
+          if (came > 0) {
+            world.followers.add(id);
+            world.speech.set(id, { text: FOLLOW_SHOUT, until: now + RALLY_SHOUT_MS });
+          }
+          console.log(`[server] ${id} asked ${came} civilians to follow`);
+        }
+      } else if (msg.type === 'ability' && msg.ability === 'wait') {
+        const officer = world.entities.get(id);
+        const now = Date.now();
+        if (officer && world.followers.has(id)) {
+          const held = holdPosition(world, id);
+          world.followers.delete(id);
+          world.followCharges.set(id, Math.max(0, (world.followCharges.get(id) ?? 0) - 1));
+          world.speech.set(id, { text: FOLLOW_WAIT_SHOUT, until: now + RALLY_SHOUT_MS });
+          console.log(`[server] ${id} told ${held} civilians to hold`);
         }
       } else if (msg.type === 'ability' && msg.ability === 'rally') {
         const officer = world.entities.get(id);
@@ -401,6 +428,8 @@ function tick(): void {
       doorPrompt: doorPromptFor(world, id),
       speech,
       rallyCharges: world.rallyCharges.get(id) ?? 0,
+      followCharges: world.followCharges.get(id) ?? 0,
+      following: world.followers.has(id),
       pickups: viewer ? visiblePickups(viewer) : Array.from(world.pickups.values()),
       inventory: toWireInventory(
         world,

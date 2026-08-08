@@ -156,6 +156,24 @@ export const FIRST_SIGHT_LINES = [
   'It looked at me!',
 ];
 
+/**
+ * Kevlar denies a grab outright rather than absorbing damage: the grapple
+ * lasts a moment, ends with no infection, and costs one of three uses. Spent,
+ * the vest is gone from the slot it was taking up.
+ */
+export const KEVLAR_GRAPPLE_MS = 500;
+
+/**
+ * "Follow me" is a shorter shout than the rally — you are asking the people
+ * around you, not the whole street.
+ */
+export const FOLLOW_RADIUS = 340;
+export const FOLLOW_ARRIVE_DIST = 62;
+export const FOLLOW_SPEED_MUL = 1.5;
+export const FOLLOW_STARTING_CHARGES = 1;
+export const FOLLOW_SHOUT = "Follow me!";
+export const FOLLOW_WAIT_SHOUT = "Wait here!";
+
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
 export const OFFICER_REFUGE_RANGE = 900;
@@ -631,7 +649,7 @@ export const TAP_MAX_MS = 220;
 /** Most houses are empty — this is the chance a building contains loot. */
 export const BUILDING_LOOT_CHANCE = 0.22;
 /** Hits a kevlar vest soaks before it's spent. */
-export const KEVLAR_POINTS = 2;
+export const KEVLAR_POINTS = 3;
 /** How long a tracker dart keeps a target lit up. */
 export const TRACKER_DART_MS = 30000;
 /** TESTING: scatter one of every item around player one's start point. */

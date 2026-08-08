@@ -54,7 +54,7 @@ import {
   type Viewport,
 } from './render.js';
 import { visibilityPolygon, type Point as FogPoint } from './fog.js';
-import { drawTargetCursor, drawWheel, hitTest, newWheelState, WHEEL_OPTIONS } from './wheel.js';
+import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import type { AbilityId } from '../../shared/types.js';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -100,6 +100,9 @@ let doorPrompt: DoorPrompt | null = null;
 /** Bumped whenever a door opens or shuts, to invalidate the fog occluders. */
 let doorEpoch = 0;
 let rallyCharges = 0;
+let followCharges = 0;
+/** True while civilians are in tow, so the wheel offers the release order. */
+let following = false;
 let pickups: PickupState[] = [];
 let inventory: InventoryState | null = null;
 let grenades: GrenadeState[] = [];
@@ -117,6 +120,13 @@ let worstFrameMs = 0;
 let worstResetAt = 0;
 
 const input = trackInput(canvas);
+
+/** Whether the wheel should offer an ability, or grey it out and refuse it. */
+function abilityUsable(id: AbilityId): boolean {
+  if (id === "rally") return rallyCharges > 0;
+  if (id === "follow") return followCharges > 0;
+  return true; // releasing people you already have costs nothing
+}
 
 /**
  * `?spectate` on the URL drops straight into spectator mode on connect,
@@ -172,6 +182,8 @@ const { send } = connect((msg) => {
     }
     doorPrompt = msg.doorPrompt;
     rallyCharges = msg.rallyCharges;
+    followCharges = msg.followCharges;
+    following = msg.following;
     pickups = msg.pickups;
     inventory = msg.inventory;
     grenades = msg.grenades;
@@ -228,17 +240,25 @@ canvas.addEventListener(
 
     if (wheel.open) {
       e.stopImmediatePropagation();
+      const options = wheelOptions(following);
       const index = hitTest(wheel, input.mouseX, input.mouseY);
       if (index < 0) return;
 
-      if (rallyCharges <= 0) {
+      const picked = options[index];
+      if (!abilityUsable(picked.id)) {
         wheel.deniedAt = performance.now();
         wheel.deniedIndex = index;
-        send({ type: 'ability', ability: WHEEL_OPTIONS[index].id, x: 0, y: 0 });
+        send({ type: 'ability', ability: picked.id, x: 0, y: 0 });
         return; // wheel deliberately stays open
       }
 
-      armedAbility = WHEEL_OPTIONS[index].id;
+      // Only the rally needs somewhere to point at; follow and wait are about
+      // the people already around you, so they fire on the spot.
+      if (picked.id === 'rally') {
+        armedAbility = picked.id;
+      } else {
+        send({ type: 'ability', ability: picked.id, x: 0, y: 0 });
+      }
       wheel.open = false;
       return;
     }
@@ -772,7 +792,14 @@ function render() {
     drawStamina(ctx, stamina, STAMINA_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, exhausted);
     if (wheel.open) {
       wheel.hover = hitTest(wheel, input.mouseX, input.mouseY);
-      drawWheel(ctx, wheel, rallyCharges, now);
+      drawWheel(
+        ctx,
+        wheel,
+        wheelOptions(following),
+        (o) => abilityUsable(o.id),
+        (o) => (o.id === "rally" ? rallyCharges : o.id === "follow" ? followCharges : null),
+        now,
+      );
     }
     // An armed order swaps the crosshair for a blue placement arrow.
     if (armedAbility) drawTargetCursor(ctx, input.mouseX, input.mouseY, now);

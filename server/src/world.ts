@@ -127,6 +127,8 @@ export interface AiState {
   staysIndoors: boolean;
   /** What this person does on seeing someone else run. */
   witness: 'ignore' | 'follow' | 'investigate';
+  /** Player this civilian is tagging along behind, or null. */
+  followingId: string | null;
   /** Partner they stroll and panic with, if any. */
   partnerId: string | null;
   /** Still hand in hand. Once let go, they only loosely follow each other. */
@@ -347,6 +349,9 @@ export interface World {
   speech: Map<string, { text: string; until: number }>;
   /** Remaining rally shouts per player. */
   rallyCharges: Map<string, number>;
+  /** Remaining follow commands, and who currently has people in tow. */
+  followCharges: Map<string, number>;
+  followers: Set<string>;
   /** Loot lying on the floor, keyed by pickup id. */
   pickups: Map<string, PickupState>;
   inventories: Map<string, Inventory>;
@@ -431,6 +436,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     fleeStyle: Math.random() < BOLT_FLEE_CHANCE ? 'bolt' : 'safest',
     staysIndoors: Math.random() < INDOOR_STAY_CHANCE,
     witness: rollWitness(),
+    followingId: null,
     partnerId: null,
     handHeld: false,
     coupleLead: false,
@@ -773,6 +779,8 @@ export function createWorld(): World {
     materializeUntil: new Map(),
     speech: new Map(),
     rallyCharges: new Map(),
+    followCharges: new Map(),
+    followers: new Set(),
     pickups: new Map(),
     inventories: new Map(),
     trackedTargets: new Map(),
@@ -1166,6 +1174,8 @@ export function toWire(world: World, e: Entity, viewerIsZombie = false, now = Da
   const ai = world.ai.get(e.id);
   if (ai && ai.handHeld && ai.partnerId) state.hand = ai.partnerId;
   if (ai && now < ai.breakingUntil) state.breaking = true;
+  const worn = world.inventories.get(e.id);
+  if (worn && worn.kevlar > 0) state.armour = true;
 
   const line = world.speech.get(e.id);
   if (line !== undefined) {

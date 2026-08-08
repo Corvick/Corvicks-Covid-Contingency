@@ -6,7 +6,20 @@ export interface WheelOption {
 }
 
 /** Radial ability menu, held open with Q. */
-export const WHEEL_OPTIONS: WheelOption[] = [{ id: 'rally', label: 'GET OVER THERE!' }];
+/**
+ * The follow slot cycles: asking people to come with you turns it into the
+ * order that releases them, and once they are released it reverts — greyed out
+ * until a lozenge buys another use.
+ */
+export function wheelOptions(following: boolean): WheelOption[] {
+  return [
+    { id: 'rally', label: 'GET OVER THERE!' },
+    following ? { id: 'wait', label: 'WAIT HERE' } : { id: 'follow', label: 'FOLLOW ME!' },
+  ];
+}
+
+/** Kept for the hit test's arithmetic; the labels come from wheelOptions. */
+export const WHEEL_OPTIONS: WheelOption[] = wheelOptions(false);
 
 const RADIUS = 118;
 const INNER = 46;
@@ -47,7 +60,9 @@ export function hitTest(wheel: WheelState, mx: number, my: number): number {
 export function drawWheel(
   ctx: CanvasRenderingContext2D,
   wheel: WheelState,
-  charges: number,
+  options: WheelOption[],
+  usableFor: (option: WheelOption) => boolean,
+  chargesFor: (option: WheelOption) => number | null,
   now: number,
 ): void {
   if (!wheel.open) return;
@@ -58,14 +73,14 @@ export function drawWheel(
   ctx.arc(wheel.cx, wheel.cy, RADIUS + 16, 0, Math.PI * 2);
   ctx.fill();
 
-  const count = WHEEL_OPTIONS.length;
+  const count = options.length;
   const slice = (Math.PI * 2) / count;
 
   for (let i = 0; i < count; i++) {
     const start = -Math.PI / 2 - slice / 2 + i * slice;
     const end = start + slice;
     const hovered = wheel.hover === i;
-    const usable = charges > 0;
+    const usable = usableFor(options[i]);
 
     // Flash red briefly when a click is refused for lack of charges.
     const deniedAge = now - wheel.deniedAt;
@@ -94,11 +109,15 @@ export function drawWheel(
     ctx.font = 'bold 12px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(WHEEL_OPTIONS[i].label, tx, ty);
+    ctx.fillText(options[i].label, tx, ty);
 
-    ctx.fillStyle = usable ? '#7dd3fc' : '#f87171';
-    ctx.font = '11px sans-serif';
-    ctx.fillText(`${charges} charge${charges === 1 ? '' : 's'}`, tx, ty + 16);
+    // Releasing people you already have costs nothing, so it carries no count.
+    const left = chargesFor(options[i]);
+    if (left !== null) {
+      ctx.fillStyle = usable ? '#7dd3fc' : '#f87171';
+      ctx.font = '11px sans-serif';
+      ctx.fillText(`${left} charge${left === 1 ? '' : 's'}`, tx, ty + 16);
+    }
   }
 
   // Hub

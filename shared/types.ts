@@ -24,6 +24,8 @@ export interface EntityState {
   materializing?: boolean;
   /** Speech bubble text, while one is active. */
   say?: string;
+  /** Wearing kevlar — drawn as a grey band inside the body. */
+  armour?: boolean;
   /** Tearing at a door — the client claws its arms at it. */
   breaking?: boolean;
   /** Id of the partner whose hand they're holding, if any. */
@@ -168,7 +170,7 @@ export interface InputState {
   right: boolean;
 }
 
-export type AbilityId = 'rally';
+export type AbilityId = 'rally' | 'follow' | 'wait';
 
 /** A lootable item lying on the floor. */
 export interface PickupState {
@@ -242,6 +244,10 @@ export type ServerMessage =
       speech: SpeechState[];
       /** Remaining uses of the rally shout. */
       rallyCharges: number;
+      /** Remaining uses of the follow command. */
+      followCharges: number;
+      /** True once people are following, so the wheel offers "Wait" instead. */
+      following: boolean;
       pickups: PickupState[];
       inventory: InventoryState;
       grenades: GrenadeState[];

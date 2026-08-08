@@ -75,6 +75,10 @@ import {
   ESCAPE_CHANCE_PER_EXTRA_ZOMBIE,
   ESCAPE_SPEED_MULTIPLIER,
   ESCAPE_BOOST_MS,
+  KEVLAR_GRAPPLE_MS,
+  FOLLOW_RADIUS,
+  FOLLOW_ARRIVE_DIST,
+  FOLLOW_SPEED_MUL,
   INSTANT_INFECT_BASE,
   INSTANT_INFECT_PER_EXTRA_ZOMBIE,
   INSTANT_INFECT_PER_PRIOR_GRAPPLE,
@@ -1688,6 +1692,48 @@ function spotRunner(world: World, e: Entity): Entity | null {
   return null;
 }
 
+/**
+ * Ask the people immediately around you to come with you. A shorter shout than
+ * the rally — you are talking to the ones near you, not the whole street.
+ */
+export function followMe(world: World, leaderId: string, x: number, y: number): number {
+  let count = 0;
+  const now = Date.now();
+  for (const e of world.entities.values()) {
+    if (e.type !== 'human') continue;
+    if (Math.hypot(e.x - x, e.y - y) > FOLLOW_RADIUS) continue;
+
+    const state = world.ai.get(e.id) ?? newAiState(now, e.x, e.y);
+    world.ai.set(e.id, state);
+    state.followingId = leaderId;
+    state.mode = 'wander';
+    state.rallyX = null;
+    state.rallyY = null;
+    state.path = null;
+    state.nextPathAt = 0;
+    state.pauseUntil = 0;
+    count++;
+  }
+  return count;
+}
+
+/** Tell whoever is following you to hold where they stand. */
+export function holdPosition(world: World, leaderId: string): number {
+  let count = 0;
+  for (const e of world.entities.values()) {
+    const state = world.ai.get(e.id);
+    if (!state || state.followingId !== leaderId) continue;
+    state.followingId = null;
+    state.mode = 'rallied';
+    state.rallyX = e.x;
+    state.rallyY = e.y;
+    state.path = null;
+    state.nextPathAt = 0;
+    count++;
+  }
+  return count;
+}
+
 /** Send every civilian within earshot to a point, and make them hold it. */
 export function rallyHumans(world: World, originX: number, originY: number, x: number, y: number): number {
   let count = 0;
@@ -1893,6 +1939,26 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
         : skirtThreat(world, e, state, safestHeading(world, e, state));
     step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
     return;
+  }
+
+  // Following someone outranks wandering, but not running for your life —
+  // this sits below the flee branch on purpose.
+  if (state.followingId !== null) {
+    const leader = world.entities.get(state.followingId);
+    if (!leader || leader.type === 'zombie') {
+      state.followingId = null;
+    } else {
+      const gap = Math.hypot(leader.x - e.x, leader.y - e.y);
+      if (gap > FOLLOW_ARRIVE_DIST) {
+        const desired = headingToward(world, e, state, leader.x, leader.y, now);
+        step(world, e, state, desired, HUMAN_WALK_SPEED * FOLLOW_SPEED_MUL, HUMAN_TURN_RATE, dt, now);
+      } else {
+        // Close enough — face roughly where they're facing and wait on them.
+        state.heading = turnToward(state.heading, leader.facing, HUMAN_TURN_RATE * dt);
+        e.facing = state.heading;
+      }
+      return;
+    }
   }
 
   // A rally shout outranks ordinary wandering once the coast is clear.
@@ -2419,9 +2485,14 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
         return;
       }
       if (!session) {
+        // A vest turns a grab into a brief scuffle it loses.
+        const vest = world.inventories.get(target.id);
+        const armoured = vest !== undefined && vest.kevlar > 0;
         session = {
           zombieIds: new Set(),
-          endsAt: now + GRAPPLE_MIN_MS + Math.random() * (GRAPPLE_MAX_MS - GRAPPLE_MIN_MS),
+          endsAt: armoured
+            ? now + KEVLAR_GRAPPLE_MS
+            : now + GRAPPLE_MIN_MS + Math.random() * (GRAPPLE_MAX_MS - GRAPPLE_MIN_MS),
         };
         world.grapples.set(target.id, session);
       }
@@ -2533,6 +2604,20 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
 
   const target = world.entities.get(targetId);
   if (!target) return;
+
+  // Kevlar denies the grab outright: no infection, one use spent, and the vest
+  // is gone once its third use goes. It is the whole outcome, not a modifier
+  // on one — nothing below this runs.
+  const inv = world.inventories.get(targetId);
+  if (inv && inv.kevlar > 0) {
+    inv.kevlar--;
+    if (inv.kevlar <= 0) {
+      const at = inv.utilities.indexOf('kevlar');
+      if (at >= 0) inv.utilities.splice(at, 1);
+    }
+    world.speedBoosts.set(targetId, now + ESCAPE_BOOST_MS);
+    return;
+  }
 
   // An NPC officer who gets grabbed loses their nerve and runs for a while.
   if (target.type === 'officer' && !world.playerIds.has(target.id)) {

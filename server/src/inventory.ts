@@ -106,11 +106,16 @@ function applyUtility(world: World, playerId: string, inv: Inventory, item: Item
   // Some utilities are consumed the moment they're picked up.
   if (item === 'lozenge') {
     world.rallyCharges.set(playerId, (world.rallyCharges.get(playerId) ?? 0) + RALLY_STARTING_CHARGES);
+    // A lozenge also buys back a follow command.
+    world.followCharges.set(playerId, (world.followCharges.get(playerId) ?? 0) + 1);
     return true;
   }
+  // Kevlar is worn, not consumed on pickup — it takes up a utility slot until
+  // its three uses are spent, so wearing one costs you a slot you could have
+  // filled with something else.
   if (item === 'kevlar') {
     inv.kevlar = KEVLAR_POINTS;
-    return true;
+    return false;
   }
   if (item === 'riotShield') {
     inv.shield = true;

@@ -489,6 +489,16 @@ export function drawEntity(
     ctx.globalAlpha = 1;
   }
 
+  // Kevlar reads as a grey band inside the body rather than a halo around it,
+  // so it never competes with the white self-ring or the infected ring.
+  if (e.armour) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(203, 213, 225, 0.85)';
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 0.66, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   if (isSelf) {
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#ffffff';
