@@ -83,6 +83,7 @@ fogCanvas.width = Math.round(VIEWPORT_WIDTH * FOG_MASK_SCALE);
 fogCanvas.height = Math.round(VIEWPORT_HEIGHT * FOG_MASK_SCALE);
 const fogCtx = fogCanvas.getContext('2d')!;
 
+const pausePanel = document.getElementById('pause') as HTMLDivElement;
 const gameOverPanel = document.getElementById('game-over') as HTMLDivElement;
 const gameOverRestart = document.getElementById('game-over-restart') as HTMLButtonElement;
 const victoryPanel = document.getElementById('victory') as HTMLDivElement;
@@ -155,6 +156,9 @@ const startSpectating = spectateParam !== null;
  * skips the front end entirely.
  */
 let started = startSpectating;
+/** This round is offline, so it is ours alone to pause. */
+let solo = false;
+let paused = false;
 if (startSpectating) document.getElementById('shell')!.classList.add('hidden');
 
 const { send } = connect((msg) => {
@@ -242,8 +246,11 @@ const frontEnd = startSpectating
   ? null
   : setupMenu({
       send,
-      onStart: () => {
+      onStart: (offline) => {
         started = true;
+        solo = offline;
+        paused = false;
+        pausePanel.classList.add('hidden');
         // A digit typed into the chat box latched a slot key on the way past.
         input.slotPressed = -1;
       },
@@ -253,6 +260,9 @@ const frontEnd = startSpectating
 /** Put the round down. Nothing about it should carry into the next one. */
 function standDown(): void {
   started = false;
+  solo = false;
+  paused = false;
+  pausePanel.classList.add('hidden');
   wheel.open = false;
   armedAbility = null;
   input.deploy = false;
@@ -282,8 +292,11 @@ window.addEventListener('keydown', (e) => {
   // The front end has its own back buttons; this all belongs to a round.
   if (!started) return;
   if (e.code === 'Escape') {
-    // Back out of an armed order first, rather than quitting the round.
+    // Back out of an armed order first, rather than pausing or quitting.
     if (armedAbility) armedAbility = null;
+    // A solo round can be stopped and thought about. One with other people in
+    // it cannot, so Escape there is still the way out.
+    else if (solo) setPaused(!paused);
     else quitToMenu();
   }
   // Hold Q to open the ability wheel, always centred on the viewport.
@@ -415,6 +428,26 @@ function applyZoom(): void {
 // everyone stands. A new round is a new lobby now.
 gameOverRestart.addEventListener('click', quitToMenu);
 victoryRestart.addEventListener('click', quitToMenu);
+
+/**
+ * Stop the world, or start it again. The server is what actually freezes —
+ * this only asks — but the panel goes up straight away so it doesn't feel
+ * like a round trip.
+ */
+function setPaused(on: boolean): void {
+  if (!solo) return;
+  paused = on;
+  pausePanel.classList.toggle('hidden', !on);
+  send({ type: 'lobbyPause', on });
+}
+
+document.getElementById('pause-resume')!.addEventListener('click', () => setPaused(false));
+document.getElementById('pause-restart')!.addEventListener('click', () => {
+  paused = false;
+  pausePanel.classList.add('hidden');
+  send({ type: 'lobbyRestart' });
+});
+document.getElementById('pause-quit')!.addEventListener('click', quitToMenu);
 
 /**
  * Server visibility is binary, so entities would otherwise pop in and out at

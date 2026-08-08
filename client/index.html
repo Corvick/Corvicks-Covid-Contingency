@@ -246,7 +246,18 @@
       <div id="hud"></div>
       <div id="perf"></div>
 
-      <!-- Escape quits straight to the front end, so there is no pause panel. -->
+      <!-- Solo only. In a round with other people, Escape quits outright —
+           there is nothing to pause that isn't also somebody else's game. -->
+      <div id="pause" class="overlay hidden">
+        <div class="panel">
+          <h2>Paused</h2>
+          <p>Esc to resume</p>
+          <button id="pause-resume">Resume</button>
+          <button id="pause-restart" class="secondary">Restart</button>
+          <button id="pause-quit" class="secondary">Quit to main menu</button>
+        </div>
+      </div>
+
       <div id="game-over" class="overlay hidden">
         <div class="panel">
           <h2>Game Over</h2>

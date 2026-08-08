@@ -14,8 +14,12 @@ import type {
  */
 export interface MenuHooks {
   send: (msg: ClientMessage) => void;
-  /** Our lobby's round has begun; the game takes the screen from here. */
-  onStart: () => void;
+  /**
+   * Our lobby's round has begun; the game takes the screen from here. `solo`
+   * says whether it can be paused — only an offline round can, since nobody
+   * else is in it.
+   */
+  onStart: (solo: boolean) => void;
   /**
    * The lobby went away under us — the host quit, taking the round with them.
    * The game has to stand down whether or not we asked it to.
@@ -321,7 +325,7 @@ export function setupMenu(hooks: MenuHooks): Menu {
         hooks.onEnd();
       } else if (msg.type === 'start') {
         shell.classList.add('hidden');
-        hooks.onStart();
+        hooks.onStart(view?.offline === true);
       }
     },
   };

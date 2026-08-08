@@ -118,6 +118,7 @@ import {
   STAMINA_RECOVERY_THRESHOLD,
   GUN_SLOTS,
   UTILITY_SLOTS,
+  WALL_TURN_PROBE,
   PICKUP_REACH,
   GUN_RANGE,
   BLAST_RADIUS,
@@ -446,6 +447,56 @@ function unstickTick(
     return true;
   }
   return false;
+}
+
+/**
+ * About to walk into something while merely wandering or searching. There is
+ * nothing on the far side worth pressing for, so turn on the spot and go the
+ * other way — `unstickTick` gets there eventually, but only after a second of
+ * grinding along the wall, which is what it looks like from the outside.
+ *
+ * Reverse first, then fan out either side of that: a straight reversal in a
+ * corner only picks the other wall. Returns true if it turned.
+ */
+function turnAtWall(world: World, e: Entity, state: AiState): boolean {
+  const aheadX = e.x + Math.cos(state.heading) * WALL_TURN_PROBE;
+  const aheadY = e.y + Math.sin(state.heading) * WALL_TURN_PROBE;
+  if (!world.nav.isBlocked(aheadX, aheadY)) return false;
+
+  const back = state.heading + Math.PI;
+  for (const offset of [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8, 2.4, -2.4]) {
+    const angle = back + offset;
+    const px = e.x + Math.cos(angle) * WALL_TURN_PROBE;
+    const py = e.y + Math.sin(angle) * WALL_TURN_PROBE;
+    if (world.nav.isBlocked(px, py)) continue;
+    state.heading = angle;
+    e.facing = angle;
+    return true;
+  }
+
+  // Boxed in on every bearing. Turn round anyway — collision will sort the
+  // rest out, and facing the way you came beats facing the wall.
+  state.heading = back;
+  e.facing = back;
+  return true;
+}
+
+/**
+ * The same thing for anyone steering toward a wander target: turn away, and
+ * throw the target away too, or they'd steer straight back into it next tick.
+ */
+function turnAtWallAndRepick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+  radius = HUMAN_WANDER_RADIUS,
+): boolean {
+  if (!turnAtWall(world, e, state)) return false;
+  pickWanderTarget(world, e, state, now, false, radius);
+  state.path = null;
+  state.nextPathAt = 0;
+  return true;
 }
 
 function pickWanderTarget(
@@ -2124,6 +2175,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
         if (Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 24) {
           pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.4);
         }
+        if (turnAtWallAndRepick(world, e, state, now, HUMAN_WANDER_RADIUS * 1.4)) return;
         const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
         step(world, e, state, desired, HUMAN_WALK_SPEED * PANIC_SPEED_MULTIPLIER, HUMAN_TURN_RATE, dt, now);
         return;
@@ -2215,6 +2267,9 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     state.lastY = e.y;
   }
 
+  // Nose to the wall: turn away and pick somewhere else to stroll to.
+  if (turnAtWallAndRepick(world, e, state, now)) return;
+
   // Someone who has seen one of those things never quite strolls again.
   const pace = HUMAN_WALK_SPEED * (state.sawZombie ? SHAKEN_WALK_MULTIPLIER : 1);
   const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
@@ -2291,6 +2346,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     pickWanderTarget(world, e, state, now);
     return;
   }
+  if (turnAtWallAndRepick(world, e, state, now)) return;
   const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
   step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
 }
@@ -3018,6 +3074,12 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
   if (now >= state.nextTurnAt) {
     state.nextTurnAt = now + 1800 + Math.random() * 2600;
     state.wanderX = Math.random() * Math.PI * 2; // reused as a stashed heading
+  }
+  // Walked into a wall on the way. Turn round now rather than leaning on it
+  // for the up-to-four seconds until the next scheduled turn comes round.
+  if (turnAtWall(world, e, state)) {
+    state.wanderX = state.heading;
+    state.nextTurnAt = now + 1800 + Math.random() * 2600;
   }
   step(world, e, state, state.wanderX, ZOMBIE_SEARCH_SPEED, ZOMBIE_TURN_RATE, dt, now);
 }

@@ -357,6 +357,20 @@ wss.on('connection', (socket) => {
       } else if (msg.type === 'lobbyStart') {
         const lobby = lobbyOf(id);
         if (lobby && lobby.hostId === id) startLobby(lobby);
+      } else if (msg.type === 'lobbyPause') {
+        // Solo only. In a room with other people your panel is your business,
+        // not a reason for their city to stop.
+        const lobby = lobbyOf(id);
+        if (lobby && lobby.offline && lobby.running) world.paused = msg.on;
+      } else if (msg.type === 'lobbyRestart') {
+        const lobby = lobbyOf(id);
+        if (lobby && lobby.hostId === id && lobby.running) {
+          // Clearing `running` first is what lets startLobby through — it
+          // refuses while a round is up, which is exactly what this replaces.
+          lobby.running = false;
+          world.paused = false;
+          startLobby(lobby);
+        }
       } else if (msg.type === 'lobbyLeave') {
         const left = leaveLobby(id);
         despawnPlayer(id);
@@ -575,22 +589,27 @@ function tick(): void {
 
   world.pathBudget = PATH_BUDGET_PER_TICK;
 
-  // Glass smashed last tick opened a new way through — take it in once here,
-  // rather than once per pane.
-  if (world.navDirty) rebuildNav(world);
+  // Paused: nothing in the world advances, but snapshots keep going out so the
+  // frozen scene stays on screen behind the panel. Only ever set by a solo
+  // round — pausing one with other people in it would stop their game too.
+  if (!world.paused) {
+    // Glass smashed last tick opened a new way through — take it in once here,
+    // rather than once per pane.
+    if (world.navDirty) rebuildNav(world);
 
-  rebuildEntityGrid(world);
-  const frozen = computeFrozen(world);
+    rebuildEntityGrid(world);
+    const frozen = computeFrozen(world);
 
-  updatePlayers(dt, frozen);
-  updateAi(world, now, dt, frozen);
-  resolveCollisions(world);
+    updatePlayers(dt, frozen);
+    updateAi(world, now, dt, frozen);
+    resolveCollisions(world);
 
-  rebuildEntityGrid(world);
-  processInteractions(now);
-  processShooting(world, now, frozen);
-  updateAirSupport(world, now, dt);
-  updateDucks(world, now, dt);
+    rebuildEntityGrid(world);
+    processInteractions(now);
+    processShooting(world, now, frozen);
+    updateAirSupport(world, now, dt);
+    updateDucks(world, now, dt);
+  }
 
   const survivors = countSurvivors(world);
   const zombies = countZombies(world);

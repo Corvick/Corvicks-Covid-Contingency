@@ -334,7 +334,14 @@ export type ClientMessage =
   | { type: 'lobbyChat'; text: string }
   | { type: 'lobbyLeave' }
   /** Host only. Also what the host's "go" in chat resolves to. */
-  | { type: 'lobbyStart' };
+  | { type: 'lobbyStart' }
+  /**
+   * Freeze a solo round while its panel is up. Refused for a lobby with other
+   * people in it — pausing theirs is not yours to do.
+   */
+  | { type: 'lobbyPause'; on: boolean }
+  /** Same lobby, same slots, fresh city. */
+  | { type: 'lobbyRestart' };
 
 export type LobbyTeam = 'humans' | 'dogs';
 

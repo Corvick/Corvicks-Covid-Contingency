@@ -75,9 +75,13 @@ The socket is live behind it, but `started` in `main.ts` gates both the input
 loop and `render`, so keys pressed at the menu don't drive an officer standing
 in a city nobody is looking at. `?spectate` skips the shell entirely.
 
-**Escape quits the round outright** — it leaves the lobby, which is what takes
-you out of the world, so there is no pause panel and no in-place restart. Both
-endings go back to the front end too. A new round is a new lobby.
+**Escape depends on who else is in the round.** Offline it raises the pause
+panel — Resume / Restart / Quit — and `world.paused` freezes the simulation
+while snapshots keep going out, so the frozen scene stays on screen behind it.
+Online it quits outright, because there is nothing there to pause that isn't
+also somebody else's game. Both endings go back to the front end either way; a
+new round is a new lobby. Restart clears `lobby.running` first, since
+`startLobby` refuses while a round is up — which is exactly what it replaces.
 
 A lobby slot is `closed | open | bot | player`. Clicking a **row** seats you in
 it (leaving `open` behind you, and taking a bot's place if it had one);
@@ -287,6 +291,12 @@ magazine, which made swapping a way to manufacture ammo.
   destination and path to it. Direction-only steering walked them into walls.
   This applies to `retreat` as well as `flee`: retreat runs for many seconds, so
   a raw bearing away from the threat parks them on the first wall behind them.
+- **Walking into a wall turns you round on the spot** (`turnAtWall`), but only
+  while wandering or searching — there is nothing beyond it worth pressing for.
+  `unstickTick` gets there too, a second later, and a second of grinding along
+  a wall is exactly what it looks like from the outside. Chasing and fleeing
+  deliberately keep pressing: they have a reason to. Measured over three seeds,
+  zombie search-grinding went from ~600 samples per 45s to ~2.
 - **Anything that notices it is getting nowhere** (`unstickTick`) picks its way
   out from directions that are actually walkable — `nav.lineClear`, not just "the
   far end of the probe is empty", which called a direction clear whenever the

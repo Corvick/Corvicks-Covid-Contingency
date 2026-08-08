@@ -813,6 +813,13 @@ export const SOLDIER_COLOR = '#4d7c3f';
 export const BEACON_THRESHOLD = 10;
 
 // ---------------------------------------------------------------- pathfinding
+/**
+ * How far ahead a wandering or searching entity looks for a wall. Comfortably
+ * past NAV_INFLATE, so it fires on genuine contact rather than on walking down
+ * a corridor with a wall alongside.
+ */
+export const WALL_TURN_PROBE = 26;
+
 export const NAV_CELL = 14;
 export const NAV_INFLATE = 10; // wall padding; below entity radius so doorways stay open
 export const PATH_BUDGET_PER_TICK = 10;

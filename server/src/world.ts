@@ -399,6 +399,8 @@ export interface World {
   bots: Set<string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
+  /** Frozen: a solo round with its pause panel up. */
+  paused: boolean;
   /** Gamertag per connected player, as given at the front end. */
   names: Map<string, string>;
   /** Ids of helicopter-dropped troops — they aim far better. */
@@ -842,6 +844,7 @@ export function createWorld(): World {
     soldiers: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
+    paused: false,
     names: new Map(),
     pathBudget: PATH_BUDGET_PER_TICK,
     gameOver: false,
@@ -902,6 +905,7 @@ export function resetWorld(world: World): void {
   world.spectators.clear();
   world.gameOver = false;
   world.victory = false;
+  world.paused = false;
 
   populate(world);
   spawnPickups(world, playerOneStart(world));
