@@ -48,6 +48,8 @@ import {
   DOOR_BEG_HOLD_CHANCE,
   DOOR_OPENS_FOR_STRANGERS_CHANCE,
   DOOR_SLAM_CHANCE,
+  ZOMBIE_SMART_SHARE,
+  OFFICER_SEEK_CHANCE,
   RALLY_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
   BOLT_FLEE_CHANCE,
@@ -240,6 +242,12 @@ export interface AiState {
   lockAlso: number;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
+  /** Bright enough to leave a room it has cleared. */
+  smartZombie: boolean;
+  /** When the room it is in last looked empty, or 0. */
+  roomClearSince: number;
+  /** Runs to whoever has a gun rather than to a door. */
+  officerSeeker: boolean;
   /** When this one first noticed it was getting nowhere, or 0. */
   stuckSince: number;
   /** Freshly turned: no interest in doors while there is prey about. */
@@ -496,6 +504,9 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextSlamCheck: 0,
     lockAlso: -1,
     doorWaitUntil: 0,
+    smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
+    roomClearSince: 0,
+    officerSeeker: Math.random() < OFFICER_SEEK_CHANCE,
     stuckSince: 0,
     freshUntil: 0,
     breakingUntil: 0,

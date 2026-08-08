@@ -112,6 +112,29 @@ export const ZOMBIE_POST_GRAPPLE_SLOW = 0.5;
 export const ZOMBIE_POST_GRAPPLE_MS = 2600;
 
 /**
+ * A badly shot zombie drags. Nothing changes above this fraction of health;
+ * below it the pace falls off linearly to `ZOMBIE_HURT_SLOWEST` at 1 HP, so
+ * emptying a magazine into one is worth doing even when it doesn't drop.
+ */
+export const ZOMBIE_HURT_THRESHOLD = 0.4;
+export const ZOMBIE_HURT_SLOWEST = 0.5;
+
+/**
+ * Share of zombies bright enough to leave a room they've cleared, making for a
+ * door rather than milling about in it. The rest stay dumb, which is what
+ * keeps buildings populated instead of everything draining into the streets.
+ */
+export const ZOMBIE_SMART_SHARE = 0.45;
+export const ZOMBIE_ROOM_CLEAR_MS = 3000;
+/** A zombie this close to prey drops whatever door it was working on. */
+export const ZOMBIE_ABANDON_DOOR_RANGE = 210;
+
+/** Some people run to whoever has a gun rather than to a door. */
+export const OFFICER_SEEK_CHANCE = 0.16;
+export const OFFICER_REFUGE_RANGE = 900;
+export const OFFICER_REFUGE_GAP = 62;
+
+/**
  * Final surge once a zombie is right on someone's heels. Stacks on top of the
  * lunge and stops chasers from trailing a hair behind their victim forever.
  * Measured as the gap between the two bodies, not centre-to-centre.
@@ -151,9 +174,14 @@ export const ENTITY_MAX_HEALTH: Record<EntityType, number> = {
 
 // ---------------------------------------------------------------- infection
 export const GRAPPLE_MIN_MS = 1000;
-export const GRAPPLE_MAX_MS = 3000;
+export const GRAPPLE_MAX_MS = 2200;
 /** Once a victim has this many attackers, other zombies go find their own. */
 export const MAX_GRAPPLERS = 3;
+/**
+ * Held by this many at once and there is no getting away — the escape roll is
+ * skipped entirely rather than merely made unlikely.
+ */
+export const GRAPPLE_NO_ESCAPE_AT = 3;
 
 /** The outbreak arrives as a tight group along one randomly chosen map edge. */
 export const INITIAL_ZOMBIES = 5;
@@ -294,8 +322,8 @@ export const SOCIAL_CIRCLE_RADIUS = 34;
 export const BUILDING_START_SHARE = 0.48;
 
 /** Being shot staggers a zombie for a moment. */
-export const SHOT_SLOW_MS = 400;
-export const SHOT_SLOW_MULTIPLIER = 0.45;
+export const SHOT_SLOW_MS = 500;
+export const SHOT_SLOW_MULTIPLIER = 0.36;
 /** How long a grey officer keeps running after being grabbed. */
 export const OFFICER_FLEE_MS = 20000;
 
@@ -368,7 +396,7 @@ export const NPC_OFFICER_COLOR = '#9ca3af';
  */
 export const INTERIOR_DOOR_SHARE = 0.55;
 export const DOOR_START_OPEN_CHANCE = 0.5;
-export const DOOR_HEALTH = 1900;
+export const DOOR_HEALTH = 1600;
 /** ~33 seconds of work for a single zombie. */
 export const DOOR_ZOMBIE_DAMAGE = 18;
 export const DOOR_ATTACK_INTERVAL_MS = 600;

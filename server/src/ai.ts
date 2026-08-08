@@ -126,6 +126,13 @@ import {
   ZOMBIE_STUCK_MIN_PROGRESS,
   ZOMBIE_STUCK_DOOR_MS,
   ZOMBIE_STUCK_DOOR_RANGE,
+  ZOMBIE_HURT_THRESHOLD,
+  ZOMBIE_HURT_SLOWEST,
+  ZOMBIE_ROOM_CLEAR_MS,
+  ZOMBIE_ABANDON_DOOR_RANGE,
+  GRAPPLE_NO_ESCAPE_AT,
+  OFFICER_REFUGE_RANGE,
+  OFFICER_REFUGE_GAP,
   DOOR_SLAM_CHANCE,
   DOOR_SLAM_RANGE,
   DOOR_WARN_CHANCE,
@@ -443,6 +450,15 @@ function step(
   state.heading = turnToward(state.heading, desired, turnRate * dt);
   let speed = baseSpeed * e.speedMul;
   if (now < state.slowUntil) speed *= state.slowMul;
+  // A shot-up zombie drags: nothing until it's badly hurt, then falling off to
+  // half pace as it approaches its last point of health.
+  if (e.type === 'zombie') {
+    const frac = e.health / (e.maxHealth || 1);
+    if (frac < ZOMBIE_HURT_THRESHOLD) {
+      const t = Math.max(0, frac) / ZOMBIE_HURT_THRESHOLD;
+      speed *= ZOMBIE_HURT_SLOWEST + (1 - ZOMBIE_HURT_SLOWEST) * t;
+    }
+  }
   speed = speedAt(world, e.x, e.y, speed);
   e.x += Math.cos(state.heading) * speed * dt;
   e.y += Math.sin(state.heading) * speed * dt;
@@ -959,6 +975,29 @@ function doorContested(world: World, state: AiState, index: number): boolean {
   return false;
 }
 
+/**
+ * Is there a zombie shut in here with us? Bolting a door with one of them on
+ * your side of it is the one thing nobody should ever do.
+ */
+function threatSharesBuilding(world: World, e: Entity, state: AiState): boolean {
+  const building = buildingIndexAt(world, e.x, e.y);
+  if (building < 0) return false;
+
+  // Any zombie in here counts, not only ones currently in view. Strictly they
+  // shouldn't know about one two rooms away — but bolting themselves in with
+  // it reads as a bug every time it happens, so they get the benefit.
+  const b = world.map.buildings[building];
+  const cx = b.x + b.w / 2;
+  const cy = b.y + b.h / 2;
+  const reach = Math.hypot(b.w, b.h) / 2 + 20;
+
+  for (const other of world.entityGrid.queryCircle(cx, cy, reach, new Set<Entity>())) {
+    if (other.type !== 'zombie') continue;
+    if (buildingIndexAt(world, other.x, other.y) === building) return true;
+  }
+  return false;
+}
+
 /** Start working a door. Whatever they were doing is left exactly as it was. */
 function beginDoorWork(
   world: World,
@@ -1038,12 +1077,19 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
 
     state.doorWaitUntil = 0;
     shutDoor(world, index, now);
-    if (state.doorFollowUpLock) {
+    // Never bolt yourself in with one of them.
+    if (state.doorFollowUpLock && !threatSharesBuilding(world, e, state)) {
       beginDoorWork(world, e, state, index, 'lock', now);
       return;
     }
     state.doorFollowUp = -1;
+    state.doorFollowUpLock = false;
   } else if (action === 'lock') {
+    if (threatSharesBuilding(world, e, state)) {
+      state.doorFollowUp = -1;
+      state.doorFollowUpLock = false;
+      return;
+    }
     lockDoor(world, index);
     state.doorFollowUp = -1;
     state.doorFollowUpLock = false;
@@ -1648,6 +1694,24 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     // branches can be the one walking them into the wall.
     if (unstickTick(world, e, state, now, dt, speed)) return;
 
+    // Some people don't run for a building at all — they run to whoever has a
+    // gun and stand behind them.
+    if (state.officerSeeker) {
+      const officer = nearestOfType(world, e, 'officer', OFFICER_REFUGE_RANGE);
+      if (officer) {
+        const gap = Math.hypot(officer.x - e.x, officer.y - e.y);
+        if (gap > OFFICER_REFUGE_GAP) {
+          const desired = headingToward(world, e, state, officer.x, officer.y, now);
+          step(world, e, state, skirtThreat(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
+          return;
+        }
+        // Close enough to feel safe: hold beside them and watch the street.
+        state.heading = Math.atan2(state.threatY - e.y, state.threatX - e.x);
+        e.facing = state.heading;
+        return;
+      }
+    }
+
     // Bush-hiders don't run blindly — they bolt for the nearest cover, so
     // long as it isn't back toward whatever is chasing them.
     if (state.bushHider) {
@@ -2102,6 +2166,11 @@ function attackBlockingWindow(
  * spent this tick tearing at the door instead of moving.
  */
 function attackBlockingDoor(world: World, e: Entity, state: AiState, now: number): boolean {
+  // Somebody it can actually get at beats a door it can only hear through.
+  // The line-of-sight test is what separates the two: prey behind this very
+  // door fails it, so a chase through a doorway still batters the door down.
+  if (reachablePrey(world, e, ZOMBIE_ABANDON_DOOR_RANGE)) return false;
+
   for (const index of doorsNear(world, e.x, e.y, e.radius + 30)) {
     if (!isDoorShut(world, index)) continue;
     const door = world.map.doors[index];
@@ -2181,6 +2250,68 @@ function preyNearby(world: World, e: Entity, range: number): boolean {
     if (Math.hypot(other.x - e.x, other.y - e.y) <= range) return true;
   }
   return false;
+}
+
+/** ...and can actually be got at, rather than being behind the thing in the way. */
+function reachablePrey(world: World, e: Entity, range: number): boolean {
+  const nearby = world.entityGrid.queryCircle(e.x, e.y, range, new Set<Entity>());
+  for (const other of nearby) {
+    if (other.type !== 'human' && other.type !== 'officer') continue;
+    if (Math.hypot(other.x - e.x, other.y - e.y) > range) continue;
+    if (hasLineOfSight(world, e.x, e.y, other.x, other.y)) return true;
+  }
+  return false;
+}
+
+/**
+ * A zombie that has cleared the room it's in and is bright enough to leave it,
+ * rather than pacing an empty building for the rest of the round. Half of them
+ * aren't, which is what keeps buildings occupied instead of everything
+ * draining out into the streets.
+ */
+function leaveClearedRoom(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  if (!state.smartZombie) return false;
+
+  const building = buildingIndexAt(world, e.x, e.y);
+  if (building < 0) {
+    state.roomClearSince = 0;
+    return false;
+  }
+  if (preyNearby(world, e, ZOMBIE_SIGHT_RADIUS * 0.6)) {
+    state.roomClearSince = 0;
+    return false;
+  }
+
+  if (state.roomClearSince === 0) {
+    state.roomClearSince = now;
+    return false;
+  }
+  if (now - state.roomClearSince < ZOMBIE_ROOM_CLEAR_MS) return false;
+
+  // Nothing left in here. Head for a way out.
+  const doors = doorsOf(world, building);
+  if (doors.length === 0) return false;
+
+  let best: { x: number; y: number } | null = null;
+  let bestGap = Infinity;
+  for (const door of doors) {
+    const gap = Math.hypot(door.x - e.x, door.y - e.y);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = { x: door.x, y: door.y };
+    }
+  }
+  if (!best) return false;
+
+  // Close enough to be through it; let the ordinary wander take over again.
+  if (bestGap < 30) {
+    state.roomClearSince = 0;
+    return false;
+  }
+
+  const desired = headingToward(world, e, state, best.x, best.y, now);
+  step(world, e, state, desired, ZOMBIE_SEARCH_SPEED, ZOMBIE_TURN_RATE, dt, now);
+  return true;
 }
 
 /**
@@ -2286,6 +2417,9 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
   // problem rather than pacing the room until the round ends.
   if (zombieStuckTick(world, e, state, now, dt)) return;
 
+  // Room's empty and this one has the wit to go and find another.
+  if (leaveClearedRoom(world, e, state, now, dt)) return;
+
   // With the city all but emptied, anything shut is worth taking apart on the
   // way past, whether or not this one saw it close.
   if (world.survivorCount < DOOR_FRENZY_SURVIVORS && attackBlockingDoor(world, e, state, now)) {
@@ -2345,8 +2479,12 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   }
 
   const extra = session.zombieIds.size - 1;
-  const escapeChance = Math.max(0, BASE_ESCAPE_CHANCE - extra * ESCAPE_CHANCE_PER_EXTRA_ZOMBIE);
-  if (Math.random() < escapeChance) {
+  // Held by three or more and there is simply no getting out of it.
+  const escapeChance =
+    session.zombieIds.size >= GRAPPLE_NO_ESCAPE_AT
+      ? 0
+      : Math.max(0, BASE_ESCAPE_CHANCE - extra * ESCAPE_CHANCE_PER_EXTRA_ZOMBIE);
+  if (escapeChance > 0 && Math.random() < escapeChance) {
     world.speedBoosts.set(target.id, now + ESCAPE_BOOST_MS);
     return;
   }
