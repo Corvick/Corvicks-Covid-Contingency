@@ -63,6 +63,23 @@ const BASE_RAYS = 120;
  * a coarse fan so open ground reaches the sight radius. Anything inside or
  * behind an occluder falls outside the returned polygon.
  */
+/**
+ * Wrap into the same [-PI, PI] range `atan2` returns.
+ *
+ * The base fan is generated in that range deliberately, but the angles derived
+ * from it were not: a corner at `a + EPS` where `a` is just under PI, or a
+ * bush tangent at `base + spread`, both land outside it. Sorted, those sit past
+ * the ends of the list, and the arc that closes the polygon then sweeps nearly
+ * the whole circle the wrong way round — which fills almost everything and
+ * reads on screen as the fog switching off. This is the fog dead spot.
+ */
+function norm(a: number): number {
+  const twoPi = Math.PI * 2;
+  let x = (a + Math.PI) % twoPi;
+  if (x < 0) x += twoPi;
+  return x - Math.PI;
+}
+
 export function visibilityPolygon(
   px: number,
   py: number,
@@ -108,7 +125,7 @@ export function visibilityPolygon(
     ];
     for (const [cx, cy] of corners) {
       const a = Math.atan2(cy - py, cx - px);
-      angles.push(a - EPS, a, a + EPS);
+      angles.push(norm(a - EPS), a, norm(a + EPS));
     }
   }
 
@@ -116,7 +133,12 @@ export function visibilityPolygon(
     const d = Math.hypot(b.x - px, b.y - py);
     const base = Math.atan2(b.y - py, b.x - px);
     const spread = Math.asin(Math.min(1, b.r / d));
-    angles.push(base - spread - EPS, base - spread, base + spread, base + spread + EPS);
+    angles.push(
+      norm(base - spread - EPS),
+      norm(base - spread),
+      norm(base + spread),
+      norm(base + spread + EPS),
+    );
   }
 
   angles.sort((a, b) => a - b);

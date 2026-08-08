@@ -233,12 +233,20 @@ In `shared/constants.ts`:
 
 ## Known open issue
 
-**Fog dead spot.** At specific map positions the fog stops occluding entirely;
-moving off the spot restores it. Not reproduced in 249 sampled positions — the
-polygon and mask are correct everywhere testable. A watchdog in
-`client/src/main.ts` logs `[fog] no occlusion at X,Y — … seed N` to the console
-when it happens. **If the user reports it, ask for that console line** — the seed
-plus coordinates make it reproducible offline.
+None outstanding. The **fog dead spot** is fixed: ray angles derived from wall
+corners (`a ± EPS`) and bush tangents (`base ± spread`) were not wrapped back
+into `[-PI, PI]` the way the base fan is. Sorted, those sat past the ends of
+the list, and the arc closing the polygon then swept nearly the whole circle
+the wrong way round — filling almost everything, which reads as the fog
+switching off. The watchdog in `client/src/main.ts` remains, and now logs a
+`[fog] OFF` / `[fog] back ON` pair with the seed; if it ever fires again, that
+pair plus the coordinates reproduces it offline in seconds.
+
+The lesson worth keeping: the watchdog originally tripped on "almost all of the
+circle visible", which is what the fault looks like *on screen*. What it looks
+like *in the data* is the opposite — a shoelace area near zero, because a
+self-overlapping path cancels itself out while canvas fills it by nonzero
+winding. Measure the polygon, not the impression.
 
 ## Not built yet
 

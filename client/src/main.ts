@@ -658,15 +658,23 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
       const p = poly[i];
       // Two unobstructed neighbours bound a true arc of the sight circle —
       // drawing it as an arc rather than a chord is what kills the faceting.
-      if (prev.atRadius && p.atRadius) {
+      // Only ever sweep forward, and only a short way. A pair that is out of
+      // order — or a whole quadrant apart — would otherwise take the long way
+      // round the circle and fill nearly all of it.
+      const delta = p.angle - prev.angle;
+      if (prev.atRadius && p.atRadius && delta > 0 && delta < Math.PI / 2) {
         fogCtx.arc(cx, cy, r, prev.angle, p.angle);
       } else {
         fogCtx.lineTo((p.x - view.x) * s, (p.y - view.y) * s);
       }
     }
     const last = poly[poly.length - 1];
+    // Same guard on the arc that closes the ring back to the first point.
     if (last.atRadius && poly[0].atRadius) {
-      fogCtx.arc(cx, cy, r, last.angle, poly[0].angle + Math.PI * 2);
+      const wrap = poly[0].angle + Math.PI * 2 - last.angle;
+      if (wrap > 0 && wrap < Math.PI / 2) {
+        fogCtx.arc(cx, cy, r, last.angle, poly[0].angle + Math.PI * 2);
+      }
     }
     fogCtx.closePath();
     fogCtx.fill();
