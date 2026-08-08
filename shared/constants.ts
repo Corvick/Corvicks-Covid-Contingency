@@ -670,6 +670,12 @@ export const TEST_DROP_RADIUS = 90;
 // ---------------------------------------------------------------- air support
 export const GRENADE_THROW_RANGE = 400;
 export const GRENADE_FLIGHT_MS = 850;
+/**
+ * Thrown things bounce off whatever they hit rather than passing through it,
+ * keeping this share of their speed each time. Low enough that a shell fired
+ * into a doorway rattles about in the room instead of pinging back at you.
+ */
+export const GRENADE_BOUNCE = 0.55;
 export const GRENADE_COOLDOWN_MS = 700;
 export const SMOKE_DURATION_MS = 9000;
 export const SMOKE_RADIUS = 72;

@@ -114,7 +114,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     // Kept out of the ordinary loot table entirely; placed by its own roll.
     rarity: 0,
     cooldownMs: 1600,
-    range: 560,
+    range: 360,
     ammo: 4,
     explosive: true,
   },

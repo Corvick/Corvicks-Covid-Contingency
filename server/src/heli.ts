@@ -15,6 +15,7 @@ import {
   BLAST_RADIUS,
   BLAST_DAMAGE_MIN,
   BLAST_DAMAGE_MAX,
+  GRENADE_BOUNCE,
 } from '../../shared/constants.js';
 import {
   findSpawnNear,
@@ -24,15 +25,21 @@ import {
   type Entity,
   type World,
 } from './world.js';
+import { clamp } from './geometry.js';
 
+/**
+ * A thrown or launched charge, moved as an actual projectile rather than
+ * interpolated from thrower to target — it has to be able to hit things and
+ * come off them, which a straight line between two points cannot do.
+ */
 export interface Grenade {
   id: string;
   /** Smoke marks a landing zone; a frag shell goes off. */
   kind: 'smoke' | 'frag';
-  startX: number;
-  startY: number;
-  targetX: number;
-  targetY: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
   thrownAt: number;
 }
 
@@ -75,15 +82,63 @@ export function throwGrenade(
   now: number,
   kind: 'smoke' | 'frag' = 'smoke',
 ): void {
+  // Velocity is set so that an unobstructed throw lands on the target exactly
+  // as its flight time runs out; anything it hits on the way shortens that.
+  const flight = GRENADE_FLIGHT_MS / 1000;
   world.grenades.set(nextId('nade'), {
     id: nextId('g'),
     kind,
-    startX: x,
-    startY: y,
-    targetX: tx,
-    targetY: ty,
+    x,
+    y,
+    vx: (tx - x) / flight,
+    vy: (ty - y) / flight,
     thrownAt: now,
   });
+}
+
+/** Solid to a thrown charge: walls, intact glass, and shut doors. */
+function bouncesOff(world: World, x: number, y: number): boolean {
+  // The nav grid already carries walls and unbroken panes.
+  if (world.nav.isBlocked(x, y)) return true;
+
+  for (const index of world.doorGrid.queryCircle(x, y, 8, new Set<number>())) {
+    const door = world.doors[index];
+    if (!door || door.open || door.broken) continue;
+    const r = door.rect;
+    if (x > r.x - 4 && x < r.x + r.w + 4 && y > r.y - 4 && y < r.y + r.h + 4) return true;
+  }
+  return false;
+}
+
+/**
+ * Step a grenade along, reflecting it off anything solid. Each axis is tested
+ * on its own, which is what makes a charge thrown into a corner come back out
+ * of it rather than burying itself in the geometry.
+ */
+function moveGrenade(world: World, g: Grenade, dt: number): void {
+  const nx = g.x + g.vx * dt;
+  const ny = g.y + g.vy * dt;
+
+  let bounced = false;
+  if (bouncesOff(world, nx, g.y)) {
+    g.vx = -g.vx * GRENADE_BOUNCE;
+    g.vy *= GRENADE_BOUNCE;
+    bounced = true;
+  }
+  if (bouncesOff(world, g.x, ny)) {
+    g.vy = -g.vy * GRENADE_BOUNCE;
+    g.vx *= GRENADE_BOUNCE;
+    bounced = true;
+  }
+  // A corner hit that neither axis caught on its own.
+  if (!bounced && bouncesOff(world, nx, ny)) {
+    g.vx = -g.vx * GRENADE_BOUNCE;
+    g.vy = -g.vy * GRENADE_BOUNCE;
+    bounced = true;
+  }
+
+  g.x = clamp(g.x + g.vx * dt, 4, WORLD_WIDTH - 4);
+  g.y = clamp(g.y + g.vy * dt, 4, WORLD_HEIGHT - 4);
 }
 
 /** Pick the nearest map edge and return an off-screen point on it. */
@@ -166,18 +221,22 @@ function detonate(world: World, x: number, y: number, now: number): void {
 export function updateAirSupport(world: World, now: number, dt: number): void {
   // ---- grenades in flight
   for (const [key, g] of world.grenades) {
-    if (now - g.thrownAt < GRENADE_FLIGHT_MS) continue;
+    if (now - g.thrownAt < GRENADE_FLIGHT_MS) {
+      moveGrenade(world, g, dt);
+      continue;
+    }
     world.grenades.delete(key);
 
+    // Wherever it actually ended up, not where it was aimed.
     if (g.kind === 'frag') {
-      detonate(world, g.targetX, g.targetY, now);
+      detonate(world, g.x, g.y, now);
       continue;
     }
 
     world.smokes.set(nextId('smoke'), {
       id: nextId('s'),
-      x: g.targetX,
-      y: g.targetY,
+      x: g.x,
+      y: g.y,
       startedAt: now,
       called: false,
     });
@@ -237,9 +296,9 @@ export function grenadesToWire(world: World, now: number): GrenadeState[] {
   for (const g of world.grenades.values()) {
     const t = Math.min(1, (now - g.thrownAt) / GRENADE_FLIGHT_MS);
     out.push({
-      x: Math.round(g.startX + (g.targetX - g.startX) * t),
-      y: Math.round(g.startY + (g.targetY - g.startY) * t),
-      // Simple arc so it visibly lobs rather than slides.
+      x: Math.round(g.x),
+      y: Math.round(g.y),
+      // Arc for the throw, flattening out once it has bounced and is rolling.
       h: Math.round(Math.sin(t * Math.PI) * 34),
     });
   }
