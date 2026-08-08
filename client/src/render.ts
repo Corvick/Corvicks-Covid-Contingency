@@ -12,6 +12,8 @@ import type {
   SmokeState,
   SpeechState,
   BlastState,
+  Pond,
+  DuckState,
   Wall,
   Window as WindowPane,
 } from '../../shared/types.js';
@@ -98,6 +100,84 @@ export function drawWindows(
     ctx.strokeStyle = 'rgba(191, 219, 254, 0.7)';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(p.x + 0.5, p.y + 0.5, p.w - 1, p.h - 1);
+  }
+}
+
+/** The pond and its lily pads. Drawn with the ground, under everything else. */
+export function drawPond(ctx: CanvasRenderingContext2D, pond: Pond, view: Viewport): void {
+  if (!visible(view, pond.x, pond.y, pond.r + 20)) return;
+
+  ctx.beginPath();
+  ctx.arc(pond.x, pond.y, pond.r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(30, 64, 92, 0.92)';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(71, 116, 145, 0.9)';
+  ctx.stroke();
+
+  // A lighter shallow rim, so it reads as water rather than a hole.
+  ctx.beginPath();
+  ctx.arc(pond.x, pond.y, pond.r * 0.82, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(96, 150, 180, 0.32)';
+  ctx.lineWidth = 6;
+  ctx.stroke();
+
+  for (const pad of pond.pads) {
+    ctx.beginPath();
+    ctx.arc(pad.x, pad.y, pad.r, 0.5, Math.PI * 2 + 0.15);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(34, 105, 58, 0.95)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(18, 66, 36, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+/** Ducks: a body and a bill, wings out and a shadow beneath once they're up. */
+export function drawDucks(ctx: CanvasRenderingContext2D, ducks: DuckState[], view: Viewport): void {
+  for (const duck of ducks) {
+    if (!visible(view, duck.x, duck.y, 26)) continue;
+    const dirX = Math.cos(duck.facing);
+    const dirY = Math.sin(duck.facing);
+
+    if (duck.flying) {
+      // Shadow on the ground below, offset so it reads as height.
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+      ctx.beginPath();
+      ctx.ellipse(duck.x + 7, duck.y + 9, 5, 2.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(240, 240, 235, 0.95)';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      for (const side of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(duck.x, duck.y);
+        ctx.lineTo(duck.x - dirY * 9 * side - dirX * 3, duck.y + dirX * 9 * side - dirY * 3);
+        ctx.stroke();
+      }
+    }
+
+    ctx.beginPath();
+    ctx.ellipse(duck.x, duck.y, 5.5, 4, duck.facing, 0, Math.PI * 2);
+    ctx.fillStyle = duck.flying ? '#e8e6df' : '#d8d4c8';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(40, 38, 32, 0.7)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Head and bill.
+    ctx.beginPath();
+    ctx.arc(duck.x + dirX * 5, duck.y + dirY * 5, 2.6, 0, Math.PI * 2);
+    ctx.fillStyle = '#3f6b3a';
+    ctx.fill();
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(duck.x + dirX * 7, duck.y + dirY * 7);
+    ctx.lineTo(duck.x + dirX * 10, duck.y + dirY * 10);
+    ctx.stroke();
   }
 }
 

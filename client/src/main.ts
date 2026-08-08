@@ -25,6 +25,7 @@ import type {
   SmokeState,
   SpeechState,
   BlastState,
+  DuckState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -46,6 +47,8 @@ import {
   drawInventory,
   drawPickups,
   drawBlasts,
+  drawDucks,
+  drawPond,
   drawSmoke,
   drawStamina,
   drawTracers,
@@ -110,6 +113,7 @@ let inventory: InventoryState | null = null;
 let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
+let ducks: DuckState[] = [];
 let helicopters: HelicopterState[] = [];
 let speech: SpeechState[] = [];
 const wheel = newWheelState();
@@ -192,6 +196,7 @@ const { send } = connect((msg) => {
     grenades = msg.grenades;
     smokes = msg.smokes;
     blasts = msg.blasts;
+    ducks = msg.ducks;
     helicopters = msg.helicopters;
     speech = msg.speech;
     exhausted = msg.exhausted;
@@ -726,6 +731,7 @@ function render() {
 
   if (map) {
     drawGround(ctx, map);
+    drawPond(ctx, map.pond, view);
     drawWalls(ctx, map.walls, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
     drawDoors(ctx, map.doors, doorStates, view);
@@ -760,6 +766,7 @@ function render() {
   tracers = tracers.filter((t) => now - t.born < TRACER_LIFETIME_MS);
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
 
+  drawDucks(ctx, ducks, view);
   if (map) drawBushes(ctx, map.bushes, view);
 
   // Air support sits above the foliage: smoke, then the grenade, then the

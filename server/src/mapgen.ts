@@ -1,4 +1,12 @@
-import type { Building, Bush, Door, MapData, Wall, Window as WindowPane } from '../../shared/types.js';
+import type {
+  Building,
+  Bush,
+  Door,
+  MapData,
+  Pond,
+  Wall,
+  Window as WindowPane,
+} from '../../shared/types.js';
 import {
   WORLD_WIDTH,
   WORLD_HEIGHT,
@@ -27,6 +35,8 @@ import {
   CORNER_COMPLEX_MAX_TILES,
   CORNER_COMPLEX_ROOM_MIN,
   CORNER_COMPLEX_MAX_CUTS,
+  POND_MIN_RADIUS,
+  POND_MAX_RADIUS,
 } from '../../shared/constants.js';
 import { NavGrid } from './navgrid.js';
 
@@ -926,6 +936,40 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   buildings.push(corner.building);
   landmarks.push(corner.box);
 
+  // A pond, somewhere out of the way. Reserved with the landmarks so nothing
+  // gets built on the water, and kept off the perimeter so it's approachable
+  // from every side.
+  const pondR = POND_MIN_RADIUS + rand() * (POND_MAX_RADIUS - POND_MIN_RADIUS);
+  const pond: Pond = { x: 0, y: 0, r: pondR, pads: [] };
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const px = MAP_MARGIN + pondR + 80 + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - pondR * 2 - 160);
+    const py = MAP_MARGIN + pondR + 80 + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - pondR * 2 - 160);
+    const box = { x: px - pondR, y: py - pondR, w: pondR * 2, h: pondR * 2 };
+    const clashes = landmarks.some(
+      (b) =>
+        box.x < b.x + b.w + 90 &&
+        box.x + box.w + 90 > b.x &&
+        box.y < b.y + b.h + 90 &&
+        box.y + box.h + 90 > b.y,
+    );
+    if (clashes && attempt < 79) continue;
+    pond.x = px;
+    pond.y = py;
+    break;
+  }
+  landmarks.push({ x: pond.x - pondR, y: pond.y - pondR, w: pondR * 2, h: pondR * 2 });
+
+  const padCount = 2 + Math.floor(rand() * 2);
+  for (let i = 0; i < padCount; i++) {
+    const angle = rand() * Math.PI * 2;
+    const dist = rand() * pondR * 0.55;
+    pond.pads.push({
+      x: pond.x + Math.cos(angle) * dist,
+      y: pond.y + Math.sin(angle) * dist,
+      r: 13 + rand() * 8,
+    });
+  }
+
   const bigCount = BIG_BUILDING_MIN + Math.floor(rand() * (BIG_BUILDING_MAX - BIG_BUILDING_MIN + 1));
   for (let i = 0; i < bigCount; i++) {
     const tw = BIG_BUILDING_MIN_TILES + Math.floor(rand() * (BIG_BUILDING_MAX_TILES - BIG_BUILDING_MIN_TILES));
@@ -1057,6 +1101,7 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     windows,
     buildings,
     doors,
+    pond,
   };
   repairEnclosures(map, 4);
   return map;

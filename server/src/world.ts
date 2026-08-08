@@ -25,6 +25,7 @@ import {
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
   BUSH_SPEED_MULTIPLIER,
+  POND_SPEED_MULTIPLIER,
   PATH_BUDGET_PER_TICK,
   ZOMBIE_SPEED_MUL_MIN,
   ZOMBIE_SPEED_MUL_MAX,
@@ -77,6 +78,7 @@ import { newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
 import { doorRect, initDoors } from './doors.js';
+import { initDucks, type Duck } from './ducks.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -359,6 +361,8 @@ export interface World {
   trackedTargets: Map<string, number>;
   grenades: Map<string, Grenade>;
   smokes: Map<string, Smoke>;
+  /** The flock on the pond. Scenery that reacts, not entities. */
+  ducks: Duck[];
   /** Recent detonations, cleared once they have been drawn out. */
   blasts: Array<{ x: number; y: number; at: number }>;
   helicopters: Map<string, Helicopter>;
@@ -789,6 +793,7 @@ export function createWorld(): World {
     grenades: new Map(),
     smokes: new Map(),
     blasts: [],
+    ducks: [],
     helicopters: new Map(),
     soldiers: new Set(),
     pathBudget: PATH_BUDGET_PER_TICK,
@@ -798,6 +803,7 @@ export function createWorld(): World {
   };
   buildStaticGrids(world);
   initDoors(world);
+  initDucks(world);
   populate(world);
   spawnPickups(world, playerOneStart(world));
   return world;
@@ -815,6 +821,7 @@ export function resetWorld(world: World): void {
   world.startedAt = Date.now();
   buildStaticGrids(world);
   initDoors(world);
+  initDucks(world);
   world.doorPrompts.clear();
   world.doorHolds.clear();
   world.doorSpent.clear();

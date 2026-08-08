@@ -115,6 +115,23 @@ export interface Building {
   doors: number[];
 }
 
+/** Ornamental water, with a few lily pads and a resident flock. */
+export interface Pond {
+  x: number;
+  y: number;
+  r: number;
+  pads: Array<{ x: number; y: number; r: number }>;
+}
+
+/** A duck, sent for drawing only — they are scenery that reacts, not entities. */
+export interface DuckState {
+  x: number;
+  y: number;
+  facing: number;
+  /** Up and away, drawn with wings out and a shadow beneath. */
+  flying?: boolean;
+}
+
 export interface MapData {
   seed: number;
   width: number;
@@ -125,6 +142,7 @@ export interface MapData {
   /** Building footprints — used for "hide indoors" behaviour. */
   buildings: Building[];
   doors: Door[];
+  pond: Pond;
 }
 
 /** A shotgun blast is several tracers from one trigger pull. */
@@ -261,6 +279,7 @@ export type ServerMessage =
       grenades: GrenadeState[];
       smokes: SmokeState[];
       blasts: BlastState[];
+      ducks: DuckState[];
       helicopters: HelicopterState[];
       /** Sprint is locked out until stamina recovers past its threshold. */
       exhausted: boolean;

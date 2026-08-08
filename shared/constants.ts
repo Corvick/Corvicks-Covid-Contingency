@@ -185,6 +185,20 @@ export const BLAST_DAMAGE_MAX = 140;
 export const BLAST_DAMAGE_MIN = 35;
 export const BLAST_MS = 520;
 
+/** The pond, its lily pads, and the flock that lives on it. */
+export const POND_MIN_RADIUS = 110;
+export const POND_MAX_RADIUS = 190;
+/** Wading is slow going. */
+export const POND_SPEED_MULTIPLIER = 0.45;
+export const DUCK_COUNT_MIN = 4;
+export const DUCK_COUNT_MAX = 9;
+export const DUCK_PADDLE_SPEED = 14;
+/** Gunfire this near the water puts the whole flock up. */
+export const DUCK_SCARE_RADIUS = 260;
+export const DUCK_FLY_SPEED = 260;
+/** Once up they clear off entirely rather than settling again. */
+export const DUCK_FLY_MS = 4200;
+
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
 export const OFFICER_REFUGE_RANGE = 900;

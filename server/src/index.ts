@@ -58,6 +58,7 @@ import {
 import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
 import { processShooting } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
+import { ducksToWire, updateDucks } from './ducks.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 
 const PORT = 8080;
@@ -371,6 +372,7 @@ function tick(): void {
   processInteractions(now);
   processShooting(world, now, frozen);
   updateAirSupport(world, now, dt);
+  updateDucks(world, now, dt);
 
   const survivors = countSurvivors(world);
   const zombies = countZombies(world);
@@ -445,6 +447,7 @@ function tick(): void {
       grenades: airGrenades,
       smokes: airSmokes,
       blasts: airBlasts,
+      ducks: ducksToWire(world),
       helicopters: airHelis,
       spectating,
       gameOver: world.gameOver,

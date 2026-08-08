@@ -33,6 +33,7 @@ import {
 } from './world.js';
 import { heldGunSlot, heldItem } from './inventory.js';
 import { damageDoor } from './doors.js';
+import { scareDucks } from './ducks.js';
 
 /**
  * Gunfire is loud: every zombie in earshot investigates the shooter's position
@@ -131,6 +132,9 @@ export function fire(
   });
 
   alertZombies(world, shooter.x, shooter.y, now);
+  // Anything on the water takes off at the noise, and at the round going past.
+  scareDucks(world, shooter.x, shooter.y, now);
+  scareDucks(world, endX, endY, now);
 
   if (!victim) return;
 
