@@ -2,6 +2,10 @@ export type ItemId =
   | 'pistol'
   | 'machineGun'
   | 'shotgun'
+  | 'boltRifle'
+  | 'sniper'
+  | 'heavyMg'
+  | 'chargeRifle'
   | 'cureGun'
   | 'trackerDart'
   | 'kevlar'
@@ -35,6 +39,22 @@ export interface ItemDef {
   automatic?: boolean;
   /** Lobs an explosive shell instead of a hitscan round. */
   explosive?: boolean;
+
+  /** How long a hit staggers a zombie, and how far it slows them. */
+  slowMs?: number;
+  slowMul?: number;
+  /** A round entering between the arms kills outright. */
+  headshot?: boolean;
+  /** Client zooms out and draws a reticle; the server extends what you see. */
+  scope?: boolean;
+  /** Right-click plants a bipod: immobile, but `deployedBloom` accurate. */
+  deployable?: boolean;
+  deployedBloom?: number;
+  /** Hold the trigger to wind up, release to fire. */
+  charge?: boolean;
+  chargeMs?: number;
+  /** Bodies one round passes through. At full charge, all of them. */
+  pierce?: number;
 }
 
 export const ITEMS: Record<ItemId, ItemDef> = {
@@ -80,6 +100,77 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     range: 340,
     pellets: 8,
     ammo: 28,
+  },
+  boltRifle: {
+    id: 'boltRifle',
+    kind: 'gun',
+    label: 'Bolt Action Rifle',
+    short: 'BOLT',
+    color: '#d6b27c',
+    // The common one. Turns up in houses more often than anything else.
+    rarity: 5,
+    damageMin: 42,
+    damageMax: 64,
+    bloom: 0.012,
+    cooldownMs: 1000, // works the bolt as fast as you can pull a trigger
+    range: 900,
+    ammo: 24,
+    // A heavy round puts them down harder and for longer than a pistol does.
+    slowMs: 900,
+    slowMul: 0.35,
+  },
+  sniper: {
+    id: 'sniper',
+    kind: 'gun',
+    label: 'Sniper Rifle',
+    short: 'SNPR',
+    color: '#22d3ee',
+    rarity: 1,
+    damageMin: 70,
+    damageMax: 95,
+    bloom: 0.003,
+    cooldownMs: 1500,
+    range: 2200,
+    ammo: 8,
+    scope: true,
+    headshot: true,
+    slowMs: 1100,
+    slowMul: 0.3,
+  },
+  heavyMg: {
+    id: 'heavyMg',
+    kind: 'gun',
+    label: 'Heavy Machine Gun',
+    short: 'HMG',
+    color: '#f97316',
+    rarity: 1,
+    damageMin: 11,
+    damageMax: 18,
+    // Hopeless from the hip — the whole point is to put it down first.
+    bloom: 0.34,
+    cooldownMs: 95,
+    range: 720,
+    ammo: 300,
+    automatic: true,
+    deployable: true,
+    deployedBloom: 0.018,
+  },
+  chargeRifle: {
+    id: 'chargeRifle',
+    kind: 'gun',
+    label: 'Charge Rifle',
+    short: 'CHRG',
+    color: '#c084fc',
+    rarity: 1,
+    damageMin: 30,
+    damageMax: 45,
+    bloom: 0.02,
+    cooldownMs: 500,
+    range: 1300,
+    ammo: 14,
+    charge: true,
+    chargeMs: 1300,
+    pierce: 9,
   },
   cureGun: {
     id: 'cureGun',

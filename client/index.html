@@ -224,20 +224,12 @@
       <div id="hud"></div>
       <div id="perf"></div>
 
-      <div id="menu" class="overlay hidden">
-        <div class="panel">
-          <h2>Paused</h2>
-          <p>Esc to close</p>
-          <button id="restart-btn">Restart</button>
-          <button id="spectate-btn" class="secondary">Restart in spectator mode</button>
-        </div>
-      </div>
-
+      <!-- Escape quits straight to the front end, so there is no pause panel. -->
       <div id="game-over" class="overlay hidden">
         <div class="panel">
           <h2>Game Over</h2>
           <p>Every survivor has turned.</p>
-          <button id="game-over-restart">Restart</button>
+          <button id="game-over-restart">Back to menu</button>
         </div>
       </div>
 
@@ -245,7 +237,7 @@
         <div class="panel">
           <h2>Outbreak Contained</h2>
           <p>Every zombie has been put down.</p>
-          <button id="victory-restart">Play again</button>
+          <button id="victory-restart">Back to menu</button>
         </div>
       </div>
     </div>

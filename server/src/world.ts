@@ -294,6 +294,8 @@ export interface Command {
   shooting: boolean;
   sprint: boolean;
   interact: boolean;
+  /** Right mouse: wants the bipod down. Only the heavy MG has one. */
+  deploy: boolean;
 }
 
 export interface World {
@@ -317,6 +319,13 @@ export interface World {
   grappleCounts: Map<string, number>;
   speedBoosts: Map<string, number>;
   lastShotAt: Map<string, number>;
+  /**
+   * Heavy MG bipod: id -> when planting began. Present means deploying or
+   * deployed; DEPLOY_MS after that timestamp it is actually steady.
+   */
+  deployStart: Map<string, number>;
+  /** Charge rifle: id -> when the trigger went down, while winding up. */
+  chargeSince: Map<string, number>;
   /** Sprint reserve for player officers. */
   stamina: Map<string, number>;
   /** Players who ran the bar dry and haven't recovered enough to sprint again. */
@@ -790,6 +799,8 @@ export function createWorld(): World {
     grappleCounts: new Map(),
     speedBoosts: new Map(),
     lastShotAt: new Map(),
+    deployStart: new Map(),
+    chargeSince: new Map(),
     stamina: new Map(),
     exhausted: new Set(),
     shots: [],
@@ -869,6 +880,8 @@ export function resetWorld(world: World): void {
   world.grappleCounts.clear();
   world.speedBoosts.clear();
   world.lastShotAt.clear();
+  world.deployStart.clear();
+  world.chargeSince.clear();
   world.shots.length = 0;
   world.spectators.clear();
   world.gameOver = false;

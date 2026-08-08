@@ -271,6 +271,10 @@ export interface InventoryState {
   dropProgress: number;
   /** Pickup within reach, if any — drives the "press E" prompt. */
   nearbyItem: ItemId | null;
+  /** Bipod: -1 not deployable, 0-1 planting, 1 steady. */
+  deployProgress: number;
+  /** Charge rifle wind-up: -1 when not charging, else 0-1. */
+  chargeProgress: number;
 }
 
 export type ClientMessage =
@@ -282,6 +286,8 @@ export type ClientMessage =
       sprint: boolean;
       /** True while E is held — a tap collects, a hold drops. */
       interact: boolean;
+      /** Right mouse toggle: plant the heavy MG's bipod. */
+      deploy: boolean;
     }
   | { type: 'ability'; ability: AbilityId; x: number; y: number }
   | { type: 'selectSlot'; slot: number }

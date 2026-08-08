@@ -75,6 +75,10 @@ The socket is live behind it, but `started` in `main.ts` gates both the input
 loop and `render`, so keys pressed at the menu don't drive an officer standing
 in a city nobody is looking at. `?spectate` skips the shell entirely.
 
+**Escape quits the round outright** — it leaves the lobby, which is what takes
+you out of the world, so there is no pause panel and no in-place restart. Both
+endings go back to the front end too. A new round is a new lobby.
+
 A lobby slot is `closed | open | bot | player`, and exactly one is `player` —
 you are always sitting somewhere. Clicking a **row** seats you in it (leaving
 `open` behind you, and taking a bot's place if it had one); clicking its **tag**
@@ -148,6 +152,22 @@ otherwise demand.
 - **"Follow me" and "wait" share one charge.** The charge is spent on release,
   not on the call, so one buys a full cycle. The wheel takes an option list
   with per-entry usability rather than one shared count.
+- **Four guns carry their behaviour in `ItemDef`, not in branches.** The
+  **bolt action rifle** is the common one — pistol cadence, far tighter, and
+  `slowMs`/`slowMul` make a hit stagger longer than anything else. The
+  **sniper** sets `scope`, which pulls the client's camera back *and* widens
+  `sightRadiusFor` on the server — without both you'd be aiming at ground the
+  fog never sent you. Its `headshot` kills when the round arrives inside
+  `HEADSHOT_ARC` of the way the zombie is facing: a shot between the arms, so
+  the one charging you is the one you can take the head off. The **heavy MG**
+  is hopeless from the hip until right-click plants it (`DEPLOY_MS`); the
+  player is rooted from the moment they commit, not from when the pegs land.
+  The **charge rifle** fires on release, not press, and winding it fully drives
+  the round through `pierce` bodies. Bots share `fireHeld` and so fire all of
+  them, at full charge.
+- **Bots walk past the dart gun and the riot shield** (`BOT_IGNORES`). Both
+  already scored zero, since neither has a damage figure; the set says so out
+  loud so giving the dart one later doesn't send every bot after it.
 - **The pond is a radius per bearing, not a polygon.** Containment is one
   comparison and pushing a body out is a slide along the same ray; nav grid,
   collision and the drawn bank all read `pondRadiusAt`, so what you see is

@@ -2263,6 +2263,15 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
  * pull actually delivers, so a shotgun's eight pellets count for what they are
  * rather than for one pellet's damage.
  */
+/**
+ * Loot a bot officer walks straight past. The dart marks a target for a hunt
+ * nothing consumes yet, and the shield does nothing at all — a bot crossing
+ * two blocks for either is a bot not holding a gun. Both scored zero already;
+ * this says so out loud, so giving the dart a damage figure later doesn't
+ * quietly send every bot after one.
+ */
+const BOT_IGNORES = new Set<ItemId>(['trackerDart', 'riotShield']);
+
 function gunWorth(item: ItemId | null): number {
   if (!item) return 0;
   const def = ITEMS[item];
@@ -2300,6 +2309,7 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
   let bestScore = -Infinity;
 
   for (const p of world.pickups.values()) {
+    if (BOT_IGNORES.has(p.item)) continue;
     const dist = Math.hypot(p.x - e.x, p.y - e.y);
     if (dist > range) continue;
     if (!world.nav.isReachable(p.x, p.y)) continue;

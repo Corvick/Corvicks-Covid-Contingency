@@ -22,6 +22,11 @@ export interface InputTracker {
   interact: boolean;
   /** Slot key pressed since the last poll, or -1. */
   slotPressed: number;
+  /**
+   * Right mouse is a toggle, not a hold — planting a bipod is a decision you
+   * make and then get on with, not something you keep a finger on.
+   */
+  deploy: boolean;
 }
 
 export function trackInput(canvas: HTMLCanvasElement): InputTracker {
@@ -33,6 +38,7 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     sprint: false,
     interact: false,
     slotPressed: -1,
+    deploy: false,
   };
 
   /**
@@ -79,6 +85,12 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
 
   canvas.addEventListener('mousemove', updateMouse);
   canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 2) {
+      // The server ignores this unless what's in hand actually has a bipod, so
+      // a stray right-click with the pistol out costs nothing.
+      tracker.deploy = !tracker.deploy;
+      return;
+    }
     if (e.button !== 0) return;
     updateMouse(e);
     tracker.shooting = true;

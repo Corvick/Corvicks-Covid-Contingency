@@ -13,6 +13,7 @@ import {
   ONE_OFF_ITEMS,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
+import { chargeProgress, deployProgress } from './combat.js';
 
 export interface Inventory {
   guns: Array<GunSlot | null>;
@@ -209,6 +210,10 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
   if (inv.activeSlot <= GUN_SLOTS) inv.guns[inv.activeSlot - 1] = null;
   else inv.utilities.splice(inv.activeSlot - GUN_SLOTS - 1, 1);
 
+  // Worn kit is worn *because* the slot is occupied. Dropping the vest has to
+  // take the protection with it, or you keep the armour and free the slot.
+  if (item === 'kevlar') inv.kevlar = 0;
+
   const id = `loot-drop-${Math.random().toString(36).slice(2, 9)}`;
   world.pickups.set(id, { id, item, x, y });
   inv.activeSlot = 0;
@@ -224,6 +229,7 @@ export function dropProgress(inv: Inventory, now: number): number {
 
 export function toWireInventory(
   world: World,
+  id: string,
   inv: Inventory,
   x: number,
   y: number,
@@ -238,6 +244,8 @@ export function toWireInventory(
     shield: inv.shield,
     dropProgress: dropProgress(inv, now),
     nearbyItem: near ? near.item : null,
+    deployProgress: deployProgress(world, id, inv),
+    chargeProgress: chargeProgress(world, id, inv),
   };
 }
 

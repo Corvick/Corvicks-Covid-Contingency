@@ -14,6 +14,8 @@ import {
   MATERIALIZE_MS,
   GUN_SLOTS,
   UTILITY_SLOTS,
+  SNIPER_ZOOM,
+  SCOPE_EASE_MS,
 } from '../../shared/constants.js';
 import type {
   DoorPrompt,
@@ -36,6 +38,8 @@ import {
   drawBeacons,
   drawBushes,
   drawCrosshair,
+  drawReticle,
+  drawAimGauge,
   doorSlab,
   drawDoorPrompt,
   drawDoors,
@@ -63,6 +67,7 @@ import {
 import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import { setupMenu } from './menu.js';
+import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { AbilityId } from '../../shared/types.js';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -78,9 +83,6 @@ fogCanvas.width = Math.round(VIEWPORT_WIDTH * FOG_MASK_SCALE);
 fogCanvas.height = Math.round(VIEWPORT_HEIGHT * FOG_MASK_SCALE);
 const fogCtx = fogCanvas.getContext('2d')!;
 
-const menu = document.getElementById('menu') as HTMLDivElement;
-const restartBtn = document.getElementById('restart-btn') as HTMLButtonElement;
-const spectateBtn = document.getElementById('spectate-btn') as HTMLButtonElement;
 const gameOverPanel = document.getElementById('game-over') as HTMLDivElement;
 const gameOverRestart = document.getElementById('game-over-restart') as HTMLButtonElement;
 const victoryPanel = document.getElementById('victory') as HTMLDivElement;
@@ -245,15 +247,44 @@ const frontEnd = startSpectating
         // A digit typed into the chat box latched a slot key on the way past.
         input.slotPressed = -1;
       },
+      onEnd: standDown,
     });
 
+/** Put the round down. Nothing about it should carry into the next one. */
+function standDown(): void {
+  started = false;
+  wheel.open = false;
+  armedAbility = null;
+  input.deploy = false;
+  input.shooting = false;
+  input.slotPressed = -1;
+  scopeZoom = 1;
+  tracked.clear();
+  tracers = [];
+  gameOverPanel.classList.add('hidden');
+  victoryPanel.classList.add('hidden');
+}
+
+/**
+ * Escape leaves the round outright. Leaving the lobby is what takes you out of
+ * the world — the server despawns you, and closes the lobby behind you if it
+ * was yours — so this is a real exit rather than a screen over a game still
+ * being played underneath.
+ */
+function quitToMenu(): void {
+  if (!frontEnd) return; // a spectator link has no menu to go back to
+  send({ type: 'lobbyLeave' });
+  standDown();
+  frontEnd.reopen();
+}
+
 window.addEventListener('keydown', (e) => {
-  // The front end has its own back buttons; the pause panel belongs to a round.
+  // The front end has its own back buttons; this all belongs to a round.
   if (!started) return;
   if (e.code === 'Escape') {
-    // Back out of an armed order first, rather than opening the menu.
+    // Back out of an armed order first, rather than quitting the round.
     if (armedAbility) armedAbility = null;
-    else menu.classList.toggle('hidden');
+    else quitToMenu();
   }
   // Hold Q to open the ability wheel, always centred on the viewport.
   if (e.code === 'KeyQ' && !wheel.open && !spectating) {
@@ -380,25 +411,10 @@ function applyZoom(): void {
   spectateY = worldY - at.y / scale + VIEWPORT_HEIGHT / scale / 2;
 }
 
-restartBtn.addEventListener('click', () => {
-  send({ type: 'restart' });
-  menu.classList.add('hidden');
-});
-
-spectateBtn.addEventListener('click', () => {
-  send({ type: 'spectate' });
-  menu.classList.add('hidden');
-});
-
-gameOverRestart.addEventListener('click', () => {
-  send({ type: 'restart' });
-  gameOverPanel.classList.add('hidden');
-});
-
-victoryRestart.addEventListener('click', () => {
-  send({ type: 'restart' });
-  victoryPanel.classList.add('hidden');
-});
+// Both endings go back to the front end rather than resetting the world where
+// everyone stands. A new round is a new lobby now.
+gameOverRestart.addEventListener('click', quitToMenu);
+victoryRestart.addEventListener('click', quitToMenu);
 
 /**
  * Server visibility is binary, so entities would otherwise pop in and out at
@@ -510,15 +526,41 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
       scale,
     };
   }
+  // Down a scope the camera pulls back, which is what "aiming beyond your
+  // screen" actually means here — the extra ground has to be on screen before
+  // you can put the reticle on it. The server widens what it sends to match.
+  const scale = scopeZoom;
+  const w = VIEWPORT_WIDTH / scale;
+  const h = VIEWPORT_HEIGHT / scale;
   return {
     view: {
-      x: clamp(view.x - VIEWPORT_WIDTH / 2, 0, Math.max(0, WORLD_WIDTH - VIEWPORT_WIDTH)),
-      y: clamp(view.y - VIEWPORT_HEIGHT / 2, 0, Math.max(0, WORLD_HEIGHT - VIEWPORT_HEIGHT)),
-      w: VIEWPORT_WIDTH,
-      h: VIEWPORT_HEIGHT,
+      x: w >= WORLD_WIDTH ? (WORLD_WIDTH - w) / 2 : clamp(view.x - w / 2, 0, WORLD_WIDTH - w),
+      y: h >= WORLD_HEIGHT ? (WORLD_HEIGHT - h) / 2 : clamp(view.y - h / 2, 0, WORLD_HEIGHT - h),
+      w,
+      h,
     },
-    scale: 1,
+    scale,
   };
+}
+
+/**
+ * Eased so raising and lowering the scope is a movement rather than a jump —
+ * a hard cut re-frames the whole screen in one frame and reads as a glitch.
+ */
+let scopeZoom = 1;
+function updateScope(dt: number): void {
+  const want = ITEMS[heldItemId() ?? 'pistol']?.scope ? SNIPER_ZOOM : 1;
+  const step = (1 - SNIPER_ZOOM) * (dt / SCOPE_EASE_MS);
+  scopeZoom = want < scopeZoom ? Math.max(want, scopeZoom - step) : Math.min(want, scopeZoom + step);
+}
+
+/** Whatever is in the active slot, as an item id. */
+function heldItemId(): ItemId | null {
+  if (!inventory) return null;
+  const slot = inventory.activeSlot;
+  if (slot === 0) return 'pistol';
+  if (slot <= inventory.guns.length) return inventory.guns[slot - 1]?.item ?? null;
+  return inventory.utilities[slot - inventory.guns.length - 1] ?? null;
 }
 
 /**
@@ -585,6 +627,7 @@ function sendInputLoop() {
     shooting: input.shooting && !spectating && !wheel.open && !armedAbility,
     sprint: input.sprint,
     interact: input.interact && !spectating,
+    deploy: input.deploy && !spectating,
   });
   setTimeout(sendInputLoop, 1000 / 30);
 }
@@ -808,6 +851,7 @@ function render() {
   const now = performance.now();
   const frameDelta = lastFrameAt > 0 ? Math.min(100, now - lastFrameAt) : 16;
   advanceFades(frameDelta);
+  updateScope(frameDelta);
 
   // Everything that happened since the last frame started, attributed.
   const gap = lastFrameAt > 0 ? now - lastFrameAt : 0;
@@ -916,9 +960,33 @@ function render() {
         now,
       );
     }
-    // An armed order swaps the crosshair for a blue placement arrow.
+    // An armed order swaps the crosshair for a blue placement arrow, and the
+    // sniper swaps it for a reticle.
     if (armedAbility) drawTargetCursor(ctx, input.mouseX, input.mouseY, now);
+    else if (ITEMS[heldItemId() ?? 'pistol']?.scope) drawReticle(ctx, input.mouseX, input.mouseY);
     else drawCrosshair(ctx, input.mouseX, input.mouseY);
+
+    // What the gun in hand is busy doing, under the mark you're aiming with.
+    if (inventory && inventory.deployProgress >= 0) {
+      const steady = inventory.deployProgress >= 1;
+      drawAimGauge(
+        ctx,
+        input.mouseX,
+        input.mouseY,
+        inventory.deployProgress,
+        steady ? '#4ade80' : '#fbbf24',
+        steady ? 'DEPLOYED' : input.deploy ? 'PLANTING' : 'RIGHT-CLICK TO DEPLOY',
+      );
+    } else if (inventory && inventory.chargeProgress >= 0) {
+      drawAimGauge(
+        ctx,
+        input.mouseX,
+        input.mouseY,
+        inventory.chargeProgress,
+        inventory.chargeProgress >= 1 ? '#e879f9' : '#c084fc',
+        inventory.chargeProgress >= 1 ? 'CHARGED' : 'CHARGING',
+      );
+    }
   }
 
 

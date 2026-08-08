@@ -18,6 +18,9 @@ import {
   TRACKER_DART_MS,
   GRENADE_THROW_RANGE,
   GRENADE_COOLDOWN_MS,
+  HEADSHOT_ARC,
+  DEPLOY_MS,
+  CHARGE_MIN_FRACTION,
 } from '../../shared/constants.js';
 import { throwGrenade } from './heli.js';
 import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
@@ -61,7 +64,11 @@ function alertZombies(world: World, x: number, y: number, now: number): void {
   }
 }
 
-/** Hitscan along the muzzle line: nearest zombie, but only if no wall first. */
+/**
+ * Hitscan along the muzzle line: nearest zombie, but only if no wall first.
+ * `pierce` lets one round carry through several bodies, and `damageMul` is how
+ * far a charge weapon wound up before letting go.
+ */
 export function fire(
   world: World,
   shooter: Entity,
@@ -69,6 +76,8 @@ export function fire(
   bloom: number,
   now: number,
   def?: ItemDef,
+  pierce = 1,
+  damageMul = 1,
 ): void {
   const angle = aim + (Math.random() * 2 - 1) * bloom;
   const range = def?.range ?? GUN_RANGE;
@@ -110,25 +119,28 @@ export function fire(
     damageDoor(world, index, DOOR_BULLET_DAMAGE);
   }
 
-  let victim: Entity | null = null;
-  let victimT = wallT;
+  // Everything the line touches, nearest first. Most rounds stop at the first
+  // body; a charged shot walks the list.
+  const hits: Array<{ entity: Entity; t: number }> = [];
   const candidates = world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>());
   for (const other of candidates) {
     if (other.type !== 'zombie' || other.id === shooter.id) continue;
     const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
-    if (t !== null && t < victimT) {
-      victimT = t;
-      victim = other;
-    }
+    if (t !== null && t < wallT) hits.push({ entity: other, t });
   }
+  hits.sort((a, b) => a.t - b.t);
+  const struck = hits.slice(0, Math.max(1, pierce));
 
-  const stopT = victim ? victimT : wallT;
+  const last = struck[struck.length - 1];
+  // A piercing round carries on to the wall behind the last body it passes
+  // through; an ordinary one stops in the first.
+  const stopT = struck.length === 0 ? wallT : pierce > 1 ? wallT : last.t;
   world.shots.push({
     x1: Math.round(muzzleX),
     y1: Math.round(muzzleY),
     x2: Math.round(muzzleX + (endX - muzzleX) * stopT),
     y2: Math.round(muzzleY + (endY - muzzleY) * stopT),
-    hit: victim !== null,
+    hit: struck.length > 0,
   });
 
   alertZombies(world, shooter.x, shooter.y, now);
@@ -136,12 +148,34 @@ export function fire(
   scareDucks(world, shooter.x, shooter.y, now);
   scareDucks(world, endX, endY, now);
 
-  if (!victim) return;
+  for (const { entity } of struck) hit(world, shooter, entity, angle, now, def, damageMul);
+}
 
+/** One body taking one round. Split out so a piercing shot can reuse it. */
+function hit(
+  world: World,
+  shooter: Entity,
+  victim: Entity,
+  angle: number,
+  now: number,
+  def: ItemDef | undefined,
+  damageMul: number,
+): void {
   const oneShot = PLAYER_ONE_SHOT_KILL && world.playerIds.has(shooter.id);
   const lo = def?.damageMin ?? GUN_DAMAGE_MIN;
   const hi = def?.damageMax ?? GUN_DAMAGE_MAX;
-  const damage = oneShot ? victim.health : lo + Math.floor(Math.random() * (hi - lo + 1));
+
+  /**
+   * Between the arms. A zombie's arms are drawn out along its facing, so a
+   * round arriving inside a narrow arc off the front went past them — which is
+   * exactly the shot you get when one is charging you down.
+   */
+  const incoming = angle + Math.PI; // the direction the round came from
+  const off = Math.abs(((incoming - victim.facing + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+  const headshot = def?.headshot === true && off <= HEADSHOT_ARC;
+
+  const rolled = lo + Math.floor(Math.random() * (hi - lo + 1));
+  const damage = oneShot || headshot ? victim.health : Math.round(rolled * damageMul);
   victim.health -= damage;
 
   if (victim.health > 0) {
@@ -157,9 +191,11 @@ export function fire(
       state.heading = toShooter;
       victim.facing = toShooter;
 
-      // Taking a round staggers them for a moment.
-      state.slowUntil = Math.max(state.slowUntil, now + SHOT_SLOW_MS);
-      state.slowMul = SHOT_SLOW_MULTIPLIER;
+      // Taking a round staggers them for a moment. A heavy rifle round puts
+      // them down harder and for longer than a pistol does.
+      const slowMs = def?.slowMs ?? SHOT_SLOW_MS;
+      state.slowUntil = Math.max(state.slowUntil, now + slowMs);
+      state.slowMul = Math.min(state.slowMul || 1, def?.slowMul ?? SHOT_SLOW_MULTIPLIER);
 
       if (Math.random() < RETALIATE_CHANCE) {
         state.lastSeenX = shooter.x;
@@ -264,7 +300,14 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
  *
  * Returns true when a shot actually went off.
  */
-export function fireHeld(world: World, shooter: Entity, inv: Inventory, aim: number, now: number): boolean {
+export function fireHeld(
+  world: World,
+  shooter: Entity,
+  inv: Inventory,
+  aim: number,
+  now: number,
+  charge = 1,
+): boolean {
   const id = shooter.id;
   const held = heldItem(inv);
   if (!held) return false;
@@ -330,25 +373,104 @@ export function fireHeld(world: World, shooter: Entity, inv: Inventory, aim: num
   } else if (held === 'trackerDart') {
     fireSpecial(world, shooter, aim, def, 'dart', now);
   } else {
+    // A planted bipod is the whole reason to carry the heavy MG: from the hip
+    // it sprays, off the pegs it is one of the most accurate guns in the city.
+    const bloom =
+      def.deployable && isDeployed(world, id) ? (def.deployedBloom ?? 0.02) : (def.bloom ?? GUN_BLOOM_RAD);
+    // Winding the charge rifle all the way up drives the round through a whole
+    // queue of them; a snapped-off shot barely gets through one.
+    const pierce = def.charge ? Math.max(1, Math.round((def.pierce ?? 1) * charge)) : (def.pierce ?? 1);
+    const damageMul = def.charge ? charge : 1;
+
     const pellets = def.pellets ?? 1;
     for (let i = 0; i < pellets; i++) {
-      fire(world, shooter, aim, def.bloom ?? GUN_BLOOM_RAD, now, def);
+      fire(world, shooter, aim, bloom, now, def, pierce, damageMul);
     }
   }
   return true;
+}
+
+/** True once the bipod has finished planting — not merely while it's going down. */
+export function isDeployed(world: World, id: string): boolean {
+  const since = world.deployStart.get(id);
+  return since !== undefined && Date.now() - since >= DEPLOY_MS;
+}
+
+/** 0-1 while the pegs go down, 1 once steady, -1 when there's no bipod at all. */
+export function deployProgress(world: World, id: string, inv: Inventory): number {
+  const held = heldItem(inv);
+  if (!held || !ITEMS[held]?.deployable) return -1;
+  const since = world.deployStart.get(id);
+  if (since === undefined) return 0;
+  return Math.min(1, (Date.now() - since) / DEPLOY_MS);
+}
+
+/** 0-1 while the charge rifle winds up, -1 when it isn't. */
+export function chargeProgress(world: World, id: string, inv: Inventory): number {
+  const held = heldItem(inv);
+  if (!held || !ITEMS[held]?.charge) return -1;
+  const since = world.chargeSince.get(id);
+  if (since === undefined) return -1;
+  return Math.min(1, (Date.now() - since) / (ITEMS[held].chargeMs ?? 1200));
+}
+
+/**
+ * The bipod, and what invalidates it. Planting takes DEPLOY_MS during which
+ * you're already rooted — commit early and you're caught standing still.
+ */
+function updateDeploy(world: World, id: string, inv: Inventory, wants: boolean): void {
+  const held = heldItem(inv);
+  const deployable = held !== null && ITEMS[held]?.deployable === true;
+  // Putting the gun away packs the bipod up with it.
+  if (!wants || !deployable) {
+    world.deployStart.delete(id);
+    return;
+  }
+  if (!world.deployStart.has(id)) world.deployStart.set(id, Date.now());
 }
 
 export function processShooting(world: World, now: number, frozen: Set<string>): void {
   for (const id of world.playerIds) {
     const shooter = world.entities.get(id);
     if (!shooter || shooter.type !== 'officer') continue;
-    if (frozen.has(id)) continue;
-
-    const command = world.commands.get(id);
-    if (!command?.shooting) continue;
 
     const inv = world.inventories.get(id);
     if (!inv) continue;
+    const command = world.commands.get(id);
+
+    // The bipod is worked whether or not the trigger is down, and a grappled
+    // officer has rather more pressing problems than their firing position.
+    updateDeploy(world, id, inv, !frozen.has(id) && command?.deploy === true);
+    if (frozen.has(id)) {
+      world.chargeSince.delete(id);
+      continue;
+    }
+    if (!command) continue;
+
+    const held = heldItem(inv);
+    const def = held ? ITEMS[held] : null;
+
+    // A charge weapon fires on release, not on press — holding winds it up.
+    if (def?.charge) {
+      if (command.shooting) {
+        if (!world.chargeSince.has(id)) world.chargeSince.set(id, now);
+        continue;
+      }
+      const since = world.chargeSince.get(id);
+      if (since === undefined) continue;
+      world.chargeSince.delete(id);
+      // Letting go the instant you pressed still costs you a round, but it
+      // barely leaves the barrel — you have to hold it to get anything.
+      const charge = Math.max(
+        CHARGE_MIN_FRACTION,
+        Math.min(1, (now - since) / (def.chargeMs ?? 1200)),
+      );
+      fireHeld(world, shooter, inv, command.aim, now, charge);
+      continue;
+    }
+    world.chargeSince.delete(id);
+
+    if (!command.shooting) continue;
     fireHeld(world, shooter, inv, command.aim, now);
   }
 }

@@ -428,6 +428,26 @@ export const BUILDING_START_SHARE = 0.48;
 /** Being shot staggers a zombie for a moment. */
 export const SHOT_SLOW_MS = 500;
 export const SHOT_SLOW_MULTIPLIER = 0.36;
+
+// -------------------------------------------------------------- special guns
+/**
+ * Scoping sees further than the naked eye — without this the sniper could out-
+ * range the fog and shoot at ground with nothing drawn on it.
+ */
+export const SNIPER_SIGHT_RADIUS = 1500;
+/** How far the client pulls the camera back while scoped. */
+export const SNIPER_ZOOM = 0.58;
+/** Seconds of easing in and out of the scope, so it doesn't snap. */
+export const SCOPE_EASE_MS = 220;
+/**
+ * Half-angle of the head, measured off the way a zombie is facing. A round
+ * entering inside this arc went in between the arms.
+ */
+export const HEADSHOT_ARC = 0.5;
+/** Planting the bipod. You are immobile for this long before it pays off. */
+export const DEPLOY_MS = 1000;
+/** A charge shot at nothing still costs you the round. */
+export const CHARGE_MIN_FRACTION = 0.25;
 /** How long a grey officer keeps running after being grabbed. */
 export const OFFICER_FLEE_MS = 20000;
 

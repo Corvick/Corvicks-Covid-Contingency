@@ -1108,6 +1108,83 @@ export function drawInventory(
   }
 }
 
+/**
+ * The scoped reticle: a ranging circle with ticks, rather than the four stubs
+ * of the ordinary crosshair. Deliberately larger — you are looking at a lot
+ * more ground than usual and a small mark gets lost in it.
+ */
+export function drawReticle(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(34, 211, 238, 0.85)';
+  ctx.lineWidth = 1;
+
+  ctx.beginPath();
+  ctx.arc(x, y, 26, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Four arms into the ring, with a gap at the middle so the mark stays clear.
+  ctx.beginPath();
+  for (const [dx, dy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ]) {
+    ctx.moveTo(x + dx * 7, y + dy * 7);
+    ctx.lineTo(x + dx * 26, y + dy * 26);
+  }
+  ctx.stroke();
+
+  // Range ticks down the lower arm, the way a real scope carries them.
+  ctx.strokeStyle = 'rgba(34, 211, 238, 0.5)';
+  ctx.beginPath();
+  for (let i = 1; i <= 3; i++) {
+    const ty = y + 10 + i * 5;
+    const half = 4 - i;
+    ctx.moveTo(x - half, ty);
+    ctx.lineTo(x + half, ty);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * The bipod going down, and the charge rifle winding up. Both sit under the
+ * cursor because both are about the shot you are lining up, not your state.
+ */
+export function drawAimGauge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  progress: number,
+  color: string,
+  label: string,
+): void {
+  const w = 54;
+  const h = 4;
+  const top = y + 34;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(x - w / 2, top, w, h);
+  ctx.fillStyle = color;
+  ctx.fillRect(x - w / 2, top, w * Math.max(0, Math.min(1, progress)), h);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x - w / 2 + 0.5, top + 0.5, w - 1, h - 1);
+
+  ctx.fillStyle = color;
+  ctx.font = '9px ui-monospace, Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(label, x, top + h + 3);
+  ctx.restore();
+}
+
 export function drawCrosshair(ctx: CanvasRenderingContext2D, x: number, y: number): void {
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
   ctx.lineWidth = 1.5;

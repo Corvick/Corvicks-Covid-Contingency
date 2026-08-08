@@ -8,7 +8,15 @@ import type {
   Shot,
   SpeechState,
 } from '../../shared/types.js';
-import { collect, dropHeld, nearestPickup, newInventory, toWireInventory } from './inventory.js';
+import {
+  collect,
+  dropHeld,
+  heldItem,
+  nearestPickup,
+  newInventory,
+  toWireInventory,
+} from './inventory.js';
+import { ITEMS } from '../../shared/items.js';
 import { grenadesToWire, helicoptersToWire, smokesToWire, updateAirSupport } from './heli.js';
 import {
   TICK_RATE,
@@ -36,6 +44,7 @@ import {
   DROP_HOLD_MS,
   BLAST_MS,
   TAP_MAX_MS,
+  SNIPER_SIGHT_RADIUS,
 } from '../../shared/constants.js';
 import {
   countSurvivors,
@@ -118,6 +127,7 @@ function spawnPlayer(id: string): void {
     shooting: false,
     sprint: false,
     interact: false,
+    deploy: false,
   });
   world.inventories.set(id, newInventory());
   world.stamina.set(id, STAMINA_MAX);
@@ -224,6 +234,7 @@ wss.on('connection', (socket) => {
           shooting: msg.shooting,
           sprint: msg.sprint,
           interact: msg.interact,
+          deploy: msg.deploy,
         });
       } else if (msg.type === 'selectSlot') {
         const inv = world.inventories.get(id);
@@ -384,7 +395,11 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
 
     let dx = 0;
     let dy = 0;
-    if (!frozen.has(id)) {
+    // Behind a planted bipod you are a gun emplacement, not a person — that is
+    // the trade the heavy MG asks for, and it starts the moment you commit,
+    // not when the pegs finish going down.
+    const rooted = world.deployStart.has(id);
+    if (!frozen.has(id) && !rooted) {
       if (command.input.up) dy -= 1;
       if (command.input.down) dy += 1;
       if (command.input.left) dx -= 1;
@@ -420,15 +435,27 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
 }
 
 /** Fog of war is enforced server-side: unseen entities are never sent. */
+/**
+ * How far this viewer can see. Down a scope you see a good deal further —
+ * without it the sniper would out-range the fog and you'd be shooting at ground
+ * with nothing drawn on it.
+ */
+function sightRadiusFor(viewer: Entity): number {
+  const inv = world.inventories.get(viewer.id);
+  const held = inv ? heldItem(inv) : null;
+  return held && ITEMS[held]?.scope ? SNIPER_SIGHT_RADIUS : PLAYER_SIGHT_RADIUS;
+}
+
 function visibleTo(viewer: Entity, now: number): EntityState[] {
   const out: EntityState[] = [];
   const viewerIsZombie = viewer.type === 'zombie';
+  const sight = sightRadiusFor(viewer);
   for (const other of world.entities.values()) {
     if (other.id === viewer.id) {
       out.push(toWire(world, other, viewerIsZombie, now));
       continue;
     }
-    if (Math.hypot(other.x - viewer.x, other.y - viewer.y) > PLAYER_SIGHT_RADIUS) continue;
+    if (Math.hypot(other.x - viewer.x, other.y - viewer.y) > sight) continue;
     if (!hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y)) continue;
     out.push(toWire(world, other, viewerIsZombie, now));
   }
@@ -438,8 +465,9 @@ function visibleTo(viewer: Entity, now: number): EntityState[] {
 /** Loot is subject to the same fog rules as everything else. */
 function visiblePickups(viewer: Entity): PickupState[] {
   const out: PickupState[] = [];
+  const sight = sightRadiusFor(viewer);
   for (const p of world.pickups.values()) {
-    if (Math.hypot(p.x - viewer.x, p.y - viewer.y) > PLAYER_SIGHT_RADIUS) continue;
+    if (Math.hypot(p.x - viewer.x, p.y - viewer.y) > sight) continue;
     if (!hasLineOfSight(world, viewer.x, viewer.y, p.x, p.y)) continue;
     out.push(p);
   }
@@ -447,11 +475,12 @@ function visiblePickups(viewer: Entity): PickupState[] {
 }
 
 function visibleShots(viewer: Entity): Shot[] {
+  const sight = sightRadiusFor(viewer);
   return world.shots.filter(
     (shot) =>
-      (Math.hypot(shot.x1 - viewer.x, shot.y1 - viewer.y) <= PLAYER_SIGHT_RADIUS &&
+      (Math.hypot(shot.x1 - viewer.x, shot.y1 - viewer.y) <= sight &&
         hasLineOfSight(world, viewer.x, viewer.y, shot.x1, shot.y1)) ||
-      (Math.hypot(shot.x2 - viewer.x, shot.y2 - viewer.y) <= PLAYER_SIGHT_RADIUS &&
+      (Math.hypot(shot.x2 - viewer.x, shot.y2 - viewer.y) <= sight &&
         hasLineOfSight(world, viewer.x, viewer.y, shot.x2, shot.y2)),
   );
 }
@@ -596,7 +625,7 @@ function tick(): void {
       // Doors are static geometry the client already has; only their state
       // travels, and only for the ones near enough to matter.
       doors: viewer
-        ? doorsToWire(world, viewer.x, viewer.y, PLAYER_SIGHT_RADIUS + 220)
+        ? doorsToWire(world, viewer.x, viewer.y, sightRadiusFor(viewer) + 220)
         : allDoorsToWire(world),
       doorPrompt: doorPromptFor(world, id),
       speech,
@@ -606,6 +635,7 @@ function tick(): void {
       pickups: viewer ? visiblePickups(viewer) : Array.from(world.pickups.values()),
       inventory: toWireInventory(
         world,
+        id,
         world.inventories.get(id) ?? newInventory(),
         viewer?.x ?? 0,
         viewer?.y ?? 0,

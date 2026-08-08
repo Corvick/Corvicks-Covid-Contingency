@@ -16,11 +16,18 @@ export interface MenuHooks {
   send: (msg: ClientMessage) => void;
   /** Our lobby's round has begun; the game takes the screen from here. */
   onStart: () => void;
+  /**
+   * The lobby went away under us — the host quit, taking the round with them.
+   * The game has to stand down whether or not we asked it to.
+   */
+  onEnd: () => void;
 }
 
 export interface Menu {
   /** Feed every server message through here. Non-lobby ones are ignored. */
   handle: (msg: ServerMessage) => void;
+  /** Come back from a round: put the shell up again, at the title. */
+  reopen: () => void;
 }
 
 const NAME_KEY = 'gamertag';
@@ -242,6 +249,12 @@ export function setupMenu(hooks: MenuHooks): Menu {
   el('lobby-back').addEventListener('click', () => hooks.send({ type: 'lobbyLeave' }));
 
   return {
+    reopen() {
+      view = null;
+      show('title');
+      shell.classList.remove('hidden');
+    },
+
     handle(msg) {
       if (msg.type === 'lobbies') {
         lobbies = msg.lobbies;
@@ -253,6 +266,8 @@ export function setupMenu(hooks: MenuHooks): Menu {
       } else if (msg.type === 'lobbyLeft') {
         view = null;
         show('online');
+        shell.classList.remove('hidden');
+        hooks.onEnd();
       } else if (msg.type === 'start') {
         shell.classList.add('hidden');
         hooks.onStart();
