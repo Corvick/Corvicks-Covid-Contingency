@@ -51,6 +51,7 @@ import {
   ZOMBIE_SMART_SHARE,
   OFFICER_SEEK_CHANCE,
   RALLY_STARTING_CHARGES,
+  FOLLOW_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
   BOLT_FLEE_CHANCE,
   INDOOR_STAY_CHANCE,
@@ -825,6 +826,14 @@ export function resetWorld(world: World): void {
   world.doorPrompts.clear();
   world.doorHolds.clear();
   world.doorSpent.clear();
+  // These hold indices into the *old* map's door list. Left alone, they point
+  // at whatever door happens to share that index in the new city.
+  world.lockRequests.clear();
+  world.doorClearing.clear();
+  // Nobody is following anyone into a fresh round, and a stale flag would
+  // leave the wheel offering to release people who no longer exist.
+  world.followers.clear();
+  world.blasts.length = 0;
 
   world.entities.clear();
   world.ai.clear();
@@ -860,6 +869,7 @@ export function resetWorld(world: World): void {
     world.stamina.set(id, STAMINA_MAX);
     world.exhausted.delete(id);
     world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
+    world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
     world.inventories.set(id, newInventory());
   }
 }
