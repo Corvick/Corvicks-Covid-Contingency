@@ -12,6 +12,7 @@ export type ItemId =
   | 'riotShield'
   | 'lozenge'
   | 'smokeGrenade'
+  | 'pocketGunner'
   | 'grenadeLauncher'
   | 'ammoBox';
 
@@ -261,6 +262,14 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'LOZ',
     color: '#f472b6',
     rarity: 3,
+  },
+  pocketGunner: {
+    id: 'pocketGunner',
+    kind: 'utility',
+    label: 'Pocket Machine Gunner',
+    short: 'GUNR',
+    color: '#84cc16',
+    rarity: 2,
   },
   smokeGrenade: {
     id: 'smokeGrenade',

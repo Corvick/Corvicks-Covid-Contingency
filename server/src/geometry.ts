@@ -57,6 +57,93 @@ export function resolveCircleRect(c: Circle, r: Wall): boolean {
 }
 
 /**
+ * A box that isn't axis-aligned: centre, half-extents, and a rotation. The
+ * sandbag needs one because it is laid across whatever way an officer happened
+ * to be facing, and snapping it to the four compass points would leave it
+ * visibly askew from the gun behind it.
+ */
+export interface OrientedBox {
+  x: number;
+  y: number;
+  /** Half-width across the face, half-depth through it. */
+  hw: number;
+  hh: number;
+  angle: number;
+}
+
+/** Distance from a point to the box, and the nearest point on it. */
+export function closestOnBox(
+  box: OrientedBox,
+  px: number,
+  py: number,
+): { x: number; y: number; dist: number } {
+  const cos = Math.cos(box.angle);
+  const sin = Math.sin(box.angle);
+  // Into the box's own frame, where it is an ordinary rect about the origin.
+  const dx = px - box.x;
+  const dy = py - box.y;
+  const lx = dx * cos + dy * sin;
+  const ly = -dx * sin + dy * cos;
+
+  const cx = clamp(lx, -box.hw, box.hw);
+  const cy = clamp(ly, -box.hh, box.hh);
+  // And back out again.
+  const wx = box.x + cx * cos - cy * sin;
+  const wy = box.y + cx * sin + cy * cos;
+  return { x: wx, y: wy, dist: Math.hypot(px - wx, py - wy) };
+}
+
+/** Push a circle out of an oriented box. Mutates the circle. */
+export function resolveCircleBox(c: Circle, box: OrientedBox): boolean {
+  const cos = Math.cos(box.angle);
+  const sin = Math.sin(box.angle);
+  const dx = c.x - box.x;
+  const dy = c.y - box.y;
+  const lx = dx * cos + dy * sin;
+  const ly = -dx * sin + dy * cos;
+
+  const nx = clamp(lx, -box.hw, box.hw);
+  const ny = clamp(ly, -box.hh, box.hh);
+  const ox = lx - nx;
+  const oy = ly - ny;
+  const distSq = ox * ox + oy * oy;
+
+  let pushX: number;
+  let pushY: number;
+  if (distSq > 1e-9) {
+    if (distSq > c.radius * c.radius) return false;
+    const dist = Math.sqrt(distSq);
+    const push = c.radius - dist;
+    pushX = (ox / dist) * push;
+    pushY = (oy / dist) * push;
+  } else {
+    // Centre is inside: out through the shallowest face, as with a plain rect.
+    const left = lx + box.hw;
+    const right = box.hw - lx;
+    const top = ly + box.hh;
+    const bottom = box.hh - ly;
+    const min = Math.min(left, right, top, bottom);
+    if (min === left) {
+      pushX = -(left + c.radius);
+      pushY = 0;
+    } else if (min === right) {
+      pushX = right + c.radius;
+      pushY = 0;
+    } else if (min === top) {
+      pushX = 0;
+      pushY = -(top + c.radius);
+    } else {
+      pushX = 0;
+      pushY = bottom + c.radius;
+    }
+  }
+
+  c.x += pushX * cos - pushY * sin;
+  c.y += pushX * sin + pushY * cos;
+  return true;
+}
+
+/**
  * Liang-Barsky clip of a segment against a rect. Returns the entry parameter
  * t in [0,1] along the segment, or null when the segment misses entirely.
  */

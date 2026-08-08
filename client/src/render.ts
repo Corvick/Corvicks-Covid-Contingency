@@ -14,6 +14,7 @@ import type {
   BlastState,
   Pond,
   DuckState,
+  EmplacementState,
   Wall,
   Window as WindowPane,
 } from '../../shared/types.js';
@@ -27,6 +28,7 @@ import {
   BOT_OFFICER_COLOR,
   BOT_OFFICER_HEAD_COLOR,
   EMPTY_PICKUP_COLOR,
+  EMPLACEMENT_AMMO,
   SOLDIER_COLOR,
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
@@ -953,6 +955,72 @@ export function drawHelicopters(
 }
 
 /** Loot crates on the floor, drawn in world space. */
+/**
+ * A deployed pocket gunner: the sandbags, and the gun on its mount. Drawn
+ * under the entities so the officer working it stands on top of his own
+ * emplacement rather than behind it.
+ */
+export function drawEmplacements(
+  ctx: CanvasRenderingContext2D,
+  guns: EmplacementState[],
+  view: Viewport,
+): void {
+  for (const gun of guns) {
+    if (!visible(view, gun.x, gun.y, 120)) continue;
+
+    // Sandbags. They wear down rather than vanish, so the colour dries out as
+    // they take punishment — you can see one is nearly gone before it goes.
+    if (gun.bags) {
+      const b = gun.bags;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(b.angle);
+      const worn = 0.35 + 0.65 * b0(gun.bagHp);
+      ctx.fillStyle = `rgb(${Math.round(120 + 40 * worn)}, ${Math.round(104 + 30 * worn)}, ${Math.round(72 + 20 * worn)})`;
+      ctx.strokeStyle = 'rgba(31, 27, 20, 0.85)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(-b.hw, -b.hh, b.hw * 2, b.hh * 2, 4);
+      ctx.fill();
+      ctx.stroke();
+      // Three bags, so it reads as stacked rather than as a plank.
+      ctx.strokeStyle = 'rgba(31, 27, 20, 0.5)';
+      ctx.lineWidth = 1;
+      for (const t of [-0.34, 0.34]) {
+        ctx.beginPath();
+        ctx.moveTo(b.hw * t, -b.hh);
+        ctx.lineTo(b.hw * t, b.hh);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // The gun: a squat mount with a barrel along the current traverse.
+    ctx.save();
+    ctx.translate(gun.x, gun.y);
+    ctx.rotate(gun.facing);
+    ctx.fillStyle = gun.gunHp > 0 ? '#3f3f46' : '#27272a';
+    ctx.beginPath();
+    ctx.roundRect(-7, -6, 14, 12, 3);
+    ctx.fill();
+    ctx.fillStyle = '#18181b';
+    ctx.fillRect(4, -2, 22, 4);
+    ctx.restore();
+
+    // How much belt is left, as a short bar behind the gun.
+    const frac = Math.max(0, Math.min(1, gun.ammo / EMPLACEMENT_AMMO));
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(gun.x - 14, gun.y - 20, 28, 3);
+    ctx.fillStyle = frac > 0.25 ? '#84cc16' : '#f87171';
+    ctx.fillRect(gun.x - 14, gun.y - 20, 28 * frac, 3);
+  }
+}
+
+/** Clamp a 0-1 that arrived over the wire. */
+function b0(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}
+
 export function drawPickups(
   ctx: CanvasRenderingContext2D,
   pickups: PickupState[],

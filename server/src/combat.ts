@@ -37,6 +37,7 @@ import {
 import { heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { damageDoor } from './doors.js';
 import { scareDucks } from './ducks.js';
+import { deployEmplacement } from './emplacement.js';
 
 /**
  * Gunfire is loud: every zombie in earshot investigates the shooter's position
@@ -352,6 +353,19 @@ export function fireHeld(
   const id = shooter.id;
   const held = heldItem(inv);
   if (!held) return false;
+
+  // Sets down a gun crew facing the way you are. Spent only if it actually
+  // found room to stand — otherwise you keep the item and can try elsewhere.
+  if (held === 'pocketGunner') {
+    const last = world.lastShotAt.get(id) ?? 0;
+    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (!deployEmplacement(world, shooter, now)) return false;
+    world.lastShotAt.set(id, now);
+    const at = inv.utilities.indexOf('pocketGunner');
+    if (at >= 0) inv.utilities.splice(at, 1);
+    inv.activeSlot = 0;
+    return true;
+  }
 
   // Smoke goes underarm toward the aim point, then calls in the helicopter.
   if (held === 'smokeGrenade') {

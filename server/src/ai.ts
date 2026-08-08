@@ -186,6 +186,7 @@ import {
 } from '../../shared/constants.js';
 import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
 import { collect, dropHeld, heldGunSlot, heldItem, type Inventory } from './inventory.js';
+import { zombieAtSandbag } from './emplacement.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { PickupState, Wall } from '../../shared/types.js';
 import {
@@ -3105,9 +3106,12 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
     const dist = Math.hypot(target.x - e.x, target.y - e.y);
     const gap = dist - (e.radius + target.radius);
 
-    // Glass or a door between us and dinner: work at it until it gives.
+    // Glass, a door, or a wall of sandbags between us and dinner: work at it
+    // until it gives. The bags are see-through, so unlike a door this is a
+    // thing they can watch their meal through while they tear it down.
     if (attackBlockingWindow(world, e, state, target, now)) return;
     if (gap < 90 && attackBlockingDoor(world, e, state, now)) return;
+    if (zombieAtSandbag(world, e, state, now)) return;
 
     // Entities are kept apart by collision, so "contact" needs a little slack.
     if (dist <= e.radius + target.radius + GRAPPLE_REACH_BONUS) {
@@ -3192,6 +3196,9 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
       return;
     }
   }
+
+  // Nothing to chase, but there are bags in the way of wherever it was going.
+  if (zombieAtSandbag(world, e, state, now)) return;
 
   // Shut in somewhere with nothing to chase: work out that the door is the
   // problem rather than pacing the room until the round ends.

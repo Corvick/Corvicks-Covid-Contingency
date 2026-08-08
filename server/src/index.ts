@@ -68,6 +68,11 @@ import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './
 import { processShooting } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { ducksToWire, updateDucks } from './ducks.js';
+import {
+  emplacementsToWire,
+  resolveEmplacementCollisions,
+  updateEmplacements,
+} from './emplacement.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 import {
   anyRunning,
@@ -611,8 +616,13 @@ function tick(): void {
     updatePlayers(dt, frozen);
     updateAi(world, now, dt, frozen);
     resolveCollisions(world);
+    // Sandbags are deliberately not in the nav grid — like doors, routes are
+    // planned as though they weren't there and whoever walks into one deals
+    // with it. So the push-out happens here, once everyone has moved.
+    resolveEmplacementCollisions(world);
 
     rebuildEntityGrid(world);
+    updateEmplacements(world, now, dt);
     processInteractions(now);
     processShooting(world, now, frozen);
     updateAirSupport(world, now, dt);
@@ -694,6 +704,7 @@ function tick(): void {
       smokes: airSmokes,
       blasts: airBlasts,
       ducks: ducksToWire(world),
+      emplacements: emplacementsToWire(world),
       helicopters: airHelis,
       spectating,
       gameOver: world.gameOver,

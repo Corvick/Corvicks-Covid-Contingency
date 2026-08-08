@@ -30,6 +30,7 @@ import type {
   SpeechState,
   BlastState,
   DuckState,
+  EmplacementState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -54,6 +55,7 @@ import {
   drawPickups,
   drawBlasts,
   drawDucks,
+  drawEmplacements,
   drawPond,
   drawSmoke,
   drawStamina,
@@ -120,6 +122,7 @@ let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
+let emplacements: EmplacementState[] = [];
 let helicopters: HelicopterState[] = [];
 let speech: SpeechState[] = [];
 const wheel = newWheelState();
@@ -217,6 +220,7 @@ const { send } = connect((msg) => {
     smokes = msg.smokes;
     blasts = msg.blasts;
     ducks = msg.ducks;
+    emplacements = msg.emplacements;
     helicopters = msg.helicopters;
     speech = msg.speech;
     exhausted = msg.exhausted;
@@ -927,6 +931,9 @@ function render() {
     drawWalls(ctx, map.walls, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
     drawDoors(ctx, map.doors, doorStates, view);
+    // Under the entities, so the officer stands on his own emplacement rather
+    // than behind it.
+    drawEmplacements(ctx, emplacements, view);
     drawPickups(ctx, pickups, view, now);
   }
   mark('map');

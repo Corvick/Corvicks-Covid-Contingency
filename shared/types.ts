@@ -128,6 +128,28 @@ export interface Pond {
   pads: Array<{ x: number; y: number; r: number }>;
 }
 
+/**
+ * A deployed pocket gunner: the machine gun, and the sandbags in front of it.
+ * The bags are drawn as an oriented box because they lie across whatever way
+ * the officer who put them down was facing.
+ */
+export interface EmplacementState {
+  id: string;
+  x: number;
+  y: number;
+  /** Where the gun is pointing right now, not where it was planted. */
+  facing: number;
+  /** The direction it was planted in — the centre of its arc. */
+  arc: number;
+  /** Rounds left, so the client can show it running down. */
+  ammo: number;
+  /** 0-1 each. The bags go first; then the gun itself. */
+  bagHp: number;
+  gunHp: number;
+  /** Absent once the bags are gone. */
+  bags?: { x: number; y: number; angle: number; hw: number; hh: number };
+}
+
 /** A duck, sent for drawing only — they are scenery that reacts, not entities. */
 export interface DuckState {
   x: number;
@@ -394,6 +416,8 @@ export type ServerMessage =
       smokes: SmokeState[];
       blasts: BlastState[];
       ducks: DuckState[];
+      /** Deployed pocket gunners: the gun, and the bags in front of it. */
+      emplacements: EmplacementState[];
       helicopters: HelicopterState[];
       /** Sprint is locked out until stamina recovers past its threshold. */
       exhausted: boolean;

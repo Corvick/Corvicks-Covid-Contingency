@@ -193,6 +193,29 @@ otherwise demand.
   already scored zero, since neither has a damage figure; the set says so out
   loud so giving the dart one later doesn't send every bot after it.
 
+### The pocket gunner
+
+A utility that puts down a grey officer behind a machine gun and a wall of
+sandbags, facing whichever way you were. `server/src/emplacement.ts` owns it.
+
+- **The officer is an ordinary NPC entity.** It collides, it can be grabbed, it
+  draws like any other. The emplacement record holds only what makes it a gun
+  crew — which is why running dry needs nothing but deleting the record: what's
+  left is already a grey officer with a pistol.
+- **The bags are see-through and bullets go over them.** They are not in
+  `hasLineOfSight` or in `fire`, only in collision — and, like doors,
+  deliberately **not in the nav grid**: routes are planned as though they
+  weren't there and whoever walks into one deals with it, which is what makes
+  zombies stand and tear at them instead of strolling round.
+- **The bags are an oriented box**, not an axis-aligned rect, because they lie
+  across whatever bearing the officer happened to be facing. `resolveCircleBox`
+  and `closestOnBox` in `geometry.ts` are the whole of that.
+- **The traverse is ±`EMPLACEMENT_ARC` from where it was planted.** A mount
+  doesn't spin: anything behind it does not exist as far as the gun is
+  concerned.
+- It barely scratches anything. Its job is `EMPLACEMENT_SLOW_MUL` — holding a
+  street, not clearing one.
+
 ### Bot officers
 
 Blue body, grey head — a separate `bot` wire flag, not the ambient grey `npc`

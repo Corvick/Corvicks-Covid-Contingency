@@ -82,6 +82,7 @@ import { DangerField } from './danger.js';
 import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
+import type { Emplacement } from './emplacement.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -402,6 +403,8 @@ export interface World {
   bots: Set<string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
+  /** Deployed pocket gunners, keyed by the officer manning each one. */
+  emplacements: Map<string, Emplacement>;
   /** Frozen: a solo round with its pause panel up. */
   paused: boolean;
   /** Gamertag per connected player, as given at the front end. */
@@ -857,6 +860,7 @@ export function createWorld(): World {
     soldiers: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
+    emplacements: new Map(),
     paused: false,
     names: new Map(),
     pathBudget: PATH_BUDGET_PER_TICK,
@@ -919,6 +923,7 @@ export function resetWorld(world: World): void {
   world.gameOver = false;
   world.victory = false;
   world.paused = false;
+  world.emplacements.clear();
 
   populate(world);
   spawnPickups(world, playerOneStart(world));

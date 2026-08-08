@@ -506,6 +506,41 @@ export const BOT_SMOKE_COOLDOWN_MS = 9000;
 export const BOT_PATROL_SAMPLES = 14;
 export const BOT_PATROL_MIN = 420;
 export const BOT_PATROL_MAX = 1100;
+// ------------------------------------------------------- the pocket gunner
+/**
+ * A machine gun on a bipod behind a wall of sandbags, and a grey officer to
+ * work it. It barely scratches anything — its job is to hold a street, not to
+ * clear one, so what it really does is slow everything that walks into its arc.
+ */
+export const EMPLACEMENT_AMMO = 500;
+export const EMPLACEMENT_COOLDOWN_MS = 85;
+export const EMPLACEMENT_DAMAGE_MIN = 2;
+export const EMPLACEMENT_DAMAGE_MAX = 5;
+export const EMPLACEMENT_BLOOM = 0.05;
+export const EMPLACEMENT_RANGE = 620;
+/** Longer and heavier than a rifle round: the point of the thing. */
+export const EMPLACEMENT_SLOW_MS = 1500;
+export const EMPLACEMENT_SLOW_MUL = 0.25;
+/** Half-angle of the traverse. A right angle each way is 180 degrees of front. */
+export const EMPLACEMENT_ARC = Math.PI / 2;
+/** How fast the gun swings across its arc. */
+export const EMPLACEMENT_TURN_RATE = 3.2;
+/** Where it lands relative to whoever put it down. */
+export const EMPLACEMENT_PLACE_DIST = 46;
+
+/** The sandbags: see-through and no obstacle to a bullet, but you can't walk it. */
+export const SANDBAG_HALF_WIDTH = 42;
+export const SANDBAG_HALF_DEPTH = 9;
+/** How far in front of the gunner the bags are stacked. */
+export const SANDBAG_STANDOFF = 26;
+export const SANDBAG_HEALTH = 1200;
+export const EMPLACEMENT_GUN_HEALTH = 700;
+/** A zombie's claw at the bags, and how often it lands. */
+export const SANDBAG_HIT_DAMAGE = 34;
+export const SANDBAG_HIT_INTERVAL_MS = 620;
+/** How near a zombie has to be to start tearing at them. */
+export const SANDBAG_REACH = 22;
+
 /** Body and head of a bot officer: blue with a grey head. */
 export const BOT_OFFICER_COLOR = '#2563eb';
 export const BOT_OFFICER_HEAD_COLOR = '#9ca3af';
