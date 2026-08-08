@@ -1,125 +1,79 @@
-import { LOBBY_DOG_SLOTS, LOBBY_HUMAN_SLOTS } from '../../shared/constants.js';
-import type { SlotState } from '../../shared/types.js';
+import type {
+  ClientMessage,
+  LobbySummary,
+  LobbyTeam,
+  LobbyView,
+  ServerMessage,
+  SlotWire,
+} from '../../shared/types.js';
 
 /**
- * The front end: title, gamertag, mode, lobby. It owns nothing about the game
- * itself — it hands back a name and a slot configuration and gets out of the
- * way, so the running game never has to know a menu existed.
+ * The front end: title, gamertag, create or browse, lobby. It owns no game
+ * state and no lobby state — the server holds the lobby and pushes it back on
+ * every change, and this just draws whatever arrived and forwards clicks.
  */
-export interface LobbyConfig {
-  name: string;
-  humans: SlotState[];
-  dogs: SlotState[];
+export interface MenuHooks {
+  send: (msg: ClientMessage) => void;
+  /** Our lobby's round has begun; the game takes the screen from here. */
+  onStart: () => void;
 }
 
-type Team = 'humans' | 'dogs';
-
-/** What the tag button walks a slot through. Your own slot is never in it. */
-const CYCLE: SlotState[] = ['closed', 'open', 'bot'];
+export interface Menu {
+  /** Feed every server message through here. Non-lobby ones are ignored. */
+  handle: (msg: ServerMessage) => void;
+}
 
 const NAME_KEY = 'gamertag';
 const NAME_MAX = 16;
 
-export function setupMenu(onStart: (config: LobbyConfig) => void): void {
-  const shell = document.getElementById('shell') as HTMLDivElement;
+export function setupMenu(hooks: MenuHooks): Menu {
+  const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+  const shell = el<HTMLDivElement>('shell');
+
   const screens = {
-    title: document.getElementById('screen-title') as HTMLDivElement,
-    name: document.getElementById('screen-name') as HTMLDivElement,
-    online: document.getElementById('screen-online') as HTMLDivElement,
-    lobby: document.getElementById('lobby') as HTMLDivElement,
+    title: el<HTMLDivElement>('screen-title'),
+    name: el<HTMLDivElement>('screen-name'),
+    online: el<HTMLDivElement>('screen-online'),
+    create: el<HTMLDivElement>('screen-create'),
+    join: el<HTMLDivElement>('screen-join'),
+    lobby: el<HTMLDivElement>('lobby'),
+  };
+  type Screen = keyof typeof screens;
+
+  let current: Screen = 'title';
+  const show = (which: Screen) => {
+    current = which;
+    for (const [key, node] of Object.entries(screens)) node.classList.toggle('active', key === which);
   };
 
-  const show = (which: keyof typeof screens) => {
-    for (const [key, el] of Object.entries(screens)) el.classList.toggle('active', key === which);
-  };
-
-  // You always occupy exactly one slot, starting at the top of the officers.
-  const slots: Record<Team, SlotState[]> = {
-    humans: Array.from({ length: LOBBY_HUMAN_SLOTS }, (_, i) => (i === 0 ? 'player' : 'closed')),
-    dogs: Array.from({ length: LOBBY_DOG_SLOTS }, () => 'closed'),
-  };
   let name = '';
-
-  const hosts: Record<Team, HTMLDivElement> = {
-    humans: document.getElementById('slots-humans') as HTMLDivElement,
-    dogs: document.getElementById('slots-dogs') as HTMLDivElement,
-  };
-
-  /** Move into a slot, leaving the one you were in standing open behind you. */
-  const takeSlot = (team: Team, index: number) => {
-    for (const t of ['humans', 'dogs'] as Team[]) {
-      const at = slots[t].indexOf('player');
-      if (at >= 0) slots[t][at] = 'open';
-    }
-    slots[team][index] = 'player';
-    renderAll();
-  };
-
-  const render = (team: Team) => {
-    const host = hosts[team];
-    host.replaceChildren();
-    slots[team].forEach((state, i) => {
-      const row = document.createElement('div');
-      row.className = 'slot';
-      row.dataset.state = state;
-
-      const label = document.createElement('span');
-      label.textContent = `${team === 'humans' ? 'OFFICER' : 'DOG'} ${i + 1}`;
-
-      const tag = document.createElement('button');
-      tag.className = 'tag';
-      tag.textContent = state === 'player' ? name.toUpperCase() : state.toUpperCase();
-      // You can't close or bot the seat you're sitting in.
-      tag.disabled = state === 'player';
-      tag.addEventListener('click', (e) => {
-        e.stopPropagation(); // the row underneath would try to seat you
-        slots[team][i] = CYCLE[(CYCLE.indexOf(slots[team][i]) + 1) % CYCLE.length];
-        render(team);
-      });
-
-      // A closed slot isn't yours to sit in until it's been opened; anything
-      // else you can move into, bots included — you take their place.
-      if (state === 'open' || state === 'bot') {
-        row.addEventListener('click', () => takeSlot(team, i));
-      }
-
-      row.append(label, tag);
-      host.appendChild(row);
-    });
-  };
-
-  const renderAll = () => {
-    render('humans');
-    render('dogs');
-  };
+  let lobbies: LobbySummary[] = [];
+  let view: LobbyView | null = null;
 
   // ---- gamertag ----
-  const input = document.getElementById('name-input') as HTMLInputElement;
-  const okBtn = document.getElementById('btn-name-ok') as HTMLButtonElement;
-
-  const typed = () => input.value.trim().slice(0, NAME_MAX);
-  const refreshOk = () => okBtn.classList.toggle('dim', typed().length === 0);
+  const nameInput = el<HTMLInputElement>('name-input');
+  const nameOk = el<HTMLButtonElement>('btn-name-ok');
+  const typedName = () => nameInput.value.trim().slice(0, NAME_MAX);
 
   const confirmName = () => {
-    const next = typed();
+    const next = typedName();
     if (!next) return;
     name = next;
-    // Remembered so it's already filled in next time. Private browsing and
-    // locked-down storage both throw here, and neither is worth a crash.
+    // Private browsing and locked-down storage both throw here, and neither is
+    // worth a crash — you just get asked again next time.
     try {
       localStorage.setItem(NAME_KEY, name);
     } catch {
-      /* not remembered, but still usable this session */
+      /* not remembered, still usable this session */
     }
-    renderAll();
     show('online');
   };
 
-  input.addEventListener('input', refreshOk);
-  input.addEventListener('keydown', (e) => {
+  nameInput.addEventListener('input', () => nameOk.classList.toggle('dim', !typedName()));
+  nameInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') confirmName();
   });
-  okBtn.addEventListener('click', confirmName);
+  nameOk.addEventListener('click', confirmName);
 
   const askName = () => {
     let remembered = '';
@@ -128,24 +82,181 @@ export function setupMenu(onStart: (config: LobbyConfig) => void): void {
     } catch {
       /* nothing remembered */
     }
-    input.value = remembered;
-    refreshOk();
+    nameInput.value = remembered;
+    nameOk.classList.toggle('dim', !typedName());
     show('name');
-    input.focus();
-    input.select();
+    nameInput.focus();
+    nameInput.select();
   };
 
-  // ---- wiring ----
-  document.getElementById('btn-online')!.addEventListener('click', askName);
-  document.getElementById('btn-name-back')!.addEventListener('click', () => show('title'));
-  document.getElementById('btn-create')!.addEventListener('click', () => show('lobby'));
-  document.getElementById('btn-online-back')!.addEventListener('click', askName);
-  document.getElementById('lobby-back')!.addEventListener('click', () => show('online'));
+  // ---- create ----
+  const lobbyNameInput = el<HTMLInputElement>('lobby-name-input');
+  const doCreate = () => {
+    hooks.send({
+      type: 'lobbyCreate',
+      name: lobbyNameInput.value.trim() || `${name}'s lobby`,
+      gamertag: name,
+    });
+  };
+  lobbyNameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doCreate();
+  });
+  el('btn-create-go').addEventListener('click', doCreate);
 
-  document.getElementById('lobby-start')!.addEventListener('click', () => {
-    shell.classList.add('hidden');
-    onStart({ name, humans: slots.humans, dogs: slots.dogs });
+  // ---- browse ----
+  const listHost = el<HTMLDivElement>('lobby-list');
+
+  const renderList = () => {
+    listHost.replaceChildren();
+    if (lobbies.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'no lobbies yet — create one';
+      listHost.appendChild(empty);
+      return;
+    }
+    for (const lobby of lobbies) {
+      const row = document.createElement('div');
+      row.className = 'lobby-row';
+
+      const title = document.createElement('span');
+      title.textContent = lobby.name;
+
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = `${lobby.host} · ${lobby.players}/${lobby.capacity}`;
+      if (lobby.running) {
+        const running = document.createElement('span');
+        running.className = 'running';
+        running.textContent = ' · IN PROGRESS';
+        meta.appendChild(running);
+      }
+
+      row.append(title, meta);
+      row.addEventListener('click', () =>
+        hooks.send({ type: 'lobbyJoin', id: lobby.id, gamertag: name }),
+      );
+      listHost.appendChild(row);
+    }
+  };
+
+  el('btn-refresh').addEventListener('click', () => hooks.send({ type: 'lobbyList' }));
+
+  // ---- lobby ----
+  const chatLog = el<HTMLDivElement>('chat-log');
+  const chatInput = el<HTMLInputElement>('chat-input');
+  const startBtn = el<HTMLButtonElement>('lobby-start');
+  const hosts: Record<LobbyTeam, HTMLDivElement> = {
+    humans: el<HTMLDivElement>('slots-humans'),
+    dogs: el<HTMLDivElement>('slots-dogs'),
+  };
+
+  const renderSlots = (team: LobbyTeam, seats: SlotWire[], isHost: boolean) => {
+    const host = hosts[team];
+    host.replaceChildren();
+    seats.forEach((seat, i) => {
+      const row = document.createElement('div');
+      row.className = 'slot';
+      row.dataset.state = seat.state;
+      if (seat.self) row.dataset.self = 'yes';
+
+      const label = document.createElement('span');
+      label.textContent = `${team === 'humans' ? 'OFFICER' : 'DOG'} ${i + 1}`;
+
+      const tag = document.createElement('button');
+      tag.className = 'tag';
+      tag.textContent = seat.state === 'player' ? (seat.name ?? '???') : seat.state.toUpperCase();
+      // Only the host arranges the room, and nobody rearranges an occupied seat.
+      tag.disabled = !isHost || seat.state === 'player';
+      tag.addEventListener('click', (e) => {
+        e.stopPropagation(); // the row underneath would try to seat us
+        hooks.send({ type: 'lobbyCycle', team, index: i });
+      });
+
+      // A closed seat isn't yours to take until it's been opened, and there's
+      // no point clicking one someone is already in. Taking a bot's seat is
+      // fair game for anyone — the server agrees, so don't disagree here.
+      if (seat.state === 'open' || seat.state === 'bot') {
+        row.addEventListener('click', () => hooks.send({ type: 'lobbySit', team, index: i }));
+      } else {
+        row.style.cursor = 'default';
+      }
+
+      row.append(label, tag);
+      host.appendChild(row);
+    });
+  };
+
+  const renderLobby = () => {
+    if (!view) return;
+    el('lobby-title').textContent = view.name.toUpperCase();
+    renderSlots('humans', view.humans, view.isHost);
+    renderSlots('dogs', view.dogs, view.isHost);
+    startBtn.style.display = view.isHost ? '' : 'none';
+
+    // Pinned to the bottom unless you've scrolled up to read something.
+    const atBottom = chatLog.scrollTop + chatLog.clientHeight >= chatLog.scrollHeight - 24;
+    chatLog.replaceChildren();
+    for (const line of view.chat) {
+      const p = document.createElement('div');
+      p.className = line.from ? 'chat-line' : 'chat-line system';
+      if (line.from) {
+        const who = document.createElement('span');
+        who.className = 'from';
+        who.textContent = `${line.from}: `;
+        p.appendChild(who);
+      }
+      p.appendChild(document.createTextNode(line.text));
+      chatLog.appendChild(p);
+    }
+    if (atBottom) chatLog.scrollTop = chatLog.scrollHeight;
+  };
+
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = '';
+    hooks.send({ type: 'lobbyChat', text });
   });
 
-  renderAll();
+  startBtn.addEventListener('click', () => hooks.send({ type: 'lobbyStart' }));
+
+  // ---- navigation ----
+  el('btn-online').addEventListener('click', askName);
+  el('btn-name-back').addEventListener('click', () => show('title'));
+  el('btn-online-back').addEventListener('click', askName);
+  el('btn-create').addEventListener('click', () => {
+    lobbyNameInput.value = `${name}'s lobby`;
+    show('create');
+    lobbyNameInput.focus();
+    lobbyNameInput.select();
+  });
+  el('btn-create-back').addEventListener('click', () => show('online'));
+  el('btn-join').addEventListener('click', () => {
+    hooks.send({ type: 'lobbyList' });
+    renderList();
+    show('join');
+  });
+  el('btn-join-back').addEventListener('click', () => show('online'));
+  el('lobby-back').addEventListener('click', () => hooks.send({ type: 'lobbyLeave' }));
+
+  return {
+    handle(msg) {
+      if (msg.type === 'lobbies') {
+        lobbies = msg.lobbies;
+        if (current === 'join') renderList();
+      } else if (msg.type === 'lobby') {
+        view = msg.lobby;
+        renderLobby();
+        if (current !== 'lobby') show('lobby');
+      } else if (msg.type === 'lobbyLeft') {
+        view = null;
+        show('online');
+      } else if (msg.type === 'start') {
+        shell.classList.add('hidden');
+        hooks.onStart();
+      }
+    },
+  };
 }

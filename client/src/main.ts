@@ -147,22 +147,17 @@ const spectateParam = new URLSearchParams(location.search).get('spectate');
 const startSpectating = spectateParam !== null;
 
 /**
- * False while the front end is up. The socket is live either way — the server
- * has already given us an officer — but nothing is sent or drawn until the host
- * actually starts a round, so keys pressed at the menu don't drive a player
- * standing in a city behind it. A spectator link skips the menu entirely.
+ * False while the front end is up. The socket is live either way, but you have
+ * no entity in any city until your lobby starts, and nothing is sent or drawn
+ * until then — so keys pressed at the menu drive nobody. A spectator link
+ * skips the front end entirely.
  */
 let started = startSpectating;
-if (!started) {
-  setupMenu((config) => {
-    started = true;
-    send({ type: 'startGame', name: config.name, humans: config.humans, dogs: config.dogs });
-  });
-} else {
-  document.getElementById('shell')!.classList.add('hidden');
-}
+if (startSpectating) document.getElementById('shell')!.classList.add('hidden');
 
 const { send } = connect((msg) => {
+  // The front end reads the lobby traffic; the game below ignores it.
+  frontEnd?.handle(msg);
   if (msg.type === 'welcome') {
     selfId = msg.selfId;
     map = msg.map;
@@ -236,7 +231,25 @@ const { send } = connect((msg) => {
   }
 });
 
+/**
+ * Built after the socket because it needs to send on it. Nothing can arrive
+ * before this line runs — messages are delivered on a later task — so the
+ * handler above is never called with this still unassigned.
+ */
+const frontEnd = startSpectating
+  ? null
+  : setupMenu({
+      send,
+      onStart: () => {
+        started = true;
+        // A digit typed into the chat box latched a slot key on the way past.
+        input.slotPressed = -1;
+      },
+    });
+
 window.addEventListener('keydown', (e) => {
+  // The front end has its own back buttons; the pause panel belongs to a round.
+  if (!started) return;
   if (e.code === 'Escape') {
     // Back out of an armed order first, rather than opening the menu.
     if (armedAbility) armedAbility = null;

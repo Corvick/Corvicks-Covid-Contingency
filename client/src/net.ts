@@ -27,8 +27,11 @@ export function takeNetStats(): { parseMs: number; applyMs: number; bytes: numbe
 export function connect(onMessage: (msg: ServerMessage) => void): Connection {
   let ws: WebSocket | null = null;
 
+  /** `?server=8090` points at a second server, leaving a live game alone. */
+  const port = new URLSearchParams(location.search).get('server') || '8080';
+
   function open() {
-    const socket = new WebSocket(`ws://${location.hostname}:8080`);
+    const socket = new WebSocket(`ws://${location.hostname}:${port}`);
     ws = socket;
 
     socket.addEventListener('message', (event) => {

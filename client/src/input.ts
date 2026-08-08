@@ -35,7 +35,19 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     slotPressed: -1,
   };
 
+  /**
+   * True while a text field has the keyboard — the lobby's chat and name
+   * boxes. WASD is preventDefault'd below, so without this you cannot type a
+   * "w" into chat at all.
+   */
+  function typing(e: KeyboardEvent): boolean {
+    const target = e.target as HTMLElement | null;
+    if (!target) return false;
+    return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+  }
+
   window.addEventListener('keydown', (e) => {
+    if (typing(e)) return;
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') tracker.sprint = true;
     if (e.code === 'KeyE') tracker.interact = true;
 

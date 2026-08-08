@@ -201,9 +201,47 @@ export interface InputState {
 
 /**
  * A lobby slot: shut, waiting for someone, filled by the machine, or sat in by
- * a real person. Exactly one slot is 'player' — you are always somewhere.
+ * a real person.
  */
 export type SlotState = 'closed' | 'open' | 'bot' | 'player';
+
+/** A slot as the server describes it — the name rides along with the seat. */
+export interface SlotWire {
+  state: SlotState;
+  /** Gamertag of whoever is sitting here, when `state` is 'player'. */
+  name?: string;
+  /** True when that person is you, so the client can pick you out. */
+  self?: boolean;
+}
+
+/** One line in a lobby's chat. `from` is empty for the server's own notices. */
+export interface ChatLine {
+  from: string;
+  text: string;
+}
+
+/** A lobby as it appears in the browse list. */
+export interface LobbySummary {
+  id: string;
+  name: string;
+  /** The host's gamertag. */
+  host: string;
+  /** People sitting in slots, and how many seats exist in total. */
+  players: number;
+  capacity: number;
+  /** Its round is already under way — you can still join, but not play yet. */
+  running: boolean;
+}
+
+/** The lobby you are actually in, pushed whenever anything about it changes. */
+export interface LobbyView {
+  id: string;
+  name: string;
+  isHost: boolean;
+  humans: SlotWire[];
+  dogs: SlotWire[];
+  chat: ChatLine[];
+}
 
 export type AbilityId = 'rally' | 'follow' | 'wait';
 
@@ -254,12 +292,33 @@ export type ClientMessage =
    */
   | { type: 'spectate'; restart?: boolean }
   | { type: 'restart' }
-  /** Host pressed start: lay the round out to match the lobby. */
-  | { type: 'startGame'; name: string; humans: SlotState[]; dogs: SlotState[] };
+  // ---- front end. None of these touch the running world except `lobbyStart`.
+  /** Send me the browse list, and keep sending it as it changes. */
+  | { type: 'lobbyList' }
+  | { type: 'lobbyCreate'; name: string; gamertag: string }
+  | { type: 'lobbyJoin'; id: string; gamertag: string }
+  /** Take a seat. Only 'open' and 'bot' seats can be taken. */
+  | { type: 'lobbySit'; team: LobbyTeam; index: number }
+  /** Host only: walk a slot through closed → open → bot. */
+  | { type: 'lobbyCycle'; team: LobbyTeam; index: number }
+  | { type: 'lobbyChat'; text: string }
+  | { type: 'lobbyLeave' }
+  /** Host only. Also what the host's "go" in chat resolves to. */
+  | { type: 'lobbyStart' };
+
+export type LobbyTeam = 'humans' | 'dogs';
 
 export type ServerMessage =
   | { type: 'welcome'; selfId: string; map: MapData }
   | { type: 'map'; map: MapData }
+  /** The browse list, pushed to everyone who isn't in a lobby yet. */
+  | { type: 'lobbies'; lobbies: LobbySummary[] }
+  /** The lobby you're in. Sent on every change, so the client just redraws. */
+  | { type: 'lobby'; lobby: LobbyView }
+  /** You are no longer in a lobby — you left, or it went away under you. */
+  | { type: 'lobbyLeft'; reason: string }
+  /** Your lobby's round is beginning. The map follows. */
+  | { type: 'start' }
   | {
       type: 'state';
       entities: EntityState[];

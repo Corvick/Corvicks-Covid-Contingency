@@ -60,8 +60,26 @@ import { processShooting } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { ducksToWire, updateDucks } from './ducks.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
+import {
+  anyRunning,
+  botCount,
+  chat,
+  createLobby,
+  cycle,
+  inALobby,
+  joinLobby,
+  leaveLobby,
+  lobbyOf,
+  say,
+  seatedPlayers,
+  sit,
+  summaries,
+  viewFor,
+  type Lobby,
+} from './lobby.js';
 
-const PORT = 8080;
+/** 8080 unless told otherwise, so a second server can be run alongside a game. */
+const PORT = Number(process.env.PORT) || 8080;
 const TICK_MS = 1000 / TICK_RATE;
 
 const world = createWorld();
@@ -79,10 +97,13 @@ function broadcast(message: ServerMessage): void {
   for (const socket of sockets.values()) send(socket, message);
 }
 
-wss.on('connection', (socket) => {
-  const id = randomUUID();
-
-  // Player one drops on the designated start point so testing needs no hike.
+/**
+ * Put a connection into the world as an officer. Nobody gets one on connect
+ * any more — you arrive at the front end, and only a lobby starting a round
+ * puts you in a city. The first one in gets the designated start point so
+ * testing needs no hike.
+ */
+function spawnPlayer(id: string): void {
   const isPlayerOne = world.playerIds.size === 0;
   const start = playerOneStart(world);
   const spawn = isPlayerOne
@@ -102,10 +123,96 @@ wss.on('connection', (socket) => {
   world.stamina.set(id, STAMINA_MAX);
   world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
   world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
+}
+
+/** Take a connection back out of the world — they've gone, or the lobby has. */
+function despawnPlayer(id: string): void {
+  world.entities.delete(id);
+  world.playerIds.delete(id);
+  world.commands.delete(id);
+  world.inventories.delete(id);
+}
+
+/** Push the browse list to everyone still choosing where to go. */
+function broadcastLobbies(): void {
+  const list = summaries();
+  for (const [connId, socket] of sockets) {
+    if (!inALobby(connId)) send(socket, { type: 'lobbies', lobbies: list });
+  }
+}
+
+/** Redraw a lobby for everyone in it. Each viewer sees their own 'self' flags. */
+function pushLobby(lobby: Lobby): void {
+  for (const connId of lobby.members.keys()) {
+    const socket = sockets.get(connId);
+    if (socket) send(socket, { type: 'lobby', lobby: viewFor(lobby, connId) });
+  }
+}
+
+/** Tell everyone in a lobby it has gone, and drop them back to the browse list. */
+function closeLobby(lobby: Lobby, reason: string): void {
+  for (const connId of lobby.members.keys()) {
+    const socket = sockets.get(connId);
+    if (socket) send(socket, { type: 'lobbyLeft', reason });
+    despawnPlayer(connId);
+  }
+}
+
+/**
+ * Begin a lobby's round. There is one world, so this refuses while another
+ * lobby's round is under way rather than resetting the city out from under it.
+ */
+function startLobby(lobby: Lobby): void {
+  if (lobby.running) return;
+  if (anyRunning()) {
+    say(lobby, '', 'another round is already running — wait for it to finish');
+    pushLobby(lobby);
+    return;
+  }
+
+  const seated = seatedPlayers(lobby);
+  if (seated.length === 0) {
+    say(lobby, '', 'nobody is sitting in a slot');
+    pushLobby(lobby);
+    return;
+  }
+
+  // Only the people in this lobby exist in the round. Anyone left over from a
+  // previous one is cleared out first, or they'd wander a city they never
+  // joined.
+  for (const connId of world.playerIds) despawnPlayer(connId);
+  world.playerIds.clear();
+
+  lobby.running = true;
+  world.botOfficerCount = botCount(lobby);
+  resetWorld(world);
+  for (const connId of seated) spawnPlayer(connId);
+
+  const dogs = lobby.dogs.filter((s) => s.state === 'player').length;
+  console.log(
+    `[server] "${lobby.name}" started — ${seated.length} players, ` +
+      `${world.botOfficerCount} bot officers` +
+      (dogs > 0 ? `, ${dogs} in dog slots (spawning as officers for now)` : ''),
+  );
+
+  say(lobby, '', 'the round has begun');
+  pushLobby(lobby);
+  broadcastLobbies();
+  for (const connId of lobby.members.keys()) {
+    const socket = sockets.get(connId);
+    if (!socket) continue;
+    send(socket, { type: 'start' });
+    send(socket, { type: 'map', map: world.map });
+  }
+}
+
+wss.on('connection', (socket) => {
+  const id = randomUUID();
   sockets.set(id, socket);
 
   send(socket, { type: 'welcome', selfId: id, map: world.map });
-  console.log(`[server] player ${id} connected (${sockets.size} playing)`);
+  send(socket, { type: 'lobbies', lobbies: summaries() });
+  console.log(`[server] ${id} connected (${sockets.size} at the front end or playing)`);
 
   socket.on('message', (raw) => {
     try {
@@ -172,20 +279,60 @@ wss.on('connection', (socket) => {
         );
         if (restart) broadcast({ type: 'map', map: world.map });
         else send(socket, { type: 'map', map: world.map });
-      } else if (msg.type === 'startGame') {
-        // The lobby decides how much of the officer team the machine plays.
-        // Whichever slot the host sits in, they get an officer for now — the
-        // playable dog doesn't exist, so a dog slot is a seat and nothing more.
-        world.botOfficerCount = msg.humans.filter((s) => s === 'bot').length;
-        const dogs = msg.dogs.filter((s) => s !== 'closed').length;
-        const asDog = msg.dogs.includes('player');
-        world.names.set(id, msg.name);
-        resetWorld(world);
-        console.log(
-          `[server] ${msg.name} started a round — ${world.botOfficerCount} bot officers, ` +
-            `${dogs} dog slots${asDog ? ' (host took one; spawning as an officer)' : ''}`,
-        );
-        broadcast({ type: 'map', map: world.map });
+      } else if (msg.type === 'lobbyList') {
+        send(socket, { type: 'lobbies', lobbies: summaries() });
+      } else if (msg.type === 'lobbyCreate') {
+        world.names.set(id, msg.gamertag);
+        const lobby = createLobby(id, msg.name, msg.gamertag);
+        console.log(`[server] ${msg.gamertag} created lobby "${lobby.name}" (${lobby.id})`);
+        pushLobby(lobby);
+        broadcastLobbies();
+      } else if (msg.type === 'lobbyJoin') {
+        world.names.set(id, msg.gamertag);
+        const lobby = joinLobby(id, msg.id, msg.gamertag);
+        if (!lobby) {
+          // Someone clicked a lobby that closed while the list sat on screen.
+          send(socket, { type: 'lobbyLeft', reason: 'that lobby is gone' });
+          send(socket, { type: 'lobbies', lobbies: summaries() });
+        } else {
+          console.log(`[server] ${msg.gamertag} joined lobby "${lobby.name}"`);
+          pushLobby(lobby);
+          broadcastLobbies();
+        }
+      } else if (msg.type === 'lobbySit') {
+        if (sit(id, msg.team, msg.index)) {
+          const lobby = lobbyOf(id);
+          if (lobby) {
+            pushLobby(lobby);
+            broadcastLobbies();
+          }
+        }
+      } else if (msg.type === 'lobbyCycle') {
+        if (cycle(id, msg.team, msg.index)) {
+          const lobby = lobbyOf(id);
+          if (lobby) pushLobby(lobby);
+        }
+      } else if (msg.type === 'lobbyChat') {
+        const lobby = chat(id, msg.text);
+        if (lobby) {
+          // "go" from the host is the start command — it's quicker than
+          // reaching for the button, and everyone in the room sees it happen.
+          const said = msg.text.trim().toLowerCase();
+          if (said === 'go' && lobby.hostId === id) startLobby(lobby);
+          else pushLobby(lobby);
+        }
+      } else if (msg.type === 'lobbyStart') {
+        const lobby = lobbyOf(id);
+        if (lobby && lobby.hostId === id) startLobby(lobby);
+      } else if (msg.type === 'lobbyLeave') {
+        const left = leaveLobby(id);
+        despawnPlayer(id);
+        if (left) {
+          if (left.closed) closeLobby(left.lobby, 'the host closed the lobby');
+          else pushLobby(left.lobby);
+          broadcastLobbies();
+        }
+        send(socket, { type: 'lobbies', lobbies: summaries() });
       } else if (msg.type === 'restart') {
         // Someone watching stays watching: resetWorld gives every connection a
         // fresh officer, which dropped a spectator back into first person.
@@ -205,6 +352,11 @@ wss.on('connection', (socket) => {
   });
 
   socket.on('close', () => {
+    const left = leaveLobby(id);
+    if (left) {
+      if (left.closed) closeLobby(left.lobby, 'the host left');
+      else pushLobby(left.lobby);
+    }
     world.names.delete(id);
     world.entities.delete(id);
     world.playerIds.delete(id);
