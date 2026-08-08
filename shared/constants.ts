@@ -224,6 +224,11 @@ export const SHELTER_FURTHEST_CHANCE = 0.07;
  * Bot officers: the counter-force. They carry real inventories, go looking
  * for better guns and fire them through the same path a player does.
  */
+/** Lobby shape. Five officers against two dogs. */
+export const LOBBY_HUMAN_SLOTS = 5;
+export const LOBBY_DOG_SLOTS = 2;
+
+/** Fallback when a round starts without a lobby behind it. */
 export const BOT_OFFICER_COUNT = 4;
 export const BOT_LOOT_RANGE = 1400;
 export const BOT_LOOT_SCAN_MS = 900;

@@ -376,6 +376,8 @@ export interface World {
   helicopters: Map<string, Helicopter>;
   /** Officers played by the machine, standing in for absent players. */
   bots: Set<string>;
+  /** How many the next round should spawn — the lobby sets this. */
+  botOfficerCount: number;
   /** Ids of helicopter-dropped troops — they aim far better. */
   soldiers: Set<string>;
   pathBudget: number;
@@ -810,6 +812,7 @@ export function createWorld(): World {
     helicopters: new Map(),
     soldiers: new Set(),
     bots: new Set(),
+    botOfficerCount: BOT_OFFICER_COUNT,
     pathBudget: PATH_BUDGET_PER_TICK,
     gameOver: false,
     victory: false,
@@ -1017,7 +1020,7 @@ function populate(world: World): void {
   // Bot officers stand in for the players who aren't here. They get the same
   // starting kit a player does — a pistol and nothing else — and go looking
   // for the rest of it.
-  for (let i = 0; i < BOT_OFFICER_COUNT; i++) {
+  for (let i = 0; i < world.botOfficerCount; i++) {
     const spawn = findSpawn(world, ENTITY_RADIUS.officer);
     const id = `bot-${i}`;
     world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));

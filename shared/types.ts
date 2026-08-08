@@ -199,6 +199,9 @@ export interface InputState {
   right: boolean;
 }
 
+/** A lobby slot: shut, waiting for someone, or filled by the machine. */
+export type SlotState = 'closed' | 'open' | 'bot';
+
 export type AbilityId = 'rally' | 'follow' | 'wait';
 
 /** A lootable item lying on the floor. */
@@ -247,7 +250,9 @@ export type ClientMessage =
    * the point is to observe how a game actually unfolds.
    */
   | { type: 'spectate'; restart?: boolean }
-  | { type: 'restart' };
+  | { type: 'restart' }
+  /** Host pressed start: lay the round out to match the lobby. */
+  | { type: 'startGame'; humans: SlotState[]; dogs: SlotState[] };
 
 export type ServerMessage =
   | { type: 'welcome'; selfId: string; map: MapData }

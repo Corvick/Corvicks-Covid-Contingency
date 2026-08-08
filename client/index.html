@@ -44,10 +44,98 @@
       }
       .panel button.secondary { background: #374151; }
       .panel button:hover { filter: brightness(1.15); }
+      .panel button:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+      .panel button:disabled:hover { filter: none; }
+
+      /* ---- front end: title, mode, lobby ---- */
+      #shell { position: absolute; inset: 0; background: #0b0d10; }
+      #shell.hidden { display: none; }
+      .screen { display: none; height: 100%; flex-direction: column;
+                align-items: center; justify-content: center; color: #e5e7eb; }
+      .screen.active { display: flex; }
+      .screen h1 { margin: 0 0 6px; font-size: 34px; letter-spacing: 0.08em; }
+      .screen h1 + p { margin: 0 0 28px; color: #9ca3af; font-size: 13px; }
+      .screen h2 { margin: 0 0 18px; font-size: 22px; letter-spacing: 0.04em; }
+      .menu-btn {
+        display: block; width: 260px; margin: 6px 0; padding: 12px 0;
+        font-size: 15px; letter-spacing: 0.06em; cursor: pointer;
+        border: 1px solid #374151; border-radius: 4px;
+        background: #1f2937; color: #e5e7eb;
+      }
+      .menu-btn:hover { background: #263242; }
+      .menu-btn.dim { color: #6b7280; border-color: #262f3b; cursor: not-allowed; }
+      .menu-btn.dim:hover { background: #1f2937; }
+      .back-btn {
+        margin-top: 18px; background: none; border: none; color: #6b7280;
+        font-size: 12px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .back-btn:hover { color: #9ca3af; }
+
+      #lobby { justify-content: flex-start; padding-top: 46px; box-sizing: border-box; }
+      .teams { display: flex; gap: 40px; }
+      .team { min-width: 250px; }
+      .team h3 { margin: 0 0 2px; font-size: 15px; letter-spacing: 0.06em; }
+      .team p { margin: 0 0 12px; color: #6b7280; font-size: 11px; letter-spacing: 0.04em; }
+      .slot {
+        display: flex; justify-content: space-between; align-items: center;
+        width: 100%; margin: 5px 0; padding: 9px 12px; font-size: 12px;
+        letter-spacing: 0.06em; cursor: pointer; box-sizing: border-box;
+        border: 1px solid #2b3441; border-radius: 3px;
+        background: #161b22; color: #6b7280;
+      }
+      .slot:hover { border-color: #3d4a5c; }
+      .slot .tag { font-weight: bold; }
+      .slot[data-state='open'] { color: #a7b4c4; }
+      .slot[data-state='open'] .tag { color: #38bdf8; }
+      .slot[data-state='bot'] { color: #d8e0ea; border-color: #3f5165; }
+      .slot[data-state='bot'] .tag { color: #4ade80; }
+      #lobby-start {
+        position: absolute; right: 40px; bottom: 34px; width: 190px; margin: 0;
+        background: #16803c; border-color: #1c9a49; color: #fff;
+      }
+      #lobby-start:hover { background: #1a9647; }
+      #lobby-back { position: absolute; left: 40px; bottom: 38px; margin: 0; }
+      .hint { margin-top: 20px; color: #4b5563; font-size: 11px; letter-spacing: 0.05em; }
     </style>
   </head>
   <body>
     <div id="stage">
+      <!-- Front end. Sits over the canvas until a game is actually started. -->
+      <div id="shell">
+        <div id="screen-title" class="screen active">
+          <h1>CORVICK'S COVID CONTINGENCY</h1>
+          <p>five officers · one outbreak</p>
+          <button class="menu-btn dim" id="btn-offline" disabled>PLAY OFFLINE</button>
+          <button class="menu-btn" id="btn-online">PLAY ONLINE</button>
+        </div>
+
+        <div id="screen-online" class="screen">
+          <h2>PLAY ONLINE</h2>
+          <button class="menu-btn" id="btn-create">CREATE LOBBY</button>
+          <button class="menu-btn dim" id="btn-join" disabled>JOIN LOBBY</button>
+          <button class="back-btn" id="btn-online-back">← BACK</button>
+        </div>
+
+        <div id="lobby" class="screen">
+          <h2>LOBBY</h2>
+          <div class="teams">
+            <div class="team">
+              <h3>TEAM 1 — OFFICERS</h3>
+              <p>humans · 5 slots</p>
+              <div id="slots-humans"></div>
+            </div>
+            <div class="team">
+              <h3>TEAM 2 — ZOMBIE DOGS</h3>
+              <p>the outbreak · 2 slots</p>
+              <div id="slots-dogs"></div>
+            </div>
+          </div>
+          <p class="hint">click a slot to cycle it: CLOSED → OPEN → BOT</p>
+          <button class="back-btn" id="lobby-back">← BACK</button>
+          <button class="menu-btn" id="lobby-start">START GAME</button>
+        </div>
+      </div>
+
       <canvas id="game"></canvas>
       <div id="hud"></div>
       <div id="perf"></div>

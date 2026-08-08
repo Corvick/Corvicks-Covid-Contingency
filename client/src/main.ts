@@ -62,6 +62,7 @@ import {
 } from './render.js';
 import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
+import { setupMenu } from './menu.js';
 import type { AbilityId } from '../../shared/types.js';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -144,6 +145,22 @@ function abilityUsable(id: AbilityId): boolean {
  */
 const spectateParam = new URLSearchParams(location.search).get('spectate');
 const startSpectating = spectateParam !== null;
+
+/**
+ * False while the front end is up. The socket is live either way — the server
+ * has already given us an officer — but nothing is sent or drawn until the host
+ * actually starts a round, so keys pressed at the menu don't drive a player
+ * standing in a city behind it. A spectator link skips the menu entirely.
+ */
+let started = startSpectating;
+if (!started) {
+  setupMenu((config) => {
+    started = true;
+    send({ type: 'startGame', humans: config.humans, dogs: config.dogs });
+  });
+} else {
+  document.getElementById('shell')!.classList.add('hidden');
+}
 
 const { send } = connect((msg) => {
   if (msg.type === 'welcome') {
@@ -536,6 +553,11 @@ function aimAngle(): number {
 }
 
 function sendInputLoop() {
+  if (!started) {
+    setTimeout(sendInputLoop, 1000 / 30);
+    return;
+  }
+
   // Slot keys are edge-triggered, so drain the latch as we send.
   if (input.slotPressed >= 0) {
     send({ type: 'selectSlot', slot: input.slotPressed });
@@ -762,6 +784,14 @@ function reportSlowGap(gap: number, now: number, drawn: number, net: ReturnType<
 }
 
 function render() {
+  // Nothing to draw behind the front end, and no frame timings worth keeping
+  // from it either — the first real frame should not be blamed for the menu.
+  if (!started) {
+    lastFrameAt = 0;
+    requestAnimationFrame(render);
+    return;
+  }
+
   const now = performance.now();
   const frameDelta = lastFrameAt > 0 ? Math.min(100, now - lastFrameAt) : 16;
   advanceFades(frameDelta);

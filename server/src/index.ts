@@ -172,6 +172,15 @@ wss.on('connection', (socket) => {
         );
         if (restart) broadcast({ type: 'map', map: world.map });
         else send(socket, { type: 'map', map: world.map });
+      } else if (msg.type === 'startGame') {
+        // The lobby decides how much of the officer team the machine plays.
+        world.botOfficerCount = msg.humans.filter((s) => s === 'bot').length;
+        const dogs = msg.dogs.filter((s) => s !== 'closed').length;
+        resetWorld(world);
+        console.log(
+          `[server] lobby start — ${world.botOfficerCount} bot officers, ${dogs} dog slots (dogs not built yet)`,
+        );
+        broadcast({ type: 'map', map: world.map });
       } else if (msg.type === 'restart') {
         // Someone watching stays watching: resetWorld gives every connection a
         // fresh officer, which dropped a spectator back into first person.
