@@ -1,4 +1,5 @@
 import type { MapData, Wall } from '../../shared/types.js';
+import { pondRadiusAt } from '../../shared/pond.js';
 import { NAV_CELL, NAV_INFLATE, PATH_MAX_NODES } from '../../shared/constants.js';
 
 export interface Waypoint {
@@ -97,6 +98,7 @@ export class NavGrid {
     for (let i = 0; i < map.windows.length; i++) {
       if (!broken.has(i)) this.markWall(map.windows[i]);
     }
+    this.markPond(map);
     this.component = new Int32Array(count).fill(-1);
     this.labelComponents();
   }
@@ -153,6 +155,31 @@ export class NavGrid {
   /** True when this point is part of the map's main walkable region. */
   isReachable(x: number, y: number): boolean {
     return this.component[this.cellAt(x, y)] === this.mainComponent;
+  }
+
+  /** Open water is no more walkable than a wall, and the same to a route. */
+  private markPond(map: MapData): void {
+    const pond = map.pond;
+    if (!pond) return;
+
+    const reach = pond.r * 1.5 + NAV_INFLATE;
+    const c0 = Math.max(0, Math.floor((pond.x - reach) / NAV_CELL));
+    const c1 = Math.min(this.cols - 1, Math.floor((pond.x + reach) / NAV_CELL));
+    const r0 = Math.max(0, Math.floor((pond.y - reach) / NAV_CELL));
+    const r1 = Math.min(this.rows - 1, Math.floor((pond.y + reach) / NAV_CELL));
+
+    for (let r = r0; r <= r1; r++) {
+      const cy = r * NAV_CELL + NAV_CELL / 2;
+      for (let c = c0; c <= c1; c++) {
+        const cx = c * NAV_CELL + NAV_CELL / 2;
+        // Inflated like walls are, so routes don't shave the waterline.
+        const dx = cx - pond.x;
+        const dy = cy - pond.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist >= pondRadiusAt(pond, Math.atan2(dy, dx)) + NAV_INFLATE) continue;
+        this.blocked[r * this.cols + c] = 1;
+      }
+    }
   }
 
   private markWall(wall: Wall): void {

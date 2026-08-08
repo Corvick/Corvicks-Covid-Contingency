@@ -119,7 +119,10 @@ export interface Building {
 export interface Pond {
   x: number;
   y: number;
+  /** Mean radius; the real edge wobbles either side of it. */
   r: number;
+  /** Summed harmonics that make the outline roundish rather than circular. */
+  wobble: Array<{ freq: number; amp: number; phase: number }>;
   pads: Array<{ x: number; y: number; r: number }>;
 }
 

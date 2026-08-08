@@ -26,6 +26,7 @@ import {
   type World,
 } from './world.js';
 import { clamp } from './geometry.js';
+import { scareDucks } from './ducks.js';
 
 /**
  * A thrown or launched charge, moved as an actual projectile rather than
@@ -84,6 +85,8 @@ export function throwGrenade(
 ): void {
   // Velocity is set so that an unobstructed throw lands on the target exactly
   // as its flight time runs out; anything it hits on the way shortens that.
+  // The bang of firing is startling in itself, wherever the shell ends up.
+  scareDucks(world, x, y, now);
   const flight = GRENADE_FLIGHT_MS / 1000;
   world.grenades.set(nextId('nade'), {
     id: nextId('g'),
@@ -195,6 +198,7 @@ function dropSoldier(world: World, heli: Helicopter, now: number): void {
  * the room behind it.
  */
 function detonate(world: World, x: number, y: number, now: number): void {
+  scareDucks(world, x, y, now);
   world.blasts.push({ x: Math.round(x), y: Math.round(y), at: now });
 
   for (const e of world.entityGrid.queryCircle(x, y, BLAST_RADIUS, new Set<Entity>())) {

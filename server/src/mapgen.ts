@@ -940,7 +940,14 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   // gets built on the water, and kept off the perimeter so it's approachable
   // from every side.
   const pondR = POND_MIN_RADIUS + rand() * (POND_MAX_RADIUS - POND_MIN_RADIUS);
-  const pond: Pond = { x: 0, y: 0, r: pondR, pads: [] };
+  // Two or three low harmonics: enough to read as a natural bank, bounded well
+  // under 1 so the outline can never fold back through the middle.
+  const wobble = [
+    { freq: 2 + Math.floor(rand() * 2), amp: 0.1 + rand() * 0.1, phase: rand() * Math.PI * 2 },
+    { freq: 3 + Math.floor(rand() * 3), amp: 0.05 + rand() * 0.08, phase: rand() * Math.PI * 2 },
+    { freq: 5 + Math.floor(rand() * 3), amp: 0.03 + rand() * 0.05, phase: rand() * Math.PI * 2 },
+  ];
+  const pond: Pond = { x: 0, y: 0, r: pondR, wobble, pads: [] };
   for (let attempt = 0; attempt < 80; attempt++) {
     const px = MAP_MARGIN + pondR + 80 + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - pondR * 2 - 160);
     const py = MAP_MARGIN + pondR + 80 + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - pondR * 2 - 160);

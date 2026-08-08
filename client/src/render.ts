@@ -18,6 +18,7 @@ import type {
   Window as WindowPane,
 } from '../../shared/types.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
+import { pondRadiusAt } from '../../shared/pond.js';
 import {
   ENTITY_COLOR,
   ENTITY_RADIUS,
@@ -103,12 +104,30 @@ export function drawWindows(
   }
 }
 
+/** Segments used to trace the bank — enough that it reads as a smooth curve. */
+const POND_SEGMENTS = 48;
+
 /** The pond and its lily pads. Drawn with the ground, under everything else. */
 export function drawPond(ctx: CanvasRenderingContext2D, pond: Pond, view: Viewport): void {
-  if (!visible(view, pond.x, pond.y, pond.r + 20)) return;
+  // The wobble can push the bank half again past the mean radius.
+  if (!visible(view, pond.x, pond.y, pond.r * 1.5 + 20)) return;
 
-  ctx.beginPath();
-  ctx.arc(pond.x, pond.y, pond.r, 0, Math.PI * 2);
+  // Traced from the same radius-per-bearing the server collides against, so
+  // the drawn bank is exactly the one you can't walk past.
+  const outline = (scale: number) => {
+    ctx.beginPath();
+    for (let i = 0; i <= POND_SEGMENTS; i++) {
+      const angle = (i / POND_SEGMENTS) * Math.PI * 2;
+      const r = pondRadiusAt(pond, angle) * scale;
+      const px = pond.x + Math.cos(angle) * r;
+      const py = pond.y + Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  };
+
+  outline(1);
   ctx.fillStyle = 'rgba(30, 64, 92, 0.92)';
   ctx.fill();
   ctx.lineWidth = 3;
@@ -116,8 +135,7 @@ export function drawPond(ctx: CanvasRenderingContext2D, pond: Pond, view: Viewpo
   ctx.stroke();
 
   // A lighter shallow rim, so it reads as water rather than a hole.
-  ctx.beginPath();
-  ctx.arc(pond.x, pond.y, pond.r * 0.82, 0, Math.PI * 2);
+  outline(0.82);
   ctx.strokeStyle = 'rgba(96, 150, 180, 0.32)';
   ctx.lineWidth = 6;
   ctx.stroke();

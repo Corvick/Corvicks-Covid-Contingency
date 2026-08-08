@@ -25,7 +25,6 @@ import {
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
   BUSH_SPEED_MULTIPLIER,
-  POND_SPEED_MULTIPLIER,
   PATH_BUDGET_PER_TICK,
   ZOMBIE_SPEED_MUL_MIN,
   ZOMBIE_SPEED_MUL_MAX,
@@ -78,6 +77,7 @@ import { newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
 import { doorRect, initDoors } from './doors.js';
+import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
 
 export interface Entity extends EntityState {
@@ -1145,6 +1145,25 @@ export function resolveCollisions(world: World): void {
     for (const index of slabs) {
       const door = world.doors[index];
       if (door && !door.open && !door.broken) resolveCircleRect(e, door.rect);
+    }
+
+    // Out of the water. The edge is a radius per bearing, so pushing clear is
+    // a slide back out along the same ray rather than an edge search.
+    const pond = world.map.pond;
+    if (pond) {
+      const dx = e.x - pond.x;
+      const dy = e.y - pond.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < pond.r * 1.5 + e.radius) {
+        const angle = Math.atan2(dy, dx);
+        const edge = pondRadiusAt(pond, angle) + e.radius;
+        if (dist < edge) {
+          // Dead centre has no bearing to push along; any of them will do.
+          const out = dist < 0.001 ? Math.random() * Math.PI * 2 : angle;
+          e.x = pond.x + Math.cos(out) * edge;
+          e.y = pond.y + Math.sin(out) * edge;
+        }
+      }
     }
 
     e.x = clamp(e.x, e.radius, WORLD_WIDTH - e.radius);
