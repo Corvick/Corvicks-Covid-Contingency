@@ -12,11 +12,23 @@ import {
   WORLD_WIDTH,
   WORLD_HEIGHT,
   ENTITY_RADIUS,
+  BLAST_RADIUS,
+  BLAST_DAMAGE_MIN,
+  BLAST_DAMAGE_MAX,
 } from '../../shared/constants.js';
-import { findSpawnNear, makeEntity, newAiState, type World } from './world.js';
+import {
+  findSpawnNear,
+  hasLineOfSight,
+  makeEntity,
+  newAiState,
+  type Entity,
+  type World,
+} from './world.js';
 
 export interface Grenade {
   id: string;
+  /** Smoke marks a landing zone; a frag shell goes off. */
+  kind: 'smoke' | 'frag';
   startX: number;
   startY: number;
   targetX: number;
@@ -54,9 +66,18 @@ export interface Helicopter {
 let counter = 0;
 const nextId = (prefix: string) => `${prefix}-${counter++}`;
 
-export function throwGrenade(world: World, x: number, y: number, tx: number, ty: number, now: number): void {
+export function throwGrenade(
+  world: World,
+  x: number,
+  y: number,
+  tx: number,
+  ty: number,
+  now: number,
+  kind: 'smoke' | 'frag' = 'smoke',
+): void {
   world.grenades.set(nextId('nade'), {
     id: nextId('g'),
+    kind,
     startX: x,
     startY: y,
     targetX: tx,
@@ -113,11 +134,46 @@ function dropSoldier(world: World, heli: Helicopter, now: number): void {
   world.materializeUntil.set(id, now + 600);
 }
 
+/**
+ * A shell going off. Damage falls away from the centre, and a wall between the
+ * blast and a body shields it — otherwise a grenade lobbed at a wall would kill
+ * the room behind it.
+ */
+function detonate(world: World, x: number, y: number, now: number): void {
+  world.blasts.push({ x: Math.round(x), y: Math.round(y), at: now });
+
+  for (const e of world.entityGrid.queryCircle(x, y, BLAST_RADIUS, new Set<Entity>())) {
+    if (e.type !== 'zombie') continue;
+    const dist = Math.hypot(e.x - x, e.y - y);
+    if (dist > BLAST_RADIUS) continue;
+    if (!hasLineOfSight(world, x, y, e.x, e.y)) continue;
+
+    const falloff = 1 - dist / BLAST_RADIUS;
+    const damage = BLAST_DAMAGE_MIN + (BLAST_DAMAGE_MAX - BLAST_DAMAGE_MIN) * falloff;
+    e.health -= damage;
+    if (e.health > 0) continue;
+
+    world.entities.delete(e.id);
+    world.ai.delete(e.id);
+    world.grapples.delete(e.id);
+    for (const [targetId, session] of world.grapples) {
+      session.zombieIds.delete(e.id);
+      if (session.zombieIds.size === 0) world.grapples.delete(targetId);
+    }
+  }
+}
+
 export function updateAirSupport(world: World, now: number, dt: number): void {
   // ---- grenades in flight
   for (const [key, g] of world.grenades) {
     if (now - g.thrownAt < GRENADE_FLIGHT_MS) continue;
     world.grenades.delete(key);
+
+    if (g.kind === 'frag') {
+      detonate(world, g.targetX, g.targetY, now);
+      continue;
+    }
+
     world.smokes.set(nextId('smoke'), {
       id: nextId('s'),
       x: g.targetX,

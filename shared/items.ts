@@ -7,7 +7,9 @@ export type ItemId =
   | 'kevlar'
   | 'riotShield'
   | 'lozenge'
-  | 'smokeGrenade';
+  | 'smokeGrenade'
+  | 'grenadeLauncher'
+  | 'ammoBox';
 
 export type ItemKind = 'gun' | 'utility';
 
@@ -31,6 +33,8 @@ export interface ItemDef {
   ammo?: number;
   /** Fires while the trigger is held rather than once per click. */
   automatic?: boolean;
+  /** Lobs an explosive shell instead of a hitscan round. */
+  explosive?: boolean;
 }
 
 export const ITEMS: Record<ItemId, ItemDef> = {
@@ -100,6 +104,27 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     cooldownMs: 1200,
     range: 620,
     ammo: 10,
+  },
+  grenadeLauncher: {
+    id: 'grenadeLauncher',
+    kind: 'gun',
+    label: 'Grenade Launcher',
+    short: 'GL',
+    color: '#a3e635',
+    // Kept out of the ordinary loot table entirely; placed by its own roll.
+    rarity: 0,
+    cooldownMs: 1600,
+    range: 560,
+    ammo: 4,
+    explosive: true,
+  },
+  ammoBox: {
+    id: 'ammoBox',
+    kind: 'utility',
+    label: 'Ammo Box',
+    short: 'AMMO',
+    color: '#facc15',
+    rarity: 4,
   },
   kevlar: {
     id: 'kevlar',

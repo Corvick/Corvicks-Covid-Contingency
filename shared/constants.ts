@@ -174,6 +174,17 @@ export const FOLLOW_STARTING_CHARGES = 1;
 export const FOLLOW_SHOUT = "Follow me!";
 export const FOLLOW_WAIT_SHOUT = "Wait here!";
 
+/**
+ * The launcher is kept out of the loot table and placed by its own roll, so
+ * most cities simply don't have one. Finding it should feel like an event.
+ */
+export const GRENADE_LAUNCHER_SPAWN_CHANCE = 0.2;
+/** Its shell detonates where it lands, hurting everything close to it. */
+export const BLAST_RADIUS = 132;
+export const BLAST_DAMAGE_MAX = 140;
+export const BLAST_DAMAGE_MIN = 35;
+export const BLAST_MS = 520;
+
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
 export const OFFICER_REFUGE_RANGE = 900;

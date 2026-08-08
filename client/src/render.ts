@@ -11,6 +11,7 @@ import type {
   PickupState,
   SmokeState,
   SpeechState,
+  BlastState,
   Wall,
   Window as WindowPane,
 } from '../../shared/types.js';
@@ -25,6 +26,8 @@ import {
   HELI_SHADOW_ALPHA,
   WALL_THICKNESS,
   GUN_SLOTS,
+  BLAST_RADIUS,
+  BLAST_MS,
 } from '../../shared/constants.js';
 
 export interface Viewport {
@@ -700,6 +703,32 @@ export function drawGrenades(ctx: CanvasRenderingContext2D, grenades: GrenadeSta
     ctx.arc(g.x, g.y - g.h, 4.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+  }
+}
+
+/** Shell detonations: a bright ring thrown outward, fading as it widens. */
+export function drawBlasts(
+  ctx: CanvasRenderingContext2D,
+  blasts: BlastState[],
+  view: Viewport,
+): void {
+  for (const b of blasts) {
+    if (!visible(view, b.x, b.y, BLAST_RADIUS + 20)) continue;
+    const t = Math.min(1, b.age / BLAST_MS);
+    const r = BLAST_RADIUS * (0.25 + t * 0.85);
+
+    ctx.globalAlpha = 1 - t;
+    ctx.fillStyle = 'rgba(253, 224, 71, 0.35)';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, r * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(251, 146, 60, 0.9)';
+    ctx.lineWidth = 3 * (1 - t) + 1;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 }
 

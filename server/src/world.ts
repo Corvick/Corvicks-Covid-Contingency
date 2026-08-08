@@ -359,6 +359,8 @@ export interface World {
   trackedTargets: Map<string, number>;
   grenades: Map<string, Grenade>;
   smokes: Map<string, Smoke>;
+  /** Recent detonations, cleared once they have been drawn out. */
+  blasts: Array<{ x: number; y: number; at: number }>;
   helicopters: Map<string, Helicopter>;
   /** Ids of helicopter-dropped troops — they aim far better. */
   soldiers: Set<string>;
@@ -786,6 +788,7 @@ export function createWorld(): World {
     trackedTargets: new Map(),
     grenades: new Map(),
     smokes: new Map(),
+    blasts: [],
     helicopters: new Map(),
     soldiers: new Set(),
     pathBudget: PATH_BUDGET_PER_TICK,

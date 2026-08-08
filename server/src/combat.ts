@@ -294,6 +294,28 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
     const last = world.lastShotAt.get(id) ?? 0;
     if (now - last < (def.cooldownMs ?? GUN_COOLDOWN_MS)) continue;
 
+    // The launcher lobs a shell at wherever you're pointing rather than
+    // tracing a line, so it reuses the grenade's flight and detonates there.
+    if (def.explosive) {
+      const slot = heldGunSlot(inv);
+      if (slot) {
+        if (slot.ammo <= 0) continue;
+        slot.ammo--;
+      }
+      world.lastShotAt.set(id, now);
+      const reach = def.range ?? GUN_RANGE;
+      throwGrenade(
+        world,
+        shooter.x,
+        shooter.y,
+        shooter.x + Math.cos(command.aim) * reach,
+        shooter.y + Math.sin(command.aim) * reach,
+        now,
+        'frag',
+      );
+      continue;
+    }
+
     // Everything but the pistol burns rounds.
     const slot = heldGunSlot(inv);
     if (slot) {

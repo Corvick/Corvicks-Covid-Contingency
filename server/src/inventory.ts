@@ -10,6 +10,7 @@ import {
   BUILDING_LOOT_CHANCE,
   TEST_DROP_ALL_ITEMS,
   TEST_DROP_RADIUS,
+  GRENADE_LAUNCHER_SPAWN_CHANCE,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 
@@ -75,6 +76,18 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
       break;
     }
   }
+
+  // The launcher is kept out of the loot table entirely and gets one roll for
+  // the whole city, so most rounds simply never see one.
+  if (Math.random() < GRENADE_LAUNCHER_SPAWN_CHANCE) {
+    const spots = Array.from(world.pickups.values());
+    if (spots.length > 0) {
+      const at = spots[Math.floor(Math.random() * spots.length)];
+      const id = `loot-gl`;
+      world.pickups.set(id, { id, item: 'grenadeLauncher', x: at.x, y: at.y });
+      world.pickups.delete(at.id);
+    }
+  }
 }
 
 export function nearestPickup(world: World, x: number, y: number): PickupState | null {
@@ -102,26 +115,44 @@ export function heldGunSlot(inv: Inventory): GunSlot | null {
   return inv.guns[inv.activeSlot - 1];
 }
 
-function applyUtility(world: World, playerId: string, inv: Inventory, item: ItemId): boolean {
+/**
+ * What picking a utility up does: some are used on the spot and vanish, some
+ * are carried, and some refuse to be picked up at all because using them right
+ * now would waste them.
+ */
+type UtilityOutcome = 'used' | 'carry' | 'refuse';
+
+function applyUtility(world: World, playerId: string, inv: Inventory, item: ItemId): UtilityOutcome {
+  // An ammo box tops up the gun in your hands and is gone. The pistol has
+  // unlimited rounds, so it refuses rather than letting you waste the box.
+  if (item === 'ammoBox') {
+    const slot = heldGunSlot(inv);
+    if (!slot) return 'refuse';
+    const full = ITEMS[slot.item].ammo ?? 0;
+    if (slot.ammo >= full) return 'refuse';
+    slot.ammo = full;
+    return 'used';
+  }
+
   // Some utilities are consumed the moment they're picked up.
   if (item === 'lozenge') {
     world.rallyCharges.set(playerId, (world.rallyCharges.get(playerId) ?? 0) + RALLY_STARTING_CHARGES);
     // A lozenge also buys back a follow command.
     world.followCharges.set(playerId, (world.followCharges.get(playerId) ?? 0) + 1);
-    return true;
+    return 'used';
   }
   // Kevlar is worn, not consumed on pickup — it takes up a utility slot until
   // its three uses are spent, so wearing one costs you a slot you could have
   // filled with something else.
   if (item === 'kevlar') {
     inv.kevlar = KEVLAR_POINTS;
-    return false;
+    return 'carry';
   }
   if (item === 'riotShield') {
     inv.shield = true;
-    return true;
+    return 'used';
   }
-  return false; // carried instead (smoke grenade)
+  return 'carry'; // smoke grenade, and anything else you hold on to
 }
 
 /**
@@ -135,9 +166,11 @@ export function collect(world: World, playerId: string, inv: Inventory, x: numbe
   const def = ITEMS[pickup.item];
 
   if (def.kind === 'utility') {
-    if (applyUtility(world, playerId, inv, pickup.item)) {
+    const outcome = applyUtility(world, playerId, inv, pickup.item);
+    if (outcome === 'refuse') return 'nothing that would use it';
+    if (outcome === 'used') {
       world.pickups.delete(pickup.id);
-      return `picked up ${def.label}`;
+      return `used ${def.label}`;
     }
     if (inv.utilities.length >= UTILITY_SLOTS) return 'utility slots full';
     inv.utilities.push(pickup.item);

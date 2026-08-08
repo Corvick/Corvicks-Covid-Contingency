@@ -137,6 +137,14 @@ export interface GrenadeState {
   h: number;
 }
 
+/** A shell going off: the client draws an expanding ring from it. */
+export interface BlastState {
+  x: number;
+  y: number;
+  /** Milliseconds since it went off. */
+  age: number;
+}
+
 export interface SmokeState {
   x: number;
   y: number;
@@ -252,6 +260,7 @@ export type ServerMessage =
       inventory: InventoryState;
       grenades: GrenadeState[];
       smokes: SmokeState[];
+      blasts: BlastState[];
       helicopters: HelicopterState[];
       /** Sprint is locked out until stamina recovers past its threshold. */
       exhausted: boolean;

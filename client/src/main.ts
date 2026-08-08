@@ -24,6 +24,7 @@ import type {
   PickupState,
   SmokeState,
   SpeechState,
+  BlastState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -44,6 +45,7 @@ import {
   drawInteractPrompt,
   drawInventory,
   drawPickups,
+  drawBlasts,
   drawSmoke,
   drawStamina,
   drawTracers,
@@ -107,6 +109,7 @@ let pickups: PickupState[] = [];
 let inventory: InventoryState | null = null;
 let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
+let blasts: BlastState[] = [];
 let helicopters: HelicopterState[] = [];
 let speech: SpeechState[] = [];
 const wheel = newWheelState();
@@ -188,6 +191,7 @@ const { send } = connect((msg) => {
     inventory = msg.inventory;
     grenades = msg.grenades;
     smokes = msg.smokes;
+    blasts = msg.blasts;
     helicopters = msg.helicopters;
     speech = msg.speech;
     exhausted = msg.exhausted;
@@ -761,6 +765,7 @@ function render() {
   // Air support sits above the foliage: smoke, then the grenade, then the
   // aircraft itself over everything on the ground.
   drawSmoke(ctx, smokes, now);
+  drawBlasts(ctx, blasts, view);
   drawGrenades(ctx, grenades);
   if (helicopters.length > 0) drawHelicopters(ctx, helicopters, now);
 

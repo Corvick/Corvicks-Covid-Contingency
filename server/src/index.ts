@@ -34,6 +34,7 @@ import {
   GUN_SLOTS,
   UTILITY_SLOTS,
   DROP_HOLD_MS,
+  BLAST_MS,
   TAP_MAX_MS,
 } from '../../shared/constants.js';
 import {
@@ -393,6 +394,9 @@ function tick(): void {
   const airGrenades = grenadesToWire(world, now);
   const airSmokes = smokesToWire(world, now);
   const airHelis = helicoptersToWire(world, now);
+  // Detonations linger only long enough for the ring to be drawn out.
+  world.blasts = world.blasts.filter((b) => now - b.at < BLAST_MS);
+  const airBlasts = world.blasts.map((b) => ({ x: b.x, y: b.y, age: now - b.at }));
 
   // Speech carries through fog: someone hammering on a door is heard whether
   // or not there's a line of sight to them.
@@ -440,6 +444,7 @@ function tick(): void {
       ),
       grenades: airGrenades,
       smokes: airSmokes,
+      blasts: airBlasts,
       helicopters: airHelis,
       spectating,
       gameOver: world.gameOver,
