@@ -24,6 +24,8 @@ export interface EntityState {
   materializing?: boolean;
   /** Speech bubble text, while one is active. */
   say?: string;
+  /** Tearing at a door — the client claws its arms at it. */
+  breaking?: boolean;
   /** Id of the partner whose hand they're holding, if any. */
   hand?: string;
 }

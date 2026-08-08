@@ -232,6 +232,39 @@ export function damageDoor(world: World, index: number, amount: number): boolean
   return true;
 }
 
+/** Anybody stood in the doorway, other than whoever is working the handle. */
+export function someoneInDoorway(world: World, index: number, exceptId: string): boolean {
+  const door = world.doors[index];
+  if (!door) return false;
+  const slab = door.rect;
+  const cx = slab.x + slab.w / 2;
+  const cy = slab.y + slab.h / 2;
+  const reach = Math.max(slab.w, slab.h) / 2 + 16;
+
+  for (const other of world.entityGrid.queryCircle(cx, cy, reach, new Set<Entity>())) {
+    if (other.id === exceptId) continue;
+    // Only bodies actually overlapping the slab count, not those beside it.
+    const nx = clamp(other.x, slab.x, slab.x + slab.w);
+    const ny = clamp(other.y, slab.y, slab.y + slab.h);
+    if (Math.hypot(other.x - nx, other.y - ny) < other.radius + 2) return true;
+  }
+  return false;
+}
+
+/**
+ * A doorway somebody is trying to shut. Anyone stood in one steps clear of it
+ * rather than being pinned there while the door waits.
+ */
+export function doorWantsClearing(world: World, index: number, now: number): boolean {
+  const until = world.doorClearing.get(index);
+  if (until === undefined) return false;
+  if (now >= until) {
+    world.doorClearing.delete(index);
+    return false;
+  }
+  return true;
+}
+
 /** Someone outside is begging to be let in at this door. */
 export function addPlea(world: World, index: number, until: number): void {
   const existing = world.doorPleas.get(index) ?? 0;

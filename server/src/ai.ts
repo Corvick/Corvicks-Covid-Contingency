@@ -113,6 +113,15 @@ import {
   DOOR_ZOMBIE_DAMAGE,
   DOOR_NPC_UNLOCK_MS,
   DOOR_REENGAGE_MS,
+  DOOR_VS_HUMAN_RANGE,
+  FRESH_ZOMBIE_MS,
+  DOOR_FRENZY_SURVIVORS,
+  DOOR_ALSO_LOCK_RANGE,
+  DOOR_ASK_OTHERS_CHANCE,
+  DOOR_ASK_MS,
+  DOOR_ASK_LINES,
+  DOOR_BLOCKED_WAIT_MS,
+  DOOR_STEP_ASIDE_SPEED,
   DOOR_SLAM_CHANCE,
   DOOR_SLAM_RANGE,
   DOOR_WARN_CHANCE,
@@ -130,6 +139,8 @@ import {
   doorsNear,
   doorSide,
   canWorkLockFrom,
+  someoneInDoorway,
+  doorWantsClearing,
   insideOfDoor,
   isDoorShut,
   lockDoor,
@@ -863,6 +874,39 @@ function doorInTheWay(world: World, e: Entity, state: AiState, now: number): num
   return best;
 }
 
+/**
+ * Stood in a doorway somebody wants to shut: step clear of the slab, along
+ * whichever way out is nearer. Returns true when this took the tick over.
+ */
+function stepOutOfDoorway(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  if (world.doorClearing.size === 0) return false;
+  if (state.doorBusyUntil > 0) return false; // busy working a handle themselves
+
+  for (const index of doorsNear(world, e.x, e.y, e.radius + 30)) {
+    if (!doorWantsClearing(world, index, now)) continue;
+    const door = world.doors[index];
+    if (!door) continue;
+
+    const slab = door.rect;
+    const nx = clamp(e.x, slab.x, slab.x + slab.w);
+    const ny = clamp(e.y, slab.y, slab.y + slab.h);
+    if (Math.hypot(e.x - nx, e.y - ny) >= e.radius + 2) continue;
+
+    // Out along the slab's short axis, whichever side is closer to open air.
+    const spec = world.map.doors[index];
+    const away = spec.horiz
+      ? e.y < spec.y
+        ? -Math.PI / 2
+        : Math.PI / 2
+      : e.x < spec.x
+        ? Math.PI
+        : 0;
+    step(world, e, state, away, DOOR_STEP_ASIDE_SPEED, HUMAN_TURN_RATE * 3, dt, now);
+    return true;
+  }
+  return false;
+}
+
 /** An open doorway this entity is about to step through, or -1. */
 function doorBeingUsed(world: World, e: Entity, state: AiState): number {
   const probe = e.radius + 22;
@@ -935,6 +979,28 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
       state.doorFollowUpSide = doorSide(world, index, e.x, e.y);
     }
   } else if (action === 'close') {
+    // Never shut a door on somebody stood in the doorway. Wait for them to
+    // clear — they're being nudged out meanwhile — and give up if they don't,
+    // rather than cutting a couple in half at the threshold.
+    if (someoneInDoorway(world, index, e.id)) {
+      world.doorClearing.set(index, now + DOOR_BLOCKED_WAIT_MS);
+      if (now < (state.doorWaitUntil || 0)) {
+        beginDoorWork(world, e, state, index, 'close', now);
+        return;
+      }
+      if (!state.doorWaitUntil) {
+        state.doorWaitUntil = now + DOOR_BLOCKED_WAIT_MS;
+        beginDoorWork(world, e, state, index, 'close', now);
+        return;
+      }
+      // Waited long enough; leave it standing open.
+      state.doorWaitUntil = 0;
+      state.doorFollowUp = -1;
+      state.doorFollowUpLock = false;
+      return;
+    }
+
+    state.doorWaitUntil = 0;
     shutDoor(world, index, now);
     if (state.doorFollowUpLock) {
       beginDoorWork(world, e, state, index, 'lock', now);
@@ -959,10 +1025,20 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
  * building at all; a very few say what they think of being told.
  */
 function warnTheRoom(world: World, e: Entity, state: AiState, index: number, now: number): void {
-  if (Math.random() >= DOOR_WARN_CHANCE) return;
-
   const building = buildingIndexAt(world, e.x, e.y);
   if (building < 0) return;
+
+  // Telling the room to stay indoors is absurd with one of them in here. If
+  // anything is inside with us, that is not the moment for reassurance.
+  if (state.threatCount > 0) return;
+  for (const threat of state.threatPoints) {
+    if (buildingIndexAt(world, threat.x, threat.y) === building) return;
+  }
+
+  // Whichever door is next to this one wants bolting as well.
+  askForNeighbourDoor(world, e, state, index, building, now);
+
+  if (Math.random() >= DOOR_WARN_CHANCE) return;
 
   if (!world.speech.has(e.id)) {
     world.speech.set(e.id, {
@@ -1014,12 +1090,23 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
 
     const crossed = doorSide(world, index, e.x, e.y) !== state.doorFollowUpSide;
 
-    if (!door || door.broken || !door.open || gone > 170) {
-      // Gone, already shut by someone else, or we've wandered too far to bother.
+    // Somebody bolting themselves in will walk back to the door to do it;
+    // somebody merely closing up after themselves won't cross a room for it.
+    const giveUp = state.doorFollowUpLock ? 300 : 170;
+    const reach = state.doorFollowUpLock ? 150 : 64;
+
+    if (!door || door.broken || !door.open || gone > giveUp) {
+      // Gone, already shut by someone else, or too far to bother.
       state.doorFollowUp = -1;
       state.doorFollowUpLock = false;
-    } else if (crossed && gone < 64 && (door.busyBy === null || door.busyBy === e.id)) {
-      beginDoorWork(world, e, state, index, 'close', now);
+    } else if (crossed && (door.busyBy === null || door.busyBy === e.id)) {
+      if (gone < reach) {
+        beginDoorWork(world, e, state, index, 'close', now);
+        return true;
+      }
+      // Far enough in that they have to come back and see to it.
+      const desired = headingToward(world, e, state, spec.x, spec.y, now);
+      step(world, e, state, desired, HUMAN_FLEE_SPEED, HUMAN_TURN_RATE, dt, now);
       return true;
     }
   }
@@ -1246,6 +1333,100 @@ function answerPleaTick(world: World, e: Entity, state: AiState, now: number, dt
   return true;
 }
 
+/**
+ * Having bolted one door, the other one right there wants doing too. Most go
+ * and see to it themselves; a few call out for somebody else to.
+ */
+function askForNeighbourDoor(
+  world: World,
+  e: Entity,
+  state: AiState,
+  justLocked: number,
+  building: number,
+  now: number,
+): void {
+  let best = -1;
+  let bestGap = DOOR_ALSO_LOCK_RANGE;
+
+  for (const index of doorsNear(world, e.x, e.y, DOOR_ALSO_LOCK_RANGE)) {
+    if (index === justLocked) continue;
+    const door = world.doors[index];
+    if (!door || door.broken || door.locked) continue;
+    if (door.busyBy !== null && door.busyBy !== e.id) continue;
+    // Only a way into this building is worth bolting behind us.
+    if (!canWorkLockFrom(world, index, e.x, e.y)) continue;
+
+    const spec = world.map.doors[index];
+    const gap = Math.hypot(spec.x - e.x, spec.y - e.y);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = index;
+    }
+  }
+  if (best < 0) return;
+
+  if (Math.random() < DOOR_ASK_OTHERS_CHANCE) {
+    // Rarely, they'd rather somebody else did it.
+    if (!world.speech.has(e.id)) {
+      world.speech.set(e.id, {
+        text: DOOR_ASK_LINES[Math.floor(Math.random() * DOOR_ASK_LINES.length)],
+        until: now + DOOR_ASK_MS,
+      });
+    }
+    world.lockRequests.set(best, now + DOOR_ASK_MS * 4);
+    return;
+  }
+
+  state.lockAlso = best;
+}
+
+/**
+ * Going to bolt another door — either the one next to the one we just did, or
+ * one somebody called out about.
+ */
+function lockAlsoTick(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  if (state.lockAlso < 0) {
+    if (world.lockRequests.size === 0 || state.threatCount > 0) return false;
+    // Someone asked. Anyone indoors and near enough may take it on.
+    for (const [index, until] of world.lockRequests) {
+      if (now >= until) continue;
+      const door = world.doors[index];
+      if (!door || door.broken || door.locked) continue;
+      if (!canWorkLockFrom(world, index, e.x, e.y)) continue;
+      const spec = world.map.doors[index];
+      if (Math.hypot(spec.x - e.x, spec.y - e.y) > DOOR_PLEA_HEARING) continue;
+      state.lockAlso = index;
+      world.lockRequests.delete(index);
+      break;
+    }
+    if (state.lockAlso < 0) return false;
+  }
+
+  const index = state.lockAlso;
+  const door = world.doors[index];
+  const spec = world.map.doors[index];
+  if (!door || door.broken || door.locked || (door.busyBy !== null && door.busyBy !== e.id)) {
+    state.lockAlso = -1;
+    return false;
+  }
+
+  const gap = Math.hypot(spec.x - e.x, spec.y - e.y);
+  if (gap > e.radius + 22) {
+    const desired = headingToward(world, e, state, spec.x, spec.y, now);
+    step(world, e, state, desired, HUMAN_WALK_SPEED * 1.5, HUMAN_TURN_RATE, dt, now);
+    return true;
+  }
+
+  state.lockAlso = -1;
+  if (door.open) {
+    state.doorFollowUpLock = true;
+    beginDoorWork(world, e, state, index, 'close', now);
+  } else {
+    beginDoorWork(world, e, state, index, 'lock', now);
+  }
+  return true;
+}
+
 /** Both halves of a pair let go at once — a hand-hold has two ends. */
 function releaseHands(world: World, state: AiState, partnerId: string): void {
   state.handHeld = false;
@@ -1387,10 +1568,15 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
   // everything else the follower might otherwise decide to do.
   if (updateHandHold(world, e, state, now, dt)) return;
 
+  // Somebody is trying to shut a door this person is stood in. Get clear of
+  // it — a couple pinned across a threshold otherwise holds it open for ever.
+  if (stepOutOfDoorway(world, e, state, now, dt)) return;
+
   // Doors come next. Working a handle takes a second or two and holds them
   // in place, but never touches where they were headed — the moment it opens
   // they carry on to it.
   if (doorTick(world, e, state, now, dt)) return;
+  if (lockAlsoTick(world, e, state, now, dt)) return;
   if (begTick(world, e, state, now, dt)) return;
   if (answerPleaTick(world, e, state, now, dt)) return;
 
@@ -1873,6 +2059,7 @@ function attackBlockingDoor(world: World, e: Entity, state: AiState, now: number
 
     e.facing = Math.atan2(dy, dx);
     state.heading = e.facing;
+    state.breakingUntil = now + 400; // drives the clawing animation on the client
     if (now >= state.nextDoorHitAt) {
       state.nextDoorHitAt = now + DOOR_ATTACK_INTERVAL_MS;
       damageDoor(world, index, DOOR_ZOMBIE_DAMAGE);
@@ -1880,6 +2067,26 @@ function attackBlockingDoor(world: World, e: Entity, state: AiState, now: number
     return true;
   }
   return false;
+}
+
+/** Anyone alive worth chasing within reach of this zombie. */
+function preyNearby(world: World, e: Entity, range: number): boolean {
+  const nearby = world.entityGrid.queryCircle(e.x, e.y, range, new Set<Entity>());
+  for (const other of nearby) {
+    if (other.type !== 'human' && other.type !== 'officer') continue;
+    if (Math.hypot(other.x - e.x, other.y - e.y) <= range) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether this zombie can be bothered with a door at all. Live prey in the
+ * street beats a door every time — the door is not going anywhere — and
+ * something that has only just turned doesn't think about doors yet.
+ */
+function mindsDoors(world: World, e: Entity, state: AiState, now: number): boolean {
+  if (now < state.freshUntil) return !preyNearby(world, e, DOOR_VS_HUMAN_RANGE * 1.4);
+  return !preyNearby(world, e, DOOR_VS_HUMAN_RANGE);
 }
 
 function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: number): void {
@@ -1946,7 +2153,7 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
   // Nothing in sight, but it watched someone pull a door shut. Go and take
   // the door apart — whatever it was closing itself in with is behind it.
   if (state.doorTarget >= 0) {
-    if (now >= state.doorTargetUntil || !isDoorShut(world, state.doorTarget)) {
+    if (now >= state.doorTargetUntil || !isDoorShut(world, state.doorTarget) || !mindsDoors(world, e, state, now)) {
       state.doorTarget = -1;
     } else {
       const spec = world.map.doors[state.doorTarget];
@@ -1964,11 +2171,17 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
       state.path = null;
     } else {
       // Something went this way and a door is in the road. Tear at it.
-      if (attackBlockingDoor(world, e, state, now)) return;
+      if (mindsDoors(world, e, state, now) && attackBlockingDoor(world, e, state, now)) return;
       const desired = headingToward(world, e, state, state.lastSeenX, state.lastSeenY, now);
       step(world, e, state, desired, ZOMBIE_SPEED, ZOMBIE_TURN_RATE, dt, now);
       return;
     }
+  }
+
+  // With the city all but emptied, anything shut is worth taking apart on the
+  // way past, whether or not this one saw it close.
+  if (world.survivorCount < DOOR_FRENZY_SURVIVORS && attackBlockingDoor(world, e, state, now)) {
+    return;
   }
 
   if (now >= state.nextTurnAt) {
@@ -1987,7 +2200,12 @@ function convert(world: World, target: Entity, now: number): void {
   target.speedMul = rollSpeedMul('zombie');
   world.speedBoosts.delete(target.id);
   world.pendingInfections.delete(target.id);
-  world.ai.set(target.id, newAiState(now, target.x, target.y));
+
+  const state = newAiState(now, target.x, target.y);
+  // Newly turned and single-minded: it wants whoever is standing right there,
+  // not a door it can hear somebody behind.
+  state.freshUntil = now + FRESH_ZOMBIE_MS;
+  world.ai.set(target.id, state);
 }
 
 interface GrappleLike {
@@ -2086,6 +2304,14 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
 
   processPendingInfections(world, now);
   clearExpiredPleas(world, now);
+
+  // Counted once here rather than per zombie deciding whether to bother with
+  // a door.
+  let survivors = 0;
+  for (const e of world.entities.values()) {
+    if (e.type === 'human' || e.type === 'officer') survivors++;
+  }
+  world.survivorCount = survivors;
 
   for (const e of world.entities.values()) {
     // Players keep manual control even after they turn — no AI magnet.

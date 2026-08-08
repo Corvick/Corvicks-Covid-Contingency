@@ -392,14 +392,18 @@ export function drawEntity(
     ctx.strokeStyle = limbColor;
     ctx.lineWidth = radius * 0.5;
     ctx.lineCap = 'round';
-    // Arms claw further out mid-grapple.
-    const reach = e.grappling ? 1.75 + Math.sin(now * 0.03 + hashId(e.id)) * 0.2 : 1.5;
+    // Arms claw further out mid-grapple. Battering a door is the same motion
+    // but faster and rougher — the two arms alternate rather than pumping
+    // together, so it reads as hammering rather than grabbing.
+    const phase = now * 0.03 + hashId(e.id);
+    const reach = e.grappling ? 1.75 + Math.sin(phase) * 0.2 : 1.5;
     for (const side of [-1, 1]) {
       const sx = x + perpX * shoulder * side;
       const sy = y + perpY * shoulder * side;
+      const swing = e.breaking ? 1.62 + Math.sin(now * 0.045 + (side > 0 ? Math.PI : 0)) * 0.42 : reach;
       ctx.beginPath();
       ctx.moveTo(sx, sy);
-      ctx.lineTo(sx + dirX * radius * reach, sy + dirY * radius * reach);
+      ctx.lineTo(sx + dirX * radius * swing, sy + dirY * radius * swing);
       ctx.stroke();
     }
   } else if (e.type === 'officer') {

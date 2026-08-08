@@ -264,10 +264,10 @@ export const COUPLE_COUNT_MAX = 4;
 /** How far apart the two of them start — just touching. */
 export const COUPLE_SPAWN_GAP = HUMAN_RADIUS * 2 + 2;
 /** The follower closes back to this before falling into step alongside. */
-export const HAND_HOLD_DIST = HUMAN_RADIUS * 2 + 6;
+export const HAND_HOLD_DIST = HUMAN_RADIUS * 2 + 1;
 /** Extra pace the follower can find to close a gap, and the leader's restraint. */
-export const HAND_CATCHUP_MULTIPLIER = 1.3;
-export const HAND_LEADER_WAIT_MULTIPLIER = 0.72;
+export const HAND_CATCHUP_MULTIPLIER = 1.55;
+export const HAND_LEADER_WAIT_MULTIPLIER = 0.55;
 /** Rolled once, the first time this person ever lays eyes on a zombie. */
 export const HAND_RELEASE_ON_SIGHT_CHANCE = 0.06;
 /** Rolled once, the moment their partner is seized. Most stay and hold on. */
@@ -368,7 +368,7 @@ export const NPC_OFFICER_COLOR = '#9ca3af';
  */
 export const INTERIOR_DOOR_SHARE = 0.55;
 export const DOOR_START_OPEN_CHANCE = 0.5;
-export const DOOR_HEALTH = 1000;
+export const DOOR_HEALTH = 1900;
 /** ~33 seconds of work for a single zombie. */
 export const DOOR_ZOMBIE_DAMAGE = 18;
 export const DOOR_ATTACK_INTERVAL_MS = 600;
@@ -378,6 +378,10 @@ export const DOOR_BULLET_DAMAGE = 20;
 export const DOOR_OPEN_MIN_MS = 1500;
 export const DOOR_OPEN_MAX_MS = 2800;
 export const DOOR_CLOSE_MS = 1000;
+/** A door will not shut on somebody stood in it; it waits this long for them
+ *  to clear, nudging them out, before giving up and staying open. */
+export const DOOR_BLOCKED_WAIT_MS = 2500;
+export const DOOR_STEP_ASIDE_SPEED = 70;
 export const DOOR_LOCK_MIN_MS = 1000;
 export const DOOR_LOCK_MAX_MS = 2000;
 
@@ -465,6 +469,35 @@ export const DOOR_KICK_MS = 4200;
 /** How long a zombie remembers a door it watched someone shut. */
 export const DOOR_ALERT_MS = 25000;
 export const DOOR_ALERT_RADIUS = 430;
+/**
+ * Live prey beats a door. A zombie with anyone this close forgets whatever
+ * door it was heading for — the door is not going anywhere.
+ */
+export const DOOR_VS_HUMAN_RANGE = 300;
+/**
+ * Something that has only just turned is interested in the nearest warm body
+ * and nothing else. Doors stop registering at all for this long, so long as
+ * there is someone about.
+ */
+export const FRESH_ZOMBIE_MS = 14000;
+/**
+ * Once the city is this empty, zombies take out their frustration on any door
+ * they happen to walk into rather than only the ones they saw shut.
+ */
+export const DOOR_FRENZY_SURVIVORS = 50;
+
+/** Having bolted one door, the other one right there wants doing too. */
+export const DOOR_ALSO_LOCK_RANGE = 190;
+/** ...and it is rare to ask somebody else to see to it rather than going. */
+export const DOOR_ASK_OTHERS_CHANCE = 0.12;
+export const DOOR_ASK_MS = 3000;
+export const DOOR_ASK_LINES = [
+  'Someone lock that door too!',
+  'Get that other door!',
+  'The other door — lock it!',
+  "Somebody bolt that one as well!",
+  'That door too, quickly!',
+];
 
 /** Smallest room a partition is allowed to leave behind, in tiles. */
 export const ROOM_MIN_TILES = 4;

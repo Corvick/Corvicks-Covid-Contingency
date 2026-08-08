@@ -236,6 +236,14 @@ export interface AiState {
   /** Open door this person is rushing to shut, or -1. */
   doorSlam: number;
   nextSlamCheck: number;
+  /** Another door this person is off to bolt as well, or -1. */
+  lockAlso: number;
+  /** How long they will hold a close waiting for a doorway to clear. */
+  doorWaitUntil: number;
+  /** Freshly turned: no interest in doors while there is prey about. */
+  freshUntil: number;
+  /** Clawing at a door — drives the animation client-side. */
+  breakingUntil: number;
   /** Door just dealt with, left alone until this passes. */
   doorIgnore: number;
   doorIgnoreUntil: number;
@@ -309,6 +317,12 @@ export interface World {
   doorAlerts: Map<number, number>;
   /** Doors somebody outside is currently begging at, and when they give up. */
   doorPleas: Map<number, number>;
+  /** Doors somebody has called out to have bolted, and when the call lapses. */
+  lockRequests: Map<number, number>;
+  /** Doors waiting on a blocked doorway to clear before they can shut. */
+  doorClearing: Map<number, number>;
+  /** Humans and officers still alive, recomputed once a tick. */
+  survivorCount: number;
   /** Per-player door prompt, rebuilt each tick. */
   doorPrompts: Map<string, DoorPrompt>;
   /** Door action a player is part-way through: id -> start time. */
@@ -478,6 +492,10 @@ export function newAiState(now: number, x: number, y: number): AiState {
     slamsDoors: Math.random() < DOOR_SLAM_CHANCE,
     doorSlam: -1,
     nextSlamCheck: 0,
+    lockAlso: -1,
+    doorWaitUntil: 0,
+    freshUntil: 0,
+    breakingUntil: 0,
     doorIgnore: -1,
     doorIgnoreUntil: 0,
     refusedDoors: [],
@@ -710,6 +728,9 @@ export function createWorld(): World {
     doorGrid: new SpatialGrid<number>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     doorAlerts: new Map(),
     doorPleas: new Map(),
+    lockRequests: new Map(),
+    doorClearing: new Map(),
+    survivorCount: 0,
     doorPrompts: new Map(),
     doorHolds: new Map(),
     doorSpent: new Set(),
@@ -959,6 +980,16 @@ function populate(world: World): void {
       y = clamp(WORLD_HEIGHT * along + jitter, inset, WORLD_HEIGHT - inset);
     }
 
+    // The perimeter has buildings built onto it, so the breach point can land
+    // inside somebody's front room. Walk it in off the edge until it's out in
+    // the open — an outbreak starts in the street, not in a bedroom.
+    const inward = side === 0 ? [0, 1] : side === 1 ? [-1, 0] : side === 2 ? [0, -1] : [1, 0];
+    for (let step = 0; step < 40; step++) {
+      if (buildingIndexAt(world, x, y) < 0 && !world.nav.isBlocked(x, y)) break;
+      x = clamp(x + inward[0] * 20, inset, WORLD_WIDTH - inset);
+      y = clamp(y + inward[1] * 20, inset, WORLD_HEIGHT - inset);
+    }
+
     const id = `zombie-${i}`;
     world.entities.set(id, makeEntity(id, 'zombie', x, y));
     world.ai.set(id, newAiState(now, x, y));
@@ -1114,6 +1145,7 @@ export function toWire(world: World, e: Entity, viewerIsZombie = false, now = Da
 
   const ai = world.ai.get(e.id);
   if (ai && ai.handHeld && ai.partnerId) state.hand = ai.partnerId;
+  if (ai && now < ai.breakingUntil) state.breaking = true;
 
   const line = world.speech.get(e.id);
   if (line !== undefined) {
