@@ -129,6 +129,33 @@ export const ZOMBIE_ROOM_CLEAR_MS = 3000;
 /** A zombie this close to prey drops whatever door it was working on. */
 export const ZOMBIE_ABANDON_DOOR_RANGE = 210;
 
+/**
+ * Remarking on the first zombie you ever see. Only worth saying early on —
+ * after `FIRST_SIGHT_WINDOW_MS` everyone knows what is going on and nobody
+ * comments on it any more.
+ */
+export const FIRST_SIGHT_WINDOW_MS = 180000;
+export const FIRST_SIGHT_CHANCE = 0.22;
+export const FIRST_SIGHT_MS = 3000;
+/** The one line that needs an audience, and only in the opening minutes. */
+export const PJ_WINDOW_MS = 120000;
+export const PJ_CHANCE = 0.02;
+export const PJ_PLAYER_RANGE = 380;
+export const PJ_LINE = 'Ew it looks like PJ!';
+
+export const FIRST_SIGHT_LINES = [
+  'What the heck was that!',
+  'Was that a real life zombie?',
+  'Did anyone else see that?!',
+  'That was not a person!',
+  "You're joking — a zombie?",
+  'Tell me I imagined that.',
+  'What in God’s name was that?',
+  "That thing wasn't right.",
+  'Is this actually happening?',
+  'It looked at me!',
+];
+
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
 export const OFFICER_REFUGE_RANGE = 900;
@@ -213,7 +240,7 @@ export const PANIC_MS = 16000; // agitated wandering before looking for cover
  * the newly bitten much further across the map before they turn.
  */
 export const PANIC_SCALE_MIN = 0.65;
-export const PANIC_SCALE_MAX = 1.75;
+export const PANIC_SCALE_MAX = 2.6;
 /** Once someone has seen a zombie they never quite stroll again. */
 export const SHAKEN_WALK_MULTIPLIER = 1.3;
 export const PANIC_SPEED_MULTIPLIER = 1.5;
@@ -339,11 +366,11 @@ export const BUSH_SPEED_MULTIPLIER = 0.55;
 
 // ---------------------------------------------------------------- stamina
 export const STAMINA_MAX = 100;
-export const STAMINA_DRAIN_PER_SEC = 34; // ~3 seconds of sprint from full
-export const STAMINA_REGEN_PER_SEC = 12;
+export const STAMINA_DRAIN_PER_SEC = 46; // a shade over two seconds of sprint
+export const STAMINA_REGEN_PER_SEC = 7;
 export const STAMINA_SPRINT_FLOOR = 8; // can't start a sprint below this
 /** Once fully drained you're locked out until the bar climbs back to here. */
-export const STAMINA_RECOVERY_THRESHOLD = 75;
+export const STAMINA_RECOVERY_THRESHOLD = 82;
 export const SPRINT_MULTIPLIER = 1.7;
 
 // ---------------------------------------------------------------- gun
@@ -381,6 +408,9 @@ export const NPC_OFFICER_SHOOT_INTERVAL_MS = 2000;
 export const NPC_OFFICER_BLOOM_RAD = 0.22; // still poor, but less wild
 /** They give ground to hold the far edge of their sight line. */
 export const NPC_OFFICER_RETREAT_DIST = 360;
+export const NPC_OFFICER_TURN_RATE = 13; // quick, but not a turret
+/** Another target must be this much closer before an officer swaps to it. */
+export const TARGET_SWITCH_MARGIN = 1.35;
 export const NPC_OFFICER_SIGHT = 420;
 export const NPC_OFFICER_COLOR = '#9ca3af';
 
@@ -512,7 +542,7 @@ export const FRESH_ZOMBIE_MS = 14000;
  * Once the city is this empty, zombies take out their frustration on any door
  * they happen to walk into rather than only the ones they saw shut.
  */
-export const DOOR_FRENZY_SURVIVORS = 50;
+export const DOOR_FRENZY_SURVIVORS = 89;
 
 /**
  * A zombie shut into a room has no target, no scent and no memory of the door
@@ -574,13 +604,19 @@ export const RALLY_LOOK_MIN_MS = 900;
 export const RALLY_LOOK_MAX_MS = 3400;
 export const RALLY_LOOK_TURN_RATE = 1.6; // rad/s
 /** How often someone considers grumbling, and how likely they are to. */
-export const RALLY_CHATTER_MIN_MS = 9000;
-export const RALLY_CHATTER_MAX_MS = 22000;
-export const RALLY_CHATTER_CHANCE = 0.28;
+export const RALLY_CHATTER_MIN_MS = 20000;
+export const RALLY_CHATTER_MAX_MS = 55000;
+export const RALLY_CHATTER_CHANCE = 0.1;
 export const RALLY_CHATTER_MS = 3600;
 export const RALLY_CHATTER_LINES = [
   "I wonder how long they'll have us stand here",
   "I wonder what's going on…",
+  'How long are we meant to wait?',
+  'Anyone know what the plan is?',
+  'My feet are killing me.',
+  "I should've stayed home.",
+  'Is somebody coming for us?',
+  "It's too quiet.",
 ];
 
 // ---------------------------------------------------------------- inventory

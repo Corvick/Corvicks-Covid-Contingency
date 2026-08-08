@@ -331,6 +331,8 @@ export interface World {
   lockRequests: Map<number, number>;
   /** Doors waiting on a blocked doorway to clear before they can shut. */
   doorClearing: Map<number, number>;
+  /** When this round began — gates the first-sighting chatter. */
+  startedAt: number;
   /** Humans and officers still alive, recomputed once a tick. */
   survivorCount: number;
   /** Per-player door prompt, rebuilt each tick. */
@@ -745,6 +747,7 @@ export function createWorld(): World {
     lockRequests: new Map(),
     doorClearing: new Map(),
     survivorCount: 0,
+    startedAt: Date.now(),
     doorPrompts: new Map(),
     doorHolds: new Map(),
     doorSpent: new Set(),
@@ -796,6 +799,9 @@ export function resetWorld(world: World): void {
   world.danger = new DangerField(world.map, world.nav);
   world.nextDangerRebuild = 0;
   world.navDirty = false;
+  // A fresh round is fresh news again — the first-sighting chatter is gated
+  // on how long this round has been running, not on process uptime.
+  world.startedAt = Date.now();
   buildStaticGrids(world);
   initDoors(world);
   world.doorPrompts.clear();

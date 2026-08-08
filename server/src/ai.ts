@@ -95,6 +95,16 @@ import {
   NPC_OFFICER_BLOOM_RAD,
   NPC_OFFICER_RETREAT_DIST,
   NPC_OFFICER_SIGHT,
+  NPC_OFFICER_TURN_RATE,
+  TARGET_SWITCH_MARGIN,
+  FIRST_SIGHT_WINDOW_MS,
+  FIRST_SIGHT_CHANCE,
+  FIRST_SIGHT_MS,
+  FIRST_SIGHT_LINES,
+  PJ_WINDOW_MS,
+  PJ_CHANCE,
+  PJ_PLAYER_RANGE,
+  PJ_LINE,
   REPATH_INTERVAL_MS,
   WORLD_WIDTH,
   WORLD_HEIGHT,
@@ -274,6 +284,24 @@ function senseThreats(world: World, e: Entity, state: AiState, sight: number): v
   }
 
   state.threatCount = state.threatPoints.length;
+
+  // Stick with whoever we were already onto unless something is meaningfully
+  // closer. Taking the nearest outright made officers flick between two
+  // zombies at near-equal range, re-aiming every perception tick and hitting
+  // neither of them.
+  if (state.targetId !== null && nearest !== null && state.targetId !== nearest.id) {
+    const held = world.entities.get(state.targetId);
+    if (held && held.type === 'zombie') {
+      const heldDist = Math.hypot(held.x - e.x, held.y - e.y);
+      if (heldDist <= sight && hasLineOfSight(world, e.x, e.y, held.x, held.y)) {
+        if (nearestDist > heldDist * TARGET_SWITCH_MARGIN) {
+          nearest = held;
+          nearestDist = heldDist;
+        }
+      }
+    }
+  }
+
   state.targetId = nearest ? nearest.id : null;
   if (nearest) {
     state.threatX = nearest.x;
@@ -1617,6 +1645,35 @@ function updateHandHold(world: World, e: Entity, state: AiState, now: number, dt
   return true;
 }
 
+/**
+ * The first zombie somebody ever sees is worth a remark — but only while it is
+ * still news. Once the outbreak has been running a few minutes everybody knows
+ * what is about, and a street full of people acting surprised reads as broken.
+ */
+function remarkOnFirstSight(world: World, e: Entity, now: number): void {
+  const age = now - world.startedAt;
+  if (age > FIRST_SIGHT_WINDOW_MS) return;
+  if (world.speech.has(e.id)) return;
+
+  // One line needs an audience: it is only ever said where a player can
+  // actually read it, and only in the opening couple of minutes.
+  if (age < PJ_WINDOW_MS && Math.random() < PJ_CHANCE) {
+    for (const id of world.playerIds) {
+      const player = world.entities.get(id);
+      if (!player || player.type !== 'officer') continue;
+      if (Math.hypot(player.x - e.x, player.y - e.y) > PJ_PLAYER_RANGE) continue;
+      world.speech.set(e.id, { text: PJ_LINE, until: now + FIRST_SIGHT_MS });
+      return;
+    }
+  }
+
+  if (Math.random() >= FIRST_SIGHT_CHANCE) return;
+  world.speech.set(e.id, {
+    text: FIRST_SIGHT_LINES[Math.floor(Math.random() * FIRST_SIGHT_LINES.length)],
+    until: now + FIRST_SIGHT_MS,
+  });
+}
+
 /** A visible neighbour who is currently running for their life. */
 function spotRunner(world: World, e: Entity): Entity | null {
   const nearby = world.entityGrid.queryCircle(e.x, e.y, WITNESS_SIGHT_RADIUS, new Set<Entity>());
@@ -1679,6 +1736,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
   // Seeing a zombie overrides whatever else was happening.
   if (state.threatCount > 0) {
     state.mode = 'flee';
+    if (!state.sawZombie) remarkOnFirstSight(world, e, now);
     state.sawZombie = true;
     // Driven out of the house: it stops being somewhere to go back to.
     if (state.homeBuilding >= 0 && buildingIndexAt(world, e.x, e.y) !== state.homeBuilding) {
@@ -2046,11 +2104,15 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     const dy = threat.y - e.y;
     const dist = Math.hypot(dx, dy);
     const aim = Math.atan2(dy, dx);
-    e.facing = aim;
+    // Quick, but not instantaneous — snapping the barrel around made them look
+    // mechanical, and made the flicking between targets far more obvious.
+    state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
+    e.facing = state.heading;
 
-    if (now >= state.nextShotAt) {
+    // Don't fire until roughly on target, or they shoot at where they were.
+    if (now >= state.nextShotAt && Math.abs(angleDelta(state.heading, aim)) < 0.22) {
       state.nextShotAt = now + interval;
-      fire(world, e, aim, bloom, now);
+      fire(world, e, state.heading, bloom, now);
     }
 
     // Walk backwards to hold the far edge of their sight line, never turning

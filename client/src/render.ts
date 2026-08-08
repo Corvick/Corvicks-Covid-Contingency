@@ -24,6 +24,7 @@ import {
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
   WALL_THICKNESS,
+  GUN_SLOTS,
 } from '../../shared/constants.js';
 
 export interface Viewport {
@@ -601,7 +602,8 @@ export function drawStamina(
   const w = 180;
   const h = 8;
   const x = (vw - w) / 2;
-  const y = vh - 26;
+  // Just above the inventory row, which occupies vh-46 upward.
+  const y = vh - 58;
   const pct = Math.max(0, Math.min(1, stamina / max));
 
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
@@ -914,8 +916,19 @@ export function drawInventory(
     const x = x0 + i * (size + gap);
     const active = inv.activeSlot === i;
 
-    ctx.fillStyle = active ? 'rgba(56, 189, 248, 0.28)' : 'rgba(15, 23, 42, 0.66)';
-    ctx.strokeStyle = active ? '#38bdf8' : 'rgba(100, 116, 139, 0.6)';
+    // Slot 0 is the pistol, 1-3 take guns, 4-9 take utilities. Colouring the
+    // two banks differently means you can see at a glance what a slot is for
+    // rather than having to remember the numbering.
+    const isGunSlot = i >= 1 && i <= GUN_SLOTS;
+    const isUtilitySlot = i > GUN_SLOTS;
+    const bank = isGunSlot
+      ? { fill: 'rgba(80, 20, 24, 0.62)', edge: 'rgba(248, 113, 113, 0.75)' }
+      : isUtilitySlot
+        ? { fill: 'rgba(20, 52, 66, 0.62)', edge: 'rgba(45, 212, 191, 0.7)' }
+        : { fill: 'rgba(15, 23, 42, 0.66)', edge: 'rgba(100, 116, 139, 0.6)' };
+
+    ctx.fillStyle = active ? 'rgba(56, 189, 248, 0.28)' : bank.fill;
+    ctx.strokeStyle = active ? '#38bdf8' : bank.edge;
     ctx.lineWidth = active ? 2 : 1;
     ctx.beginPath();
     ctx.roundRect(x, y, size, size, 4);

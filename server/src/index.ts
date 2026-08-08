@@ -144,7 +144,15 @@ wss.on('connection', (socket) => {
         if (restart) broadcast({ type: 'map', map: world.map });
         else send(socket, { type: 'map', map: world.map });
       } else if (msg.type === 'restart') {
+        // Someone watching stays watching: resetWorld gives every connection a
+        // fresh officer, which dropped a spectator back into first person.
+        const watching = world.spectators.has(id);
         resetWorld(world);
+        if (watching) {
+          world.spectators.add(id);
+          world.entities.delete(id);
+          world.playerIds.delete(id);
+        }
         console.log(`[server] game reset — new city seed ${world.map.seed}`);
         broadcast({ type: 'map', map: world.map });
       }
