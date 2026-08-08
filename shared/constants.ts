@@ -486,6 +486,18 @@ export const FRESH_ZOMBIE_MS = 14000;
  */
 export const DOOR_FRENZY_SURVIVORS = 50;
 
+/**
+ * A zombie shut into a room has no target, no scent and no memory of the door
+ * closing — it would mill about in there for ever. Rather than have every
+ * zombie reason about enclosure, they notice they are getting nowhere and take
+ * it out on the nearest door, which costs one distance check per interval.
+ */
+export const ZOMBIE_STUCK_CHECK_MS = 900;
+export const ZOMBIE_STUCK_MIN_PROGRESS = 14;
+/** How long of going nowhere before a door starts looking like the problem. */
+export const ZOMBIE_STUCK_DOOR_MS = 2400;
+export const ZOMBIE_STUCK_DOOR_RANGE = 120;
+
 /** Having bolted one door, the other one right there wants doing too. */
 export const DOOR_ALSO_LOCK_RANGE = 190;
 /** ...and it is rare to ask somebody else to see to it rather than going. */

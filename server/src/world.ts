@@ -240,6 +240,8 @@ export interface AiState {
   lockAlso: number;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
+  /** When this one first noticed it was getting nowhere, or 0. */
+  stuckSince: number;
   /** Freshly turned: no interest in doors while there is prey about. */
   freshUntil: number;
   /** Clawing at a door — drives the animation client-side. */
@@ -494,6 +496,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextSlamCheck: 0,
     lockAlso: -1,
     doorWaitUntil: 0,
+    stuckSince: 0,
     freshUntil: 0,
     breakingUntil: 0,
     doorIgnore: -1,

@@ -122,6 +122,10 @@ import {
   DOOR_ASK_LINES,
   DOOR_BLOCKED_WAIT_MS,
   DOOR_STEP_ASIDE_SPEED,
+  ZOMBIE_STUCK_CHECK_MS,
+  ZOMBIE_STUCK_MIN_PROGRESS,
+  ZOMBIE_STUCK_DOOR_MS,
+  ZOMBIE_STUCK_DOOR_RANGE,
   DOOR_SLAM_CHANCE,
   DOOR_SLAM_RANGE,
   DOOR_WARN_CHANCE,
@@ -512,6 +516,25 @@ function interiorPointOf(
     }
   }
   return best;
+}
+
+/** True when every way into this building has something stood in it. */
+function entranceHeld(world: World, state: AiState, buildingIndex: number): boolean {
+  if (buildingIndex < 0 || state.threatCount === 0) return false;
+  const doors = doorsOf(world, buildingIndex);
+  if (doors.length === 0) return false;
+
+  for (const door of doors) {
+    let held = false;
+    for (const threat of state.threatPoints) {
+      if (Math.hypot(threat.x - door.x, threat.y - door.y) < DOOR_BLOCK_RADIUS) {
+        held = true;
+        break;
+      }
+    }
+    if (!held) return false; // this one is clear, so the building is still on
+  }
+  return true;
 }
 
 /**
@@ -923,6 +946,19 @@ function doorBeingUsed(world: World, e: Entity, state: AiState): number {
   return -1;
 }
 
+/**
+ * A doorway with a zombie stood in it. Nobody should be queueing at a door
+ * that something is currently eating somebody in — the way in is not worth it
+ * while it's held, and there is always another building.
+ */
+function doorContested(world: World, state: AiState, index: number): boolean {
+  const spec = world.map.doors[index];
+  for (const threat of state.threatPoints) {
+    if (Math.hypot(threat.x - spec.x, threat.y - spec.y) < DOOR_BLOCK_RADIUS) return true;
+  }
+  return false;
+}
+
 /** Start working a door. Whatever they were doing is left exactly as it was. */
 function beginDoorWork(
   world: World,
@@ -1177,6 +1213,15 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
   const door = world.doors[ahead];
   if (!door || (door.busyBy !== null && door.busyBy !== e.id)) return false;
 
+  // Something is stood in this doorway. Don't crowd in behind whoever it is
+  // eating — go and find another way in.
+  if (state.threatCount > 0 && doorContested(world, state, ahead)) {
+    state.doorIgnore = ahead;
+    state.doorIgnoreUntil = now + DOOR_REENGAGE_MS;
+    abandonShelter(world, e, state, now);
+    return false;
+  }
+
   if (door.locked) {
     // A door an officer bolted is left well alone.
     if (door.playerLocked) return false;
@@ -1222,6 +1267,12 @@ function handleLockedDoor(world: World, e: Entity, state: AiState, index: number
   }
 
   // Somewhere else, then. Drop this building and pick another.
+  abandonShelter(world, e, state, now);
+  if (!frightened) pickWanderTarget(world, e, state, now, false);
+}
+
+/** Give up on the building we were making for and look again next scan. */
+function abandonShelter(world: World, e: Entity, state: AiState, now: number): void {
   state.shelterBuilding = -1;
   state.shelterX = null;
   state.shelterY = null;
@@ -1232,7 +1283,6 @@ function handleLockedDoor(world: World, e: Entity, state: AiState, index: number
   state.escapeX = null;
   state.escapeY = null;
   state.escapeUntil = 0;
-  if (!frightened) pickWanderTarget(world, e, state, now, false);
 }
 
 /** Standing at a locked door shouting to be let in. */
@@ -1689,9 +1739,12 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
         // sweeps every building in range, which is far too costly per tick.
         if (now >= state.nextShelterScanAt) {
           state.nextShelterScanAt = now + SHELTER_SCAN_INTERVAL_MS;
+          // Drop it if something got inside ahead of us, or is stood in the
+          // way in — re-checked as we run, not only when we first chose.
           const stale =
             state.shelterBuilding < 0 ||
-            state.threatPoints.some((t) => buildingIndexAt(world, t.x, t.y) === state.shelterBuilding);
+            state.threatPoints.some((t) => buildingIndexAt(world, t.x, t.y) === state.shelterBuilding) ||
+            entranceHeld(world, state, state.shelterBuilding);
           if (stale) chooseShelter(world, e, state);
         }
         if (state.shelterX !== null && state.shelterY !== null) {
@@ -2069,6 +2122,57 @@ function attackBlockingDoor(world: World, e: Entity, state: AiState, now: number
   return false;
 }
 
+/**
+ * Notice that this zombie is getting nowhere, and take the nearest shut door
+ * apart if there is one. This is what gets a zombie out of a room somebody
+ * closed it into — it has no target, no scent, and never saw the door shut,
+ * so nothing else would ever point it at the way out.
+ *
+ * Costs one distance comparison per zombie per interval; the door search only
+ * runs for one that has actually been stuck a while.
+ */
+function zombieStuckTick(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  if (now >= state.lastUnstickCheck) {
+    state.lastUnstickCheck = now + ZOMBIE_STUCK_CHECK_MS;
+    const moved = Math.hypot(e.x - state.unstickX, e.y - state.unstickY);
+    state.unstickX = e.x;
+    state.unstickY = e.y;
+    if (moved < ZOMBIE_STUCK_MIN_PROGRESS) {
+      if (state.stuckSince === 0) state.stuckSince = now;
+    } else {
+      state.stuckSince = 0;
+    }
+  }
+
+  if (state.stuckSince === 0 || now - state.stuckSince < ZOMBIE_STUCK_DOOR_MS) return false;
+
+  // Right up against one: claw at it.
+  if (attackBlockingDoor(world, e, state, now)) return true;
+
+  // Otherwise the nearest shut door in this room is the way out.
+  let best = -1;
+  let bestGap = ZOMBIE_STUCK_DOOR_RANGE;
+  for (const index of doorsNear(world, e.x, e.y, ZOMBIE_STUCK_DOOR_RANGE)) {
+    if (!isDoorShut(world, index)) continue;
+    const spec = world.map.doors[index];
+    const gap = Math.hypot(spec.x - e.x, spec.y - e.y);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = index;
+    }
+  }
+  if (best < 0) {
+    // Nothing to break. Stop counting so it goes back to wandering.
+    state.stuckSince = 0;
+    return false;
+  }
+
+  const spec = world.map.doors[best];
+  const desired = Math.atan2(spec.y - e.y, spec.x - e.x);
+  step(world, e, state, desired, ZOMBIE_SEARCH_SPEED, ZOMBIE_TURN_RATE, dt, now);
+  return true;
+}
+
 /** Anyone alive worth chasing within reach of this zombie. */
 function preyNearby(world: World, e: Entity, range: number): boolean {
   const nearby = world.entityGrid.queryCircle(e.x, e.y, range, new Set<Entity>());
@@ -2177,6 +2281,10 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
       return;
     }
   }
+
+  // Shut in somewhere with nothing to chase: work out that the door is the
+  // problem rather than pacing the room until the round ends.
+  if (zombieStuckTick(world, e, state, now, dt)) return;
 
   // With the city all but emptied, anything shut is worth taking apart on the
   // way past, whether or not this one saw it close.
