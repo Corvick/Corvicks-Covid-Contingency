@@ -119,6 +119,8 @@ import {
   GUN_SLOTS,
   UTILITY_SLOTS,
   WALL_TURN_PROBE,
+  CORNER_CLEARANCE,
+  CORNER_PUSH,
   PICKUP_REACH,
   GUN_RANGE,
   BLAST_RADIUS,
@@ -185,7 +187,7 @@ import {
 import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
 import { collect, dropHeld, heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
-import type { PickupState } from '../../shared/types.js';
+import type { PickupState, Wall } from '../../shared/types.js';
 import {
   addPlea,
   alertZombiesToDoor,
@@ -297,7 +299,14 @@ function slideToward(world: World, e: Entity, gx: number, gy: number): number {
   return direct;
 }
 
-function senseThreats(world: World, e: Entity, state: AiState, sight: number): void {
+function senseThreats(
+  world: World,
+  e: Entity,
+  state: AiState,
+  sight: number,
+  /** Officers are looking for these; a hedge doesn't hide one from them. */
+  throughBushes = false,
+): void {
   const nearby = world.entityGrid.queryCircle(e.x, e.y, sight, new Set<Entity>());
 
   state.threatPoints.length = 0;
@@ -308,7 +317,7 @@ function senseThreats(world: World, e: Entity, state: AiState, sight: number): v
     if (other.type !== 'zombie') continue;
     const dist = Math.hypot(other.x - e.x, other.y - e.y);
     if (dist > sight) continue;
-    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, throughBushes)) continue;
 
     state.threatPoints.push({ x: other.x, y: other.y });
     if (dist < nearestDist) {
@@ -327,7 +336,7 @@ function senseThreats(world: World, e: Entity, state: AiState, sight: number): v
     const held = world.entities.get(state.targetId);
     if (held && held.type === 'zombie') {
       const heldDist = Math.hypot(held.x - e.x, held.y - e.y);
-      if (heldDist <= sight && hasLineOfSight(world, e.x, e.y, held.x, held.y)) {
+      if (heldDist <= sight && hasLineOfSight(world, e.x, e.y, held.x, held.y, throughBushes)) {
         if (nearestDist > heldDist * TARGET_SWITCH_MARGIN) {
           nearest = held;
           nearestDist = heldDist;
@@ -447,6 +456,45 @@ function unstickTick(
     return true;
   }
   return false;
+}
+
+/**
+ * Nudge a heading away from whatever wall is nearest, so an officer rounds a
+ * corner in an arc rather than scraping the inside of it. Blended as vectors
+ * rather than clamped, so open ground is unaffected and the pull grows as the
+ * wall closes.
+ *
+ * Doorways are left alone. Walls stand either side of one, and a steering rule
+ * that keeps its distance from walls is a steering rule that cannot walk
+ * through a door.
+ */
+function widenCorners(world: World, e: Entity, desired: number): number {
+  // Any doorway at all, hung with a door or not — the gap is the point.
+  for (const _ of doorsNear(world, e.x, e.y, CORNER_CLEARANCE + 30)) return desired;
+
+  const r = CORNER_CLEARANCE;
+  const walls = world.wallGrid.queryRect(e.x - r, e.y - r, e.x + r, e.y + r, new Set<Wall>());
+  let nearestX = 0;
+  let nearestY = 0;
+  let nearest = Infinity;
+  for (const wall of walls) {
+    const nx = clamp(e.x, wall.x, wall.x + wall.w);
+    const ny = clamp(e.y, wall.y, wall.y + wall.h);
+    const d = Math.hypot(e.x - nx, e.y - ny);
+    if (d < nearest) {
+      nearest = d;
+      nearestX = nx;
+      nearestY = ny;
+    }
+  }
+  if (nearest >= r || nearest === 0) return desired;
+
+  const away = Math.atan2(e.y - nearestY, e.x - nearestX);
+  const weight = (1 - nearest / r) * CORNER_PUSH;
+  return Math.atan2(
+    Math.sin(desired) + Math.sin(away) * weight,
+    Math.cos(desired) + Math.cos(away) * weight,
+  );
 }
 
 /**
@@ -2322,11 +2370,19 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
 
     // Walk backwards to hold the far edge of their sight line, never turning
     // away from the thing they're shooting at.
+    //
+    // The retreat bearing is a local, not `state.heading`. Writing it back
+    // there pointed them away from the target, so the next tick's turnToward
+    // had to swing the whole 180 degrees round again — and since the retreat
+    // band is wide, that happened on nearly every tick. The result was an
+    // officer who never finished lining up, almost never passed the firing
+    // test, and simply backed away: a grey officer that appeared to be fleeing
+    // instead of holding ground and shooting.
     if (dist < NPC_OFFICER_RETREAT_DIST) {
-      state.heading = Math.atan2(-dy, -dx);
+      const backward = Math.atan2(-dy, -dx);
       const speed = speedAt(world, e.x, e.y, HUMAN_WALK_SPEED);
-      const stepX = Math.cos(state.heading) * speed * dt;
-      const stepY = Math.sin(state.heading) * speed * dt;
+      const stepX = Math.cos(backward) * speed * dt;
+      const stepY = Math.sin(backward) * speed * dt;
       // Don't reverse into a wall — slide along it instead.
       if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
         e.x += stepX;
@@ -2347,7 +2403,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     return;
   }
   if (turnAtWallAndRepick(world, e, state, now)) return;
-  const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
+  const desired = widenCorners(world, e, headingToward(world, e, state, state.wanderX, state.wanderY, now));
   step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
 }
 
@@ -2371,6 +2427,9 @@ function gunWorth(item: ItemId | null): number {
   if (!item) return 0;
   const def = ITEMS[item];
   if (!def || def.kind !== 'gun') return 0;
+  // Some guns don't carry their damage in a damage figure — the launcher's is
+  // all blast — so they say what they're worth outright.
+  if (def.botWorth !== undefined) return def.botWorth;
   const perShot = ((def.damageMin ?? 0) + (def.damageMax ?? 0)) / 2;
   return perShot * (def.pellets ?? 1);
 }
@@ -2388,6 +2447,9 @@ function bestGun(inv: Inventory): { slot: number; worth: number } {
     const g = inv.guns[i];
     if (!g || g.ammo <= 0) continue;
     const w = gunWorth(g.item);
+    // The cure gun and the dart aren't weapons. Scoring zero, they'd otherwise
+    // beat the pistol's fallback and leave a bot pointing a syringe at a horde.
+    if (w <= 0) continue;
     if (w > worth) {
       worth = w;
       slot = i + 1;
@@ -2400,6 +2462,57 @@ function bestGun(inv: Inventory): { slot: number; worth: number } {
 /** Index into `inv.guns` of a gun that has run dry, or -1. */
 function emptyGunSlot(inv: Inventory): number {
   return inv.guns.findIndex((g) => g !== null && g.ammo <= 0);
+}
+
+/** The cure gun's slot, if one is carried with a dose left in it. */
+function cureGunSlot(inv: Inventory): number {
+  for (let i = 0; i < inv.guns.length; i++) {
+    const g = inv.guns[i];
+    if (g && g.item === 'cureGun' && g.ammo > 0) return i + 1;
+  }
+  return -1;
+}
+
+/**
+ * Somebody bitten and still on their feet. A bot carrying the cure treats that
+ * as the more urgent job than shooting — a cured neighbour is one fewer zombie
+ * in a minute's time, which is worth more than the shot it interrupts.
+ *
+ * Returns true when it has taken the tick over.
+ */
+function cureTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  now: number,
+  dt: number,
+): boolean {
+  const slot = cureGunSlot(inv);
+  if (slot < 0 || world.pendingInfections.size === 0) return false;
+
+  const reach = ITEMS.cureGun.range ?? GUN_RANGE;
+  let patient: Entity | null = null;
+  let best = Infinity;
+  for (const id of world.pendingInfections.keys()) {
+    const who = world.entities.get(id);
+    if (!who || who.type !== 'human') continue;
+    const d = Math.hypot(who.x - e.x, who.y - e.y);
+    if (d > reach || d >= best) continue;
+    if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true)) continue;
+    best = d;
+    patient = who;
+  }
+  if (!patient) return false;
+
+  inv.activeSlot = slot;
+  const aim = Math.atan2(patient.y - e.y, patient.x - e.x);
+  state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
+  e.facing = state.heading;
+  if (Math.abs(angleDelta(state.heading, aim)) < 0.12) {
+    fireHeld(world, e, inv, state.heading, now);
+  }
+  return true;
 }
 
 /**
@@ -2439,6 +2552,10 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
       want = 40;
     } else if (p.item === 'kevlar' && inv.kevlar <= 0 && utilityRoom) {
       want = 30;
+    } else if (p.item === 'smokeGrenade' && utilityRoom && !inv.utilities.includes('smokeGrenade')) {
+      // Smoke is a helicopter and half a squad of soldiers. Bots never used it
+      // for the dull reason that nothing here wanted one, so they walked past.
+      want = 60;
     }
     if (want <= 0) continue;
 
@@ -2551,7 +2668,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
 
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
-    senseThreats(world, e, state, NPC_OFFICER_SIGHT);
+    // Bots look through foliage. A civilian loses someone behind a hedge; an
+    // officer sweeping for them does not.
+    senseThreats(world, e, state, NPC_OFFICER_SIGHT, true);
   }
 
   // Clicking on an empty chamber is checked every tick, not only when there's
@@ -2618,27 +2737,40 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
 
     // Standing and fighting: face it, hold the best gun, and open up.
     botStaminaTick(state, false, dt);
-    const best = bestGun(inv);
-    if (inv.activeSlot !== best.slot) inv.activeSlot = best.slot;
+    // A curable human nearby is worth the cure gun over anything else.
+    if (!cureTick(world, e, state, inv, now, dt)) {
+      const best = bestGun(inv);
+      if (inv.activeSlot !== best.slot) inv.activeSlot = best.slot;
+    }
 
     state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
     e.facing = state.heading;
 
+    const held = heldItem(inv);
+    const def = held ? ITEMS[held] : undefined;
+    const reach = def?.range ?? GUN_RANGE;
+    // Some guns only bite well inside their paper range — a shotgun at 340 is
+    // two pellets on target, and the launcher wants to be out of its own blast.
+    const ideal = Math.min(def?.botIdealRange ?? reach, reach);
+
     if (Math.abs(angleDelta(state.heading, aim)) < 0.2) {
-      const held = heldItem(inv);
-      const reach = held ? ITEMS[held]?.range ?? GUN_RANGE : GUN_RANGE;
       // Don't waste a launcher shell on something close enough to splash us.
-      const tooClose = held ? ITEMS[held]?.explosive === true && dist < BLAST_RADIUS * 1.3 : false;
-      if (dist <= reach && !tooClose) fireHeld(world, e, inv, state.heading, now);
+      const tooClose = def?.explosive === true && dist < BLAST_RADIUS * 1.3;
+      // The launcher lands its shell on the target rather than at arm's length.
+      const at = def?.explosive ? { x: threat.x, y: threat.y } : undefined;
+      if (dist <= ideal && !tooClose) fireHeld(world, e, inv, state.heading, now, 1, at);
     }
 
-    // Give ground while still facing it — walking backwards, so the gun stays
-    // on target. Slide along whichever axis is open rather than stopping dead.
-    if (dist < NPC_OFFICER_RETREAT_DIST) {
-      const backward = Math.atan2(-dy, -dx);
+    // Walk toward it while still facing it, if the gun in hand wants to be
+    // closer than this. Below the retreat band, give ground instead.
+    const closing = dist > ideal * 1.05;
+    const giving = dist < NPC_OFFICER_RETREAT_DIST && !closing;
+    if (closing || giving) {
+      const bearing = closing ? aim : Math.atan2(-dy, -dx);
       const speed = speedAt(world, e.x, e.y, BOT_WALK_SPEED * 0.7);
-      const stepX = Math.cos(backward) * speed * dt;
-      const stepY = Math.sin(backward) * speed * dt;
+      const stepX = Math.cos(bearing) * speed * dt;
+      const stepY = Math.sin(bearing) * speed * dt;
+      // Slide along whichever axis is open rather than stopping dead.
       if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
         e.x += stepX;
         e.y += stepY;
@@ -2650,6 +2782,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     }
     return;
   }
+
+  // No zombie in view, but somebody nearby is turning. Cure them.
+  if (cureTick(world, e, state, inv, now, dt)) return;
 
   // Nothing in sight: stop running and get the wind back.
   state.bolting = false;
@@ -2713,7 +2848,7 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     if (arrived) return;
   }
   if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
-  const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
+  const desired = widenCorners(world, e, headingToward(world, e, state, state.wanderX, state.wanderY, now));
   step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
 }
 

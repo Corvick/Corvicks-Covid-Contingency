@@ -266,7 +266,13 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
   let victim: Entity | null = null;
   let victimT = wallT;
   for (const other of world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>())) {
-    if (other.type !== 'zombie' || other.id === shooter.id) continue;
+    if (other.id === shooter.id) continue;
+    // The cure also takes on someone already bitten but still walking. Healthy
+    // bystanders are ignored rather than blocking the shot — a dose spent on
+    // somebody who was never infected is a dose wasted.
+    const curable =
+      kind === 'cure' && other.type === 'human' && world.pendingInfections.has(other.id);
+    if (other.type !== 'zombie' && !curable) continue;
     const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
     if (t !== null && t < victimT) {
       victimT = t;
@@ -286,11 +292,40 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
 
   if (!victim) return;
   if (kind === 'cure') {
-    if (!world.playerIds.has(victim.id)) cure(world, victim, now);
+    if (victim.type === 'human') {
+      // Caught in time: the infection simply doesn't take.
+      world.pendingInfections.delete(victim.id);
+      world.grappleCounts.delete(victim.id);
+    } else if (!world.playerIds.has(victim.id)) {
+      cure(world, victim, now);
+    }
   } else {
     // Tracker dart: marks the target for the zombie-player hunt later on.
     world.trackedTargets.set(victim.id, now + TRACKER_DART_MS);
   }
+}
+
+/**
+ * Where a lobbed round comes down. With an aim point it lands there, short of
+ * the weapon's reach — so a shell drops on the crosshair rather than sailing
+ * the full distance past whatever you were pointing at. Without one it falls
+ * back to the old fixed-range throw, which is what a bot firing blind gets.
+ */
+function landingSpot(
+  shooter: Entity,
+  aim: number,
+  reach: number,
+  at?: { x: number; y: number },
+): { x: number; y: number } {
+  if (!at) {
+    return { x: shooter.x + Math.cos(aim) * reach, y: shooter.y + Math.sin(aim) * reach };
+  }
+  const dx = at.x - shooter.x;
+  const dy = at.y - shooter.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist <= reach || dist === 0) return { x: at.x, y: at.y };
+  // Out of range: as far along that line as the arm will throw.
+  return { x: shooter.x + (dx / dist) * reach, y: shooter.y + (dy / dist) * reach };
 }
 
 /**
@@ -307,6 +342,12 @@ export function fireHeld(
   aim: number,
   now: number,
   charge = 1,
+  /**
+   * Where a lobbed weapon should land. Hitscan ignores it; the launcher and
+   * the smoke grenade land here rather than at a fixed distance along `aim`,
+   * which is what makes the shell go where the crosshair is.
+   */
+  at?: { x: number; y: number },
 ): boolean {
   const id = shooter.id;
   const held = heldItem(inv);
@@ -318,16 +359,10 @@ export function fireHeld(
     if (now - last < GRENADE_COOLDOWN_MS) return false;
     world.lastShotAt.set(id, now);
 
-    throwGrenade(
-      world,
-      shooter.x,
-      shooter.y,
-      shooter.x + Math.cos(aim) * GRENADE_THROW_RANGE,
-      shooter.y + Math.sin(aim) * GRENADE_THROW_RANGE,
-      now,
-    );
-    const at = inv.utilities.indexOf('smokeGrenade');
-    if (at >= 0) inv.utilities.splice(at, 1);
+    const spot = landingSpot(shooter, aim, GRENADE_THROW_RANGE, at);
+    throwGrenade(world, shooter.x, shooter.y, spot.x, spot.y, now);
+    const slotOf = inv.utilities.indexOf('smokeGrenade');
+    if (slotOf >= 0) inv.utilities.splice(slotOf, 1);
     inv.activeSlot = 0;
     return true;
   }
@@ -347,16 +382,8 @@ export function fireHeld(
       slot.ammo--;
     }
     world.lastShotAt.set(id, now);
-    const reach = def.range ?? GUN_RANGE;
-    throwGrenade(
-      world,
-      shooter.x,
-      shooter.y,
-      shooter.x + Math.cos(aim) * reach,
-      shooter.y + Math.sin(aim) * reach,
-      now,
-      'frag',
-    );
+    const spot = landingSpot(shooter, aim, def.range ?? GUN_RANGE, at);
+    throwGrenade(world, shooter.x, shooter.y, spot.x, spot.y, now, 'frag');
     return true;
   }
 
@@ -465,13 +492,16 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
         CHARGE_MIN_FRACTION,
         Math.min(1, (now - since) / (def.chargeMs ?? 1200)),
       );
-      fireHeld(world, shooter, inv, command.aim, now, charge);
+      fireHeld(world, shooter, inv, command.aim, now, charge, {
+        x: command.aimX,
+        y: command.aimY,
+      });
       continue;
     }
     world.chargeSince.delete(id);
 
     if (!command.shooting) continue;
-    fireHeld(world, shooter, inv, command.aim, now);
+    fireHeld(world, shooter, inv, command.aim, now, 1, { x: command.aimX, y: command.aimY });
   }
 }
 

@@ -304,6 +304,13 @@ export type ClientMessage =
       type: 'input';
       input: InputState;
       aim: number;
+      /**
+       * Where the crosshair actually is, in world coordinates. The angle alone
+       * is enough for a hitscan round, but a lobbed shell has to land on the
+       * spot rather than at a fixed distance along the bearing.
+       */
+      aimX: number;
+      aimY: number;
       shooting: boolean;
       sprint: boolean;
       /** True while E is held — a tap collects, a hold drops. */

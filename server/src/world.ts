@@ -303,6 +303,9 @@ export interface GrappleSession {
 export interface Command {
   input: InputState;
   aim: number;
+  /** Where the crosshair is in the world, for weapons that land somewhere. */
+  aimX: number;
+  aimY: number;
   shooting: boolean;
   sprint: boolean;
   interact: boolean;
@@ -672,7 +675,15 @@ export function rebuildEntityGrid(world: World): void {
 }
 
 /** True when neither a wall nor a bush sits between the two points. */
-export function hasLineOfSight(world: World, x1: number, y1: number, x2: number, y2: number): boolean {
+export function hasLineOfSight(
+  world: World,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  /** Officers are trained and looking for this; foliage doesn't hide it. */
+  seeThroughBushes = false,
+): boolean {
   const minX = Math.min(x1, x2);
   const maxX = Math.max(x1, x2);
   const minY = Math.min(y1, y2);
@@ -691,12 +702,14 @@ export function hasLineOfSight(world: World, x1: number, y1: number, x2: number,
     if (segmentRectT(x1, y1, x2, y2, door.rect) !== null) return false;
   }
 
-  const bushes = world.bushGrid.queryRect(minX, minY, maxX, maxY, new Set<Bush>());
-  for (const bush of bushes) {
-    // The bush you're standing in doesn't block your own view out of it —
-    // others still can't see in, which is what makes hiding work.
-    if (Math.hypot(bush.x - x1, bush.y - y1) <= bush.r) continue;
-    if (segmentCircleT(x1, y1, x2, y2, bush.x, bush.y, bush.r) !== null) return false;
+  if (!seeThroughBushes) {
+    const bushes = world.bushGrid.queryRect(minX, minY, maxX, maxY, new Set<Bush>());
+    for (const bush of bushes) {
+      // The bush you're standing in doesn't block your own view out of it —
+      // others still can't see in, which is what makes hiding work.
+      if (Math.hypot(bush.x - x1, bush.y - y1) <= bush.r) continue;
+      if (segmentCircleT(x1, y1, x2, y2, bush.x, bush.y, bush.r) !== null) return false;
+    }
   }
 
   return true;
@@ -1247,7 +1260,12 @@ export function resolveCollisions(world: World): void {
   }
 }
 
-export function toWire(world: World, e: Entity, viewerIsZombie = false, now = Date.now()): EntityState {
+export function toWire(
+  world: World,
+  e: Entity,
+  revealInfected = false,
+  now = Date.now(),
+): EntityState {
   const state: EntityState = {
     id: e.id,
     type: e.type,
@@ -1265,8 +1283,10 @@ export function toWire(world: World, e: Entity, viewerIsZombie = false, now = Da
       }
     }
   }
-  // Only the zombie side gets to see who's already carrying the infection.
-  if (viewerIsZombie && world.pendingInfections.has(e.id)) state.infected = true;
+  // The zombie side sees who is already carrying it — and so does anyone with
+  // a cure gun in the bag, since a cure you can't aim is no use. Merely having
+  // it is enough; you don't have to be holding it to spot them.
+  if (revealInfected && world.pendingInfections.has(e.id)) state.infected = true;
   if (e.type === 'officer' && !world.playerIds.has(e.id)) state.npc = true;
   if (world.bots.has(e.id)) state.bot = true;
   if (world.soldiers.has(e.id)) state.soldier = true;

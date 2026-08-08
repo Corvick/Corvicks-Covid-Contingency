@@ -820,6 +820,14 @@ export const BEACON_THRESHOLD = 10;
  */
 export const WALL_TURN_PROBE = 26;
 
+/**
+ * How near a wall has to be before an officer starts leaning away from it, and
+ * how hard. The push is blended into the desired heading rather than replacing
+ * it, so it rounds a corner off instead of steering the walk.
+ */
+export const CORNER_CLEARANCE = 46;
+export const CORNER_PUSH = 0.55;
+
 export const NAV_CELL = 14;
 export const NAV_INFLATE = 10; // wall padding; below entity radius so doorways stay open
 export const PATH_BUDGET_PER_TICK = 10;

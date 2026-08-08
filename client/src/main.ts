@@ -634,11 +634,19 @@ function panSpectator(dt: number): void {
   spectateY = h >= WORLD_HEIGHT ? WORLD_HEIGHT / 2 : clamp(spectateY, h / 2, WORLD_HEIGHT - h / 2);
 }
 
+/** The crosshair in world coordinates — where a lobbed round should land. */
+function aimPoint(): { x: number; y: number } {
+  const me = self();
+  if (!me) return { x: 0, y: 0 };
+  const { view, scale } = cameraFor(me);
+  return { x: view.x + input.mouseX / scale, y: view.y + input.mouseY / scale };
+}
+
 function aimAngle(): number {
   const me = self();
   if (!me) return 0;
-  const { view, scale } = cameraFor(me);
-  return Math.atan2(view.y + input.mouseY / scale - me.y, view.x + input.mouseX / scale - me.x);
+  const at = aimPoint();
+  return Math.atan2(at.y - me.y, at.x - me.x);
 }
 
 function sendInputLoop() {
@@ -653,10 +661,13 @@ function sendInputLoop() {
     input.slotPressed = -1;
   }
 
+  const crosshair = aimPoint();
   send({
     type: 'input',
     input: { ...input.state },
     aim: aimAngle(),
+    aimX: crosshair.x,
+    aimY: crosshair.y,
     // Neither the wheel nor an armed order should empty your magazine.
     shooting: input.shooting && !spectating && !wheel.open && !armedAbility,
     sprint: input.sprint,

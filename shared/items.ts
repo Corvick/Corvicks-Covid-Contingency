@@ -55,6 +55,17 @@ export interface ItemDef {
   chargeMs?: number;
   /** Bodies one round passes through. At full charge, all of them. */
   pierce?: number;
+  /**
+   * How close a bot wants to be before it opens up, when that is nearer than
+   * the weapon's outright reach. A shotgun carries 340 but only bites at half
+   * that, so a bot firing at maximum range is a bot wasting shells.
+   */
+  botIdealRange?: number;
+  /**
+   * What a bot thinks this is worth, when damage figures don't tell the story
+   * — the launcher's damage lives in its blast, not in `damageMin`.
+   */
+  botWorth?: number;
 }
 
 export const ITEMS: Record<ItemId, ItemDef> = {
@@ -100,6 +111,9 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     range: 340,
     pellets: 8,
     ammo: 28,
+    // Eight pellets at 0.3 bloom put maybe two on target at full reach, so a
+    // bot firing from 340 is a bot wasting shells. Make it walk in first.
+    botIdealRange: 170,
   },
   boltRifle: {
     id: 'boltRifle',
@@ -112,7 +126,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     damageMin: 42,
     damageMax: 64,
     bloom: 0.012,
-    cooldownMs: 1000, // works the bolt as fast as you can pull a trigger
+    cooldownMs: 1150, // a shade slower than a pistol: you have to work the bolt
     range: 900,
     ammo: 24,
     // A heavy round puts them down harder and for longer than a pistol does.
@@ -152,6 +166,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     range: 720,
     ammo: 300,
     automatic: true,
+    // From the hip it only lands anything at close quarters.
+    botIdealRange: 400,
     deployable: true,
     deployedBloom: 0.018,
   },
@@ -208,6 +224,11 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     range: 360,
     ammo: 10,
     explosive: true,
+    // Its damage lives in the blast, so ranking it on damageMin scores it zero
+    // and bots walked straight past the best weapon in the city.
+    botWorth: 95,
+    // Far enough out not to catch itself in its own shell.
+    botIdealRange: 300,
   },
   ammoBox: {
     id: 'ammoBox',

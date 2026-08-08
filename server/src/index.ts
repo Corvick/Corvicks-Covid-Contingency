@@ -126,6 +126,8 @@ function spawnPlayer(id: string): void {
   world.commands.set(id, {
     input: { up: false, down: false, left: false, right: false },
     aim: 0,
+    aimX: 0,
+    aimY: 0,
     shooting: false,
     sprint: false,
     interact: false,
@@ -242,6 +244,8 @@ wss.on('connection', (socket) => {
         world.commands.set(id, {
           input: msg.input,
           aim: msg.aim,
+          aimX: msg.aimX,
+          aimY: msg.aimY,
           shooting: msg.shooting,
           sprint: msg.sprint,
           interact: msg.interact,
@@ -484,16 +488,20 @@ function sightRadiusFor(viewer: Entity): number {
 
 function visibleTo(viewer: Entity, now: number): EntityState[] {
   const out: EntityState[] = [];
-  const viewerIsZombie = viewer.type === 'zombie';
+  // A cure gun anywhere in the bag picks the infected out of a crowd — you
+  // can't aim a cure at somebody you can't tell apart from everyone else.
+  const inv = world.inventories.get(viewer.id);
+  const carriesCure = inv ? inv.guns.some((g) => g?.item === 'cureGun') : false;
+  const reveal = viewer.type === 'zombie' || carriesCure;
   const sight = sightRadiusFor(viewer);
   for (const other of world.entities.values()) {
     if (other.id === viewer.id) {
-      out.push(toWire(world, other, viewerIsZombie, now));
+      out.push(toWire(world, other, reveal, now));
       continue;
     }
     if (Math.hypot(other.x - viewer.x, other.y - viewer.y) > sight) continue;
     if (!hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y)) continue;
-    out.push(toWire(world, other, viewerIsZombie, now));
+    out.push(toWire(world, other, reveal, now));
   }
   return out;
 }
