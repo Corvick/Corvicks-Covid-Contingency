@@ -512,11 +512,11 @@ export function drawEntity(
     const gripX = x + dirX * radius * 1.62;
     const gripY = y + dirY * radius * 1.62;
     ctx.strokeStyle = limbColor;
-    ctx.lineWidth = radius * 0.5;
+    ctx.lineWidth = radius * 0.72;
     ctx.lineCap = 'round';
     for (const side of [-1, 1]) {
       ctx.beginPath();
-      ctx.moveTo(x + perpX * shoulder * side, y + perpY * shoulder * side);
+      ctx.moveTo(x + perpX * shoulder * 1.25 * side, y + perpY * shoulder * 1.25 * side);
       ctx.lineTo(gripX, gripY);
       ctx.stroke();
     }
@@ -593,10 +593,10 @@ export function drawEntity(
   // Kevlar reads as a grey band inside the body rather than a halo around it,
   // so it never competes with the white self-ring or the infected ring.
   if (e.armour) {
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(203, 213, 225, 0.85)';
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = 'rgba(214, 222, 233, 0.92)';
     ctx.beginPath();
-    ctx.arc(x, y, radius * 0.66, 0, Math.PI * 2);
+    ctx.arc(x, y, radius - 2, 0, Math.PI * 2);
     ctx.stroke();
   }
 

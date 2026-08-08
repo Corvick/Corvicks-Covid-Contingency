@@ -10,7 +10,7 @@ import {
   BUILDING_LOOT_CHANCE,
   TEST_DROP_ALL_ITEMS,
   TEST_DROP_RADIUS,
-  GRENADE_LAUNCHER_SPAWN_CHANCE,
+  ONE_OFF_ITEMS,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 
@@ -77,16 +77,18 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
     }
   }
 
-  // The launcher is kept out of the loot table entirely and gets one roll for
-  // the whole city, so most rounds simply never see one.
-  if (Math.random() < GRENADE_LAUNCHER_SPAWN_CHANCE) {
-    const spots = Array.from(world.pickups.values());
-    if (spots.length > 0) {
-      const at = spots[Math.floor(Math.random() * spots.length)];
-      const id = `loot-gl`;
-      world.pickups.set(id, { id, item: 'grenadeLauncher', x: at.x, y: at.y });
-      world.pickups.delete(at.id);
-    }
+  // Exactly one of each one-off item, placed by taking over an ordinary loot
+  // spot. They are out of the loot table entirely, so this is the only way
+  // either of them reaches the map.
+  for (const item of ONE_OFF_ITEMS) {
+    const spots = Array.from(world.pickups.values()).filter(
+      (p) => !ONE_OFF_ITEMS.includes(p.item as (typeof ONE_OFF_ITEMS)[number]),
+    );
+    if (spots.length === 0) break;
+    const at = spots[Math.floor(Math.random() * spots.length)];
+    world.pickups.delete(at.id);
+    const id = `loot-oneoff-${item}`;
+    world.pickups.set(id, { id, item, x: at.x, y: at.y });
   }
 }
 

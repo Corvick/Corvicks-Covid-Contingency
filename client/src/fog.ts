@@ -73,6 +73,9 @@ const BASE_RAYS = 120;
  * the whole circle the wrong way round — which fills almost everything and
  * reads on screen as the fog switching off. This is the fog dead spot.
  */
+/** Bushes that get tangent rays cast at them. The park has far more. */
+const MAX_BUSH_OCCLUDERS = 22;
+
 function norm(a: number): number {
   const twoPi = Math.PI * 2;
   let x = (a + Math.PI) % twoPi;
@@ -100,11 +103,23 @@ export function visibilityPolygon(
   }
 
   // A bush you're standing in doesn't blind you — you see out, others can't see in.
+  //
+  // Capped to the nearest few. The park is a dense thicket, and every bush
+  // costs four rays that are then each tested against every other occluder —
+  // standing in it put the ray count into the thousands, which is what made
+  // moving through the trees stutter. The ones nearest you shape the
+  // silhouette; distant ones inside a thicket are behind those anyway.
   const nearBushes: Bush[] = [];
   for (const b of bushes) {
     const d = Math.hypot(b.x - px, b.y - py);
     if (d <= b.r) continue;
     if (d <= radius + b.r) nearBushes.push(b);
+  }
+  if (nearBushes.length > MAX_BUSH_OCCLUDERS) {
+    nearBushes.sort(
+      (a, b) => Math.hypot(a.x - px, a.y - py) - Math.hypot(b.x - px, b.y - py),
+    );
+    nearBushes.length = MAX_BUSH_OCCLUDERS;
   }
 
   // Every other ray angle comes from Math.atan2, so the base fan must live in

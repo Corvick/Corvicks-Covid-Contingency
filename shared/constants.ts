@@ -178,7 +178,12 @@ export const FOLLOW_WAIT_SHOUT = "Wait here!";
  * The launcher is kept out of the loot table and placed by its own roll, so
  * most cities simply don't have one. Finding it should feel like an event.
  */
-export const GRENADE_LAUNCHER_SPAWN_CHANCE = 0.2;
+/**
+ * The launcher and the smoke grenade are each placed exactly once, by hand,
+ * and kept out of the loot table entirely (rarity 0 leaves them out by
+ * construction). One of each per city — finding either should be an event.
+ */
+export const ONE_OFF_ITEMS = ['grenadeLauncher', 'smokeGrenade'] as const;
 /** Its shell detonates where it lands, hurting everything close to it. */
 export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;
@@ -196,6 +201,24 @@ export const DUCK_SCARE_RADIUS = 260;
 export const DUCK_FLY_SPEED = 260;
 /** Up and gone: they clear the scene quickly rather than settling again. */
 export const DUCK_FLY_MS = 1500;
+
+/** Someone turning in the room with you, and nobody else turned in here yet. */
+export const TURNED_REMARK_RANGE = 280;
+export const TURNED_REMARK_CHANCE = 0.55;
+export const TURNED_LINES = [
+  'They are one of them now!',
+  'Oh God — she turned!',
+  'He is one of them!',
+  'It got him. It got him!',
+  'That was Michael. That WAS Michael.',
+  'No no no, not in here!',
+  'They have turned! Get back!',
+  'Look at their eyes — they are gone.',
+  'It happened. It just happened.',
+];
+
+/** A few shelter seekers want the far side of the city, not the near door. */
+export const SHELTER_FURTHEST_CHANCE = 0.07;
 
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
@@ -257,9 +280,9 @@ export const INITIAL_ZOMBIE_SPREAD = 110;
 export const MATERIALIZE_MS = 1400;
 /** Rare clean getaway with no infection at all. */
 export const BASE_ESCAPE_CHANCE = 0.05;
-export const ESCAPE_CHANCE_PER_EXTRA_ZOMBIE = 0.01;
+export const ESCAPE_CHANCE_PER_EXTRA_ZOMBIE = 0;
 /** Slight, and gone quickly — just enough to break contact. */
-export const ESCAPE_SPEED_MULTIPLIER = 1.35;
+export const ESCAPE_SPEED_MULTIPLIER = 1.5;
 export const ESCAPE_BOOST_MS = 1400;
 
 /** The common outcome is a bite that incubates while the victim runs. */
@@ -474,9 +497,9 @@ export const DOOR_ATTACK_INTERVAL_MS = 600;
 export const DOOR_BULLET_DAMAGE = 20;
 
 /** How long working the handle takes. Nobody moves while they're at it. */
-export const DOOR_OPEN_MIN_MS = 1500;
-export const DOOR_OPEN_MAX_MS = 2800;
-export const DOOR_CLOSE_MS = 1000;
+export const DOOR_OPEN_MIN_MS = 1100;
+export const DOOR_OPEN_MAX_MS = 2000;
+export const DOOR_CLOSE_MS = 750;
 /** A door will not shut on somebody stood in it; it waits this long for them
  *  to clear, nudging them out, before giving up and staying open. */
 export const DOOR_BLOCKED_WAIT_MS = 2500;

@@ -12,6 +12,8 @@ import {
   FOG_BLUR_PX,
   ENTITY_FADE_MS,
   MATERIALIZE_MS,
+  GUN_SLOTS,
+  UTILITY_SLOTS,
 } from '../../shared/constants.js';
 import type {
   DoorPrompt,
@@ -300,27 +302,53 @@ canvas.addEventListener('contextmenu', () => {
 canvas.addEventListener(
   'wheel',
   (e) => {
-    if (!spectating) return;
+    // Playing: the wheel walks the slot bar rather than zooming.
+    if (!spectating) {
+      if (!inventory) return;
+      e.preventDefault();
+      const slots = 1 + GUN_SLOTS + UTILITY_SLOTS;
+      const step = e.deltaY > 0 ? 1 : -1;
+      const next = (inventory.activeSlot + step + slots) % slots;
+      inventory.activeSlot = next; // optimistic, the server confirms
+      send({ type: 'selectSlot', slot: next });
+      return;
+    }
     e.preventDefault();
 
-    const before = cameraFor(undefined);
-    const worldX = before.view.x + input.mouseX / before.scale;
-    const worldY = before.view.y + input.mouseY / before.scale;
-
-    const next = clamp(
-      spectateZoom * Math.exp(-e.deltaY * 0.0015),
-      SPECTATE_ZOOM_MIN,
-      SPECTATE_ZOOM_MAX,
-    );
-    if (next === spectateZoom) return;
-    spectateZoom = next;
-
-    const scale = SPECTATE_FIT * spectateZoom;
-    spectateX = worldX - input.mouseX / scale + VIEWPORT_WIDTH / scale / 2;
-    spectateY = worldY - input.mouseY / scale + VIEWPORT_HEIGHT / scale / 2;
+    // Zoom is applied once per frame rather than per event: a single notch can
+    // deliver a burst of wheel events, and re-deriving the camera on each one
+    // is what made zooming stutter.
+    pendingZoom += e.deltaY;
+    pendingZoomAt = { x: input.mouseX, y: input.mouseY };
+    return;
   },
   { passive: false },
 );
+
+/** Deltas banked since the last frame, applied together in `applyZoom`. */
+let pendingZoom = 0;
+let pendingZoomAt: { x: number; y: number } | null = null;
+
+function applyZoom(): void {
+  if (pendingZoom === 0 || !pendingZoomAt) return;
+  const delta = pendingZoom;
+  const at = pendingZoomAt;
+  pendingZoom = 0;
+  pendingZoomAt = null;
+
+  const before = cameraFor(undefined);
+  const worldX = before.view.x + at.x / before.scale;
+  const worldY = before.view.y + at.y / before.scale;
+
+  const next = clamp(spectateZoom * Math.exp(-delta * 0.0015), SPECTATE_ZOOM_MIN, SPECTATE_ZOOM_MAX);
+  if (next === spectateZoom) return;
+  spectateZoom = next;
+
+  // Hold whatever was under the cursor where it was.
+  const scale = SPECTATE_FIT * spectateZoom;
+  spectateX = worldX - at.x / scale + VIEWPORT_WIDTH / scale / 2;
+  spectateY = worldY - at.y / scale + VIEWPORT_HEIGHT / scale / 2;
+}
 
 restartBtn.addEventListener('click', () => {
   send({ type: 'restart' });
@@ -747,7 +775,10 @@ function render() {
   phaseAt = now;
 
   const me = self();
-  if (spectating) panSpectator(frameDelta);
+  if (spectating) {
+    applyZoom();
+    panSpectator(frameDelta);
+  }
   const { view, scale } = cameraFor(me);
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);

@@ -40,6 +40,7 @@ import {
   SHELTER_SEEK_CHANCE,
   SHELTER_FAR_CHANCE,
   SHELTER_LARGE_CHANCE,
+  SHELTER_FURTHEST_CHANCE,
   PANIC_SCALE_MIN,
   PANIC_SCALE_MAX,
   DOOR_CLOSE_BEHIND_CHANCE,
@@ -113,6 +114,8 @@ export interface AiState {
   shelterFar: boolean;
   /** Wants somewhere substantial — a landmark, not the nearest front door. */
   shelterLarge: boolean;
+  /** Wants the far side of the city, whatever the distance. */
+  shelterFurthest: boolean;
   /**
    * Personal scaling on how long this person keeps running and stays rattled.
    * Most run a long way; a few gather themselves quickly.
@@ -438,6 +441,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     shelterSeeker: Math.random() < SHELTER_SEEK_CHANCE,
     shelterFar: Math.random() < SHELTER_FAR_CHANCE,
     shelterLarge: Math.random() < SHELTER_LARGE_CHANCE,
+    shelterFurthest: Math.random() < SHELTER_FURTHEST_CHANCE,
     panicScale: PANIC_SCALE_MIN + Math.random() * (PANIC_SCALE_MAX - PANIC_SCALE_MIN),
     sawZombie: false,
     fleeStyle: Math.random() < BOLT_FLEE_CHANCE ? 'bolt' : 'safest',

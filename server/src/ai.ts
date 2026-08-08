@@ -109,6 +109,9 @@ import {
   PJ_CHANCE,
   PJ_PLAYER_RANGE,
   PJ_LINE,
+  TURNED_LINES,
+  TURNED_REMARK_RANGE,
+  TURNED_REMARK_CHANCE,
   REPATH_INTERVAL_MS,
   WORLD_WIDTH,
   WORLD_HEIGHT,
@@ -634,6 +637,29 @@ function chooseShelter(world: World, e: Entity, state: AiState): boolean {
       ? SHELTER_LARGE_RADIUS
       : SHELTER_SEARCH_RADIUS;
 
+  // A few people don't want anywhere near here at all — they set off for the
+  // building furthest from the thing they just saw, whatever the distance.
+  if (state.shelterFurthest) {
+    let best = -1;
+    let bestScore = -Infinity;
+    for (let i = 0; i < world.map.buildings.length; i++) {
+      const b = world.map.buildings[i];
+      const score = Math.hypot(b.x + b.w / 2 - state.threatX, b.y + b.h / 2 - state.threatY);
+      if (score <= bestScore) continue;
+      const goal = interiorPointOf(world, i, state.threatX, state.threatY);
+      if (!goal) continue;
+      bestScore = score;
+      best = i;
+    }
+    if (best >= 0) {
+      const goal = interiorPointOf(world, best, state.threatX, state.threatY)!;
+      state.shelterBuilding = best;
+      state.shelterX = goal.x;
+      state.shelterY = goal.y;
+      return true;
+    }
+  }
+
   const list = world.map.buildings;
   const gather = (bigOnly: boolean): Array<{ i: number; d: number }> => {
     const found: Array<{ i: number; d: number }> = [];
@@ -1125,6 +1151,17 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
     lockDoor(world, index);
     state.doorFollowUp = -1;
     state.doorFollowUpLock = false;
+    // Bolting a door is the end of the journey, not a step in it. Without
+    // this they carried on with whatever they were walking toward, which for
+    // an interior door meant unbolting it again a moment later to get to the
+    // next room — having just shut themselves in on purpose.
+    state.mode = 'settled';
+    state.wanderX = e.x;
+    state.wanderY = e.y;
+    state.path = null;
+    state.shelterBuilding = -1;
+    state.shelterX = null;
+    state.shelterY = null;
     warnTheRoom(world, e, state, index, now);
   } else if (action === 'unlock') {
     unlockDoor(world, index);
@@ -2511,7 +2548,13 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
     // Right on their heels: a separate always-on surge so chasers close the
     // last few pixels instead of trailing in a conga line.
     const closing = gap <= ZOMBIE_CLOSE_RANGE ? ZOMBIE_CLOSE_BOOST : 1;
-    const speed = ZOMBIE_SPEED * (lunging ? ZOMBIE_LUNGE_MULTIPLIER : 1) * closing;
+    // A badly hurt one can't throw itself forward the way a whole one can, so
+    // the surges are damped too rather than only the base pace. `step` scales
+    // the result again, which is what makes a wounded chaser fall behind.
+    const hurt = e.health / (e.maxHealth || 1);
+    const surge = hurt < ZOMBIE_HURT_THRESHOLD ? 0.5 + 0.5 * (hurt / ZOMBIE_HURT_THRESHOLD) : 1;
+    const speed =
+      ZOMBIE_SPEED * (lunging ? 1 + (ZOMBIE_LUNGE_MULTIPLIER - 1) * surge : 1) * (1 + (closing - 1) * surge);
 
     const desired = headingToward(world, e, state, target.x, target.y, now);
     step(world, e, state, desired, speed, ZOMBIE_TURN_RATE, dt, now);
@@ -2581,6 +2624,36 @@ function convert(world: World, target: Entity, now: number): void {
   // not a door it can hear somebody behind.
   state.freshUntil = now + FRESH_ZOMBIE_MS;
   world.ai.set(target.id, state);
+
+  remarkOnTurning(world, target, now);
+}
+
+/**
+ * Somebody turning in the room with you is its own kind of horror, and worth a
+ * word — but only when they are the only one in here. With a pack already
+ * through the door it is not the moment for anyone to be commenting.
+ */
+function remarkOnTurning(world: World, turned: Entity, now: number): void {
+  const building = buildingIndexAt(world, turned.x, turned.y);
+  if (building < 0) return;
+
+  // Anyone else already turned in this building means this is not news.
+  for (const other of world.entities.values()) {
+    if (other.type !== 'zombie' || other.id === turned.id) continue;
+    if (buildingIndexAt(world, other.x, other.y) === building) return;
+  }
+
+  for (const other of world.entityGrid.queryCircle(turned.x, turned.y, TURNED_REMARK_RANGE, new Set<Entity>())) {
+    if (other.type !== 'human' || world.speech.has(other.id)) continue;
+    if (buildingIndexAt(world, other.x, other.y) !== building) continue;
+    if (Math.random() >= TURNED_REMARK_CHANCE) continue;
+
+    world.speech.set(other.id, {
+      text: TURNED_LINES[Math.floor(Math.random() * TURNED_LINES.length)],
+      until: now + FIRST_SIGHT_MS,
+    });
+    return; // one voice, not a chorus
+  }
 }
 
 interface GrappleLike {
@@ -2626,11 +2699,9 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   }
 
   const extra = session.zombieIds.size - 1;
-  // Held by three or more and there is simply no getting out of it.
-  const escapeChance =
-    session.zombieIds.size >= GRAPPLE_NO_ESCAPE_AT
-      ? 0
-      : Math.max(0, BASE_ESCAPE_CHANCE - extra * ESCAPE_CHANCE_PER_EXTRA_ZOMBIE);
+  // A flat chance of walking away clean, unless three or more have hold of
+  // you, in which case there is simply no getting out of it.
+  const escapeChance = session.zombieIds.size >= GRAPPLE_NO_ESCAPE_AT ? 0 : BASE_ESCAPE_CHANCE;
   if (escapeChance > 0 && Math.random() < escapeChance) {
     world.speedBoosts.set(target.id, now + ESCAPE_BOOST_MS);
     return;

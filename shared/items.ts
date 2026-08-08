@@ -115,7 +115,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     rarity: 0,
     cooldownMs: 1600,
     range: 360,
-    ammo: 4,
+    ammo: 10,
     explosive: true,
   },
   ammoBox: {
@@ -156,7 +156,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     label: 'Smoke Grenade',
     short: 'SMOKE',
     color: '#ef4444',
-    rarity: 2,
+    rarity: 0,
   },
 };
 
