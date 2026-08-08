@@ -477,8 +477,8 @@ export const SPRINT_MULTIPLIER = 1.7;
  * scale, which is tuned so civilians lose races with zombies. A bot is
  * supposed to win them.
  */
-export const BOT_WALK_SPEED = PLAYER_SPEED * 0.85;
-export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER;
+export const BOT_WALK_SPEED = PLAYER_SPEED * 0.72;
+export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER * 0.85;
 /** Inside this, stop shooting, turn, and run. */
 export const BOT_BOLT_DIST = 165;
 /**
@@ -501,6 +501,8 @@ export const BOT_PATROL_MAX = 1100;
 /** Body and head of a bot officer: blue with a grey head. */
 export const BOT_OFFICER_COLOR = '#2563eb';
 export const BOT_OFFICER_HEAD_COLOR = '#9ca3af';
+/** A gun on the floor with nothing left in it. */
+export const EMPTY_PICKUP_COLOR = '#6b7280';
 
 // ---------------------------------------------------------------- gun
 export const GUN_DAMAGE_MIN = 15;

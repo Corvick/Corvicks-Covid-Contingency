@@ -267,6 +267,12 @@ export interface PickupState {
   item: ItemId;
   x: number;
   y: number;
+  /**
+   * Rounds left in a gun that was dropped rather than spawned. Absent means a
+   * full magazine — loot found in the world always is. Zero draws grey, which
+   * is how everyone else knows not to bother walking over for it.
+   */
+  ammo?: number;
 }
 
 /** One of the three gun slots. */

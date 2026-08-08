@@ -210,6 +210,22 @@ races with zombies. A bot is meant to win them.
 - **Smoke is cover, not a weapon.** It goes to either flank or straight behind
   (never at the zombie) — putting it on the target only blinds the bot to the
   thing it is watching.
+- **The pistol is the fallback of last resort, not an option.** `bestGun` ranks
+  only guns with rounds left and falls through to the pistol when there are
+  none. Ranked on damage it beats a machine gun on paper, so bots were putting
+  a loaded MG away to plink with a sidearm.
+- **A dry gun in the bag counts as a free slot** in `lootWanted` — they ditch
+  it on arrival. Otherwise a bot holding three empty rifles is "full" and walks
+  past every gun in the city. On arrival they drop the dry one *then* collect,
+  and `collect` takes an optional pickup id because at that instant the nearest
+  pickup is the empty gun at their own feet.
+
+### Pickups carry ammo
+
+`PickupState.ammo` absent means a full magazine — loot that spawned in the
+world always is. A gun that was **dropped** keeps what was left in it, and one
+at zero draws grey with a bar through it. Swapping used to hand back a full
+magazine, which made swapping a way to manufacture ammo.
 - **The pond is a radius per bearing, not a polygon.** Containment is one
   comparison and pushing a body out is a slide along the same ray; nav grid,
   collision and the drawn bank all read `pondRadiusAt`, so what you see is

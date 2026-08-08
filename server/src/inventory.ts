@@ -162,8 +162,22 @@ function applyUtility(world: World, playerId: string, inv: Inventory, item: Item
  * Tap E. Picks the item up, or — when all three gun slots are already full and
  * you're holding a gun — swaps the held one for whatever is on the floor.
  */
-export function collect(world: World, playerId: string, inv: Inventory, x: number, y: number): string | null {
-  const pickup = nearestPickup(world, x, y);
+export function collect(
+  world: World,
+  playerId: string,
+  inv: Inventory,
+  x: number,
+  y: number,
+  wantId?: string,
+): string | null {
+  // `wantId` names a specific pickup — a bot that walked across the map for
+  // one thing shouldn't take whatever happens to be nearest instead, least of
+  // all the empty gun it just dropped at its own feet.
+  let pickup = nearestPickup(world, x, y);
+  if (wantId) {
+    const wanted = world.pickups.get(wantId);
+    if (wanted && Math.hypot(wanted.x - x, wanted.y - y) <= PICKUP_REACH) pickup = wanted;
+  }
   if (!pickup) return null;
 
   const def = ITEMS[pickup.item];
@@ -181,9 +195,13 @@ export function collect(world: World, playerId: string, inv: Inventory, x: numbe
     return `picked up ${def.label}`;
   }
 
+  // A gun that was dropped keeps whatever was left in it; one that spawned in
+  // the world comes with a full magazine.
+  const loaded = pickup.ammo ?? def.ammo ?? 0;
+
   const free = inv.guns.findIndex((g) => g === null);
   if (free >= 0) {
-    inv.guns[free] = { item: pickup.item, ammo: def.ammo ?? 0 };
+    inv.guns[free] = { item: pickup.item, ammo: loaded };
     inv.activeSlot = free + 1;
     world.pickups.delete(pickup.id);
     return `picked up ${def.label}`;
@@ -195,10 +213,17 @@ export function collect(world: World, playerId: string, inv: Inventory, x: numbe
 
   const dropped = slot.item;
   const droppedAmmo = slot.ammo;
-  inv.guns[inv.activeSlot - 1] = { item: pickup.item, ammo: def.ammo ?? 0 };
+  inv.guns[inv.activeSlot - 1] = { item: pickup.item, ammo: loaded };
   world.pickups.delete(pickup.id);
-  world.pickups.set(pickup.id, { id: pickup.id, item: dropped, x: pickup.x, y: pickup.y });
-  void droppedAmmo; // ground guns come with a fresh magazine
+  // What you put down is what you were carrying, rounds and all. Handing back
+  // a full magazine made swapping a way to manufacture ammo.
+  world.pickups.set(pickup.id, {
+    id: pickup.id,
+    item: dropped,
+    x: pickup.x,
+    y: pickup.y,
+    ammo: droppedAmmo,
+  });
   return `swapped for ${def.label}`;
 }
 
@@ -206,6 +231,11 @@ export function collect(world: World, playerId: string, inv: Inventory, x: numbe
 export function dropHeld(world: World, inv: Inventory, x: number, y: number): string | null {
   const item = heldItem(inv);
   if (!item || item === 'pistol') return null;
+
+  // Guns go down with what was left in them, so an empty one stays empty on
+  // the floor and reads as not worth the walk.
+  const gunSlot = heldGunSlot(inv);
+  const ammo = gunSlot ? gunSlot.ammo : undefined;
 
   if (inv.activeSlot <= GUN_SLOTS) inv.guns[inv.activeSlot - 1] = null;
   else inv.utilities.splice(inv.activeSlot - GUN_SLOTS - 1, 1);
@@ -215,7 +245,7 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
   if (item === 'kevlar') inv.kevlar = 0;
 
   const id = `loot-drop-${Math.random().toString(36).slice(2, 9)}`;
-  world.pickups.set(id, { id, item, x, y });
+  world.pickups.set(id, ammo === undefined ? { id, item, x, y } : { id, item, x, y, ammo });
   inv.activeSlot = 0;
   return `dropped ${ITEMS[item].label}`;
 }

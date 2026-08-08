@@ -26,6 +26,7 @@ import {
   NPC_OFFICER_COLOR,
   BOT_OFFICER_COLOR,
   BOT_OFFICER_HEAD_COLOR,
+  EMPTY_PICKUP_COLOR,
   SOLDIER_COLOR,
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
@@ -971,7 +972,10 @@ export function drawPickups(
     ctx.ellipse(0, 9, 10, 4, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = def.color;
+    // A gun with nothing left in it goes grey, so it reads as scenery at a
+    // glance rather than something worth crossing the street for.
+    const spent = p.ammo === 0;
+    ctx.fillStyle = spent ? EMPTY_PICKUP_COLOR : def.color;
     ctx.strokeStyle = 'rgba(15, 23, 42, 0.8)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -979,11 +983,20 @@ export function drawPickups(
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = spent ? '#1f2937' : '#0f172a';
     ctx.font = 'bold 7px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(def.short.slice(0, 4), 0, 0);
+    if (spent) {
+      // A bar through it: colour alone is easy to miss on a dim item.
+      ctx.strokeStyle = 'rgba(31, 41, 55, 0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-7, 7);
+      ctx.lineTo(7, -7);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 }

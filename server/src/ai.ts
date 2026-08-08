@@ -117,6 +117,7 @@ import {
   STAMINA_SPRINT_FLOOR,
   STAMINA_RECOVERY_THRESHOLD,
   GUN_SLOTS,
+  UTILITY_SLOTS,
   PICKUP_REACH,
   GUN_RANGE,
   BLAST_RADIUS,
@@ -180,7 +181,7 @@ import {
   DOOR_DEFY_LINES,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
-import { collect, heldItem, type Inventory } from './inventory.js';
+import { collect, dropHeld, heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { PickupState } from '../../shared/types.js';
 import {
@@ -2295,10 +2296,15 @@ function gunWorth(item: ItemId | null): number {
   return perShot * (def.pellets ?? 1);
 }
 
-/** The best gun in hand, and how good it is. */
+/**
+ * The best *loaded* gun in hand. The pistol is the answer only when nothing
+ * else has a round left in it — it never runs dry, so ranking it against the
+ * others by damage had bots reaching for it over a loaded machine gun and
+ * standing there plinking with a sidearm.
+ */
 function bestGun(inv: Inventory): { slot: number; worth: number } {
-  let slot = 0;
-  let worth = gunWorth('pistol');
+  let slot = -1;
+  let worth = -Infinity;
   for (let i = 0; i < inv.guns.length; i++) {
     const g = inv.guns[i];
     if (!g || g.ammo <= 0) continue;
@@ -2308,7 +2314,13 @@ function bestGun(inv: Inventory): { slot: number; worth: number } {
       slot = i + 1;
     }
   }
+  if (slot < 0) return { slot: 0, worth: gunWorth('pistol') };
   return { slot, worth };
+}
+
+/** Index into `inv.guns` of a gun that has run dry, or -1. */
+function emptyGunSlot(inv: Inventory): number {
+  return inv.guns.findIndex((g) => g !== null && g.ammo <= 0);
 }
 
 /**
@@ -2318,7 +2330,12 @@ function bestGun(inv: Inventory): { slot: number; worth: number } {
  */
 function lootWanted(world: World, e: Entity, inv: Inventory, range: number): PickupState | null {
   const held = bestGun(inv);
-  const dryGun = inv.guns.some((g) => g !== null && g.ammo <= 0);
+  const dryGun = emptyGunSlot(inv) >= 0;
+  // A gun that has run dry is as good as a free slot: they'll ditch it on
+  // arrival. Without this a bot with three empty rifles is "full" and walks
+  // past every gun in the city.
+  const hasRoom = inv.guns.some((g) => g === null) || dryGun;
+  const utilityRoom = inv.utilities.length < UTILITY_SLOTS;
 
   let best: PickupState | null = null;
   let bestScore = -Infinity;
@@ -2331,15 +2348,17 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
 
     let want = 0;
     if (ITEMS[p.item]?.kind === 'gun') {
+      // Somebody else's empty gun is a decoration. Walking to one and finding
+      // it dry is exactly what the grey marker exists to prevent.
+      if (p.ammo === 0) continue;
       const worth = gunWorth(p.item);
-      // An empty slot is worth taking anything for; otherwise it has to beat
-      // what we already carry.
-      const hasRoom = inv.guns.some((g) => g === null);
       if (hasRoom) want = worth;
       else if (worth > held.worth) want = worth - held.worth;
     } else if (p.item === 'ammoBox' && dryGun) {
+      // The box is used on the spot rather than carried, so a full utility
+      // belt is no obstacle to it.
       want = 40;
-    } else if (p.item === 'kevlar' && inv.kevlar <= 0) {
+    } else if (p.item === 'kevlar' && inv.kevlar <= 0 && utilityRoom) {
       want = 30;
     }
     if (want <= 0) continue;
@@ -2456,6 +2475,12 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     senseThreats(world, e, state, NPC_OFFICER_SIGHT);
   }
 
+  // Clicking on an empty chamber is checked every tick, not only when there's
+  // something to shoot at — walking around holding a gun you can't fire is how
+  // a bot gets caught out the moment one appears.
+  const inHand = heldGunSlot(inv);
+  if (inHand && inHand.ammo <= 0) inv.activeSlot = bestGun(inv).slot;
+
   // Shaken after being grabbed: get clear before thinking about anything else.
   if (now < state.fleeUntil) {
     const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
@@ -2566,11 +2591,24 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     } else {
       const gap = Math.hypot(target.x - e.x, target.y - e.y);
       if (gap <= PICKUP_REACH) {
-        const result = collect(world, e.id, inv, e.x, e.y);
+        // Bag full but something in it is dry: put the dry one down first, so
+        // there's a slot to take this into. It lands here with zero rounds and
+        // draws grey, which tells everyone else to leave it alone.
+        const spent = emptyGunSlot(inv);
+        if (
+          ITEMS[target.item]?.kind === 'gun' &&
+          spent >= 0 &&
+          !inv.guns.some((g) => g === null)
+        ) {
+          inv.activeSlot = spent + 1;
+          dropHeld(world, inv, e.x, e.y);
+        }
+        // Ask for the thing we walked here for by name — the nearest pickup
+        // may well be the empty gun we just put down.
+        const result = collect(world, e.id, inv, e.x, e.y, target.id);
         state.lootId = null;
         // Bring whatever we just took to hand if it beats what we had.
-        const best = bestGun(inv);
-        inv.activeSlot = best.slot;
+        inv.activeSlot = bestGun(inv).slot;
         if (result) state.nextLootScanAt = now + 200;
         return;
       }
