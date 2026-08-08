@@ -31,6 +31,7 @@ import type {
   BlastState,
   DuckState,
   EmplacementState,
+  FireState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -56,6 +57,8 @@ import {
   drawBlasts,
   drawDucks,
   drawEmplacements,
+  drawFires,
+  drawBurning,
   drawPond,
   drawSmoke,
   drawStamina,
@@ -123,6 +126,7 @@ let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
+let fires: FireState[] = [];
 let helicopters: HelicopterState[] = [];
 let speech: SpeechState[] = [];
 const wheel = newWheelState();
@@ -221,6 +225,7 @@ const { send } = connect((msg) => {
     blasts = msg.blasts;
     ducks = msg.ducks;
     emplacements = msg.emplacements;
+    fires = msg.fires;
     helicopters = msg.helicopters;
     speech = msg.speech;
     exhausted = msg.exhausted;
@@ -491,6 +496,7 @@ const ENTITY_FIELDS = [
   'hand',
   'armour',
   'breaking',
+  'burning',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
 
 function copyInto(into: EntityState, from: EntityState): void {
@@ -934,6 +940,7 @@ function render() {
     // Under the entities, so the officer stands on his own emplacement rather
     // than behind it.
     drawEmplacements(ctx, emplacements, view);
+    drawFires(ctx, fires, view, now);
     drawPickups(ctx, pickups, view, now);
   }
   mark('map');
@@ -958,6 +965,8 @@ function render() {
     const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;
     drawEntity(ctx, s, isSelf, now, simpleEntities);
+    // Flame licks over the top of the body, not under it.
+    if (s.burning && !simpleEntities) drawBurning(ctx, s, now);
   }
   ctx.globalAlpha = 1;
   mark('entities');

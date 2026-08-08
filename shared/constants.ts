@@ -191,7 +191,7 @@ export const ONE_OFF_ITEMS = ['grenadeLauncher', 'smokeGrenade'] as const;
  * at rarity 1 a rare gun could otherwise miss a whole map, and a round where
  * the sniper simply isn't anywhere is a worse kind of rare than a scarce one.
  */
-export const GUARANTEED_ITEMS = ['sniper', 'heavyMg', 'chargeRifle'] as const;
+export const GUARANTEED_ITEMS = ['sniper', 'heavyMg', 'chargeRifle', 'flamethrower'] as const;
 /** Its shell detonates where it lands, hurting everything close to it. */
 export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;
@@ -500,6 +500,24 @@ export const BOT_SAFE_DIST = 400;
  * hovers where it can neither see nor be reached, and never actually fights.
  */
 export const BOT_HUNT_STANDOFF = 260;
+/** Swung, not snapped — the NPC officer's rate reads as twitching on a bot. */
+export const BOT_TURN_RATE = 7.5;
+/**
+ * The dead band around a bot's ideal range, as a multiplier. Deciding to
+ * advance and to retreat against the same threshold had them flipping between
+ * the two every few ticks; holding each until the other side of this is what
+ * stops the jitter.
+ */
+export const BOT_RANGE_SLACK = 1.2;
+/** Don't plant a bipod on something already close enough to reach you. */
+export const BOT_DEPLOY_MIN_DIST = 260;
+/**
+ * Bots would rather walk round a hedge than through it — no telling what is
+ * standing in there. A preference, blended into the heading, not a rule.
+ */
+export const BOT_BUSH_CLEARANCE = 34;
+export const BOT_BUSH_PUSH = 0.7;
+
 /** Don't pop a second smoke the instant the first one lands. */
 export const BOT_SMOKE_COOLDOWN_MS = 9000;
 /** How many spots a patrolling bot considers. Cheap: one field read each. */
@@ -540,6 +558,31 @@ export const SANDBAG_HIT_DAMAGE = 34;
 export const SANDBAG_HIT_INTERVAL_MS = 620;
 /** How near a zombie has to be to start tearing at them. */
 export const SANDBAG_REACH = 22;
+
+// ------------------------------------------------------------- flamethrower
+/**
+ * A thin stream of burning napalm. Short reach, sticks to what it touches, and
+ * leaves the ground alight behind it — the fire is the weapon, not the lick of
+ * flame itself.
+ */
+export const FLAME_RANGE = 260;
+export const FLAME_SPREAD = 0.06;
+export const FLAME_COOLDOWN_MS = 55;
+/** Fuel. Deliberately generous: a flamethrower with ten shots is a novelty. */
+export const FLAME_FUEL = 900;
+/** How far apart the patches it lays down are, and how big each one is. */
+export const FLAME_STEP = 26;
+export const FIRE_PATCH_RADIUS = 30;
+export const FIRE_PATCH_SPACING = 22;
+/** How long a patch of ground burns for. */
+export const FIRE_GROUND_MS = 9000;
+/** Caught in the stream: burns for this long after it comes off them. */
+export const FLAME_BURN_AFTER_MS = 3000;
+/** Walked through burning ground: burns for this long. */
+export const FLAME_GROUND_BURN_MS = 2000;
+/** What burning does, per second, and what it does to how they move. */
+export const BURN_DAMAGE_PER_SEC = 26;
+export const BURN_SLOW_MUL = 0.55;
 
 /** Body and head of a bot officer: blue with a grey head. */
 export const BOT_OFFICER_COLOR = '#2563eb';

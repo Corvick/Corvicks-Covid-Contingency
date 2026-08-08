@@ -38,6 +38,7 @@ import { heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { damageDoor } from './doors.js';
 import { scareDucks } from './ducks.js';
 import { deployEmplacement } from './emplacement.js';
+import { sprayFlame } from './fire.js';
 
 /**
  * Gunfire is loud: every zombie in earshot investigates the shooter's position
@@ -409,7 +410,10 @@ export function fireHeld(
   }
   world.lastShotAt.set(id, now);
 
-  if (held === 'cureGun') {
+  if (held === 'flamethrower') {
+    // Not a hitscan round: a stream that sets light to what it crosses.
+    sprayFlame(world, shooter, aim, now);
+  } else if (held === 'cureGun') {
     fireSpecial(world, shooter, aim, def, 'cure', now);
   } else if (held === 'trackerDart') {
     fireSpecial(world, shooter, aim, def, 'dart', now);

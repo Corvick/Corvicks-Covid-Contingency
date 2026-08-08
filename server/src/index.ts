@@ -73,6 +73,7 @@ import {
   resolveEmplacementCollisions,
   updateEmplacements,
 } from './emplacement.js';
+import { firesToWire, updateFires } from './fire.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 import {
   anyRunning,
@@ -627,6 +628,7 @@ function tick(): void {
     processShooting(world, now, frozen);
     updateAirSupport(world, now, dt);
     updateDucks(world, now, dt);
+    updateFires(world, now, dt);
   }
 
   const survivors = countSurvivors(world);
@@ -705,6 +707,7 @@ function tick(): void {
       blasts: airBlasts,
       ducks: ducksToWire(world),
       emplacements: emplacementsToWire(world),
+      fires: firesToWire(world, now),
       helicopters: airHelis,
       spectating,
       gameOver: world.gameOver,

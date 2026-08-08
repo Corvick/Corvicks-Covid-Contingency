@@ -83,6 +83,7 @@ import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
 import type { Emplacement } from './emplacement.js';
+import type { FirePatch } from './fire.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -236,6 +237,13 @@ export interface AiState {
   botWinded: boolean;
   /** Earliest a bot will pop another smoke. */
   nextSmokeAt: number;
+  /**
+   * Latched: walking in, or giving ground. Held between two thresholds rather
+   * than recomputed against one, or a bot sitting near its ideal range flips
+   * between the two every few ticks and reads as jittering on the spot.
+   */
+  botClosing: boolean;
+  botGiving: boolean;
 
   // ------------------------------------------------------------ doors
   /** Shuts the door behind them when they're only wandering about. */
@@ -405,6 +413,9 @@ export interface World {
   botOfficerCount: number;
   /** Deployed pocket gunners, keyed by the officer manning each one. */
   emplacements: Map<string, Emplacement>;
+  /** Ground still alight, and who is on fire until when. */
+  fires: FirePatch[];
+  burning: Map<string, number>;
   /** Frozen: a solo round with its pause panel up. */
   paused: boolean;
   /** Gamertag per connected player, as given at the front end. */
@@ -551,6 +562,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     botStamina: STAMINA_MAX,
     botWinded: false,
     nextSmokeAt: 0,
+    botClosing: false,
+    botGiving: false,
 
     closesDoors: Math.random() < DOOR_CLOSE_BEHIND_CHANCE,
     locksDoors: Math.random() < DOOR_LOCK_BEHIND_CHANCE,
@@ -861,6 +874,8 @@ export function createWorld(): World {
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
     emplacements: new Map(),
+    fires: [],
+    burning: new Map(),
     paused: false,
     names: new Map(),
     pathBudget: PATH_BUDGET_PER_TICK,
@@ -924,6 +939,8 @@ export function resetWorld(world: World): void {
   world.victory = false;
   world.paused = false;
   world.emplacements.clear();
+  world.fires.length = 0;
+  world.burning.clear();
 
   populate(world);
   spawnPickups(world, playerOneStart(world));
@@ -1294,6 +1311,7 @@ export function toWire(
   if (revealInfected && world.pendingInfections.has(e.id)) state.infected = true;
   if (e.type === 'officer' && !world.playerIds.has(e.id)) state.npc = true;
   if (world.bots.has(e.id)) state.bot = true;
+  if (world.burning.has(e.id)) state.burning = true;
   if (world.soldiers.has(e.id)) state.soldier = true;
 
   const until = world.materializeUntil.get(e.id);

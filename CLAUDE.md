@@ -216,6 +216,26 @@ sandbags, facing whichever way you were. `server/src/emplacement.ts` owns it.
 - It barely scratches anything. Its job is `EMPLACEMENT_SLOW_MUL` — holding a
   street, not clearing one.
 
+### Fire
+
+The flamethrower is not a hitscan weapon. `sprayFlame` walks a short thick
+stream out to the first solid thing, sets light to whatever it crosses, and
+drops overlapping patches of burning ground behind it. The stream itself barely
+scratches — **burning is the weapon**: `BURN_DAMAGE_PER_SEC` while alight, and
+`BURN_SLOW_MUL` on how they move while they are.
+
+Caught in the stream burns for `FLAME_BURN_AFTER_MS` past the last lick;
+walking through a patch burns for `FLAME_GROUND_BURN_MS`. Both go through
+`ignite`, which takes the *later* of the two, so standing in fire while being
+sprayed can't cut the burn short.
+
+Patches are spaced rather than continuous (`FIRE_PATCH_SPACING`), and a new one
+landing on an existing fire extends it instead of stacking — so sweeping the
+stream down a street leaves a dozen fires rather than three hundred.
+
+Officers don't catch. That is a deliberate early return in `ignite`, not an
+oversight: a flamethrower you can kill yourself with is one nobody uses.
+
 ### Bot officers
 
 Blue body, grey head — a separate `bot` wire flag, not the ambient grey `npc`

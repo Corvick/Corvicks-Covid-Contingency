@@ -6,6 +6,7 @@ export type ItemId =
   | 'sniper'
   | 'heavyMg'
   | 'chargeRifle'
+  | 'flamethrower'
   | 'cureGun'
   | 'trackerDart'
   | 'kevlar'
@@ -188,6 +189,25 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     charge: true,
     chargeMs: 1300,
     pierce: 9,
+  },
+  flamethrower: {
+    id: 'flamethrower',
+    kind: 'gun',
+    label: 'Flamethrower',
+    short: 'FLAM',
+    color: '#f97316',
+    rarity: 1,
+    // The stream itself barely scratches. Burning is what does the work.
+    damageMin: 1,
+    damageMax: 2,
+    bloom: 0.06,
+    cooldownMs: 55,
+    range: 260,
+    ammo: 900,
+    automatic: true,
+    // Its damage is all in the fire it leaves, so say so outright.
+    botWorth: 88,
+    botIdealRange: 200,
   },
   cureGun: {
     id: 'cureGun',

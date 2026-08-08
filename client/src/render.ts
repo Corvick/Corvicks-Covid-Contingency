@@ -15,6 +15,8 @@ import type {
   Pond,
   DuckState,
   EmplacementState,
+  FireState,
+  ShotKind,
   Wall,
   Window as WindowPane,
 } from '../../shared/types.js';
@@ -164,26 +166,41 @@ export function drawDucks(ctx: CanvasRenderingContext2D, ducks: DuckState[], vie
     const dirX = Math.cos(duck.facing);
     const dirY = Math.sin(duck.facing);
 
-    if (duck.flying) {
-      // Shadow on the ground below, offset so it reads as height.
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
-      ctx.beginPath();
-      ctx.ellipse(duck.x + 7, duck.y + 9, 5, 2.5, 0, 0, Math.PI * 2);
-      ctx.fill();
+    // Climbing away: the bird shrinks and fades while its shadow spreads and
+    // drifts further beneath it, which is what height looks like from above.
+    const climb = duck.flying ? Math.max(0, Math.min(1, duck.climb ?? 0)) : 0;
+    const size = 1 - climb * 0.62;
+    const alpha = 1 - climb * climb; // hangs on, then goes
 
+    if (duck.flying) {
+      const drop = 9 + climb * 22;
+      ctx.fillStyle = `rgba(0, 0, 0, ${(0.25 * (1 - climb * 0.5)).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.ellipse(duck.x + 7 + climb * 8, duck.y + drop, 5 + climb * 7, 2.5 + climb * 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    if (duck.flying) {
+      // Wings beat faster and shorter as it gets away.
       ctx.strokeStyle = 'rgba(240, 240, 235, 0.95)';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2 * size;
       ctx.lineCap = 'round';
       for (const side of [-1, 1]) {
         ctx.beginPath();
         ctx.moveTo(duck.x, duck.y);
-        ctx.lineTo(duck.x - dirY * 9 * side - dirX * 3, duck.y + dirX * 9 * side - dirY * 3);
+        ctx.lineTo(
+          duck.x - dirY * 9 * size * side - dirX * 3 * size,
+          duck.y + dirX * 9 * size * side - dirY * 3 * size,
+        );
         ctx.stroke();
       }
     }
 
     ctx.beginPath();
-    ctx.ellipse(duck.x, duck.y, 5.5, 4, duck.facing, 0, Math.PI * 2);
+    ctx.ellipse(duck.x, duck.y, 5.5 * size, 4 * size, duck.facing, 0, Math.PI * 2);
     ctx.fillStyle = duck.flying ? '#e8e6df' : '#d8d4c8';
     ctx.fill();
     ctx.strokeStyle = 'rgba(40, 38, 32, 0.7)';
@@ -192,15 +209,16 @@ export function drawDucks(ctx: CanvasRenderingContext2D, ducks: DuckState[], vie
 
     // Head and bill.
     ctx.beginPath();
-    ctx.arc(duck.x + dirX * 5, duck.y + dirY * 5, 2.6, 0, Math.PI * 2);
+    ctx.arc(duck.x + dirX * 5 * size, duck.y + dirY * 5 * size, 2.6 * size, 0, Math.PI * 2);
     ctx.fillStyle = '#3f6b3a';
     ctx.fill();
     ctx.strokeStyle = '#f59e0b';
-    ctx.lineWidth = 1.4;
+    ctx.lineWidth = 1.4 * size;
     ctx.beginPath();
-    ctx.moveTo(duck.x + dirX * 7, duck.y + dirY * 7);
-    ctx.lineTo(duck.x + dirX * 10, duck.y + dirY * 10);
+    ctx.moveTo(duck.x + dirX * 7 * size, duck.y + dirY * 7 * size);
+    ctx.lineTo(duck.x + dirX * 10 * size, duck.y + dirY * 10 * size);
     ctx.stroke();
+    ctx.restore();
   }
 }
 
@@ -624,6 +642,8 @@ export interface Tracer {
   y1: number;
   x2: number;
   y2: number;
+  /** Flame draws as a thick stream rather than a round's thin line. */
+  kind?: ShotKind;
   hit: boolean;
   born: number;
 }
@@ -640,6 +660,27 @@ export function drawTracers(
     if (age >= 1) continue;
 
     ctx.globalAlpha = 1 - age;
+
+    // Napalm is a thick stream rather than a round: three tapering strokes,
+    // widening away from the muzzle, so it reads as liquid being thrown.
+    if (tracer.kind === 'flame') {
+      ctx.lineCap = 'round';
+      for (const [width, colour] of [
+        [11, 'rgba(239, 68, 68, 0.55)'],
+        [7, 'rgba(251, 146, 60, 0.75)'],
+        [3, 'rgba(253, 224, 71, 0.95)'],
+      ] as const) {
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(tracer.x1, tracer.y1);
+        ctx.lineTo(tracer.x2, tracer.y2);
+        ctx.stroke();
+      }
+      ctx.lineCap = 'butt';
+      continue;
+    }
+
     ctx.strokeStyle = '#fde68a';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -1019,6 +1060,73 @@ export function drawEmplacements(
 /** Clamp a 0-1 that arrived over the wire. */
 function b0(v: number): number {
   return Math.max(0, Math.min(1, v));
+}
+
+/**
+ * Burning ground. Each patch is a few flickering tongues rather than a disc —
+ * a flat circle reads as a stain, and this has to read as something you do not
+ * want to walk into.
+ */
+export function drawFires(
+  ctx: CanvasRenderingContext2D,
+  fires: FireState[],
+  view: Viewport,
+  now: number,
+): void {
+  for (let i = 0; i < fires.length; i++) {
+    const f = fires[i];
+    if (!visible(view, f.x, f.y, 40)) continue;
+    // Dying fires shrink and dim rather than blinking out.
+    const life = Math.max(0, Math.min(1, f.life));
+    const scale = 0.45 + 0.55 * life;
+
+    ctx.save();
+    ctx.globalAlpha = 0.25 + 0.4 * life;
+    ctx.fillStyle = '#7c2d12';
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, 22 * scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Three tongues, each on its own phase so the patch never pulses as one.
+    const seed = (f.x * 31 + f.y * 17) % 360;
+    for (let k = 0; k < 3; k++) {
+      const phase = now * 0.009 + seed + k * 2.1;
+      const wob = Math.sin(phase) * 0.5 + 0.5;
+      const r = (7 + wob * 7) * scale;
+      const ox = Math.cos(seed + k * 2.3) * 8 * scale;
+      const oy = Math.sin(seed + k * 2.3) * 8 * scale - wob * 4;
+      ctx.globalAlpha = (0.5 + 0.5 * wob) * (0.4 + 0.6 * life);
+      ctx.fillStyle = k === 0 ? '#fde047' : k === 1 ? '#fb923c' : '#ef4444';
+      ctx.beginPath();
+      ctx.arc(f.x + ox, f.y + oy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+/** Flame licking off something that has caught. Drawn over the body. */
+export function drawBurning(
+  ctx: CanvasRenderingContext2D,
+  e: EntityState,
+  now: number,
+): void {
+  const radius = ENTITY_RADIUS[e.type];
+  const seed = hashId(e.id);
+  ctx.save();
+  for (let k = 0; k < 5; k++) {
+    const phase = now * 0.014 + seed + k * 1.7;
+    const wob = Math.sin(phase) * 0.5 + 0.5;
+    const a = (seed + k * 72) * (Math.PI / 180) + now * 0.002;
+    const d = radius * (0.4 + 0.5 * wob);
+    ctx.globalAlpha = 0.35 + 0.45 * wob;
+    ctx.fillStyle = k % 3 === 0 ? '#fde047' : k % 3 === 1 ? '#fb923c' : '#ef4444';
+    ctx.beginPath();
+    ctx.arc(e.x + Math.cos(a) * d, e.y + Math.sin(a) * d - wob * 3, 3 + wob * 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 export function drawPickups(

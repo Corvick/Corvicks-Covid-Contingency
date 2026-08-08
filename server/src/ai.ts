@@ -121,6 +121,11 @@ import {
   WALL_TURN_PROBE,
   CORNER_CLEARANCE,
   CORNER_PUSH,
+  BOT_TURN_RATE,
+  BOT_RANGE_SLACK,
+  BOT_DEPLOY_MIN_DIST,
+  BOT_BUSH_CLEARANCE,
+  BOT_BUSH_PUSH,
   PICKUP_REACH,
   GUN_RANGE,
   BLAST_RADIUS,
@@ -188,7 +193,7 @@ import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
 import { collect, dropHeld, heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { zombieAtSandbag } from './emplacement.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
-import type { PickupState, Wall } from '../../shared/types.js';
+import type { Bush, PickupState, Wall } from '../../shared/types.js';
 import {
   addPlea,
   alertZombiesToDoor,
@@ -457,6 +462,28 @@ function unstickTick(
     return true;
   }
   return false;
+}
+
+/**
+ * Lean away from foliage. A bot has no idea what is standing in a hedge, and
+ * would rather find out from outside it — but this is a preference, not a
+ * rule: it is a blend into the heading, so a bot whose business is in the
+ * trees still walks into them.
+ */
+function avoidBushes(world: World, e: Entity, desired: number): number {
+  const r = BOT_BUSH_CLEARANCE;
+  let pushX = 0;
+  let pushY = 0;
+  for (const bush of world.bushGrid.queryRect(e.x - r, e.y - r, e.x + r, e.y + r, new Set<Bush>())) {
+    const d = Math.hypot(e.x - bush.x, e.y - bush.y);
+    const near = bush.r + r;
+    if (d >= near || d === 0) continue;
+    const weight = (1 - d / near) * BOT_BUSH_PUSH;
+    pushX += ((e.x - bush.x) / d) * weight;
+    pushY += ((e.y - bush.y) / d) * weight;
+  }
+  if (pushX === 0 && pushY === 0) return desired;
+  return Math.atan2(Math.sin(desired) + pushY, Math.cos(desired) + pushX);
 }
 
 /**
@@ -2547,16 +2574,19 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
       const worth = gunWorth(p.item);
       if (hasRoom) want = worth;
       else if (worth > held.worth) want = worth - held.worth;
-    } else if (p.item === 'ammoBox' && dryGun) {
-      // The box is used on the spot rather than carried, so a full utility
-      // belt is no obstacle to it.
-      want = 40;
     } else if (p.item === 'kevlar' && inv.kevlar <= 0 && utilityRoom) {
       want = 30;
     } else if (p.item === 'smokeGrenade' && utilityRoom && !inv.utilities.includes('smokeGrenade')) {
       // Smoke is a helicopter and half a squad of soldiers. Bots never used it
       // for the dull reason that nothing here wanted one, so they walked past.
       want = 60;
+    } else if (p.item === 'pocketGunner' && utilityRoom && !inv.utilities.includes('pocketGunner')) {
+      // A second officer and a machine gun, for the cost of a utility slot.
+      want = 70;
+    } else if (p.item === 'ammoBox') {
+      // Boxes top up the total now rather than only refilling a magazine, so
+      // one is worth having whether or not anything has actually run dry.
+      want = dryGun ? 40 : 18;
     }
     if (want <= 0) continue;
 
@@ -2651,6 +2681,66 @@ function popSmoke(world: World, e: Entity, state: AiState, toThreat: number, now
   return true;
 }
 
+/**
+ * The heavy MG's bipod. From the hip it sprays; on the pegs it is one of the
+ * tightest guns in the city, at the price of being rooted. A bot commits when
+ * the target is far enough out that a second of planting isn't fatal, and
+ * packs up the moment something is close enough to reach it.
+ *
+ * Returns true while planted, since a planted bot doesn't move.
+ */
+function mgTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  dist: number,
+  now: number,
+): boolean {
+  const held = heldItem(inv);
+  const wants =
+    held !== null &&
+    ITEMS[held]?.deployable === true &&
+    !state.bolting &&
+    dist > BOT_DEPLOY_MIN_DIST;
+
+  if (!wants) {
+    world.deployStart.delete(e.id);
+    return false;
+  }
+  if (!world.deployStart.has(e.id)) world.deployStart.set(e.id, now);
+  return true;
+}
+
+/**
+ * A pocket gunner is a weapon to a bot, not a piece of kit to save for later:
+ * the moment it sees something, it puts the crew down facing it. Deploying
+ * uses the officer's own facing, so it lines up on the threat first.
+ */
+function gunnerTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  aim: number,
+  now: number,
+): boolean {
+  if (!inv.utilities.includes('pocketGunner')) return false;
+  // Facing it is the aiming. Wait until the swing has landed, or the crew ends
+  // up covering the street they came from.
+  if (Math.abs(angleDelta(state.heading, aim)) > 0.3) return false;
+
+  const was = inv.activeSlot;
+  inv.activeSlot = GUN_SLOTS + 1 + inv.utilities.indexOf('pocketGunner');
+  const placed = fireHeld(world, e, inv, aim, now);
+  if (!placed) {
+    inv.activeSlot = was;
+    return false;
+  }
+  inv.activeSlot = bestGun(inv).slot;
+  return true;
+}
+
 /** Sprint reserve: spent while bolting, refilled while doing anything else. */
 function botStaminaTick(state: AiState, sprinting: boolean, dt: number): number {
   if (sprinting && !state.botWinded) {
@@ -2705,6 +2795,8 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Smoke goes up the moment something is seen, before the shooting starts —
     // it is what buys the room to back off through.
     if (popSmoke(world, e, state, aim, now)) return;
+    // And a gun crew goes down facing whatever it just saw.
+    if (gunnerTick(world, e, state, inv, aim, now)) return;
 
     // Judged on the *nearest* zombie in sight, not the one being shot at —
     // those are often different, and a bot trading fire with something across
@@ -2744,7 +2836,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       if (inv.activeSlot !== best.slot) inv.activeSlot = best.slot;
     }
 
-    state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
+    // Swung rather than snapped. At the NPC officer's rate the barrel jumps
+    // between targets, which reads as twitching rather than tracking.
+    state.heading = turnToward(state.heading, aim, BOT_TURN_RATE * dt);
     e.facing = state.heading;
 
     const held = heldItem(inv);
@@ -2754,6 +2848,10 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // two pellets on target, and the launcher wants to be out of its own blast.
     const ideal = Math.min(def?.botIdealRange ?? reach, reach);
 
+    // Planting the heavy MG is worth more than anything else it could be
+    // doing, and it roots the bot, so it comes before the footwork.
+    const planted = mgTick(world, e, state, inv, dist, now);
+
     if (Math.abs(angleDelta(state.heading, aim)) < 0.2) {
       // Don't waste a launcher shell on something close enough to splash us.
       const tooClose = def?.explosive === true && dist < BLAST_RADIUS * 1.3;
@@ -2762,12 +2860,21 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       if (dist <= ideal && !tooClose) fireHeld(world, e, inv, state.heading, now, 1, at);
     }
 
-    // Walk toward it while still facing it, if the gun in hand wants to be
-    // closer than this. Below the retreat band, give ground instead.
-    const closing = dist > ideal * 1.05;
-    const giving = dist < NPC_OFFICER_RETREAT_DIST && !closing;
-    if (closing || giving) {
-      const bearing = closing ? aim : Math.atan2(-dy, -dx);
+    if (planted) return; // behind the gun you are an emplacement, not a person
+
+    // Walk in or give ground, latched between two thresholds rather than
+    // decided against one. On a single boundary a bot sitting near its ideal
+    // range flipped between advancing and retreating every few ticks — which
+    // is exactly what "jittery" looks like from outside.
+    if (dist > ideal * BOT_RANGE_SLACK) state.botClosing = true;
+    else if (dist <= ideal) state.botClosing = false;
+
+    const backAt = Math.min(ideal * 0.8, NPC_OFFICER_RETREAT_DIST);
+    if (!state.botClosing && dist < backAt) state.botGiving = true;
+    else if (dist > backAt * BOT_RANGE_SLACK) state.botGiving = false;
+
+    if (state.botClosing || state.botGiving) {
+      const bearing = state.botClosing ? aim : Math.atan2(-dy, -dx);
       const speed = speedAt(world, e.x, e.y, BOT_WALK_SPEED * 0.7);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
@@ -2829,7 +2936,7 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       }
       // Scraping along something on the way to it counts as not getting there.
       if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
-      const desired = headingToward(world, e, state, target.x, target.y, now);
+      const desired = avoidBushes(world, e, headingToward(world, e, state, target.x, target.y, now));
       step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
       return;
     }
@@ -2849,7 +2956,11 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     if (arrived) return;
   }
   if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
-  const desired = widenCorners(world, e, headingToward(world, e, state, state.wanderX, state.wanderY, now));
+  const desired = avoidBushes(
+    world,
+    e,
+    widenCorners(world, e, headingToward(world, e, state, state.wanderX, state.wanderY, now)),
+  );
   step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
 }
 
@@ -3189,8 +3300,11 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
       state.lastSeenY = null;
       state.path = null;
     } else {
-      // Something went this way and a door is in the road. Tear at it.
-      if (mindsDoors(world, e, state, now) && attackBlockingDoor(world, e, state, now)) return;
+      // Something went this way and a door is in the road. Tear at it —
+      // unconditionally, because a door you are stood against is a door in
+      // your way. `attackBlockingDoor` already stands aside for prey it can
+      // actually reach, which is the only thing that should outrank it.
+      if (attackBlockingDoor(world, e, state, now)) return;
       const desired = headingToward(world, e, state, state.lastSeenX, state.lastSeenY, now);
       step(world, e, state, desired, ZOMBIE_SPEED, ZOMBIE_TURN_RATE, dt, now);
       return;
@@ -3207,11 +3321,11 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
   // Room's empty and this one has the wit to go and find another.
   if (leaveClearedRoom(world, e, state, now, dt)) return;
 
-  // With the city all but emptied, anything shut is worth taking apart on the
-  // way past, whether or not this one saw it close.
-  if (world.survivorCount < DOOR_FRENZY_SURVIVORS && attackBlockingDoor(world, e, state, now)) {
-    return;
-  }
+  // Anything shut it happens to be stood against gets taken apart, whether or
+  // not it saw it close and whatever the survivor count. This used to wait for
+  // the city to empty out, which is why a zombie could stand nose-to-door for
+  // most of a round doing nothing about it.
+  if (attackBlockingDoor(world, e, state, now)) return;
 
   if (now >= state.nextTurnAt) {
     state.nextTurnAt = now + 1800 + Math.random() * 2600;

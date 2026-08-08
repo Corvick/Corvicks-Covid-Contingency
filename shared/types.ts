@@ -30,6 +30,8 @@ export interface EntityState {
   armour?: boolean;
   /** Tearing at a door — the client claws its arms at it. */
   breaking?: boolean;
+  /** Alight: the client wreathes it in flame. */
+  burning?: boolean;
   /** Id of the partner whose hand they're holding, if any. */
   hand?: string;
 }
@@ -157,6 +159,12 @@ export interface DuckState {
   facing: number;
   /** Up and away, drawn with wings out and a shadow beneath. */
   flying?: boolean;
+  /**
+   * How far into the climb: 0 at take-off, 1 as it goes out of sight. The
+   * client shrinks the bird, spreads its shadow and dithers it away on this,
+   * so a duck leaves rather than simply ceasing to exist.
+   */
+  climb?: number;
 }
 
 export interface MapData {
@@ -173,7 +181,14 @@ export interface MapData {
 }
 
 /** A shotgun blast is several tracers from one trigger pull. */
-export type ShotKind = 'bullet' | 'cure' | 'dart';
+export type ShotKind = 'bullet' | 'cure' | 'dart' | 'flame';
+
+/** A patch of ground alight. `life` is 1 when fresh and 0 as it dies. */
+export interface FireState {
+  x: number;
+  y: number;
+  life: number;
+}
 
 /** Grenade mid-flight; `h` is arc height, used purely for the drawn offset. */
 export interface GrenadeState {
@@ -418,6 +433,8 @@ export type ServerMessage =
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */
       emplacements: EmplacementState[];
+      /** Ground still burning. */
+      fires: FireState[];
       helicopters: HelicopterState[];
       /** Sprint is locked out until stamina recovers past its threshold. */
       exhausted: boolean;

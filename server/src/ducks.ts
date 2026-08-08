@@ -101,14 +101,19 @@ export function updateDucks(world: World, now: number, dt: number): void {
   }
 }
 
-export function ducksToWire(world: World): DuckState[] {
+export function ducksToWire(world: World, now = Date.now()): DuckState[] {
   return world.ducks.map((d) => {
     const wire: DuckState = {
       x: Math.round(d.x),
       y: Math.round(d.y),
       facing: Math.round(d.facing * 100) / 100,
     };
-    if (d.flyingUntil > 0) wire.flying = true;
+    if (d.flyingUntil > 0) {
+      wire.flying = true;
+      // Straight from the time it has left, so the fade and the flight end together.
+      const left = Math.max(0, d.flyingUntil - now);
+      wire.climb = Math.round((1 - left / DUCK_FLY_MS) * 100) / 100;
+    }
     return wire;
   });
 }

@@ -152,12 +152,14 @@ type UtilityOutcome = 'used' | 'carry' | 'refuse';
 function applyUtility(world: World, playerId: string, inv: Inventory, item: ItemId): UtilityOutcome {
   // An ammo box tops up the gun in your hands and is gone. The pistol has
   // unlimited rounds, so it refuses rather than letting you waste the box.
+  // A box is rounds, not a magazine: it adds to whatever the gun in your hands
+  // is carrying rather than topping it up to a full one. Being full is no
+  // longer a reason to leave it on the floor — you just end up with more than
+  // a magazine's worth. The pistol still refuses it, having nothing to add to.
   if (item === 'ammoBox') {
     const slot = heldGunSlot(inv);
     if (!slot) return 'refuse';
-    const full = ITEMS[slot.item].ammo ?? 0;
-    if (slot.ammo >= full) return 'refuse';
-    slot.ammo = full;
+    slot.ammo += ITEMS[slot.item].ammo ?? 0;
     return 'used';
   }
 
