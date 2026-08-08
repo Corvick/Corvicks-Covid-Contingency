@@ -156,7 +156,7 @@ let started = startSpectating;
 if (!started) {
   setupMenu((config) => {
     started = true;
-    send({ type: 'startGame', humans: config.humans, dogs: config.dogs });
+    send({ type: 'startGame', name: config.name, humans: config.humans, dogs: config.dogs });
   });
 } else {
   document.getElementById('shell')!.classList.add('hidden');

@@ -378,6 +378,8 @@ export interface World {
   bots: Set<string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
+  /** Gamertag per connected player, as given at the front end. */
+  names: Map<string, string>;
   /** Ids of helicopter-dropped troops — they aim far better. */
   soldiers: Set<string>;
   pathBudget: number;
@@ -813,6 +815,7 @@ export function createWorld(): World {
     soldiers: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
+    names: new Map(),
     pathBudget: PATH_BUDGET_PER_TICK,
     gameOver: false,
     victory: false,

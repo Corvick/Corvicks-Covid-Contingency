@@ -174,11 +174,16 @@ wss.on('connection', (socket) => {
         else send(socket, { type: 'map', map: world.map });
       } else if (msg.type === 'startGame') {
         // The lobby decides how much of the officer team the machine plays.
+        // Whichever slot the host sits in, they get an officer for now — the
+        // playable dog doesn't exist, so a dog slot is a seat and nothing more.
         world.botOfficerCount = msg.humans.filter((s) => s === 'bot').length;
         const dogs = msg.dogs.filter((s) => s !== 'closed').length;
+        const asDog = msg.dogs.includes('player');
+        world.names.set(id, msg.name);
         resetWorld(world);
         console.log(
-          `[server] lobby start — ${world.botOfficerCount} bot officers, ${dogs} dog slots (dogs not built yet)`,
+          `[server] ${msg.name} started a round — ${world.botOfficerCount} bot officers, ` +
+            `${dogs} dog slots${asDog ? ' (host took one; spawning as an officer)' : ''}`,
         );
         broadcast({ type: 'map', map: world.map });
       } else if (msg.type === 'restart') {
@@ -200,6 +205,7 @@ wss.on('connection', (socket) => {
   });
 
   socket.on('close', () => {
+    world.names.delete(id);
     world.entities.delete(id);
     world.playerIds.delete(id);
     world.spectators.delete(id);

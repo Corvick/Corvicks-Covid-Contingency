@@ -199,8 +199,11 @@ export interface InputState {
   right: boolean;
 }
 
-/** A lobby slot: shut, waiting for someone, or filled by the machine. */
-export type SlotState = 'closed' | 'open' | 'bot';
+/**
+ * A lobby slot: shut, waiting for someone, filled by the machine, or sat in by
+ * a real person. Exactly one slot is 'player' — you are always somewhere.
+ */
+export type SlotState = 'closed' | 'open' | 'bot' | 'player';
 
 export type AbilityId = 'rally' | 'follow' | 'wait';
 
@@ -252,7 +255,7 @@ export type ClientMessage =
   | { type: 'spectate'; restart?: boolean }
   | { type: 'restart' }
   /** Host pressed start: lay the round out to match the lobby. */
-  | { type: 'startGame'; humans: SlotState[]; dogs: SlotState[] };
+  | { type: 'startGame'; name: string; humans: SlotState[]; dogs: SlotState[] };
 
 export type ServerMessage =
   | { type: 'welcome'; selfId: string; map: MapData }

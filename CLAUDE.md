@@ -67,6 +67,22 @@ Server modules and what each owns:
 - `shared/pond.ts` — the pond's radius-per-bearing, read by nav, collision and
   the client's drawing alike
 
+### The front end
+
+`client/src/menu.ts` owns title → gamertag → create lobby, and knows nothing
+about the game: it hands back a name and a slot layout and gets out of the way.
+The socket is live behind it, but `started` in `main.ts` gates both the input
+loop and `render`, so keys pressed at the menu don't drive an officer standing
+in a city nobody is looking at. `?spectate` skips the shell entirely.
+
+A lobby slot is `closed | open | bot | player`, and exactly one is `player` —
+you are always sitting somewhere. Clicking a **row** seats you in it (leaving
+`open` behind you, and taking a bot's place if it had one); clicking its **tag**
+cycles closed/open/bot. Two controls, because one click can't both move you and
+cycle the thing you're moving into. `START GAME` sends the layout; the server
+counts the `bot` officer slots into `world.botOfficerCount`, which `populate`
+reads. The gamertag lives in `localStorage`, prefilled and pre-selected.
+
 ### Civilian traits
 
 Each civilian rolls a fixed personality in `newAiState`, and most odd-looking
