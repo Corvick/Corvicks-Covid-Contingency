@@ -44,8 +44,10 @@ broadcasts. Nothing about position or combat is trusted from the client.
 
 Tick order in `server/src/index.ts`: rebuild nav grid if `navDirty` → rebuild
 entity grid → compute frozen (grappled) set → move players → `updateAi` →
-resolve collisions → rebuild grid → interactions → shooting → air support →
-per-viewer serialise.
+resolve collisions → push bodies out of sandbags → rebuild grid → work the
+emplacements → interactions → shooting → air support → ducks → fires →
+per-viewer serialise. The whole block is skipped while `world.paused`, but
+snapshots still go out.
 
 Server modules and what each owns:
 - `world.ts` — World state container, entity/AI state, collision, spawning, `toWire`
@@ -59,7 +61,12 @@ Server modules and what each owns:
 - `danger.ts` — coarse geodesic distance-to-nearest-zombie field
 - `doors.ts` — door state, geometry, open/shut/lock/damage, wire serialisation
 - `doorplayer.ts` — the player's press-and-hold of E at a door, and its prompt
-- `combat.ts` — hitscan, weapons, window damage
+- `combat.ts` — hitscan, weapons, window damage; `fireHeld` is the one
+  trigger both players and bots pull
+- `lobby.ts` — the rooms people wait in: create/join/sit/chat, and the browse
+  list. Nobody has an entity until their lobby starts a round
+- `emplacement.ts` — the pocket gunner: its crew, its sandbags, its arc
+- `fire.ts` — the flamethrower stream, burning ground, and who is alight
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
 - `ducks.ts` — the flock on the pond
@@ -69,8 +76,11 @@ Server modules and what each owns:
 
 ### The front end
 
-`client/src/menu.ts` owns title → gamertag → create lobby, and knows nothing
-about the game: it hands back a name and a slot layout and gets out of the way.
+`client/src/menu.ts` owns the whole shell — title, gamertag, offline, create and
+browse — and knows nothing about the game. It holds **no lobby state either**:
+the server owns the lobby and pushes the whole thing back on every change, so
+the client draws whatever arrived and forwards clicks.
+
 The socket is live behind it, but `started` in `main.ts` gates both the input
 loop and `render`, so keys pressed at the menu don't drive an officer standing
 in a city nobody is looking at. `?spectate` skips the shell entirely.
@@ -136,7 +146,7 @@ stranger in, which most people would not.
 
 Hung in every way into a building and in `INTERIOR_DOOR_SHARE` of the openings
 between rooms; half start open. Shut doors are solid to movement, sight and
-gunfire, and carry 1000 HP.
+gunfire, and carry DOOR_HEALTH (1600).
 
 A door an officer bolted (`playerLocked`) is one no civilian will unlock or
 open. Civilians can draw the bolt on each other's locks from the inside, taking
@@ -412,6 +422,9 @@ winding. Measure the polygon, not the impression.
 
 ## Not built yet
 
+- **The zombie dog master.** Lobby team 2 has two dog slots and they work — you
+  can sit in one, the server counts it and logs it — but there is no dog, so
+  whoever took one spawns as an officer.
 - Zombie master (the playable zombie) — `zombieMaster` type exists, unused
 - Riot shield is collected and shown on the HUD but has **no effect**
 - Tracker dart marks targets (`world.trackedTargets`) but nothing consumes it
@@ -423,6 +436,23 @@ winding. Measure the polygon, not the impression.
   connection is fog-limited and gives misleading counts. Note that `spectate`
   restarts the round, so to observe a live game use two sockets (one player, one
   spectator) or read the global counters in the state message.
+- **Two ways to test without touching his game**, and they cover almost
+  everything:
+  - *Headless.* Import `createWorld` and run the tick order above in a loop
+    under `npx tsx`. No socket, no port, no disturbance. This is the right tool
+    for anything about behaviour, and it can measure what a spectator can't.
+  - *A second server.* `PORT=8090 npx tsx src/index.ts`, then open the client
+    with `?server=8090`. That's the only way to exercise lobbies, chat, pausing
+    and the front end, and it leaves 8080 alone.
+- **Measure the thing you actually claim.** Two harnesses in this project
+  reported nonsense before they were fixed: one counted civilians *standing
+  still* beside a wall as "grinding into" it, and one picked a "clear lane"
+  from the nav grid, which cheerfully contains shut doors. When a check fails,
+  suspect the check first — twice now it has been the test, not the code.
+- **Put the bug back to prove the fix.** Gating old behaviour behind a
+  temporary env var and running the same harness both ways turned "the grey
+  officers look wrong" into "0 shots and 155° off target, versus 6 shots and
+  under 10°". Delete the gate afterwards.
 - **He usually has a server already running on 8080.** Don't kill it and don't
   send it `spectate` — that resets the round he's playing. To check crowd
   behaviour, drive the world headlessly instead: import `createWorld` and run
