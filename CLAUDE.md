@@ -45,7 +45,7 @@ broadcasts. Nothing about position or combat is trusted from the client.
 Tick order in `server/src/index.ts`: rebuild nav grid if `navDirty` → rebuild
 entity grid → compute frozen (grappled) set → move players → `updateAi` →
 resolve collisions → push bodies out of sandbags → rebuild grid → work the
-emplacements → interactions → shooting → air support → ducks → fires →
+emplacements → interactions → shooting → air support → squad cars → ducks → fires →
 per-viewer serialise. The whole block is skipped while `world.paused`, but
 snapshots still go out.
 
@@ -73,6 +73,8 @@ Server modules and what each owns:
 - `fire.ts` — the flamethrower stream, burning ground, and who is alight
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
+- `police.ts` — the radio's answer: a squad car in off the map, and its crew
+- `mines.ts` — zap mines on the ground, and who they have dropped
 - `ducks.ts` — the flock on the pond
 - `spatial.ts` / `geometry.ts` — uniform grid broadphase, math primitives
 - `shared/pond.ts` — the pond's radius-per-bearing, read by nav, collision and
@@ -363,6 +365,30 @@ otherwise demand.
   `GUARANTEE_EVERY_GUN` walks `ITEMS` instead — rarity 0 excluded, since those
   are placed by their own roll. Measured over five cities: ~29 pieces of loot
   in buildings, no gun missing in any of them.
+- **A house rolls for a gun and a utility separately.** They used to compete
+  for the one item a building could hold, which is why a house with a rifle in
+  it never also had a vest. `GUN_LOOT` and `UTILITY_LOOT` are separate weighted
+  tables derived from the registry. Measured: ~54-77 items per city, up from
+  ~29, no gun missing, and 9-10 of the 11 utilities present — the point being
+  that **utilities are deliberately not guaranteed**, so every city is missing
+  something.
+- **The every-gun floor ignores the debug pile.** `TEST_DROP_ALL_ITEMS` drops
+  one of everything at the player's feet, and counting those as "already in the
+  city" had the guarantee satisfied by the test heap while the actual buildings
+  went without. `inACity` excludes anything with a `loot-test-` id.
+- **A second pistol is the other hand, not a gun.** It costs no slot: `collect`
+  sets `inv.dual` and slot 0 becomes `dualPistols` — same round, about twice as
+  often, still unlimited. Slot 0 stays undroppable either way.
+- **Slot counts are per-bag, not constants.** `gunSlots()` and `utilitySlots()`
+  read the gunsling and the backpack out of the utilities list, and the wire
+  carries both so the HUD draws only the cells that bag can actually use. The
+  numbering is **contiguous** — a gunsling shifts the utilities along by one and
+  the HUD renumbers with them, so what is on screen is what the key selects.
+  With both worn that is 13 slots against ten number keys; the scroll wheel
+  already walks the bar, which is how the last few are reached.
+- **Taking the pack off is refused rather than resolved.** Dropping a backpack
+  while over the base capacity would have to spill something, and choosing what
+  to spill on the player's behalf is worse than saying no.
 - **A duplicate gun is ammunition, not a gun.** Picking up a second of
   something already in the bag strips it for its rounds rather than taking a
   slot — carrying two of the same is strictly worse than one loaded one, since
@@ -686,13 +712,105 @@ like *in the data* is the opposite — a shoelace area near zero, because a
 self-overlapping path cancels itself out while canvas fills it by nonzero
 winding. Measure the polygon, not the impression.
 
+### Right-click, and the riot shield
+
+**Right mouse is reported raw and resolved on the server**, the way E already
+is at a door. The client used to own a `deploy` toggle; it now sends
+`rightDown` and the server decides whether a press was a tap or a hold. One
+button has to carry two actions and only the server knows which are available,
+so the HUD is *told* what the bipod is doing (`deployWanted` on the wire)
+rather than keeping its own copy and drifting out of step.
+
+- **Tap**: bash if the shield is up, otherwise work the bipod.
+- **Hold** (`SHIELD_STOW_HOLD_MS`): sling the shield to your back, and back
+  again. `rightSpent` latches it so it fires once per press.
+
+The shield is **worn, not held**: it costs a utility slot like kevlar, goes up
+the moment you pick it up, and stays where you put it while you get on with
+your guns. It turns a grab away outright from whichever side it covers —
+`SHIELD_FRONT_ARC` in front while up, `SHIELD_BACK_ARC` behind while slung —
+spending one of `SHIELD_POINTS` and buying the same `KEVLAR_IMMUNE_MS` breather
+the vest does. Being caught from the *other* side is the whole cost of it.
+
+**The shield and the heavy MG cannot be carried together, and `collect` refuses
+the second of the two.** Both want right-click, and the shield's claim doesn't
+depend on what is in your hands, so there is no slot-scoped way out of it —
+that was tried and doesn't survive "you can still use your guns". Refusing at
+pickup means nothing downstream ever has to cope with both.
+
+### The radio
+
+**`police.ts` is `heli.ts` with its feet on the ground.** Something comes in
+from off the map, stops, puts people out, and the people are what matter. Two
+differences: a car has to arrive down a street, and it stays parked afterwards
+instead of flying off — a patrol car on the corner is free scenery and a
+landmark for where your backup came from.
+
+**"Down a street" is a clear straight line from off the map, not a road list.**
+The generator doesn't keep one. But the city is blocks with roads between them,
+so the spots with an unobstructed run to the edge are overwhelmingly the roads
+— `hasWallClearPath` from an edge point is a cheap stand-in that needs no new
+data, and it fails safe: if nothing has a clear run the car parks at the edge
+and the crew walk in.
+
+**The bubble and the crackle back are not decoration.** The car enters off-map
+and is the best part of eight seconds away, so without them picking the radio
+up does nothing at all as far as the player can tell. The reply is drawn as a
+jagged bubble (`SpeechState.radio`) because a voice coming out of your own hip
+must not read as somebody standing next to you.
+
+**Two kinds of escort, and the difference matters.** `escortId` on an NPC
+officer means "stick with this person". The crew a call dispatches keep theirs
+for good and are added to `world.soldiers`, which already means *aims far
+better* — exactly right for a unit sent to you. Grey officers already on the
+street only get one while the radio is genuinely in your hand, and lose it when
+you put it away.
+
+The escort branch sits **below** the officer's fighting and **above** its
+patrol. An escort that breaks off a firefight to close the last twenty pixels
+to your shoulder is worse than no escort at all.
+
+### The utility belt
+
+Most of these are passive: carrying one is the whole of using it, and the cost
+is the slot. `combatBoots` (quicker, cheaper on the legs) · `backpack` (+2
+utility slots) · `gunsling` (+1 gun slot) · `binoculars` (pulls the camera back
+like a scope, and widens `sightRadiusFor` to match — without both you'd be
+looking at fog) · `zombieTracker` (an arrow orbiting you, pointing at the
+nearest one; the only thing in the game that sees past the fog, which is why
+it must be *in hand*) · `grenade` (three to a bundle, counting down in one slot
+the way kevlar does, thrown through the launcher's own shell).
+
+**Three of them are placeables, and they all go down where you stand.**
+`zapMine` arms after `ZAP_ARM_MS` so you can step off your own, then drops
+whatever crosses it for a full minute — the stun is enormous because a mine is
+a one-shot you had to carry, place and walk away from. `survivorBeacon` plants
+a mast and frees its slot; the order pointing people at it lives on the Q wheel
+afterwards and, unlike the rally shout, costs nothing and can be given again
+and again, because the mast is a *place* rather than a spot you clicked.
+
+**A stun is folded into the frozen set.** `computeFrozen` already returns the
+ids `updateAi` skips, so adding the stunned there is what keeps the mine from
+needing a mention in twenty branches — a dropped zombie moves nowhere and
+grabs nobody without any of them checking for it.
+
+**Thermal goggles are the one hole in server-enforced fog**, and it is kept as
+narrow as it can be and still work: **zombies only**, inside `THERMAL_RANGE`,
+flagged `thermal` so the client draws a soft heat blob *instead of* a body —
+an early return at the top of `drawEntity`, because you have not laid eyes on
+it and it must not read as though you have. A wallhack for survivors or loot
+stays impossible by construction.
+
+**The cure gun is the only thing that tells you about yourself.** `selfInfected`
+is null on the wire unless one is in hand, so the answer isn't merely hidden by
+the client — it never leaves the server.
+
 ## Not built yet
 
 - **The zombie dog master.** Lobby team 2 has two dog slots and they work — you
   can sit in one, the server counts it and logs it — but there is no dog, so
   whoever took one spawns as an officer.
 - Zombie master (the playable zombie) — `zombieMaster` type exists, unused
-- Riot shield is collected and shown on the HUD but has **no effect**
 - Tracker dart marks targets (`world.trackedTargets`) but nothing consumes it
 - Victory condition fires but has only been observed once, via a bot
 

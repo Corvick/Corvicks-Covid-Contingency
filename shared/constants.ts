@@ -1008,9 +1008,62 @@ export const DROP_HOLD_MS = 900;
 /** Anything shorter than this counts as a tap, not a hold. */
 export const TAP_MAX_MS = 220;
 /** Most houses are empty — this is the chance a building contains loot. */
-export const BUILDING_LOOT_CHANCE = 0.4;
+/**
+ * A building rolls for a gun and, separately, for something to go with it.
+ * They used to compete for the one item a house could hold, so a house with a
+ * rifle in it never had a vest as well.
+ */
+export const BUILDING_GUN_CHANCE = 0.42;
+export const BUILDING_UTILITY_CHANCE = 0.5;
+/** Two items in one house never land on top of each other. */
+export const LOOT_MIN_GAP = 44;
+
+/** Utility kit. Deliberately not guaranteed — most cities are missing some. */
+export const GRENADE_COUNT = 3;
+/** Combat boots: a little quicker, and cheaper on the legs.  */
+export const BOOTS_SPEED_MUL = 1.12;
+export const BOOTS_STAMINA_MUL = 0.62;
+/** Backpack and gunsling: extra slots while you carry them. */
+export const BACKPACK_SLOTS = 2;
+export const GUNSLING_SLOTS = 1;
+/** Binoculars pull the camera back, the way a scope does but gently. */
+export const BINOCULAR_ZOOM = 0.78;
+export const BINOCULAR_SIGHT_RADIUS = 980;
+/** How far the zombie tracker will look before it gives up and points nowhere. */
+export const TRACKER_RANGE = 1600;
+
 /** Hits a kevlar vest soaks before it's spent. */
 export const KEVLAR_POINTS = 3;
+
+/**
+ * The riot shield. Worn rather than held: it costs a utility slot and then
+ * stays wherever you last put it, front or back, while you get on with your
+ * guns. Right-click taps a bash; holding right-click slings it round.
+ *
+ * That is why the heavy MG and the shield can't be carried together — both
+ * want right-click, and the shield's claim on it doesn't depend on what is in
+ * your hands. `collect` refuses the second of the two rather than leaving one
+ * of them quietly broken.
+ */
+export const SHIELD_POINTS = 3;
+/** Held this long, right-click slings it rather than bashing. */
+export const SHIELD_STOW_HOLD_MS = 260;
+/** Cover: a wide arc in front while it's up, a narrower one behind when slung. */
+export const SHIELD_FRONT_ARC = 1.25;
+export const SHIELD_BACK_ARC = 1.0;
+/** The bash: reach, arc, shove, and how long it staggers what it catches. */
+export const SHIELD_BASH_RANGE = 62;
+export const SHIELD_BASH_ARC = 1.1;
+export const SHIELD_BASH_PUSH = 46;
+export const SHIELD_BASH_SLOW_MS = 1400;
+export const SHIELD_BASH_SLOW_MUL = 0.35;
+export const SHIELD_BASH_COOLDOWN_MS = 700;
+/**
+ * And what it costs. Roughly half a second of sprint per shove, out of the
+ * same bar — so a shield is not a way to stand your ground indefinitely, and
+ * bashing your way clear leaves you without the legs to use the gap.
+ */
+export const SHIELD_BASH_STAMINA = 24;
 /** How long a tracker dart keeps a target lit up. */
 export const TRACKER_DART_MS = 30000;
 /** TESTING: scatter one of every item around player one's start point. */
@@ -1047,6 +1100,72 @@ export const SOLDIER_BLOOM_RAD = 0.07;
 export const SOLDIER_SHOOT_INTERVAL_MS = 850;
 export const SOLDIER_SIGHT = 520;
 export const SOLDIER_COLOR = '#4d7c3f';
+
+// ---------------------------------------------------------------- the radio
+/**
+ * Calling it in. Picking the radio up dispatches a squad car; holding it out
+ * also draws in whatever grey officers are already on the street.
+ *
+ * The bubble and the crackle back matter more than they look: the car enters
+ * from off the map and is several seconds away, so without them the radio does
+ * nothing at all as far as the player can tell.
+ */
+export const RADIO_CALL_LINE = 'Requesting backup!';
+export const RADIO_REPLY_LINE = 'Sending available unit';
+export const RADIO_REPLY_DELAY_MS = 1100;
+export const RADIO_SPEECH_MS = 2600;
+export const RADIO_BACKUP_COUNT = 4;
+/** How far a grey officer will hear the radio and come in, while it is out. */
+export const RADIO_CALL_RANGE = 1500;
+export const RADIO_CALL_SCAN_MS = 700;
+/** How close an escort tries to stay, and how far before it breaks off to close up. */
+export const ESCORT_NEAR = 90;
+export const ESCORT_FAR = 170;
+
+/** The squad car itself: how fast, where it parks, and how it empties. */
+export const CAR_SPEED = 240;
+export const CAR_ARRIVE_DIST = 16;
+export const CAR_PARK_MIN = 170;
+export const CAR_PARK_MAX = 430;
+export const CAR_PARK_SAMPLES = 20;
+export const CAR_DOOR_INTERVAL_MS = 420;
+export const CAR_LENGTH = 46;
+export const CAR_WIDTH = 22;
+
+// ---------------------------------------------------------------- zap mines
+/**
+ * Put down at your feet and left behind. The stun is enormous on purpose — a
+ * minute is most of a fight — because a mine is a one-shot you had to carry,
+ * place, and then walk away from. It buys ground rather than killing, which is
+ * the emplacement's job rather than the grenade's.
+ */
+export const ZAP_MINE_COUNT = 3;
+export const ZAP_STUN_MS = 60000;
+export const ZAP_MINE_RADIUS = 46;
+/** A beat before it goes live, so you can step off your own mine. */
+export const ZAP_ARM_MS = 900;
+export const ZAP_FLASH_MS = 420;
+
+/**
+ * Thermal goggles. The one place anything is sent that the viewer cannot see,
+ * so the hole is kept as narrow as it can be and still work: zombies only,
+ * inside this radius, and flagged so the client draws a heat blob rather than
+ * a body. A wallhack for survivors or loot stays impossible by construction.
+ */
+export const THERMAL_RANGE = 520;
+
+// ------------------------------------------------------------ survivor beacon
+/**
+ * A little radio mast you put down and then point people at. Unlike the rally
+ * shout, which sends them to a spot you clicked and is spent, the beacon is a
+ * place on the map — you can call people to it again and again from anywhere
+ * within earshot, which is what makes it worth a utility slot.
+ */
+export const BEACON_SHOUT = 'Go to the survivor beacon!';
+export const BEACON_SHOUT_MS = 3400;
+/** How far the call carries, and how close counts as arrived. */
+export const BEACON_CALL_RADIUS = 900;
+export const BEACON_ARRIVE_DIST = 60;
 
 // ---------------------------------------------------------------- HUD
 /** Once this few humans remain, point the way to each of them. */

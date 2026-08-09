@@ -23,10 +23,12 @@ export interface InputTracker {
   /** Slot key pressed since the last poll, or -1. */
   slotPressed: number;
   /**
-   * Right mouse is a toggle, not a hold — planting a bipod is a decision you
-   * make and then get on with, not something you keep a finger on.
+   * Raw right mouse. A tap and a hold mean different things now — a tap works
+   * the bipod or bashes with the shield, a hold slings the shield onto your
+   * back — so the client reports the button and the server decides what it
+   * meant, the same way E already works at a door.
    */
-  deploy: boolean;
+  rightDown: boolean;
 }
 
 export function trackInput(canvas: HTMLCanvasElement): InputTracker {
@@ -38,7 +40,7 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     sprint: false,
     interact: false,
     slotPressed: -1,
-    deploy: false,
+    rightDown: false,
   };
 
   /**
@@ -86,9 +88,9 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
   canvas.addEventListener('mousemove', updateMouse);
   canvas.addEventListener('mousedown', (e) => {
     if (e.button === 2) {
-      // The server ignores this unless what's in hand actually has a bipod, so
-      // a stray right-click with the pistol out costs nothing.
-      tracker.deploy = !tracker.deploy;
+      // The server ignores this unless there is something to do with it, so a
+      // stray right-click with the pistol out costs nothing.
+      tracker.rightDown = true;
       return;
     }
     if (e.button !== 0) return;
@@ -97,9 +99,11 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
   });
   window.addEventListener('mouseup', (e) => {
     if (e.button === 0) tracker.shooting = false;
+    if (e.button === 2) tracker.rightDown = false;
   });
   window.addEventListener('blur', () => {
     tracker.shooting = false;
+    tracker.rightDown = false;
     tracker.sprint = false;
     tracker.interact = false;
     tracker.state.up = tracker.state.down = tracker.state.left = tracker.state.right = false;

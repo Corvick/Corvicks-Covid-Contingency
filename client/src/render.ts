@@ -16,6 +16,9 @@ import type {
   DuckState,
   EmplacementState,
   FireState,
+  BeaconState,
+  MineState,
+  PoliceCarState,
   ShotKind,
   Wall,
   Window as WindowPane,
@@ -46,6 +49,11 @@ import {
   CHARGE_BARS,
   FLAME_ARC_VERTICAL_MIN,
   FIRE_FADE_FRACTION,
+  SHIELD_FRONT_ARC,
+  CAR_LENGTH,
+  CAR_WIDTH,
+  ZAP_FLASH_MS,
+  ZAP_MINE_RADIUS,
 } from '../../shared/constants.js';
 
 export interface Viewport {
@@ -477,6 +485,27 @@ export function drawEntity(
   simple = false,
 ): void {
   const radius = ENTITY_RADIUS[e.type];
+
+  // Seen only on thermal: a soft heat blob drawn *instead of* a body. You have
+  // not laid eyes on this one — it is through a wall — so it must not read as
+  // though you have. Nothing else about it is drawn, and this returns before
+  // the body does.
+  if (e.thermal) {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#fb923c';
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, radius + 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = '#fed7aa';
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, radius * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
   // A bot officer holds a player's slot, so it is picked out from the ambient
   // grey ones rather than lumped in with them.
   const color = e.soldier
@@ -634,6 +663,31 @@ export function drawEntity(
     ctx.beginPath();
     ctx.arc(x, y, radius - 2, 0, Math.PI * 2);
     ctx.stroke();
+  }
+
+  // The riot shield: a thick arc across whichever side it is covering. Drawn
+  // as an arc rather than a badge because which way it faces is the entire
+  // mechanic — being caught from the other side is what it costs you.
+  // Dropped by a mine: a cyan crackle round the body while it lasts.
+  if (e.stunned) {
+    ctx.strokeStyle = 'rgba(34, 211, 238, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  if (e.shield) {
+    const facing = e.facing + (e.shield > 0 ? 0 : Math.PI);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = e.shield > 0 ? 'rgba(56, 189, 248, 0.95)' : 'rgba(56, 189, 248, 0.6)';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(x, y, radius + 4, facing - SHIELD_FRONT_ARC, facing + SHIELD_FRONT_ARC);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
   }
 
   if (isSelf) {
@@ -872,6 +926,161 @@ export function drawStamina(
  * the entities — a bubble carries through fog even when whoever is shouting
  * doesn't, so you can hear someone hammering on a door you can't see.
  */
+/**
+ * A squad car. Drawn as a body with a white flank stripe and a lightbar that
+ * keeps flashing after it parks, so an arrival you didn't watch still reads as
+ * "your backup came from over there" a minute later.
+ */
+export function drawPoliceCars(
+  ctx: CanvasRenderingContext2D,
+  cars: PoliceCarState[],
+  view: Viewport,
+  now: number,
+): void {
+  for (const car of cars) {
+    if (!visible(view, car.x, car.y, CAR_LENGTH)) continue;
+    ctx.save();
+    ctx.translate(car.x, car.y);
+    ctx.rotate(car.facing);
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+    ctx.fillRect(-CAR_LENGTH / 2 + 3, -CAR_WIDTH / 2 + 4, CAR_LENGTH, CAR_WIDTH);
+
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
+    ctx.strokeRect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
+
+    // Flank stripe and windscreen, so it reads as a car rather than a crate.
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillRect(-CAR_LENGTH / 2 + 6, -CAR_WIDTH / 2 + 3, CAR_LENGTH - 12, 4);
+    ctx.fillStyle = 'rgba(148, 197, 253, 0.55)';
+    ctx.fillRect(CAR_LENGTH / 2 - 15, -CAR_WIDTH / 2 + 3, 9, CAR_WIDTH - 6);
+
+    // The lightbar alternates rather than blinking together.
+    const beat = Math.sin(now * 0.012) > 0;
+    ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.7)';
+    ctx.fillRect(-3, -CAR_WIDTH / 2 - 1, 6, 5);
+    ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.7)' : '#3b82f6';
+    ctx.fillRect(-3, CAR_WIDTH / 2 - 4, 6, 5);
+    ctx.restore();
+  }
+}
+
+/**
+ * Zap mines on the ground. Dark and inert while arming, then a slow pulsing
+ * ring — you have to be able to see your own minefield to fight in front of it.
+ */
+export function drawMines(
+  ctx: CanvasRenderingContext2D,
+  mines: MineState[],
+  view: Viewport,
+  now: number,
+): void {
+  for (const mine of mines) {
+    if (!visible(view, mine.x, mine.y, 30)) continue;
+
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = mine.armed ? '#22d3ee' : 'rgba(100, 116, 139, 0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(mine.x, mine.y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    if (!mine.armed) continue;
+    const pulse = (Math.sin(now * 0.005) + 1) / 2;
+    ctx.globalAlpha = 0.25 + 0.35 * pulse;
+    ctx.strokeStyle = '#22d3ee';
+    ctx.beginPath();
+    ctx.arc(mine.x, mine.y, 11 + pulse * 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * A survivor beacon: a little mast with a pulsing ring, so it reads at a
+ * glance from across a street as somewhere to head for.
+ */
+export function drawBeaconTowers(
+  ctx: CanvasRenderingContext2D,
+  towers: BeaconState[],
+  view: Viewport,
+  now: number,
+): void {
+  for (const t of towers) {
+    if (!visible(view, t.x, t.y, 60)) continue;
+
+    // The ring travels outward and fades, like something transmitting.
+    const wave = ((now % 1800) / 1800);
+    ctx.save();
+    ctx.globalAlpha = (1 - wave) * 0.45;
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 14 + wave * 34, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.beginPath();
+    ctx.ellipse(t.x, t.y + 4, 11, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tripod legs and a mast, drawn small — it is a marker, not a building.
+    ctx.strokeStyle = '#a16207';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (const a of [-2.2, -0.94, 0.32]) {
+      ctx.moveTo(t.x, t.y - 14);
+      ctx.lineTo(t.x + Math.cos(a) * 9, t.y + Math.sin(a) * 9 + 4);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath();
+    ctx.arc(t.x, t.y - 17, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+/** One going off: a short white-blue crackle, gone almost at once. */
+export function drawZaps(
+  ctx: CanvasRenderingContext2D,
+  zaps: Array<{ x: number; y: number; at: number }>,
+  view: Viewport,
+  now: number,
+): void {
+  for (const zap of zaps) {
+    const age = (now - zap.at) / ZAP_FLASH_MS;
+    if (age < 0 || age >= 1) continue;
+    if (!visible(view, zap.x, zap.y, ZAP_MINE_RADIUS + 20)) continue;
+
+    ctx.save();
+    ctx.globalAlpha = 1 - age;
+    ctx.strokeStyle = '#a5f3fc';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(zap.x, zap.y, ZAP_MINE_RADIUS * (0.4 + age * 0.7), 0, Math.PI * 2);
+    ctx.stroke();
+
+    // A few forked arcs off the centre, so it reads as electricity.
+    const seed = (zap.x * 17 + zap.y * 31) % 360;
+    for (let k = 0; k < 6; k++) {
+      const a = seed + (k / 6) * Math.PI * 2;
+      const r = ZAP_MINE_RADIUS * (0.5 + ((seed + k * 53) % 40) / 80);
+      ctx.beginPath();
+      ctx.moveTo(zap.x, zap.y);
+      ctx.lineTo(zap.x + Math.cos(a) * r * 0.55, zap.y + Math.sin(a) * r * 0.55 - 5);
+      ctx.lineTo(zap.x + Math.cos(a) * r, zap.y + Math.sin(a) * r);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
 export function drawSpeechBubbles(
   ctx: CanvasRenderingContext2D,
   lines: SpeechState[],
@@ -879,7 +1088,7 @@ export function drawSpeechBubbles(
 ): void {
   for (const line of lines) {
     if (!visible(view, line.x, line.y, 90)) continue;
-    drawBubble(ctx, line.x, line.y, ENTITY_RADIUS.human, line.text);
+    drawBubble(ctx, line.x, line.y, ENTITY_RADIUS.human, line.text, line.radio === true);
   }
 }
 
@@ -889,6 +1098,7 @@ function drawBubble(
   py: number,
   radius: number,
   text: string,
+  radio = false,
 ): void {
   ctx.font = 'bold 13px sans-serif';
   ctx.textAlign = 'center';
@@ -901,24 +1111,56 @@ function drawBubble(
   const x = px - w / 2;
   const y = py - radius - 16 - h;
 
-  ctx.fillStyle = 'rgba(248, 250, 252, 0.95)';
-  ctx.strokeStyle = 'rgba(15, 23, 42, 0.65)';
+  const fill = radio ? 'rgba(219, 234, 254, 0.95)' : 'rgba(248, 250, 252, 0.95)';
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = radio ? 'rgba(37, 99, 235, 0.8)' : 'rgba(15, 23, 42, 0.65)';
   ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 6);
-  ctx.fill();
-  ctx.stroke();
 
-  // Tail
+  if (radio) {
+    // A handset, not a mouth: a jagged outline rather than a rounded one, so
+    // a voice coming out of your hip never reads as somebody standing there.
+    const teeth = Math.max(6, Math.round(w / 9));
+    ctx.beginPath();
+    for (let i = 0; i <= teeth; i++) {
+      const t = i / teeth;
+      const zig = i % 2 === 0 ? 0 : -3;
+      ctx.lineTo(x + w * t, y + zig);
+    }
+    for (let i = 0; i <= teeth; i++) {
+      const t = i / teeth;
+      const zig = i % 2 === 0 ? 0 : 3;
+      ctx.lineTo(x + w * (1 - t), y + h + zig);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 6);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // Tail. The radio's is a lightning kink rather than a speech tail.
   ctx.beginPath();
-  ctx.moveTo(px - 5, y + h);
-  ctx.lineTo(px + 5, y + h);
-  ctx.lineTo(px, y + h + 7);
+  if (radio) {
+    ctx.moveTo(px - 4, y + h);
+    ctx.lineTo(px + 4, y + h);
+    ctx.lineTo(px - 1, y + h + 5);
+    ctx.lineTo(px + 4, y + h + 5);
+    ctx.lineTo(px - 3, y + h + 12);
+    ctx.lineTo(px, y + h + 5);
+    ctx.lineTo(px - 5, y + h + 5);
+  } else {
+    ctx.moveTo(px - 5, y + h);
+    ctx.lineTo(px + 5, y + h);
+    ctx.lineTo(px, y + h + 7);
+  }
   ctx.closePath();
-  ctx.fillStyle = 'rgba(248, 250, 252, 0.95)';
+  ctx.fillStyle = fill;
   ctx.fill();
 
-  ctx.fillStyle = '#0f172a';
+  ctx.fillStyle = radio ? '#1e3a8a' : '#0f172a';
   ctx.fillText(text, px, y + h / 2);
 }
 
@@ -1321,15 +1563,24 @@ export function drawInventory(
   vw: number,
   vh: number,
 ): void {
+  // Only the slots this bag can actually use are drawn: the fourth gun slot
+  // appears with a gunsling, the last two utility slots with a backpack. A
+  // greyed-out cell you can never fill is worse than no cell at all.
   const cells: Array<{ key: string; item: ItemId | null; ammo: number | null }> = [
-    { key: '0', item: 'pistol', ammo: null },
+    { key: '0', item: inv.dual ? 'dualPistols' : 'pistol', ammo: null },
   ];
-  for (let i = 0; i < inv.guns.length; i++) {
+  for (let i = 0; i < inv.gunSlots; i++) {
     const g = inv.guns[i];
     cells.push({ key: String(i + 1), item: g?.item ?? null, ammo: g?.ammo ?? null });
   }
-  for (let i = 0; i < 6; i++) {
-    cells.push({ key: String(i + 4), item: inv.utilities[i] ?? null, ammo: null });
+  for (let i = 0; i < inv.utilitySlots; i++) {
+    const item = inv.utilities[i] ?? null;
+    cells.push({
+      key: String(i + 1 + inv.gunSlots),
+      item,
+      // Grenades count down in the bag the way rounds do in a magazine.
+      ammo: item === 'grenade' ? inv.grenades : null,
+    });
   }
 
   const size = 34;
@@ -1345,8 +1596,8 @@ export function drawInventory(
     // Slot 0 is the pistol, 1-3 take guns, 4-9 take utilities. Colouring the
     // two banks differently means you can see at a glance what a slot is for
     // rather than having to remember the numbering.
-    const isGunSlot = i >= 1 && i <= GUN_SLOTS;
-    const isUtilitySlot = i > GUN_SLOTS;
+    const isGunSlot = i >= 1 && i <= inv.gunSlots;
+    const isUtilitySlot = i > inv.gunSlots;
     const bank = isGunSlot
       ? { fill: 'rgba(80, 20, 24, 0.62)', edge: 'rgba(248, 113, 113, 0.75)' }
       : isUtilitySlot
@@ -1523,6 +1774,40 @@ export function drawChargeBars(
     x,
     top + h + 3,
   );
+  ctx.restore();
+}
+
+/**
+ * The zombie tracker: an arrow orbiting the officer, pointing at the nearest
+ * one. It is the only thing in the game that sees past the fog, so it is drawn
+ * on the officer rather than out in the world — you are being told a bearing,
+ * not shown a zombie.
+ */
+export function drawTracker(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  bearing: number,
+  now: number,
+): void {
+  const dist = 30 + Math.sin(now * 0.006) * 3; // a slow pulse, so it reads as live
+  const cx = x + Math.cos(bearing) * dist;
+  const cy = y + Math.sin(bearing) * dist;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(bearing);
+  ctx.fillStyle = '#f87171';
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(10, 0);
+  ctx.lineTo(-5, -6);
+  ctx.lineTo(-2, 0);
+  ctx.lineTo(-5, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
 

@@ -106,6 +106,12 @@ import {
   ESCAPE_BOOST_MS,
   KEVLAR_GRAPPLE_MS,
   KEVLAR_IMMUNE_MS,
+  SHIELD_FRONT_ARC,
+  SHIELD_BACK_ARC,
+  RADIO_CALL_RANGE,
+  RADIO_CALL_SCAN_MS,
+  ESCORT_NEAR,
+  ESCORT_FAR,
   FOLLOW_RADIUS,
   FOLLOW_ARRIVE_DIST,
   FOLLOW_SPEED_MUL,
@@ -272,6 +278,13 @@ function getAi(world: World, e: Entity, now: number): AiState {
 
 export function computeFrozen(world: World): Set<string> {
   const frozen = new Set<string>();
+  // A zombie a mine has dropped is going nowhere and grabbing nobody. Folding
+  // it in here rather than checking in each branch is what keeps the stun from
+  // needing a mention in twenty places.
+  const now = Date.now();
+  for (const [id, until] of world.stunned) {
+    if (now < until) frozen.add(id);
+  }
   for (const [targetId, session] of world.grapples) {
     frozen.add(targetId);
     for (const zombieId of session.zombieIds) frozen.add(zombieId);
@@ -2814,6 +2827,39 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     return;
   }
 
+  // Somebody with a radio is calling them in. This sits *below* the fighting
+  // above it on purpose — an escort that breaks off a firefight to close the
+  // last twenty pixels to your shoulder is worse than useless — and above the
+  // patrol, so with nothing to shoot at they come to you rather than wander.
+  if (state.escortId !== null) {
+    const lead = world.entities.get(state.escortId);
+    if (!lead || lead.type !== 'officer') {
+      state.escortId = null;
+    } else {
+      const gap = Math.hypot(lead.x - e.x, lead.y - e.y);
+      if (gap > ESCORT_NEAR) {
+        const desired = widenCorners(
+          world,
+          e,
+          headingToward(world, e, state, lead.x, lead.y, now),
+        );
+        // They hurry when they've fallen behind and stroll when they're close,
+        // so a squad doesn't jog on the spot around whoever called them.
+        const pace = gap > ESCORT_FAR ? HUMAN_WALK_SPEED * 1.9 : HUMAN_WALK_SPEED * 1.15;
+        step(world, e, state, desired, pace, HUMAN_TURN_RATE, dt, now);
+        return;
+      }
+      // Close enough. Watch the street rather than the person.
+      if (now >= state.nextLookAt) {
+        state.nextLookAt = now + RALLY_LOOK_MIN_MS + Math.random() * (RALLY_LOOK_MAX_MS - RALLY_LOOK_MIN_MS);
+        state.lookHeading = Math.random() * Math.PI * 2;
+      }
+      state.heading = turnToward(state.heading, state.lookHeading, RALLY_LOOK_TURN_RATE * dt);
+      e.facing = state.heading;
+      return;
+    }
+  }
+
   // Off duty they patrol rather than loiter.
   if (now < state.pauseUntil) return;
   if (Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 24) {
@@ -3828,8 +3874,30 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
     if (immuneUntil !== undefined && now >= immuneUntil) world.grappleImmune.delete(target.id);
     const shielded = immuneUntil !== undefined && now < immuneUntil;
 
-    // Just shrugged one off with a vest. Nothing gets hold of them for a beat,
-    // so the chase below carries on and they claw at a back they can't grip.
+    // A riot shield turns a grab away outright from whichever side it happens
+    // to be covering — in front while it is up, behind while it is slung. It
+    // costs a charge and buys the same breathing space the vest does, and
+    // being caught from the *other* side is the whole cost of carrying one.
+    if (!shielded && dist <= e.radius + target.radius + GRAPPLE_REACH_BONUS) {
+      const inv = world.inventories.get(target.id);
+      if (inv && inv.shield > 0) {
+        const off = Math.abs(angleDelta(Math.atan2(e.y - target.y, e.x - target.x), target.facing));
+        const covered = inv.shieldUp
+          ? off <= SHIELD_FRONT_ARC
+          : off >= Math.PI - SHIELD_BACK_ARC;
+        if (covered) {
+          inv.shield--;
+          if (inv.shield <= 0) {
+            inv.shieldUp = false;
+            const at = inv.utilities.indexOf('riotShield');
+            if (at >= 0) inv.utilities.splice(at, 1);
+          }
+          world.grappleImmune.set(target.id, now + KEVLAR_IMMUNE_MS);
+          return;
+        }
+      }
+    }
+
     if (!shielded && dist <= e.radius + target.radius + GRAPPLE_REACH_BONUS) {
       let session = world.grapples.get(target.id);
       if (session && session.zombieIds.size >= MAX_GRAPPLERS && !session.zombieIds.has(e.id)) {
@@ -4080,6 +4148,50 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   }
 }
 
+/**
+ * Grey officers hear a radio that is actually out and close on whoever is
+ * holding it. Put it away and they go back to their patrol.
+ *
+ * Deliberately transient, unlike the crew a call dispatches: those were sent
+ * to you and stay, these are only answering a handset they can hear. Scanned
+ * on a slow cadence — this walks the officers, not the crowd, so it is a
+ * handful of entities rather than four hundred.
+ */
+function updateRadioCalls(world: World, now: number): void {
+  if (now < world.nextRadioScan) return;
+  world.nextRadioScan = now + RADIO_CALL_SCAN_MS;
+
+  // Who is holding one, if anybody. Almost always nobody, so this is the
+  // cheap way out of the whole thing.
+  const holders: Entity[] = [];
+  for (const id of world.playerIds) {
+    const inv = world.inventories.get(id);
+    const who = world.entities.get(id);
+    if (!inv || !who || heldItem(inv) !== 'radio') continue;
+    holders.push(who);
+  }
+
+  for (const e of world.entities.values()) {
+    if (e.type !== 'officer') continue;
+    if (world.playerIds.has(e.id) || world.bots.has(e.id)) continue;
+    const state = world.ai.get(e.id);
+    if (!state) continue;
+    // The dispatched crew keep theirs whatever the caller is holding now.
+    if (world.soldiers.has(e.id)) continue;
+
+    let nearest: Entity | null = null;
+    let bestDist = RADIO_CALL_RANGE;
+    for (const holder of holders) {
+      const d = Math.hypot(holder.x - e.x, holder.y - e.y);
+      if (d < bestDist) {
+        bestDist = d;
+        nearest = holder;
+      }
+    }
+    state.escortId = nearest ? nearest.id : null;
+  }
+}
+
 export function processPendingInfections(world: World, now: number): void {
   for (const [id, turnAt] of Array.from(world.pendingInfections)) {
     if (now < turnAt) continue;
@@ -4112,6 +4224,7 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
 
   processPendingInfections(world, now);
   clearExpiredPleas(world, now);
+  updateRadioCalls(world, now);
 
   // Counted once here rather than per zombie deciding whether to bother with
   // a door. Room occupancy rides along in the same walk: it is what turns "is

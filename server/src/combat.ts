@@ -21,13 +21,24 @@ import {
   GRENADE_COOLDOWN_MS,
   HEADSHOT_ARC,
   DEPLOY_MS,
+  TAP_MAX_MS,
+  SHIELD_STOW_HOLD_MS,
+  SHIELD_BASH_RANGE,
+  SHIELD_BASH_ARC,
+  SHIELD_BASH_PUSH,
+  SHIELD_BASH_SLOW_MS,
+  SHIELD_BASH_SLOW_MUL,
+  SHIELD_BASH_COOLDOWN_MS,
+  SHIELD_BASH_STAMINA,
+  STAMINA_MAX,
+  STAMINA_SPRINT_FLOOR,
   CHARGE_BARS,
   CHARGE_BASE_MUL,
   UNDEPLOY_MS,
 } from '../../shared/constants.js';
 import { throwGrenade } from './heli.js';
 import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
-import { segmentCircleT, segmentRectT, turnToward } from './geometry.js';
+import { angleDelta, segmentCircleT, segmentRectT, turnToward } from './geometry.js';
 import {
   damageWindow,
   isInGrapple,
@@ -42,6 +53,7 @@ import { damageDoor } from './doors.js';
 import { scareDucks } from './ducks.js';
 import { deployEmplacement } from './emplacement.js';
 import { sprayFlame } from './fire.js';
+import { placeMine } from './mines.js';
 
 /**
  * Gunfire is loud: every zombie in earshot investigates the shooter's position
@@ -84,10 +96,17 @@ const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
  * Called once per tick from `updatePlayers`, before anything fires, so the
  * facing that gets drawn and the direction that gets fired are the same value.
  */
-export function steerAim(world: World, id: string, want: number, dt: number): number {
+export function steerAim(world: World, id: string, want: number, dt: number, now: number): number {
   const inv = world.inventories.get(id);
   const held = inv ? heldItem(inv) : null;
-  const rate = held ? ITEMS[held]?.turnRate : undefined;
+  let rate = held ? ITEMS[held]?.turnRate : undefined;
+
+  // A planted bipod traverses freely. The heavy MG is the worst thing in the
+  // city to swing from the hip and one of the best once it is down, and that
+  // gap is most of the reason to put it down at all.
+  if (rate !== undefined && held && ITEMS[held].deployable && isDeployed(world, id, now)) {
+    rate = undefined;
+  }
 
   if (rate === undefined) {
     // Snapping weapons still keep the map current, so switching to a heavy one
@@ -425,6 +444,54 @@ export function fireHeld(
     return true;
   }
 
+  // A mast goes down where you stand and stays there. The order that points
+  // people at it comes off the Q wheel afterwards, so this only plants it.
+  if (held === 'survivorBeacon') {
+    const last = world.lastShotAt.get(id) ?? 0;
+    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    world.lastShotAt.set(id, now);
+    world.towers.push({ x: shooter.x, y: shooter.y });
+    const slotOf = inv.utilities.indexOf('survivorBeacon');
+    if (slotOf >= 0) inv.utilities.splice(slotOf, 1);
+    inv.activeSlot = 0;
+    return true;
+  }
+
+  // A mine goes down where you stand, arms after a beat, and is left behind.
+  if (held === 'zapMine') {
+    const last = world.lastShotAt.get(id) ?? 0;
+    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (inv.mines <= 0) return false;
+    world.lastShotAt.set(id, now);
+    inv.mines--;
+    placeMine(world, shooter, now);
+    if (inv.mines <= 0) {
+      const slotOf = inv.utilities.indexOf('zapMine');
+      if (slotOf >= 0) inv.utilities.splice(slotOf, 1);
+      inv.activeSlot = 0;
+    }
+    return true;
+  }
+
+  // A frag goes the same way the smoke does, and detonates like a launcher
+  // shell. Three to a bundle, and the slot clears itself when they run out.
+  if (held === 'grenade') {
+    const last = world.lastShotAt.get(id) ?? 0;
+    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (inv.grenades <= 0) return false;
+    world.lastShotAt.set(id, now);
+    inv.grenades--;
+
+    const spot = landingSpot(shooter, aim, GRENADE_THROW_RANGE, at);
+    throwGrenade(world, shooter.x, shooter.y, spot.x, spot.y, now, 'frag');
+    if (inv.grenades <= 0) {
+      const slotOf = inv.utilities.indexOf('grenade');
+      if (slotOf >= 0) inv.utilities.splice(slotOf, 1);
+      inv.activeSlot = 0;
+    }
+    return true;
+  }
+
   // Smoke goes underarm toward the aim point, then calls in the helicopter.
   if (held === 'smokeGrenade') {
     const last = world.lastShotAt.get(id) ?? 0;
@@ -541,6 +608,93 @@ export function chargeProgress(world: World, id: string, inv: Inventory, now: nu
 }
 
 /**
+ * Shove whatever is in front of you and stagger it. The shield's one active
+ * use, and the way out when three of them have you against a wall.
+ */
+function shieldBash(world: World, shooter: Entity, now: number): void {
+  if (now < (world.bashReadyAt.get(shooter.id) ?? 0)) return;
+
+  // Shoving a body off you is work. Without a cost the bash is free crowd
+  // control on a cooldown, and the cooldown alone never makes you choose
+  // between shoving and running — the same bar pays for both now.
+  const stamina = world.stamina.get(shooter.id) ?? STAMINA_MAX;
+  if (world.exhausted.has(shooter.id) || stamina < SHIELD_BASH_STAMINA) return;
+  const left = stamina - SHIELD_BASH_STAMINA;
+  world.stamina.set(shooter.id, left);
+  // Bashing yourself to a standstill latches the same exhaustion sprinting
+  // does, so it costs you the getaway as well as the shove.
+  if (left <= STAMINA_SPRINT_FLOOR) world.exhausted.add(shooter.id);
+
+  world.bashReadyAt.set(shooter.id, now + SHIELD_BASH_COOLDOWN_MS);
+
+  for (const e of world.entityGrid.queryCircle(
+    shooter.x,
+    shooter.y,
+    SHIELD_BASH_RANGE,
+    new Set<Entity>(),
+  )) {
+    if (e.type !== 'zombie') continue;
+    const dx = e.x - shooter.x;
+    const dy = e.y - shooter.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > SHIELD_BASH_RANGE || dist === 0) continue;
+    // Only what the shield actually faces. Being flanked is the cost of it.
+    if (Math.abs(angleDelta(Math.atan2(dy, dx), shooter.facing)) > SHIELD_BASH_ARC) continue;
+
+    e.x += (dx / dist) * SHIELD_BASH_PUSH;
+    e.y += (dy / dist) * SHIELD_BASH_PUSH;
+    const state = world.ai.get(e.id);
+    if (state) {
+      state.slowUntil = Math.max(state.slowUntil, now + SHIELD_BASH_SLOW_MS);
+      state.slowMul = Math.min(state.slowMul || 1, SHIELD_BASH_SLOW_MUL);
+    }
+    // Shoved off a victim as well as backwards.
+    for (const session of world.grapples.values()) session.zombieIds.delete(e.id);
+  }
+}
+
+/**
+ * What right-click meant. A tap works the bipod or bashes with the shield; a
+ * hold slings the shield round to your back and back again.
+ *
+ * The button is reported raw and resolved here for the same reason E is: one
+ * button has to carry two actions, and only the server knows which of them is
+ * available. `spent` latches the hold so it fires once per press rather than
+ * every tick the button stays down.
+ */
+function processRightClick(
+  world: World,
+  shooter: Entity,
+  inv: Inventory,
+  down: boolean,
+  now: number,
+): void {
+  const id = shooter.id;
+  const pressedAt = world.rightHeld.get(id);
+
+  if (down) {
+    if (pressedAt === undefined) {
+      world.rightHeld.set(id, now);
+      return;
+    }
+    if (!world.rightSpent.has(id) && now - pressedAt >= SHIELD_STOW_HOLD_MS && inv.shield > 0) {
+      inv.shieldUp = !inv.shieldUp;
+      world.rightSpent.add(id);
+    }
+    return;
+  }
+
+  if (pressedAt === undefined) return;
+  if (!world.rightSpent.has(id) && now - pressedAt < TAP_MAX_MS) {
+    if (inv.shield > 0 && inv.shieldUp) shieldBash(world, shooter, now);
+    else if (world.deployWanted.has(id)) world.deployWanted.delete(id);
+    else world.deployWanted.add(id);
+  }
+  world.rightHeld.delete(id);
+  world.rightSpent.delete(id);
+}
+
+/**
  * The bipod, and what invalidates it. Planting takes DEPLOY_MS during which
  * you're already rooted — commit early and you're caught standing still — and
  * a second right-click packs it up again, which takes UNDEPLOY_MS and roots
@@ -593,9 +747,14 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
     if (!inv) continue;
     const command = world.commands.get(id);
 
-    // The bipod is worked whether or not the trigger is down, and a grappled
-    // officer has rather more pressing problems than their firing position.
-    updateDeploy(world, id, inv, !frozen.has(id) && command?.deploy === true, now);
+    // Right-click first: it decides whether the bipod is wanted at all, and a
+    // grappled officer has rather more pressing problems than either.
+    if (command && !frozen.has(id)) processRightClick(world, shooter, inv, command.rightDown, now);
+    else {
+      world.rightHeld.delete(id);
+      world.rightSpent.delete(id);
+    }
+    updateDeploy(world, id, inv, !frozen.has(id) && world.deployWanted.has(id), now);
     if (frozen.has(id)) {
       world.chargeSince.delete(id);
       continue;

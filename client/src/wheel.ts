@@ -11,11 +11,15 @@ export interface WheelOption {
  * order that releases them, and once they are released it reverts — greyed out
  * until a lozenge buys another use.
  */
-export function wheelOptions(following: boolean): WheelOption[] {
-  return [
+export function wheelOptions(following: boolean, hasBeacon = false): WheelOption[] {
+  const out: WheelOption[] = [
     { id: 'rally', label: 'GET OVER THERE!' },
     following ? { id: 'wait', label: 'WAIT HERE' } : { id: 'follow', label: 'FOLLOW ME!' },
   ];
+  // Only offered once a mast is actually standing — an order with nowhere to
+  // send anybody is worse than no order.
+  if (hasBeacon) out.push({ id: 'beacon', label: 'GO TO THE BEACON!' });
+  return out;
 }
 
 /** Kept for the hit test's arithmetic; the labels come from wheelOptions. */

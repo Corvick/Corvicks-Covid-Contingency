@@ -16,6 +16,7 @@ import {
   GUN_SLOTS,
   UTILITY_SLOTS,
   SNIPER_ZOOM,
+  BINOCULAR_ZOOM,
   SCOPE_EASE_MS,
 } from '../../shared/constants.js';
 import type {
@@ -32,7 +33,10 @@ import type {
   BlastState,
   DuckState,
   EmplacementState,
+  BeaconState,
   FireState,
+  MineState,
+  PoliceCarState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -59,12 +63,17 @@ import {
   drawBlasts,
   drawDucks,
   drawEmplacements,
+  drawPoliceCars,
+  drawMines,
+  drawZaps,
+  drawBeaconTowers,
   drawFires,
   drawBurning,
   drawPond,
   drawSmoke,
   drawStamina,
   drawTracers,
+  drawTracker,
   drawSpeechBubbles,
   drawWalls,
   drawWindows,
@@ -128,6 +137,10 @@ let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
+let cars: PoliceCarState[] = [];
+let mines: MineState[] = [];
+let towers: BeaconState[] = [];
+let zaps: Array<{ x: number; y: number; at: number }> = [];
 let fires: FireState[] = [];
 let helicopters: HelicopterState[] = [];
 let speech: SpeechState[] = [];
@@ -227,6 +240,10 @@ const { send } = connect((msg) => {
     blasts = msg.blasts;
     ducks = msg.ducks;
     emplacements = msg.emplacements;
+    cars = msg.cars;
+    mines = msg.mines;
+    towers = msg.towers;
+    zaps = msg.zaps;
     fires = msg.fires;
     helicopters = msg.helicopters;
     speech = msg.speech;
@@ -276,7 +293,7 @@ function standDown(): void {
   pausePanel.classList.add('hidden');
   wheel.open = false;
   armedAbility = null;
-  input.deploy = false;
+  input.rightDown = false;
   input.shooting = false;
   input.slotPressed = -1;
   scopeZoom = 1;
@@ -336,7 +353,7 @@ canvas.addEventListener(
 
     if (wheel.open) {
       e.stopImmediatePropagation();
-      const options = wheelOptions(following);
+      const options = wheelOptions(following, towers.length > 0);
       const index = hitTest(wheel, input.mouseX, input.mouseY);
       if (index < 0) return;
 
@@ -391,7 +408,9 @@ canvas.addEventListener(
     if (!spectating) {
       if (!inventory) return;
       e.preventDefault();
-      const slots = 1 + GUN_SLOTS + UTILITY_SLOTS;
+      // Grows with a sling or a pack, so the wheel reaches slots the number
+      // row runs out of keys for.
+      const slots = 1 + inventory.gunSlots + inventory.utilitySlots;
       const step = e.deltaY > 0 ? 1 : -1;
       const next = (inventory.activeSlot + step + slots) % slots;
       inventory.activeSlot = next; // optimistic, the server confirms
@@ -497,6 +516,8 @@ const ENTITY_FIELDS = [
   'say',
   'hand',
   'armour',
+  'shield',
+  'stunned',
   'breaking',
   'burning',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
@@ -595,7 +616,14 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
  */
 let scopeZoom = 1;
 function updateScope(dt: number): void {
-  const want = ITEMS[heldItemId() ?? 'pistol']?.scope ? SNIPER_ZOOM : 1;
+  // Binoculars pull back gently; a scope pulls back hard. Same easing either
+  // way, so raising either one is a movement rather than a jump.
+  const held = heldItemId();
+  const want = ITEMS[held ?? 'pistol']?.scope
+    ? SNIPER_ZOOM
+    : held === 'binoculars'
+      ? BINOCULAR_ZOOM
+      : 1;
   const step = (1 - SNIPER_ZOOM) * (dt / SCOPE_EASE_MS);
   scopeZoom = want < scopeZoom ? Math.max(want, scopeZoom - step) : Math.min(want, scopeZoom + step);
 }
@@ -684,7 +712,7 @@ function sendInputLoop() {
     shooting: input.shooting && !spectating && !wheel.open && !armedAbility,
     sprint: input.sprint,
     interact: input.interact && !spectating,
-    deploy: input.deploy && !spectating,
+    rightDown: input.rightDown && !spectating,
   });
   setTimeout(sendInputLoop, 1000 / 30);
 }
@@ -941,6 +969,10 @@ function render() {
     drawDoors(ctx, map.doors, doorStates, view);
     // Under the entities, so the officer stands on his own emplacement rather
     // than behind it.
+    // Under the bodies: officers pile out of it and stand in front of it.
+    drawPoliceCars(ctx, cars, view, now);
+    drawMines(ctx, mines, view, now);
+    drawBeaconTowers(ctx, towers, view, now);
     drawEmplacements(ctx, emplacements, view);
     drawFires(ctx, fires, view, now);
     drawPickups(ctx, pickups, view, now);
@@ -969,6 +1001,10 @@ function render() {
     drawEntity(ctx, s, isSelf, now, simpleEntities);
     // Flame licks over the top of the body, not under it.
     if (s.burning && !simpleEntities) drawBurning(ctx, s, now);
+    // The tracker's arrow orbits you, pointing at the nearest one.
+    if (isSelf && inventory && inventory.trackBearing !== null) {
+      drawTracker(ctx, s.x, s.y, inventory.trackBearing, now);
+    }
   }
   ctx.globalAlpha = 1;
   mark('entities');
@@ -979,6 +1015,7 @@ function render() {
   );
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
 
+  drawZaps(ctx, zaps, view, now);
   drawDucks(ctx, ducks, view);
   if (map) drawBushes(ctx, map.bushes, view);
 
@@ -1020,7 +1057,7 @@ function render() {
       drawWheel(
         ctx,
         wheel,
-        wheelOptions(following),
+        wheelOptions(following, towers.length > 0),
         (o) => abilityUsable(o.id),
         (o) => (o.id === "rally" ? rallyCharges : o.id === "follow" ? followCharges : null),
         now,
@@ -1038,7 +1075,7 @@ function render() {
       // Right-clicking off drains the bar rather than clearing it, and you
       // stay rooted while it does — so the gauge coming down is the thing
       // telling you why you still can't move.
-      const stowing = !input.deploy && inventory.deployProgress > 0;
+      const stowing = !inventory.deployWanted && inventory.deployProgress > 0;
       drawAimGauge(
         ctx,
         input.mouseX,
@@ -1049,7 +1086,7 @@ function render() {
           ? 'PACKING UP'
           : steady
             ? 'DEPLOYED — RIGHT-CLICK TO MOVE'
-            : input.deploy
+            : inventory.deployWanted
               ? 'PLANTING'
               : 'RIGHT-CLICK TO DEPLOY',
       );
@@ -1062,7 +1099,13 @@ function render() {
   const counts = `survivors ${survivors} · incubating ${infectedCount} · zombies ${zombieCount}`;
   hud.textContent = spectating
     ? `SPECTATING (WASD pan · shift faster · scroll zoom) — ${counts}`
-    : counts;
+    // The cure gun is the only thing that tells you about yourself. The server
+    // sends null unless one is in hand, so there is nothing to read otherwise.
+    : inventory?.selfInfected === true
+      ? `${counts} · YOU ARE INFECTED`
+      : inventory?.selfInfected === false
+        ? `${counts} · you are clean`
+        : counts;
 
   // Perf readout: client frame rate, worst frame in the last second, and the
   // server's tick cost against its 33.3ms budget.

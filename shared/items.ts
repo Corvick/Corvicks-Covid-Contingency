@@ -2,6 +2,7 @@ import { CHARGE_BARS } from './constants.js';
 
 export type ItemId =
   | 'pistol'
+  | 'dualPistols'
   | 'machineGun'
   | 'shotgun'
   | 'boltRifle'
@@ -17,7 +18,17 @@ export type ItemId =
   | 'smokeGrenade'
   | 'pocketGunner'
   | 'grenadeLauncher'
-  | 'ammoBox';
+  | 'ammoBox'
+  | 'zombieTracker'
+  | 'binoculars'
+  | 'combatBoots'
+  | 'grenade'
+  | 'gunsling'
+  | 'backpack'
+  | 'radio'
+  | 'zapMine'
+  | 'thermalGoggles'
+  | 'survivorBeacon';
 
 export type ItemKind = 'gun' | 'utility';
 
@@ -85,11 +96,28 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     label: 'Pistol',
     short: 'PSTL',
     color: '#cbd5e1',
-    rarity: 0, // never spawns on the ground; you always have it
+    // You always have one, so finding a second is not a gun — it is the other
+    // hand. `collect` turns it into `dualPistols` in slot 0 rather than taking
+    // a slot, which is why this spawns but is excluded from the every-gun floor.
+    rarity: 2,
     damageMin: 15,
     damageMax: 25,
     bloom: 0.06,
     cooldownMs: 1000,
+    range: 720,
+  },
+  dualPistols: {
+    id: 'dualPistols',
+    kind: 'gun',
+    label: 'Dual Pistols',
+    short: 'DUAL',
+    color: '#e2e8f0',
+    rarity: 0, // never loot: it is what slot 0 becomes
+    damageMin: 15,
+    damageMax: 25,
+    // Alternating hands: the same round, about twice as often, and looser.
+    bloom: 0.1,
+    cooldownMs: 480,
     range: 720,
   },
   machineGun: {
@@ -185,6 +213,10 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     automatic: true,
     // From the hip it only lands anything at close quarters.
     botIdealRange: 400,
+    // Heavier to swing than the flamethrower, but only off the pegs — a
+    // planted bipod traverses freely, which is part of what you get for
+    // committing to it. `steerAim` makes that exception.
+    turnRate: 2.0,
     deployable: true,
     deployedBloom: 0.018,
   },
@@ -219,7 +251,9 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     bloom: 0.06,
     cooldownMs: 55,
     range: 340,
-    ammo: 900,
+    // Cut back: a flamethrower you can hold down for half a minute is one
+    // that never asks you to pick your moment.
+    ammo: 560,
     automatic: true,
     // Heavy, awkward, and slow to bring round. Sweeping a street with it is
     // meant to be a commitment rather than a flick of the wrist.
@@ -262,7 +296,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     rarity: 0,
     cooldownMs: 1600,
     range: 360,
-    ammo: 10,
+    // Five shells. It is the best thing in the city; it should run out.
+    ammo: 5,
     explosive: true,
     // Its damage lives in the blast, so ranking it on damageMin scores it zero
     // and bots walked straight past the best weapon in the city.
@@ -318,12 +353,103 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     color: '#ef4444',
     rarity: 0,
   },
+  zombieTracker: {
+    id: 'zombieTracker',
+    kind: 'utility',
+    label: 'Zombie Tracker',
+    short: 'TRACK',
+    color: '#f87171',
+    rarity: 3,
+  },
+  binoculars: {
+    id: 'binoculars',
+    kind: 'utility',
+    label: 'Binoculars',
+    short: 'BINOC',
+    color: '#7dd3fc',
+    rarity: 3,
+  },
+  combatBoots: {
+    id: 'combatBoots',
+    kind: 'utility',
+    label: 'Combat Boots',
+    short: 'BOOTS',
+    color: '#a16207',
+    rarity: 3,
+  },
+  grenade: {
+    id: 'grenade',
+    kind: 'utility',
+    label: 'Grenades',
+    short: 'FRAG',
+    color: '#65a30d',
+    rarity: 3,
+  },
+  gunsling: {
+    id: 'gunsling',
+    kind: 'utility',
+    label: 'Gunsling',
+    short: 'SLING',
+    color: '#d97706',
+    rarity: 2,
+  },
+  survivorBeacon: {
+    id: 'survivorBeacon',
+    kind: 'utility',
+    label: 'Survivor Beacon',
+    short: 'BCON',
+    color: '#facc15',
+    rarity: 2,
+  },
+  thermalGoggles: {
+    id: 'thermalGoggles',
+    kind: 'utility',
+    label: 'Thermal Goggles',
+    short: 'THRM',
+    color: '#fb923c',
+    rarity: 2,
+  },
+  zapMine: {
+    id: 'zapMine',
+    kind: 'utility',
+    label: 'Zap Mines',
+    short: 'MINE',
+    color: '#22d3ee',
+    rarity: 3,
+  },
+  radio: {
+    id: 'radio',
+    kind: 'utility',
+    label: 'Hand Radio',
+    short: 'RADIO',
+    color: '#38bdf8',
+    rarity: 2,
+  },
+  backpack: {
+    id: 'backpack',
+    kind: 'utility',
+    label: 'Backpack',
+    short: 'PACK',
+    color: '#78716c',
+    rarity: 2,
+  },
 };
 
-/** Everything that can turn up as loot, expanded by rarity weight. */
-export const LOOT_TABLE: ItemId[] = (Object.keys(ITEMS) as ItemId[]).flatMap((id) =>
-  Array<ItemId>(ITEMS[id].rarity).fill(id),
-);
+/**
+ * Guns and utilities are drawn from separate tables, because a building rolls
+ * for one of each. They used to compete for the single item a house could
+ * hold, so a house with a rifle in it never had a vest as well.
+ *
+ * Both are expanded by rarity weight; rarity 0 keeps something out entirely,
+ * which is how the one-offs and `dualPistols` stay off the floor.
+ */
+const weighted = (kind: ItemKind): ItemId[] =>
+  (Object.keys(ITEMS) as ItemId[])
+    .filter((id) => ITEMS[id].kind === kind)
+    .flatMap((id) => Array<ItemId>(ITEMS[id].rarity).fill(id));
+
+export const GUN_LOOT: ItemId[] = weighted('gun');
+export const UTILITY_LOOT: ItemId[] = weighted('utility');
 
 export function isGun(id: ItemId): boolean {
   return ITEMS[id].kind === 'gun';

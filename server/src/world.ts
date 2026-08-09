@@ -87,6 +87,8 @@ import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
 import type { Emplacement } from './emplacement.js';
+import type { PoliceCar } from './police.js';
+import type { Mine } from './mines.js';
 import type { FirePatch } from './fire.js';
 
 export interface Entity extends EntityState {
@@ -319,6 +321,12 @@ export interface AiState {
   /** Runs to whoever has a gun rather than to a door. */
   officerSeeker: boolean;
   /**
+   * An officer this one is sticking with. Set on the crew a radio call sends,
+   * and on any grey officer within earshot while the radio is actually out —
+   * the difference being that the crew keep it and the locals don't.
+   */
+  escortId: string | null;
+  /**
    * Caught indoors with one of them, retreats deeper into the building and
    * bolts a door behind rather than running for the street past it.
    */
@@ -370,8 +378,8 @@ export interface Command {
   shooting: boolean;
   sprint: boolean;
   interact: boolean;
-  /** Right mouse: wants the bipod down. Only the heavy MG has one. */
-  deploy: boolean;
+  /** Right mouse, raw. The server works out whether it was a tap or a hold. */
+  rightDown: boolean;
 }
 
 export interface World {
@@ -422,6 +430,17 @@ export interface World {
    */
   stowing: Map<string, { at: number; from: number }>;
   /**
+   * Right mouse, resolved server-side into a tap or a hold the way E is at a
+   * door. `rightHeld` is when the button went down, `rightSpent` latches a
+   * hold so it fires once per press, and `deployWanted` is the bipod toggle
+   * that used to live on the client.
+   */
+  rightHeld: Map<string, number>;
+  rightSpent: Set<string>;
+  deployWanted: Set<string>;
+  /** Earliest each officer may bash again. */
+  bashReadyAt: Map<string, number>;
+  /**
    * Where each officer is actually pointing, as against where their mouse is.
    * A weapon with a turnRate swings at a limited rate and the body follows;
    * everything else keeps this equal to the mouse.
@@ -468,7 +487,7 @@ export interface World {
   /** id -> when a materialising entity finishes fading in. */
   materializeUntil: Map<string, number>;
   /** id -> active speech bubble. */
-  speech: Map<string, { text: string; until: number }>;
+  speech: Map<string, { text: string; until: number; radio?: boolean }>;
   /** Remaining rally shouts per player. */
   rallyCharges: Map<string, number>;
   /** Remaining follow commands, and who currently has people in tow. */
@@ -490,6 +509,22 @@ export interface World {
   bots: Set<string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
+  /** Survivor beacons standing in the city. Placed, then pointed at. */
+  towers: Array<{ x: number; y: number }>;
+  /** Zap mines waiting on the ground, and the crackle when one goes. */
+  mines: Map<string, Mine>;
+  zaps: Array<{ x: number; y: number; at: number }>;
+  /**
+   * Zombies a mine has dropped: id -> when they come round. They are folded
+   * into the frozen set, so the AI skips them entirely rather than each
+   * branch having to remember to check.
+   */
+  stunned: Map<string, number>;
+  /** Squad cars answering the radio, and the crackle back from the handset. */
+  cars: Map<string, PoliceCar>;
+  radioReplies: Array<{ id: string; at: number }>;
+  /** Next time to check who is holding a radio. Rarely anybody, so it's slow. */
+  nextRadioScan: number;
   /** Deployed pocket gunners, keyed by the officer manning each one. */
   emplacements: Map<string, Emplacement>;
   /** Ground still alight, and who is on fire until when. */
@@ -675,6 +710,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     searchBuilding: -1,
     streetSince: 0,
     officerSeeker: Math.random() < OFFICER_SEEK_CHANCE,
+    escortId: null,
     barricades: Math.random() < BARRICADE_CHANCE,
     followsCrowd: Math.random() < FOLLOW_CROWD_CHANCE,
     crowdHeading: 0,
@@ -949,6 +985,10 @@ export function createWorld(): World {
     lastShotAt: new Map(),
     deployStart: new Map(),
     stowing: new Map(),
+    rightHeld: new Map(),
+    rightSpent: new Set(),
+    deployWanted: new Set(),
+    bashReadyAt: new Map(),
     aimHeading: new Map(),
     chargeSince: new Map(),
     stamina: new Map(),
@@ -976,6 +1016,13 @@ export function createWorld(): World {
     soldiers: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
+    towers: [],
+    mines: new Map(),
+    zaps: [],
+    stunned: new Map(),
+    cars: new Map(),
+    radioReplies: [],
+    nextRadioScan: 0,
     emplacements: new Map(),
     fires: [],
     burning: new Map(),
@@ -1041,6 +1088,17 @@ export function resetWorld(world: World): void {
   world.lastShotAt.clear();
   world.deployStart.clear();
   world.stowing.clear();
+  world.rightHeld.clear();
+  world.rightSpent.clear();
+  world.deployWanted.clear();
+  world.bashReadyAt.clear();
+  world.cars.clear();
+  world.towers.length = 0;
+  world.mines.clear();
+  world.zaps.length = 0;
+  world.stunned.clear();
+  world.radioReplies.length = 0;
+  world.nextRadioScan = 0;
   world.aimHeading.clear();
   world.chargeSince.clear();
   world.shots.length = 0;
@@ -1435,6 +1493,10 @@ export function toWire(
   if (ai && now < ai.breakingUntil) state.breaking = true;
   const worn = world.inventories.get(e.id);
   if (worn && worn.kevlar > 0) state.armour = true;
+  // Which way the shield faces is the whole of how it works, so it has to be
+  // visible on the body rather than only in the HUD.
+  if (worn && worn.shield > 0) state.shield = worn.shieldUp ? 1 : -1;
+  if (world.stunned.has(e.id)) state.stunned = true;
 
   const line = world.speech.get(e.id);
   if (line !== undefined) {

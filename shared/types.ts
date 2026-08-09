@@ -28,6 +28,19 @@ export interface EntityState {
   say?: string;
   /** Wearing kevlar — drawn as a grey band inside the body. */
   armour?: boolean;
+  /** Dropped by a zap mine and going nowhere. */
+  stunned?: boolean;
+  /**
+   * Seen only through thermal goggles — through a wall or a hedge. Drawn as a
+   * heat blob rather than a body, because you have not actually laid eyes on
+   * it and it should not read as though you have.
+   */
+  thermal?: boolean;
+  /**
+   * Carrying a riot shield, and which way it faces: +1 in front, -1 slung on
+   * the back. Absent for everyone else.
+   */
+  shield?: number;
   /** Tearing at a door — the client claws its arms at it. */
   breaking?: boolean;
   /** Alight: the client wreathes it in flame. */
@@ -94,6 +107,29 @@ export interface SpeechState {
   x: number;
   y: number;
   text: string;
+  /** Crackling out of a handset rather than out of a mouth: drawn jagged. */
+  radio?: boolean;
+}
+
+/** A survivor beacon: a small mast people can be sent to. */
+export interface BeaconState {
+  x: number;
+  y: number;
+}
+
+/** A zap mine on the ground: a dark disc until it arms, then a live one. */
+export interface MineState {
+  x: number;
+  y: number;
+  armed: boolean;
+}
+
+/** A squad car answering the radio. Scenery once it has parked and emptied. */
+export interface PoliceCarState {
+  x: number;
+  y: number;
+  facing: number;
+  parked: boolean;
 }
 
 /** What pressing or holding E would do to the door you're stood at. */
@@ -296,7 +332,7 @@ export interface LobbyView {
   spectators: string[];
 }
 
-export type AbilityId = 'rally' | 'follow' | 'wait';
+export type AbilityId = 'rally' | 'follow' | 'wait' | 'beacon';
 
 /** A lootable item lying on the floor. */
 export interface PickupState {
@@ -325,15 +361,40 @@ export interface InventoryState {
   utilities: ItemId[];
   activeSlot: number;
   kevlar: number;
-  shield: boolean;
+  /** Riot shield charges left, 0 for none. */
+  shield: number;
+  /** Up in front rather than slung on the back. */
+  shieldUp: boolean;
+  /** Slot 0 is a pair. */
+  dual: boolean;
+  /** Frags left in the bundle. */
+  grenades: number;
+  /** Mines left in the bundle. */
+  mines: number;
+  /** How many of each kind of slot this bag can use, sling and pack included. */
+  gunSlots: number;
+  utilitySlots: number;
   /** 0-1 while holding E to drop; -1 when not dropping. */
   dropProgress: number;
   /** Pickup within reach, if any — drives the "press E" prompt. */
   nearbyItem: ItemId | null;
   /** Bipod: -1 not deployable, 0-1 planting, 1 steady. */
   deployProgress: number;
+  /**
+   * Whether the bipod is wanted down. The toggle lives on the server now that
+   * right-click is resolved there, so the HUD has to be told rather than
+   * keeping its own copy and drifting out of step with it.
+   */
+  deployWanted: boolean;
   /** Charge rifle wind-up: -1 when not charging, else 0-1. */
   chargeProgress: number;
+  /** Bearing to the nearest zombie while the tracker is out, else null. */
+  trackBearing: number | null;
+  /**
+   * Whether *you* are incubating. Null unless a cure gun is in hand — the
+   * server simply never sends it otherwise, so there is nothing to read.
+   */
+  selfInfected: boolean | null;
 }
 
 export type ClientMessage =
@@ -353,7 +414,7 @@ export type ClientMessage =
       /** True while E is held — a tap collects, a hold drops. */
       interact: boolean;
       /** Right mouse toggle: plant the heavy MG's bipod. */
-      deploy: boolean;
+      rightDown: boolean;
     }
   | { type: 'ability'; ability: AbilityId; x: number; y: number }
   | { type: 'selectSlot'; slot: number }
@@ -433,6 +494,10 @@ export type ServerMessage =
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */
       emplacements: EmplacementState[];
+      cars: PoliceCarState[];
+      mines: MineState[];
+      towers: BeaconState[];
+      zaps: Array<{ x: number; y: number; at: number }>;
       /** Ground still burning. */
       fires: FireState[];
       helicopters: HelicopterState[];

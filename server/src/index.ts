@@ -15,6 +15,8 @@ import {
   nearestPickup,
   newInventory,
   toWireInventory,
+  gunSlots,
+  utilitySlots,
 } from './inventory.js';
 import { ITEMS } from '../../shared/items.js';
 import { grenadesToWire, helicoptersToWire, smokesToWire, updateAirSupport } from './heli.js';
@@ -45,6 +47,14 @@ import {
   BLAST_MS,
   TAP_MAX_MS,
   SNIPER_SIGHT_RADIUS,
+  BINOCULAR_SIGHT_RADIUS,
+  THERMAL_RANGE,
+  BEACON_SHOUT,
+  BEACON_SHOUT_MS,
+  BEACON_CALL_RADIUS,
+  BOOTS_SPEED_MUL,
+  BOOTS_STAMINA_MUL,
+  GUNSLING_SLOTS,
 } from '../../shared/constants.js';
 import {
   countSurvivors,
@@ -74,6 +84,8 @@ import {
   updateEmplacements,
 } from './emplacement.js';
 import { firesToWire, updateFires } from './fire.js';
+import { carsToWire, updatePoliceCars } from './police.js';
+import { minesToWire, updateMines } from './mines.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 import {
   anyRunning,
@@ -137,7 +149,7 @@ function spawnPlayer(id: string): void {
     shooting: false,
     sprint: false,
     interact: false,
-    deploy: false,
+    rightDown: false,
   });
   world.inventories.set(id, newInventory());
   world.stamina.set(id, STAMINA_MAX);
@@ -255,11 +267,13 @@ wss.on('connection', (socket) => {
           shooting: msg.shooting,
           sprint: msg.sprint,
           interact: msg.interact,
-          deploy: msg.deploy,
+          rightDown: msg.rightDown,
         });
       } else if (msg.type === 'selectSlot') {
         const inv = world.inventories.get(id);
-        if (inv && msg.slot >= 0 && msg.slot <= GUN_SLOTS + UTILITY_SLOTS) {
+        // The top of the range moves with the sling and the pack, so a slot
+        // only a backpack opened up is selectable while the pack is in the bag.
+        if (inv && msg.slot >= 0 && msg.slot <= gunSlots(inv) + utilitySlots(inv)) {
           inv.activeSlot = msg.slot;
         }
       } else if (msg.type === 'ability' && msg.ability === 'follow') {
@@ -297,6 +311,18 @@ wss.on('connection', (socket) => {
           console.log(`[server] ${id} rallied ${moved} civilians`);
         } else {
           world.speech.set(id, { text: RALLY_NO_CHARGE_LINE, until: now + RALLY_NO_CHARGE_MS });
+        }
+      } else if (msg.type === 'ability' && msg.ability === 'beacon') {
+        // Unlike the rally shout, this costs nothing and can be given again
+        // and again: the mast is a fixed place on the map, so the order is
+        // "go there", not "go to the spot I just picked".
+        const officer = world.entities.get(id);
+        const now = Date.now();
+        const tower = nearestTower(officer);
+        if (officer && officer.type === 'officer' && tower) {
+          world.speech.set(id, { text: BEACON_SHOUT, until: now + BEACON_SHOUT_MS });
+          const moved = rallyHumans(world, officer.x, officer.y, tower.x, tower.y);
+          console.log(`[server] ${id} sent ${moved} civilians to the beacon`);
         }
       } else if (msg.type === 'spectate') {
         // Normally a fresh game to watch; `restart: false` drops into the one
@@ -430,7 +456,7 @@ wss.on('connection', (socket) => {
   });
 });
 
-function updatePlayers(dt: number, frozen: Set<string>): void {
+function updatePlayers(dt: number, frozen: Set<string>, now: number): void {
   for (const id of world.playerIds) {
     const entity = world.entities.get(id);
     const command = world.commands.get(id);
@@ -440,7 +466,7 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
     // walks. A weapon with a `turnRate` swings slowly and drags the body round
     // with it, so this is the one value both the drawn facing and the shot
     // direction come from — worked out here, before anything fires.
-    if (entity.type === 'officer') entity.facing = steerAim(world, id, command.aim, dt);
+    if (entity.type === 'officer') entity.facing = steerAim(world, id, command.aim, dt, now);
 
     let dx = 0;
     let dy = 0;
@@ -459,12 +485,17 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
     // Stamina drains only while actually sprinting, and refills otherwise.
     // Running it dry latches an exhausted state that only clears once the bar
     // has climbed back past STAMINA_RECOVERY_THRESHOLD.
+    // Boots are worn, not held: carrying them is enough. They are quicker and
+    // cheaper on the legs, which is what a whole utility slot buys.
+    const inv = world.inventories.get(id);
+    const booted = inv !== undefined && inv.utilities.includes('combatBoots');
+
     let stamina = world.stamina.get(id) ?? STAMINA_MAX;
     const locked = world.exhausted.has(id);
     const wantsSprint = command.sprint && moving && !locked && stamina > STAMINA_SPRINT_FLOOR;
 
     if (wantsSprint) {
-      stamina = Math.max(0, stamina - STAMINA_DRAIN_PER_SEC * dt);
+      stamina = Math.max(0, stamina - STAMINA_DRAIN_PER_SEC * (booted ? BOOTS_STAMINA_MUL : 1) * dt);
       if (stamina <= STAMINA_SPRINT_FLOOR) world.exhausted.add(id);
     } else {
       stamina = Math.min(STAMINA_MAX, stamina + STAMINA_REGEN_PER_SEC * dt);
@@ -475,7 +506,7 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
     if (!moving) continue;
 
     const len = Math.hypot(dx, dy);
-    const base = PLAYER_SPEED * (wantsSprint ? SPRINT_MULTIPLIER : 1);
+    const base = PLAYER_SPEED * (wantsSprint ? SPRINT_MULTIPLIER : 1) * (booted ? BOOTS_SPEED_MUL : 1);
     const speed = speedAt(world, entity.x, entity.y, base);
     entity.x += (dx / len) * speed * dt;
     entity.y += (dy / len) * speed * dt;
@@ -492,7 +523,26 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
 function sightRadiusFor(viewer: Entity): number {
   const inv = world.inventories.get(viewer.id);
   const held = inv ? heldItem(inv) : null;
-  return held && ITEMS[held]?.scope ? SNIPER_SIGHT_RADIUS : PLAYER_SIGHT_RADIUS;
+  if (held && ITEMS[held]?.scope) return SNIPER_SIGHT_RADIUS;
+  // Binoculars pull the camera back the way a scope does, so the server has to
+  // send the ground you can now see or you would be looking at empty fog.
+  if (held === 'binoculars') return BINOCULAR_SIGHT_RADIUS;
+  return PLAYER_SIGHT_RADIUS;
+}
+
+/** The mast this officer would be pointing at: the nearest one in earshot. */
+function nearestTower(officer: Entity | undefined): { x: number; y: number } | null {
+  if (!officer) return null;
+  let best: { x: number; y: number } | null = null;
+  let bestDist = BEACON_CALL_RADIUS;
+  for (const t of world.towers) {
+    const d = Math.hypot(t.x - officer.x, t.y - officer.y);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return best;
 }
 
 function visibleTo(viewer: Entity, now: number): EntityState[] {
@@ -503,14 +553,35 @@ function visibleTo(viewer: Entity, now: number): EntityState[] {
   const carriesCure = inv ? inv.guns.some((g) => g?.item === 'cureGun') : false;
   const reveal = viewer.type === 'zombie' || carriesCure;
   const sight = sightRadiusFor(viewer);
+
+  /**
+   * Thermal goggles are a deliberate, narrow hole in server-enforced fog —
+   * the one place anything is sent that the viewer cannot see.
+   *
+   * Kept as tight as it can be and still do the job: **zombies only**, inside
+   * their own short radius, and flagged so the client draws a heat blob rather
+   * than a body. Nothing else about the fog rule bends, so a wallhack for
+   * survivors or loot is still impossible by construction.
+   */
+  const held = inv ? heldItem(inv) : null;
+  const thermal = held === 'thermalGoggles' ? THERMAL_RANGE : 0;
+
   for (const other of world.entities.values()) {
     if (other.id === viewer.id) {
       out.push(toWire(world, other, reveal, now));
       continue;
     }
-    if (Math.hypot(other.x - viewer.x, other.y - viewer.y) > sight) continue;
-    if (!hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y)) continue;
-    out.push(toWire(world, other, reveal, now));
+    const dist = Math.hypot(other.x - viewer.x, other.y - viewer.y);
+    const seen = dist <= sight && hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y);
+    if (seen) {
+      out.push(toWire(world, other, reveal, now));
+      continue;
+    }
+    if (thermal > 0 && other.type === 'zombie' && dist <= thermal) {
+      const state = toWire(world, other, reveal, now);
+      state.thermal = true;
+      out.push(state);
+    }
   }
   return out;
 }
@@ -617,7 +688,7 @@ function tick(): void {
     rebuildEntityGrid(world);
     const frozen = computeFrozen(world);
 
-    updatePlayers(dt, frozen);
+    updatePlayers(dt, frozen, now);
     updateAi(world, now, dt, frozen);
     resolveCollisions(world);
     // Sandbags are deliberately not in the nav grid — like doors, routes are
@@ -630,6 +701,8 @@ function tick(): void {
     processInteractions(now);
     processShooting(world, now, frozen);
     updateAirSupport(world, now, dt);
+    updatePoliceCars(world, now, dt);
+    updateMines(world, now);
     updateDucks(world, now, dt);
     updateFires(world, now, dt);
   }
@@ -670,7 +743,12 @@ function tick(): void {
     }
     const speaker = world.entities.get(id);
     if (!speaker) continue;
-    speech.push({ x: Math.round(speaker.x), y: Math.round(speaker.y), text: line.text });
+    speech.push({
+      x: Math.round(speaker.x),
+      y: Math.round(speaker.y),
+      text: line.text,
+      ...(line.radio ? { radio: true } : {}),
+    });
   }
 
   // Once only a handful of humans are left, point the way to each of them.
@@ -710,6 +788,10 @@ function tick(): void {
       blasts: airBlasts,
       ducks: ducksToWire(world),
       emplacements: emplacementsToWire(world),
+    cars: carsToWire(world),
+    mines: minesToWire(world, now),
+    towers: world.towers,
+    zaps: world.zaps,
       fires: firesToWire(world, now),
       helicopters: airHelis,
       spectating,

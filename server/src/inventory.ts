@@ -1,13 +1,21 @@
 import type { GunSlot, InventoryState, PickupState } from '../../shared/types.js';
-import { ITEMS, LOOT_TABLE, isGun, type ItemId } from '../../shared/items.js';
+import { GUN_LOOT, ITEMS, UTILITY_LOOT, isGun, type ItemId } from '../../shared/items.js';
 import {
   GUN_SLOTS,
   UTILITY_SLOTS,
   PICKUP_REACH,
   DROP_HOLD_MS,
   KEVLAR_POINTS,
+  SHIELD_POINTS,
   RALLY_STARTING_CHARGES,
-  BUILDING_LOOT_CHANCE,
+  BUILDING_GUN_CHANCE,
+  BUILDING_UTILITY_CHANCE,
+  LOOT_MIN_GAP,
+  GRENADE_COUNT,
+  ZAP_MINE_COUNT,
+  BACKPACK_SLOTS,
+  GUNSLING_SLOTS,
+  TRACKER_RANGE,
   TEST_DROP_ALL_ITEMS,
   TEST_DROP_RADIUS,
   ONE_OFF_ITEMS,
@@ -16,13 +24,29 @@ import {
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
+import { callBackup } from './police.js';
 
 export interface Inventory {
+  /**
+   * Always `GUN_SLOTS + GUNSLING_SLOTS` long. How many of them you may
+   * actually use is `gunSlots()` — the last one only opens up while a gunsling
+   * is in the bag, and the array is kept at full length so nothing has to be
+   * resized when the sling is picked up or dropped.
+   */
   guns: Array<GunSlot | null>;
   utilities: ItemId[];
   activeSlot: number;
   kevlar: number;
-  shield: boolean;
+  /** Riot shield charges left, or 0 for no shield. */
+  shield: number;
+  /** In front of you rather than slung on your back. */
+  shieldUp: boolean;
+  /** Found a second pistol: slot 0 is a pair now, and still never runs out. */
+  dual: boolean;
+  /** Frags left. Like kevlar, the slot clears itself once they're gone. */
+  grenades: number;
+  /** Mines left, same bundle-in-one-slot arrangement. */
+  mines: number;
   /** When E was pressed down, or null while released. */
   holdSince: number | null;
   /** Suppresses the tap-to-collect once a hold has already dropped something. */
@@ -31,14 +55,28 @@ export interface Inventory {
 
 export function newInventory(): Inventory {
   return {
-    guns: Array(GUN_SLOTS).fill(null),
+    guns: Array(GUN_SLOTS + GUNSLING_SLOTS).fill(null),
     utilities: [],
     activeSlot: 0,
     kevlar: 0,
-    shield: false,
+    shield: 0,
+    shieldUp: false,
+    dual: false,
+    grenades: 0,
+    mines: 0,
     holdSince: null,
     holdConsumed: false,
   };
+}
+
+/** Gun slots this bag can use right now — three, or four with a sling. */
+export function gunSlots(inv: Inventory): number {
+  return GUN_SLOTS + (inv.utilities.includes('gunsling') ? GUNSLING_SLOTS : 0);
+}
+
+/** Utility slots this bag can use right now. The pack pays for its own slot. */
+export function utilitySlots(inv: Inventory): number {
+  return UTILITY_SLOTS + (inv.utilities.includes('backpack') ? BACKPACK_SLOTS : 0);
 }
 
 /** Scatter loot through the city. Most buildings come up empty. */
@@ -62,28 +100,54 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
     n = ids.length;
   }
 
-  for (const b of world.map.buildings) {
-    if (Math.random() > BUILDING_LOOT_CHANCE) continue;
-
-    const item = LOOT_TABLE[Math.floor(Math.random() * LOOT_TABLE.length)];
-    // Keep it off the walls, and inside the real footprint rather than the
-    // bounding box — an L-shaped building's notch is outdoors.
+  /**
+   * Drop one item somewhere inside this building. Kept off the walls and
+   * inside the real footprint rather than the bounding box — an L-shaped
+   * building's notch is outdoors — and never on top of something already
+   * lying there, since a house can hold more than one thing now.
+   */
+  const placeIn = (b: (typeof world.map.buildings)[number], item: ItemId): void => {
     for (let attempt = 0; attempt < 18; attempt++) {
       const rect = b.rects[Math.floor(Math.random() * b.rects.length)];
-      if (!rect) break;
+      if (!rect) return;
       const x = rect.x + 18 + Math.random() * Math.max(1, rect.w - 36);
       const y = rect.y + 6 + Math.random() * Math.max(1, rect.h - 12);
       if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+      let crowded = false;
+      for (const p of world.pickups.values()) {
+        if (Math.hypot(p.x - x, p.y - y) < LOOT_MIN_GAP) {
+          crowded = true;
+          break;
+        }
+      }
+      if (crowded) continue;
       const id = `loot-${n++}`;
       world.pickups.set(id, { id, item, x, y });
-      break;
+      return;
+    }
+  };
+
+  // A house rolls for a gun and, separately, for something to go with it.
+  // They used to compete for the single item a building could hold, which is
+  // why a house with a rifle in it never also had a vest.
+  for (const b of world.map.buildings) {
+    if (Math.random() < BUILDING_GUN_CHANCE) {
+      placeIn(b, GUN_LOOT[Math.floor(Math.random() * GUN_LOOT.length)]);
+    }
+    if (Math.random() < BUILDING_UTILITY_CHANCE) {
+      placeIn(b, UTILITY_LOOT[Math.floor(Math.random() * UTILITY_LOOT.length)]);
     }
   }
 
   // Spots that may be taken over by a placed item — anything already placed by
-  // hand is off limits, or the second placement would eat the first.
+  // hand is off limits, or the second placement would eat the first. The debug
+  // pile is off limits too: it sits at the player's feet rather than in a
+  // building, and counting it would have the every-gun floor satisfied by a
+  // heap of test items and never place anything in the city at all.
   const placed = new Set<ItemId>([...ONE_OFF_ITEMS, ...GUARANTEED_ITEMS]);
-  const freeSpots = () => Array.from(world.pickups.values()).filter((p) => !placed.has(p.item));
+  const inACity = (p: PickupState) => !p.id.startsWith('loot-test-');
+  const freeSpots = () =>
+    Array.from(world.pickups.values()).filter((p) => inACity(p) && !placed.has(p.item));
 
   // Exactly one of each one-off item, placed by taking over an ordinary loot
   // spot. They are out of the loot table entirely, so this is the only way
@@ -112,7 +176,7 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
   for (const item of new Set<ItemId>([...GUARANTEED_ITEMS, ...everyGun])) {
     let already = false;
     for (const p of world.pickups.values()) {
-      if (p.item === item) {
+      if (inACity(p) && p.item === item) {
         already = true;
         break;
       }
@@ -142,13 +206,16 @@ export function nearestPickup(world: World, x: number, y: number): PickupState |
 
 /** The item currently in hand, or null when the active slot is empty. */
 export function heldItem(inv: Inventory): ItemId | null {
-  if (inv.activeSlot === 0) return 'pistol';
-  if (inv.activeSlot <= GUN_SLOTS) return inv.guns[inv.activeSlot - 1]?.item ?? null;
-  return inv.utilities[inv.activeSlot - GUN_SLOTS - 1] ?? null;
+  if (inv.activeSlot === 0) return inv.dual ? 'dualPistols' : 'pistol';
+  if (inv.activeSlot <= gunSlots(inv)) return inv.guns[inv.activeSlot - 1]?.item ?? null;
+  // Numbering is contiguous, so a gunsling shifts the utilities along by one
+  // — and the HUD renumbers with it, so what is on screen is what the key
+  // selects. Keyed off the live count, not the constant, for that reason.
+  return inv.utilities[inv.activeSlot - gunSlots(inv) - 1] ?? null;
 }
 
 export function heldGunSlot(inv: Inventory): GunSlot | null {
-  if (inv.activeSlot === 0 || inv.activeSlot > GUN_SLOTS) return null;
+  if (inv.activeSlot === 0 || inv.activeSlot > gunSlots(inv)) return null;
   return inv.guns[inv.activeSlot - 1];
 }
 
@@ -187,11 +254,36 @@ function applyUtility(world: World, playerId: string, inv: Inventory, item: Item
     inv.kevlar = KEVLAR_POINTS;
     return 'carry';
   }
-  if (item === 'riotShield') {
-    inv.shield = true;
-    return 'used';
+  // Worn like the vest, and like the vest it costs a slot for as long as it
+  // lasts. It goes up the moment you pick it up — a shield on your back is a
+  // decision, not a default.
+  // The radio calls a car in the moment it is picked up, and then keeps
+  // working as long as you hold it out. One call per radio.
+  if (item === 'radio') {
+    callBackup(world, world.entities.get(playerId)!, Date.now());
+    return 'carry';
   }
-  return 'carry'; // smoke grenade, and anything else you hold on to
+  if (item === 'riotShield') {
+    inv.shield = SHIELD_POINTS;
+    inv.shieldUp = true;
+    return 'carry';
+  }
+  // Grenades come as a bundle and count down like kevlar does, so three of
+  // them cost one slot rather than three.
+  if (item === 'grenade') {
+    inv.grenades += GRENADE_COUNT;
+    return inv.utilities.includes('grenade') ? 'used' : 'carry';
+  }
+  if (item === 'zapMine') {
+    inv.mines += ZAP_MINE_COUNT;
+    return inv.utilities.includes('zapMine') ? 'used' : 'carry';
+  }
+  // One sling and one pack is all a person can wear. A second of either is
+  // dead weight, so it stays on the floor rather than eating a slot.
+  if ((item === 'gunsling' || item === 'backpack') && inv.utilities.includes(item)) {
+    return 'refuse';
+  }
+  return 'carry'; // boots, binoculars, tracker, smoke, and anything else worn
 }
 
 /**
@@ -218,6 +310,17 @@ export function collect(
 
   const def = ITEMS[pickup.item];
 
+  // The shield and the heavy MG both claim right-click, and the shield's claim
+  // doesn't depend on what is in your hands — it is worn, not held. Rather than
+  // leave one of them quietly broken, you carry one or the other. Refusing at
+  // pickup means nothing downstream ever has to cope with both.
+  if (pickup.item === 'riotShield' && inv.guns.some((g) => g?.item === 'heavyMg')) {
+    return 'no hand free for a shield with the heavy MG';
+  }
+  if (pickup.item === 'heavyMg' && inv.shield > 0) {
+    return 'not while you are carrying the shield';
+  }
+
   if (def.kind === 'utility') {
     const outcome = applyUtility(world, playerId, inv, pickup.item);
     if (outcome === 'refuse') return 'nothing that would use it';
@@ -225,10 +328,20 @@ export function collect(
       world.pickups.delete(pickup.id);
       return `used ${def.label}`;
     }
-    if (inv.utilities.length >= UTILITY_SLOTS) return 'utility slots full';
+    if (inv.utilities.length >= utilitySlots(inv)) return 'utility slots full';
     inv.utilities.push(pickup.item);
     world.pickups.delete(pickup.id);
     return `picked up ${def.label}`;
+  }
+
+  // A second pistol isn't a gun, it's the other hand. It costs no slot and
+  // upgrades the one you can never lose, so the sidearm stops being purely
+  // the thing you fall back to when everything else is dry.
+  if (pickup.item === 'pistol') {
+    if (inv.dual) return 'already holding a pair';
+    inv.dual = true;
+    world.pickups.delete(pickup.id);
+    return 'paired up — dual pistols';
   }
 
   // A gun that was dropped keeps whatever was left in it; one that spawned in
@@ -248,7 +361,7 @@ export function collect(
     return `stripped a ${def.label} for ${loaded} rounds`;
   }
 
-  const free = inv.guns.findIndex((g) => g === null);
+  const free = inv.guns.findIndex((g, i) => g === null && i < gunSlots(inv));
   if (free >= 0) {
     inv.guns[free] = { item: pickup.item, ammo: loaded };
     inv.activeSlot = free + 1;
@@ -279,19 +392,36 @@ export function collect(
 /** Hold E. Drops whatever is in hand; the pistol is bolted to slot 0. */
 export function dropHeld(world: World, inv: Inventory, x: number, y: number): string | null {
   const item = heldItem(inv);
-  if (!item || item === 'pistol') return null;
+  // Slot 0 is bolted down, pair or not.
+  if (!item || item === 'pistol' || item === 'dualPistols') return null;
+
+  // Taking the pack off with more in the bag than you can hold without it
+  // would have to spill something. Refusing is clearer than choosing for them.
+  if (item === 'backpack' && inv.utilities.length > utilitySlots(inv) - BACKPACK_SLOTS) {
+    return 'too full to take the pack off';
+  }
+  if (item === 'gunsling') {
+    const carried = inv.guns.filter((g) => g !== null).length;
+    if (carried > GUN_SLOTS) return 'unsling a gun first';
+  }
 
   // Guns go down with what was left in them, so an empty one stays empty on
   // the floor and reads as not worth the walk.
   const gunSlot = heldGunSlot(inv);
   const ammo = gunSlot ? gunSlot.ammo : undefined;
 
-  if (inv.activeSlot <= GUN_SLOTS) inv.guns[inv.activeSlot - 1] = null;
-  else inv.utilities.splice(inv.activeSlot - GUN_SLOTS - 1, 1);
+  if (inv.activeSlot <= gunSlots(inv)) inv.guns[inv.activeSlot - 1] = null;
+  else inv.utilities.splice(inv.activeSlot - gunSlots(inv) - 1, 1);
 
   // Worn kit is worn *because* the slot is occupied. Dropping the vest has to
   // take the protection with it, or you keep the armour and free the slot.
   if (item === 'kevlar') inv.kevlar = 0;
+  if (item === 'grenade') inv.grenades = 0;
+  if (item === 'zapMine') inv.mines = 0;
+  if (item === 'riotShield') {
+    inv.shield = 0;
+    inv.shieldUp = false;
+  }
 
   const id = `loot-drop-${Math.random().toString(36).slice(2, 9)}`;
   world.pickups.set(id, ammo === undefined ? { id, item, x, y } : { id, item, x, y, ammo });
@@ -302,8 +432,27 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
 export function dropProgress(inv: Inventory, now: number): number {
   if (inv.holdSince === null || inv.holdConsumed) return -1;
   const held = heldItem(inv);
-  if (!held || held === 'pistol') return -1;
+  if (!held || held === 'pistol' || held === 'dualPistols') return -1;
   return Math.min(1, (now - inv.holdSince) / DROP_HOLD_MS);
+}
+
+/**
+ * Bearing to the nearest zombie, or null. The tracker is the one thing that
+ * sees past the fog, which is the whole of what it is for — but only while it
+ * is actually in your hand, and only out to `TRACKER_RANGE`.
+ */
+function trackBearing(world: World, inv: Inventory, x: number, y: number): number | null {
+  if (heldItem(inv) !== 'zombieTracker') return null;
+  let best: number | null = null;
+  let bestDist = TRACKER_RANGE;
+  for (const e of world.entities.values()) {
+    if (e.type !== 'zombie') continue;
+    const d = Math.hypot(e.x - x, e.y - y);
+    if (d >= bestDist) continue;
+    bestDist = d;
+    best = Math.atan2(e.y - y, e.x - x);
+  }
+  return best;
 }
 
 export function toWireInventory(
@@ -321,10 +470,22 @@ export function toWireInventory(
     activeSlot: inv.activeSlot,
     kevlar: inv.kevlar,
     shield: inv.shield,
+    shieldUp: inv.shieldUp,
+    dual: inv.dual,
+    grenades: inv.grenades,
+    mines: inv.mines,
+    gunSlots: gunSlots(inv),
+    utilitySlots: utilitySlots(inv),
     dropProgress: dropProgress(inv, now),
     nearbyItem: near ? near.item : null,
     deployProgress: deployProgress(world, id, inv, now),
+    deployWanted: world.deployWanted.has(id),
     chargeProgress: chargeProgress(world, id, inv, now),
+    trackBearing: trackBearing(world, inv, x, y),
+    // Only the cure gun tells you about yourself. Without one in hand the
+    // flag never reaches the client at all, so there is nothing to read off
+    // the wire either.
+    selfInfected: heldItem(inv) === 'cureGun' ? world.pendingInfections.has(id) : null,
   };
 }
 
