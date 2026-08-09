@@ -6,6 +6,7 @@ import {
   GUN_RANGE,
   GUN_COOLDOWN_MS,
   GUNSHOT_ALERT_RADIUS,
+  ZOMBIE_LAST_SEEN_MS,
   RETALIATE_CHANCE,
   RETALIATE_COMMIT_MS,
   PLAYER_ONE_SHOT_KILL,
@@ -20,11 +21,13 @@ import {
   GRENADE_COOLDOWN_MS,
   HEADSHOT_ARC,
   DEPLOY_MS,
-  CHARGE_MIN_FRACTION,
+  CHARGE_BARS,
+  CHARGE_BASE_MUL,
+  UNDEPLOY_MS,
 } from '../../shared/constants.js';
 import { throwGrenade } from './heli.js';
 import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
-import { segmentCircleT, segmentRectT } from './geometry.js';
+import { segmentCircleT, segmentRectT, turnToward } from './geometry.js';
 import {
   damageWindow,
   isInGrapple,
@@ -61,9 +64,46 @@ function alertZombies(world: World, x: number, y: number, now: number): void {
     if (state.targetId) continue;
     state.lastSeenX = x;
     state.lastSeenY = y;
+    state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
     state.path = null;
     state.nextPathAt = 0;
   }
+}
+
+const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
+
+/**
+ * Where this officer is actually pointing, as against where the mouse is.
+ *
+ * Most weapons snap: the aim is the mouse and that is the end of it. A weapon
+ * with a `turnRate` swings at a limited rate instead, and the *body* turns
+ * with it — so the crosshair runs ahead and the stream drags round after it.
+ * That lag is the whole of the flamethrower's weight; there is no separate
+ * "heavy" flag and nothing branches on the item id.
+ *
+ * Called once per tick from `updatePlayers`, before anything fires, so the
+ * facing that gets drawn and the direction that gets fired are the same value.
+ */
+export function steerAim(world: World, id: string, want: number, dt: number): number {
+  const inv = world.inventories.get(id);
+  const held = inv ? heldItem(inv) : null;
+  const rate = held ? ITEMS[held]?.turnRate : undefined;
+
+  if (rate === undefined) {
+    // Snapping weapons still keep the map current, so switching to a heavy one
+    // starts from where they were looking rather than from a stale bearing.
+    world.aimHeading.set(id, want);
+    return want;
+  }
+
+  const next = turnToward(world.aimHeading.get(id) ?? want, want, rate * dt);
+  world.aimHeading.set(id, next);
+  return next;
+}
+
+/** The lagged aim if this officer has one, otherwise wherever they're pointing. */
+function aimFor(world: World, id: string, command: { aim: number }): number {
+  return world.aimHeading.get(id) ?? command.aim;
 }
 
 /**
@@ -80,6 +120,8 @@ export function fire(
   def?: ItemDef,
   pierce = 1,
   damageMul = 1,
+  /** A round with enough behind it to carry through one wall or door. */
+  throughWall = false,
 ): void {
   const angle = aim + (Math.random() * 2 - 1) * bloom;
   const range = def?.range ?? GUN_RANGE;
@@ -94,11 +136,36 @@ export function fire(
   const minY = Math.min(muzzleY, endY);
   const maxY = Math.max(muzzleY, endY);
 
-  let wallT = 1;
+  // Everything solid the line meets, nearest first. Walls and shut doors both
+  // stop a round; a door also wears down under fire, though chewing one open
+  // this way is slow enough that kicking it in is still the sane option.
+  const blockers: Array<{ t: number; door: number }> = [];
   const walls = world.wallGrid.queryRect(minX, minY, maxX, maxY, new Set<Wall>());
   for (const wall of walls) {
     const t = segmentRectT(muzzleX, muzzleY, endX, endY, wall);
-    if (t !== null && t < wallT) wallT = t;
+    if (t !== null) blockers.push({ t, door: -1 });
+  }
+  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
+  for (const index of slabs) {
+    const door = world.doors[index];
+    if (!door || door.open || door.broken) continue;
+    const t = segmentRectT(muzzleX, muzzleY, endX, endY, door.rect);
+    if (t !== null) blockers.push({ t, door: index });
+  }
+  blockers.sort((a, b) => a.t - b.t);
+
+  // A fully wound charge round goes through exactly one of them and stops at
+  // the next. Everything else stops at the first.
+  let wallT = 1;
+  let skip = throughWall ? 1 : 0;
+  for (const blocker of blockers) {
+    if (blocker.door >= 0) damageDoor(world, blocker.door, DOOR_BULLET_DAMAGE);
+    if (skip > 0) {
+      skip--;
+      continue;
+    }
+    wallT = blocker.t;
+    break;
   }
 
   // Rounds punch through glass: the pane takes damage, the bullet carries on.
@@ -107,18 +174,6 @@ export function fire(
     if (!isWindowIntact(world, index)) continue;
     const t = segmentRectT(muzzleX, muzzleY, endX, endY, world.map.windows[index]);
     if (t !== null && t <= wallT) damageWindow(world, index, WINDOW_BULLET_DAMAGE);
-  }
-
-  // A shut door stops the round, and wears down under fire. Chewing one open
-  // this way is slow enough that kicking it in is still the sane option.
-  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
-  for (const index of slabs) {
-    const door = world.doors[index];
-    if (!door || door.open || door.broken) continue;
-    const t = segmentRectT(muzzleX, muzzleY, endX, endY, door.rect);
-    if (t === null || t > wallT) continue;
-    wallT = t;
-    damageDoor(world, index, DOOR_BULLET_DAMAGE);
   }
 
   // Everything the line touches, nearest first. Most rounds stop at the first
@@ -202,6 +257,7 @@ function hit(
       if (Math.random() < RETALIATE_CHANCE) {
         state.lastSeenX = shooter.x;
         state.lastSeenY = shooter.y;
+        state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
         state.targetId = null;
         state.path = null;
         state.nextPathAt = 0;
@@ -210,6 +266,7 @@ function hit(
       } else if (!state.targetId) {
         state.lastSeenX = shooter.x;
         state.lastSeenY = shooter.y;
+        state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
         state.path = null;
         state.nextPathAt = 0;
       }
@@ -411,8 +468,9 @@ export function fireHeld(
   world.lastShotAt.set(id, now);
 
   if (held === 'flamethrower') {
-    // Not a hitscan round: a stream that sets light to what it crosses.
-    sprayFlame(world, shooter, aim, now);
+    // Not a hitscan round: a stream that sets light to what it crosses, and
+    // one that lands where the crosshair is rather than always at full reach.
+    sprayFlame(world, shooter, aim, now, at);
   } else if (held === 'cureGun') {
     fireSpecial(world, shooter, aim, def, 'cure', now);
   } else if (held === 'trackerDart') {
@@ -421,57 +479,109 @@ export function fireHeld(
     // A planted bipod is the whole reason to carry the heavy MG: from the hip
     // it sprays, off the pegs it is one of the most accurate guns in the city.
     const bloom =
-      def.deployable && isDeployed(world, id) ? (def.deployedBloom ?? 0.02) : (def.bloom ?? GUN_BLOOM_RAD);
-    // Winding the charge rifle all the way up drives the round through a whole
-    // queue of them; a snapped-off shot barely gets through one.
-    const pierce = def.charge ? Math.max(1, Math.round((def.pierce ?? 1) * charge)) : (def.pierce ?? 1);
-    const damageMul = def.charge ? charge : 1;
+      def.deployable && isDeployed(world, id, now) ? (def.deployedBloom ?? 0.02) : (def.bloom ?? GUN_BLOOM_RAD);
+
+    // The charge rifle winds up in four steps. One bar is one body; each bar
+    // after that is one more, and the fourth drives the round through a wall
+    // or a door as well. `charge` arrives as a fraction so bots — which fire
+    // everything at full — land on the top bar without knowing any of this.
+    const level = def.charge ? Math.max(1, Math.min(CHARGE_BARS, Math.round(charge * CHARGE_BARS))) : 0;
+    const pierce = def.charge ? level : (def.pierce ?? 1);
+    const damageMul = def.charge
+      ? CHARGE_BASE_MUL + (1 - CHARGE_BASE_MUL) * ((level - 1) / (CHARGE_BARS - 1))
+      : 1;
+    const throughWall = def.charge === true && level >= CHARGE_BARS;
 
     const pellets = def.pellets ?? 1;
     for (let i = 0; i < pellets; i++) {
-      fire(world, shooter, aim, bloom, now, def, pierce, damageMul);
+      fire(world, shooter, aim, bloom, now, def, pierce, damageMul, throughWall);
     }
   }
   return true;
 }
 
-/** True once the bipod has finished planting — not merely while it's going down. */
-export function isDeployed(world: World, id: string): boolean {
+/**
+ * True once the bipod has finished planting — not merely while it's going
+ * down, and not once it has started coming back up.
+ */
+export function isDeployed(world: World, id: string, now: number): boolean {
+  if (world.stowing.has(id)) return false;
   const since = world.deployStart.get(id);
-  return since !== undefined && Date.now() - since >= DEPLOY_MS;
+  return since !== undefined && now - since >= DEPLOY_MS;
 }
 
-/** 0-1 while the pegs go down, 1 once steady, -1 when there's no bipod at all. */
-export function deployProgress(world: World, id: string, inv: Inventory): number {
+/**
+ * 0-1 while the pegs go down, 1 once steady, back down to 0 while it is being
+ * packed away, -1 when there's no bipod at all.
+ *
+ * The way back down matters as much as the way up: the gauge draining is the
+ * only thing telling you why you still can't move after right-clicking off.
+ */
+export function deployProgress(world: World, id: string, inv: Inventory, now: number): number {
   const held = heldItem(inv);
   if (!held || !ITEMS[held]?.deployable) return -1;
+
+  const stow = world.stowing.get(id);
+  if (stow !== undefined) {
+    return clamp01(stow.from * (1 - (now - stow.at) / UNDEPLOY_MS));
+  }
+
   const since = world.deployStart.get(id);
   if (since === undefined) return 0;
-  return Math.min(1, (Date.now() - since) / DEPLOY_MS);
+  return clamp01((now - since) / DEPLOY_MS);
 }
 
 /** 0-1 while the charge rifle winds up, -1 when it isn't. */
-export function chargeProgress(world: World, id: string, inv: Inventory): number {
+export function chargeProgress(world: World, id: string, inv: Inventory, now: number): number {
   const held = heldItem(inv);
   if (!held || !ITEMS[held]?.charge) return -1;
   const since = world.chargeSince.get(id);
   if (since === undefined) return -1;
-  return Math.min(1, (Date.now() - since) / (ITEMS[held].chargeMs ?? 1200));
+  return clamp01((now - since) / (ITEMS[held].chargeMs ?? 1200));
 }
 
 /**
  * The bipod, and what invalidates it. Planting takes DEPLOY_MS during which
- * you're already rooted — commit early and you're caught standing still.
+ * you're already rooted — commit early and you're caught standing still — and
+ * a second right-click packs it up again, which takes UNDEPLOY_MS and roots
+ * you for that too. Getting up is a decision, not a free cancel.
  */
-function updateDeploy(world: World, id: string, inv: Inventory, wants: boolean): void {
+function updateDeploy(world: World, id: string, inv: Inventory, wants: boolean, now: number): void {
   const held = heldItem(inv);
   const deployable = held !== null && ITEMS[held]?.deployable === true;
-  // Putting the gun away packs the bipod up with it.
-  if (!wants || !deployable) {
+
+  // Switching weapons away from it packs the bipod up there and then — you
+  // can't be pinned behind a gun you are no longer holding.
+  if (!deployable) {
     world.deployStart.delete(id);
+    world.stowing.delete(id);
     return;
   }
-  if (!world.deployStart.has(id)) world.deployStart.set(id, Date.now());
+
+  if (wants) {
+    world.stowing.delete(id);
+    if (!world.deployStart.has(id)) world.deployStart.set(id, now);
+    return;
+  }
+
+  // Right-clicked off. Nothing to pack up if it was never down.
+  if (!world.deployStart.has(id)) {
+    world.stowing.delete(id);
+    return;
+  }
+
+  let stow = world.stowing.get(id);
+  if (!stow) {
+    // Remember how far up it actually got, so a bipod cancelled halfway
+    // through planting drains from halfway rather than snapping to full.
+    const planted = Math.min(1, (now - (world.deployStart.get(id) ?? now)) / DEPLOY_MS);
+    stow = { at: now, from: planted };
+    world.stowing.set(id, stow);
+  }
+  if (now - stow.at >= UNDEPLOY_MS) {
+    world.deployStart.delete(id);
+    world.stowing.delete(id);
+  }
 }
 
 export function processShooting(world: World, now: number, frozen: Set<string>): void {
@@ -485,7 +595,7 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
 
     // The bipod is worked whether or not the trigger is down, and a grappled
     // officer has rather more pressing problems than their firing position.
-    updateDeploy(world, id, inv, !frozen.has(id) && command?.deploy === true);
+    updateDeploy(world, id, inv, !frozen.has(id) && command?.deploy === true, now);
     if (frozen.has(id)) {
       world.chargeSince.delete(id);
       continue;
@@ -504,13 +614,16 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
       const since = world.chargeSince.get(id);
       if (since === undefined) continue;
       world.chargeSince.delete(id);
-      // Letting go the instant you pressed still costs you a round, but it
-      // barely leaves the barrel — you have to hold it to get anything.
-      const charge = Math.max(
-        CHARGE_MIN_FRACTION,
-        Math.min(1, (now - since) / (def.chargeMs ?? 1200)),
-      );
-      fireHeld(world, shooter, inv, command.aim, now, charge, {
+
+      // Below the first bar there is not enough in it to fire at all, and it
+      // costs nothing — a mis-click is not a wasted round. Firing on the bar
+      // rather than on the raw fraction is what makes the four-segment gauge
+      // tell the truth: what you see filled is what you get.
+      const wound = Math.min(1, (now - since) / (def.chargeMs ?? 1200));
+      const bars = Math.floor(wound * CHARGE_BARS);
+      if (bars < 1) continue;
+
+      fireHeld(world, shooter, inv, aimFor(world, id, command), now, bars / CHARGE_BARS, {
         x: command.aimX,
         y: command.aimY,
       });
@@ -519,7 +632,12 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
     world.chargeSince.delete(id);
 
     if (!command.shooting) continue;
-    fireHeld(world, shooter, inv, command.aim, now, 1, { x: command.aimX, y: command.aimY });
+    // Fired along where they are actually pointing, not where the mouse is —
+    // for a heavy weapon those differ, and the stream has to follow the body.
+    fireHeld(world, shooter, inv, aimFor(world, id, command), now, 1, {
+      x: command.aimX,
+      y: command.aimY,
+    });
   }
 }
 

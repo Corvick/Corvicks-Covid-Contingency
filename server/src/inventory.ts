@@ -12,6 +12,7 @@ import {
   TEST_DROP_RADIUS,
   ONE_OFF_ITEMS,
   GUARANTEED_ITEMS,
+  GUARANTEE_EVERY_GUN,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
@@ -96,10 +97,19 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
     world.pickups.set(id, { id, item, x: at.x, y: at.y });
   }
 
-  // And a floor under the rare guns: if the loot table happened not to roll
-  // one anywhere, put one in. A rare gun that is missing entirely is a worse
-  // kind of rare than a scarce one.
-  for (const item of GUARANTEED_ITEMS) {
+  // And a floor under every gun: if the loot table happened not to roll one
+  // anywhere, put one in. A gun that is missing entirely is a worse kind of
+  // rare than a scarce one, and deriving the list from the registry means a
+  // gun added later is covered without anyone remembering to list it.
+  //
+  // Rarity 0 is excluded because those are placed by their own roll above,
+  // and so is the pistol, which you always have.
+  const everyGun = GUARANTEE_EVERY_GUN
+    ? (Object.keys(ITEMS) as ItemId[]).filter(
+        (id) => isGun(id) && id !== 'pistol' && ITEMS[id].rarity > 0,
+      )
+    : [];
+  for (const item of new Set<ItemId>([...GUARANTEED_ITEMS, ...everyGun])) {
     let already = false;
     for (const p of world.pickups.values()) {
       if (p.item === item) {
@@ -225,6 +235,19 @@ export function collect(
   // the world comes with a full magazine.
   const loaded = pickup.ammo ?? def.ammo ?? 0;
 
+  // A second of something you're already carrying is ammunition, not a gun.
+  // Carrying two of the same is strictly worse than carrying one loaded one —
+  // you can only fire the one — so a duplicate is stripped for its rounds.
+  // This is checked ahead of the free-slot case on purpose: filling a slot
+  // with a copy of what's in the next slot along is never the better outcome.
+  const twin = inv.guns.findIndex((g) => g !== null && g.item === pickup.item);
+  if (twin >= 0) {
+    if (loaded <= 0) return `that ${def.label} is empty`;
+    inv.guns[twin]!.ammo += loaded;
+    world.pickups.delete(pickup.id);
+    return `stripped a ${def.label} for ${loaded} rounds`;
+  }
+
   const free = inv.guns.findIndex((g) => g === null);
   if (free >= 0) {
     inv.guns[free] = { item: pickup.item, ammo: loaded };
@@ -300,8 +323,8 @@ export function toWireInventory(
     shield: inv.shield,
     dropProgress: dropProgress(inv, now),
     nearbyItem: near ? near.item : null,
-    deployProgress: deployProgress(world, id, inv),
-    chargeProgress: chargeProgress(world, id, inv),
+    deployProgress: deployProgress(world, id, inv, now),
+    chargeProgress: chargeProgress(world, id, inv, now),
   };
 }
 

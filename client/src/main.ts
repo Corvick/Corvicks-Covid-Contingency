@@ -4,6 +4,7 @@ import {
   WORLD_WIDTH,
   WORLD_HEIGHT,
   TRACER_LIFETIME_MS,
+  FLAME_TRACER_MS,
   PLAYER_SIGHT_RADIUS,
   STAMINA_MAX,
   FOG_UPDATE_MS,
@@ -42,6 +43,7 @@ import {
   drawCrosshair,
   drawReticle,
   drawAimGauge,
+  drawChargeBars,
   doorSlab,
   drawDoorPrompt,
   drawDoors,
@@ -971,7 +973,10 @@ function render() {
   ctx.globalAlpha = 1;
   mark('entities');
 
-  tracers = tracers.filter((t) => now - t.born < TRACER_LIFETIME_MS);
+  // Napalm lingers, so it can't be culled on the round tracer's clock.
+  tracers = tracers.filter(
+    (t) => now - t.born < (t.kind === 'flame' ? FLAME_TRACER_MS : TRACER_LIFETIME_MS),
+  );
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
 
   drawDucks(ctx, ducks, view);
@@ -1030,23 +1035,26 @@ function render() {
     // What the gun in hand is busy doing, under the mark you're aiming with.
     if (inventory && inventory.deployProgress >= 0) {
       const steady = inventory.deployProgress >= 1;
+      // Right-clicking off drains the bar rather than clearing it, and you
+      // stay rooted while it does — so the gauge coming down is the thing
+      // telling you why you still can't move.
+      const stowing = !input.deploy && inventory.deployProgress > 0;
       drawAimGauge(
         ctx,
         input.mouseX,
         input.mouseY,
         inventory.deployProgress,
-        steady ? '#4ade80' : '#fbbf24',
-        steady ? 'DEPLOYED' : input.deploy ? 'PLANTING' : 'RIGHT-CLICK TO DEPLOY',
+        stowing ? '#fbbf24' : steady ? '#4ade80' : '#fbbf24',
+        stowing
+          ? 'PACKING UP'
+          : steady
+            ? 'DEPLOYED — RIGHT-CLICK TO MOVE'
+            : input.deploy
+              ? 'PLANTING'
+              : 'RIGHT-CLICK TO DEPLOY',
       );
     } else if (inventory && inventory.chargeProgress >= 0) {
-      drawAimGauge(
-        ctx,
-        input.mouseX,
-        input.mouseY,
-        inventory.chargeProgress,
-        inventory.chargeProgress >= 1 ? '#e879f9' : '#c084fc',
-        inventory.chargeProgress >= 1 ? 'CHARGED' : 'CHARGING',
-      );
+      drawChargeBars(ctx, input.mouseX, input.mouseY, inventory.chargeProgress);
     }
   }
 

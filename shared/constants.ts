@@ -120,12 +120,43 @@ export const ZOMBIE_HURT_THRESHOLD = 0.4;
 export const ZOMBIE_HURT_SLOWEST = 0.5;
 
 /**
- * Share of zombies bright enough to leave a room they've cleared, making for a
- * door rather than milling about in it. The rest stay dumb, which is what
- * keeps buildings populated instead of everything draining into the streets.
+ * Share of zombies that are bright about searching. *Every* zombie leaves a
+ * room it has emptied now; this decides how quickly and how well. A smart one
+ * gives up on an empty room in seconds and picks the way out that leads
+ * somewhere nobody has swept; a dull one dawdles for the best part of ten and
+ * then takes whatever door is handy. That gap is what keeps buildings
+ * populated instead of everything draining into the streets at once.
  */
 export const ZOMBIE_SMART_SHARE = 0.45;
 export const ZOMBIE_ROOM_CLEAR_MS = 3000;
+export const ZOMBIE_ROOM_CLEAR_SLOW_MS = 9500;
+/** How long a zombie holds to a chosen way out before reconsidering it. */
+export const ZOMBIE_EXIT_COMMIT_MS = 6000;
+/**
+ * How long "somebody has already been through there" is worth anything. Past
+ * this a room is as good as unsearched again, so the horde re-sweeps a city it
+ * has been over rather than settling into the last few rooms it hasn't.
+ */
+export const ZOMBIE_SWEEP_MEMORY_MS = 45000;
+/** Milling about the street with nothing to chase before it goes looking. */
+export const ZOMBIE_STREET_WANDER_MS = 4500;
+export const ZOMBIE_STREET_WANDER_SLOW_MS = 13000;
+/** Furthest it will cross to search a building it cannot see into. */
+export const ZOMBIE_HUNT_RADIUS = 1100;
+/** Close enough to a chosen doorway to start tearing at what's hung in it. */
+export const ZOMBIE_EXIT_REACH = 34;
+/**
+ * How long a zombie keeps making for somewhere it last saw or heard prey.
+ *
+ * This has to expire. The chase-the-last-sighting branch runs *above* every
+ * check that would notice a zombie is getting nowhere, so one making for a
+ * spot it can't reach — behind a bolted door, across a wall — used to grind
+ * there indefinitely, invisible to the stuck check and the room search alike.
+ */
+export const ZOMBIE_LAST_SEEN_MS = 9000;
+/** How often, and by how much, progress toward a chosen way out is judged. */
+export const ZOMBIE_EXIT_PROGRESS_MS = 1600;
+export const ZOMBIE_EXIT_PROGRESS_MIN = 12;
 /** A zombie this close to prey drops whatever door it was working on. */
 export const ZOMBIE_ABANDON_DOOR_RANGE = 210;
 
@@ -162,6 +193,15 @@ export const FIRST_SIGHT_LINES = [
  * the vest is gone from the slot it was taking up.
  */
 export const KEVLAR_GRAPPLE_MS = 500;
+/**
+ * And nothing can lay a hand on you for a beat after shrugging one off.
+ *
+ * Without it the vest is worth almost nothing in the only situation it exists
+ * for: in a crowd the next zombie grabs on the same tick the last one let go,
+ * and all three uses are gone inside a second and a half with the wearer never
+ * having moved. The window is what turns the vest into a chance to get out.
+ */
+export const KEVLAR_IMMUNE_MS = 500;
 
 /**
  * "Follow me" is a shorter shout than the rally — you are asking the people
@@ -192,6 +232,16 @@ export const ONE_OFF_ITEMS = ['grenadeLauncher', 'smokeGrenade'] as const;
  * the sniper simply isn't anywhere is a worse kind of rare than a scarce one.
  */
 export const GUARANTEED_ITEMS = ['sniper', 'heavyMg', 'chargeRifle', 'flamethrower'] as const;
+/**
+ * Every gun is somewhere in every city, in a building.
+ *
+ * `GUARANTEED_ITEMS` was a hand-kept list of the rare ones, which meant adding
+ * a gun and forgetting to list it produced maps that simply didn't have it.
+ * This derives the floor from the item registry instead, so a new gun is
+ * covered the moment it exists. The pistol is excluded — you always have one —
+ * and so is anything with rarity 0, which is placed by its own roll.
+ */
+export const GUARANTEE_EVERY_GUN = true;
 /** Its shell detonates where it lands, hurting everything close to it. */
 export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;
@@ -240,11 +290,45 @@ export const LOBBY_DOG_SLOTS = 2;
 export const BOT_OFFICER_COUNT = 4;
 export const BOT_LOOT_RANGE = 1400;
 export const BOT_LOOT_SCAN_MS = 900;
+/**
+ * How keen a bot is on a duplicate gun, which `collect` strips for its rounds
+ * rather than carrying. Scaled by how empty the copy in the bag already is, so
+ * a bot with a full rifle ignores one and a bot down to its last few crosses
+ * the street for it.
+ */
+export const BOT_REFILL_APPETITE = 55;
 
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
 export const OFFICER_REFUGE_RANGE = 900;
 export const OFFICER_REFUGE_GAP = 62;
+/**
+ * A machine gun behind a wall of sandbags is a better bet than one man with a
+ * pistol, so an emplacement wins against a lone officer half again as far off.
+ * Applied as a discount on the distance rather than a flat bonus, or the
+ * nearest officer always wins in a crowd.
+ */
+export const GUNNER_REFUGE_PREFERENCE = 0.6;
+/** How far behind the bags people gather — out of the gun's own way. */
+export const GUNNER_REFUGE_GAP = 78;
+/** Close enough to a protector to count as being under their wing. */
+export const PROTECTED_DIST = 120;
+
+/** Saying so, now and then, to whoever is standing between them and it. */
+export const PROTECT_CHATTER_MIN_MS = 9000;
+export const PROTECT_CHATTER_MAX_MS = 26000;
+export const PROTECT_CHATTER_CHANCE = 0.55;
+export const PROTECT_CHATTER_MS = 3400;
+export const PROTECT_LINES = [
+  'Please keep me safe.',
+  "Don't leave me here.",
+  "You'll keep them off us, won't you?",
+  'Stay close, please.',
+  "I'm staying with you.",
+  "Don't let them near me.",
+  'I feel better with you here.',
+  "You won't go anywhere, will you?",
+];
 
 /**
  * Final surge once a zombie is right on someone's heels. Stacks on top of the
@@ -454,8 +538,24 @@ export const SCOPE_EASE_MS = 220;
 export const HEADSHOT_ARC = 0.5;
 /** Planting the bipod. You are immobile for this long before it pays off. */
 export const DEPLOY_MS = 1000;
+/**
+ * And packing it up again. Right-click a second time to stow the bipod: it is
+ * quicker than planting, but you stay rooted for it, so committing the gun is
+ * a decision in both directions rather than only on the way down.
+ */
+export const UNDEPLOY_MS = 420;
 /** A charge shot at nothing still costs you the round. */
-export const CHARGE_MIN_FRACTION = 0.25;
+/**
+ * The charge rifle's four steps.
+ *
+ * Below the first bar there is not enough in it to fire at all — and letting
+ * go early costs nothing, so a mis-click is not a wasted round. Each bar after
+ * that is one more body the round carries through, and the fourth drives it
+ * through a wall or a door as well.
+ */
+export const CHARGE_BARS = 4;
+/** Damage at the first bar, as a fraction of the gun's figure. The last is full. */
+export const CHARGE_BASE_MUL = 0.4;
 /** How long a grey officer keeps running after being grabbed. */
 export const OFFICER_FLEE_MS = 20000;
 
@@ -565,17 +665,61 @@ export const SANDBAG_REACH = 22;
  * leaves the ground alight behind it — the fire is the weapon, not the lick of
  * flame itself.
  */
-export const FLAME_RANGE = 260;
+export const FLAME_RANGE = 340;
 export const FLAME_SPREAD = 0.06;
+/**
+ * Napalm leaves the nozzle travelling flat and only comes down further out, so
+ * the ground it sets alight starts partway along the throw. Without this the
+ * pavement you are standing on catches, which — since officers don't burn —
+ * looked less dangerous than it did simply wrong.
+ */
+/** Shortest throw the stream will make, however close the crosshair is. */
+export const FLAME_MIN_THROW = 90;
+/**
+ * Where it lands it splashes: how many patches, how wide the cone, how far
+ * past the landing point they are thrown. Kept beyond FIRE_PATCH_SPACING so
+ * they read as separate fires rather than merging back into the one they came
+ * from. Suppressed entirely when a wall stopped the throw.
+ */
+export const FLAME_SPLASH_COUNT = 3;
+export const FLAME_SPLASH_ARC = 1.9;
+export const FLAME_SPLASH_SPREAD = 40;
+/** How far back from the impact point the fire actually settles. */
+export const FLAME_LAND_INSET = 8;
+/** Napalm hangs far longer than a round's tracer, and dies away rather than off. */
+export const FLAME_TRACER_MS = 320;
+/** Screen-space lift at the peak of the arc, at full range. */
+export const FLAME_ARC_LIFT = 26;
+/**
+ * How much of that lift survives when firing straight up or down the screen.
+ *
+ * The lift is screen-space: it reads as height because it is across the line
+ * of travel. Fire north or south and it is *along* the line instead, where it
+ * stops looking like an arc and starts looking like the stream mis-aimed.
+ */
+export const FLAME_ARC_VERTICAL_MIN = 0.28;
+/** Blobs drawn along one stream, and how fat it gets at its middle. */
+export const FLAME_BLOBS = 12;
+export const FLAME_BLOB_RADIUS = 13;
 export const FLAME_COOLDOWN_MS = 55;
 /** Fuel. Deliberately generous: a flamethrower with ten shots is a novelty. */
 export const FLAME_FUEL = 900;
-/** How far apart the patches it lays down are, and how big each one is. */
-export const FLAME_STEP = 26;
+/**
+ * How big a patch is, and how far apart two of them have to be to count as
+ * two. The spacing is what keeps burning ground reading as a scatter of
+ * separate fires rather than one continuous orange smear — `dropPatch` merges
+ * anything inside it, so a wider spacing means fewer, more distinct fires.
+ */
 export const FIRE_PATCH_RADIUS = 30;
-export const FIRE_PATCH_SPACING = 22;
+export const FIRE_PATCH_SPACING = 34;
 /** How long a patch of ground burns for. */
 export const FIRE_GROUND_MS = 9000;
+/**
+ * And how much of that life it spends going out. A fire that is still at 45%
+ * size and a quarter opaque when its clock runs out doesn't fade — it
+ * vanishes. The last stretch has to carry it all the way to nothing.
+ */
+export const FIRE_FADE_FRACTION = 0.45;
 /** Caught in the stream: burns for this long after it comes off them. */
 export const FLAME_BURN_AFTER_MS = 3000;
 /** Walked through burning ground: burns for this long. */
@@ -583,6 +727,24 @@ export const FLAME_GROUND_BURN_MS = 2000;
 /** What burning does, per second, and what it does to how they move. */
 export const BURN_DAMAGE_PER_SEC = 26;
 export const BURN_SLOW_MUL = 0.55;
+/**
+ * Civilians catch, yelp and beat it out. They take almost nothing and stop
+ * burning almost at once.
+ *
+ * This is a rule about the game, not about fire: without it the flamethrower
+ * is a tool for clearing a street of the people you are there to save, and
+ * burning the uninfected is a cheaper way to stop an outbreak than fighting
+ * it. Officers don't catch at all for the same kind of reason.
+ */
+export const HUMAN_BURN_MS = 700;
+export const HUMAN_BURN_DAMAGE_PER_SEC = 2;
+/**
+ * And fire will never take a civilian below this, however long they stand in
+ * it. A trickle of damage is still a way to kill one given a minute, and the
+ * rule has to be absolute to be worth having — the same shape as kevlar's
+ * "can't be infected", which is an early return rather than a big number.
+ */
+export const HUMAN_BURN_FLOOR = 25;
 
 /** Body and head of a bot officer: blue with a grey head. */
 export const BOT_OFFICER_COLOR = '#2563eb';
@@ -846,7 +1008,7 @@ export const DROP_HOLD_MS = 900;
 /** Anything shorter than this counts as a tap, not a hold. */
 export const TAP_MAX_MS = 220;
 /** Most houses are empty — this is the chance a building contains loot. */
-export const BUILDING_LOOT_CHANCE = 0.22;
+export const BUILDING_LOOT_CHANCE = 0.4;
 /** Hits a kevlar vest soaks before it's spent. */
 export const KEVLAR_POINTS = 3;
 /** How long a tracker dart keeps a target lit up. */
@@ -917,6 +1079,40 @@ export const REPATH_INTERVAL_MS = 700;
  */
 export const PATH_MAX_NODES = 14000;
 
+// ---------------------------------------------------------------- rumour
+/**
+ * What the crowd *knows*, as opposed to what is true.
+ *
+ * The danger field is sourced from every zombie on the map whether or not
+ * anyone has laid eyes on it, which is fine for the split second of running
+ * for your life but wrong for deciding where to stroll. This is the honest
+ * version: somewhere a human or an officer actually saw one, decaying with
+ * time. It is collective because people shout — one person seeing a zombie is
+ * a street that everybody avoids for a while.
+ */
+export const RUMOUR_MEMORY_MS = 40000;
+/** How far word of a sighting spreads on the grid, in cells. */
+export const RUMOUR_SPREAD_CELLS = 2;
+/** How hard a remembered sighting pushes each kind of choice away. */
+export const RUMOUR_WANDER_WEIGHT = 520;
+export const RUMOUR_SHELTER_WEIGHT = 900;
+export const RUMOUR_ESCAPE_WEIGHT = 260;
+/** Above this, a building is somewhere nobody deliberately holes up. */
+export const RUMOUR_REFUGE_LIMIT = 0.35;
+
+// ---------------------------------------------------------------- rooms
+/**
+ * How much thicker than the door slab the plug is that splits two rooms apart
+ * in the room map. It has to be wide enough that a solid line of cell centres
+ * falls inside it at nav resolution, or the flood fill leaks through the
+ * doorway and two rooms silently become one.
+ */
+export const ROOM_DOOR_PLUG = 12;
+/** How far a room's id bleeds past its floor, in cells, so doorways still read. */
+export const ROOM_DILATE_CELLS = 2;
+/** How far past a doorway an entity leaving through it aims. */
+export const ROOM_EXIT_AIM = 46;
+
 // ---------------------------------------------------------------- danger field
 /**
  * Coarse grid for the geodesic danger field. One BFS per rebuild serves every
@@ -926,6 +1122,29 @@ export const DANGER_CELL = 28;
 export const DANGER_REBUILD_MS = 160; // ~6Hz
 /** Distances beyond this are treated as "safe" and not mapped. */
 export const DANGER_MAX_DISTANCE = 900;
+
+/**
+ * How much the halfway point of a flight counts against its destination.
+ *
+ * Scoring only where they are running *to* picks somewhere lovely and safe on
+ * the far side of the zombie, and then the router walks them straight past it.
+ */
+export const ESCAPE_MIDPOINT_WEIGHT = 0.55;
+
+/** Falling in behind a neighbour who is plainly getting away. */
+export const FOLLOW_CROWD_CHANCE = 0.34;
+export const FOLLOW_CROWD_CHECK_MS = 700;
+export const FOLLOW_CROWD_RANGE = 260;
+export const FOLLOW_CROWD_COMMIT_MS = 1600;
+/** How much better their line has to be before it's worth joining. */
+export const FOLLOW_CROWD_MARGIN = 90;
+
+/** Retreating deeper into a building and bolting a door on the way. */
+export const BARRICADE_CHANCE = 0.34;
+/** A room with a second way out is a delay; one without is a coffin. */
+export const BARRICADE_SECOND_EXIT_BONUS = 240;
+/** A building with only one way in is a trap, and two is a way out. */
+export const SHELTER_MULTI_EXIT_BONUS = 260;
 
 /** Flee destination search. */
 export const ESCAPE_SAMPLES = 16;

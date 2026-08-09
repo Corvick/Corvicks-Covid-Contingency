@@ -65,7 +65,7 @@ import {
   type Entity,
 } from './world.js';
 import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
-import { processShooting } from './combat.js';
+import { processShooting, steerAim } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { ducksToWire, updateDucks } from './ducks.js';
 import {
@@ -436,8 +436,11 @@ function updatePlayers(dt: number, frozen: Set<string>): void {
     const command = world.commands.get(id);
     if (!entity || !command) continue;
 
-    // Officers point where the mouse points; anything else faces where it walks.
-    if (entity.type === 'officer') entity.facing = command.aim;
+    // Officers point where the mouse points; anything else faces where it
+    // walks. A weapon with a `turnRate` swings slowly and drags the body round
+    // with it, so this is the one value both the drawn facing and the shot
+    // direction come from — worked out here, before anything fires.
+    if (entity.type === 'officer') entity.facing = steerAim(world, id, command.aim, dt);
 
     let dx = 0;
     let dy = 0;

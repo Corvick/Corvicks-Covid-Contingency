@@ -38,6 +38,14 @@ import {
   GUN_SLOTS,
   BLAST_RADIUS,
   BLAST_MS,
+  FLAME_RANGE,
+  FLAME_TRACER_MS,
+  FLAME_ARC_LIFT,
+  FLAME_BLOBS,
+  FLAME_BLOB_RADIUS,
+  CHARGE_BARS,
+  FLAME_ARC_VERTICAL_MIN,
+  FIRE_FADE_FRACTION,
 } from '../../shared/constants.js';
 
 export interface Viewport {
@@ -648,6 +656,96 @@ export interface Tracer {
   born: number;
 }
 
+/**
+ * One lick of napalm: a stream of overlapping blobs that leaves the nozzle
+ * flat, arcs up and fattens through the middle, and comes down at the far end
+ * in a splash — with a soft shadow tracking it along the ground underneath.
+ *
+ * Three ruled strokes, which is what this replaced, read as a laser sight. A
+ * stream has to have a ragged edge and some weight to it, and it has to die
+ * away rather than switch off, so everything here shrinks as well as fades.
+ */
+function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: number): void {
+  const dx = tracer.x2 - tracer.x1;
+  const dy = tracer.y2 - tracer.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+
+  const shrink = 1 - age * 0.55;
+  const fade = (1 - age) ** 1.4;
+
+  // The lift is screen-space, so it only reads as *height* when it is across
+  // the line of travel. Fired straight up or down the screen it is along that
+  // line instead, where the same arc stops looking like height and starts
+  // looking like the stream falling short. So most of it comes out.
+  const uprightness = Math.abs(dx) / len; // 1 firing sideways, 0 firing up or down
+  const lift =
+    FLAME_ARC_LIFT *
+    Math.min(1, len / FLAME_RANGE) *
+    (FLAME_ARC_VERTICAL_MIN + (1 - FLAME_ARC_VERTICAL_MIN) * uprightness);
+  const seed = (tracer.x1 * 13 + tracer.y1 * 7) % 628;
+
+  /** How high off the ground the stream is at `t`, and how fat it is there. */
+  const arcAt = (t: number) => Math.sin(Math.PI * t);
+
+  // The shadow first, flat on the ground and directly under the arc, so the
+  // lift reads as height rather than as the stream being aimed off to one side.
+  ctx.globalAlpha = 0.16 * fade;
+  ctx.fillStyle = '#000';
+  for (let i = 2; i <= FLAME_BLOBS; i += 2) {
+    const t = i / FLAME_BLOBS;
+    const r = FLAME_BLOB_RADIUS * (0.3 + 0.8 * arcAt(t)) * shrink * 0.8;
+    ctx.beginPath();
+    ctx.ellipse(tracer.x1 + dx * t, tracer.y1 + dy * t, r, r * 0.38, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Then the stream: dull red body, orange middle, near-white core.
+  for (const [scale, colour] of [
+    [1, 'rgba(220, 38, 38, 0.5)'],
+    [0.66, 'rgba(251, 146, 60, 0.72)'],
+    [0.32, 'rgba(254, 240, 138, 0.95)'],
+  ] as const) {
+    ctx.fillStyle = colour;
+    for (let i = 1; i <= FLAME_BLOBS; i++) {
+      const t = i / FLAME_BLOBS;
+      const arc = arcAt(t);
+      const r = FLAME_BLOB_RADIUS * (0.26 + 0.95 * arc) * scale * shrink;
+      // Wobble across the line, widening downrange, so the edge is ragged.
+      const wob = Math.sin(seed + i * 1.9) * 3.4 * arc;
+      ctx.globalAlpha = fade * (0.55 + 0.45 * arc);
+      ctx.beginPath();
+      ctx.arc(
+        tracer.x1 + dx * t + nx * wob,
+        tracer.y1 + dy * t + ny * wob - arc * lift,
+        r,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+  }
+
+  // And the splash where it comes down, thrown further out as it ages so it
+  // spreads rather than sitting still and fading.
+  //
+  // It fans *back* toward the shooter, not on past the impact. The endpoint is
+  // already hard against whatever stopped the stream, so anything thrown
+  // forward from it is drawn through a wall — and splashback off the thing you
+  // just hit is the truer picture anyway.
+  const aim = Math.atan2(dy, dx) + Math.PI;
+  for (let k = 0; k < 3; k++) {
+    const a = aim + ((k + 0.5) / 3 - 0.5) * 1.7;
+    const d = 10 + ((seed + k * 37) % 9) + age * 22;
+    ctx.globalAlpha = fade * 0.8;
+    ctx.fillStyle = k === 1 ? '#fde047' : '#fb923c';
+    ctx.beginPath();
+    ctx.arc(tracer.x2 + Math.cos(a) * d, tracer.y2 + Math.sin(a) * d, 6 * shrink, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 export function drawTracers(
   ctx: CanvasRenderingContext2D,
   tracers: Tracer[],
@@ -656,31 +754,18 @@ export function drawTracers(
 ): void {
   ctx.lineCap = 'butt';
   for (const tracer of tracers) {
-    const age = (now - tracer.born) / lifetime;
+    // Napalm hangs about far longer than a round does, and is the whole reason
+    // tracers carry a kind at all.
+    const life = tracer.kind === 'flame' ? FLAME_TRACER_MS : lifetime;
+    const age = (now - tracer.born) / life;
     if (age >= 1) continue;
 
-    ctx.globalAlpha = 1 - age;
-
-    // Napalm is a thick stream rather than a round: three tapering strokes,
-    // widening away from the muzzle, so it reads as liquid being thrown.
     if (tracer.kind === 'flame') {
-      ctx.lineCap = 'round';
-      for (const [width, colour] of [
-        [11, 'rgba(239, 68, 68, 0.55)'],
-        [7, 'rgba(251, 146, 60, 0.75)'],
-        [3, 'rgba(253, 224, 71, 0.95)'],
-      ] as const) {
-        ctx.strokeStyle = colour;
-        ctx.lineWidth = width;
-        ctx.beginPath();
-        ctx.moveTo(tracer.x1, tracer.y1);
-        ctx.lineTo(tracer.x2, tracer.y2);
-        ctx.stroke();
-      }
-      ctx.lineCap = 'butt';
+      drawFlameStream(ctx, tracer, age);
       continue;
     }
 
+    ctx.globalAlpha = 1 - age;
     ctx.strokeStyle = '#fde68a';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -1076,15 +1161,23 @@ export function drawFires(
   for (let i = 0; i < fires.length; i++) {
     const f = fires[i];
     if (!visible(view, f.x, f.y, 40)) continue;
-    // Dying fires shrink and dim rather than blinking out.
+
+    // A fire spends the last stretch of its life going out, and has to reach
+    // *nothing* — the old curve bottomed out at 45% size and a quarter opaque
+    // and then the patch was simply deleted, which is a fire vanishing rather
+    // than a fire dying. `dying` is 1 for most of the life and ramps to 0.
     const life = Math.max(0, Math.min(1, f.life));
-    const scale = 0.45 + 0.55 * life;
+    const dying = Math.min(1, life / FIRE_FADE_FRACTION);
+    if (dying <= 0) continue;
+    const scale = 0.3 + 0.7 * dying;
 
     ctx.save();
-    ctx.globalAlpha = 0.25 + 0.4 * life;
+    // A smaller, dimmer scorch than before: with the patches now spaced apart
+    // this is what reads as separate fires instead of one continuous smear.
+    ctx.globalAlpha = 0.34 * dying;
     ctx.fillStyle = '#7c2d12';
     ctx.beginPath();
-    ctx.arc(f.x, f.y, 22 * scale, 0, Math.PI * 2);
+    ctx.arc(f.x, f.y, 17 * scale, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
@@ -1093,10 +1186,10 @@ export function drawFires(
     for (let k = 0; k < 3; k++) {
       const phase = now * 0.009 + seed + k * 2.1;
       const wob = Math.sin(phase) * 0.5 + 0.5;
-      const r = (7 + wob * 7) * scale;
-      const ox = Math.cos(seed + k * 2.3) * 8 * scale;
-      const oy = Math.sin(seed + k * 2.3) * 8 * scale - wob * 4;
-      ctx.globalAlpha = (0.5 + 0.5 * wob) * (0.4 + 0.6 * life);
+      const r = (5 + wob * 6) * scale;
+      const ox = Math.cos(seed + k * 2.3) * 7 * scale;
+      const oy = Math.sin(seed + k * 2.3) * 7 * scale - wob * 4 * dying;
+      ctx.globalAlpha = (0.45 + 0.45 * wob) * dying;
       ctx.fillStyle = k === 0 ? '#fde047' : k === 1 ? '#fb923c' : '#ef4444';
       ctx.beginPath();
       ctx.arc(f.x + ox, f.y + oy, r, 0, Math.PI * 2);
@@ -1378,6 +1471,58 @@ export function drawAimGauge(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillText(label, x, top + h + 3);
+  ctx.restore();
+}
+
+/**
+ * The charge rifle's four steps, as four separate boxes rather than one bar.
+ *
+ * A continuous bar was a lie about how the gun works: it fires on whole bars,
+ * so what you can see filled has to be exactly what you will get. The first
+ * box has to fill before it will fire at all, each one after that is another
+ * body the round goes through, and the fourth also puts it through a wall.
+ */
+export function drawChargeBars(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  progress: number,
+): void {
+  const w = 58;
+  const h = 6;
+  const gap = 2;
+  const top = y + 34;
+  const seg = (w - gap * (CHARGE_BARS - 1)) / CHARGE_BARS;
+  const level = Math.floor(Math.max(0, Math.min(1, progress)) * CHARGE_BARS);
+
+  ctx.save();
+  for (let i = 0; i < CHARGE_BARS; i++) {
+    const sx = x - w / 2 + i * (seg + gap);
+    const fill = Math.max(0, Math.min(1, progress * CHARGE_BARS - i));
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(sx, top, seg, h);
+    if (fill > 0) {
+      // The last box is the one that punches through a wall, so it lights up
+      // differently — it is a different kind of shot, not just a bigger one.
+      ctx.fillStyle = i === CHARGE_BARS - 1 && fill >= 1 ? '#f0abfc' : '#c084fc';
+      ctx.fillRect(sx, top, seg * fill, h);
+    }
+    // A full box reads as armed; a partial one as still filling.
+    ctx.strokeStyle = fill >= 1 ? 'rgba(255, 255, 255, 0.65)' : 'rgba(255, 255, 255, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(sx + 0.5, top + 0.5, seg - 1, h - 1);
+  }
+
+  ctx.fillStyle = level === 0 ? '#94a3b8' : level >= CHARGE_BARS ? '#f0abfc' : '#c084fc';
+  ctx.font = '9px ui-monospace, Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(
+    level === 0 ? 'KEEP HOLDING' : level >= CHARGE_BARS ? 'THROUGH WALL' : `PIERCE ${level}`,
+    x,
+    top + h + 3,
+  );
   ctx.restore();
 }
 

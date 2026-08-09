@@ -1,3 +1,5 @@
+import { CHARGE_BARS } from './constants.js';
+
 export type ItemId =
   | 'pistol'
   | 'machineGun'
@@ -52,6 +54,12 @@ export interface ItemDef {
   /** Right-click plants a bipod: immobile, but `deployedBloom` accurate. */
   deployable?: boolean;
   deployedBloom?: number;
+  /**
+   * How fast the officer can swing this thing, in rad/s. Absent means the
+   * aim snaps to the mouse the way it always has; a figure here makes the
+   * weapon feel heavy, because the body and the stream both lag the crosshair.
+   */
+  turnRate?: number;
   /** Hold the trigger to wind up, release to fire. */
   charge?: boolean;
   chargeMs?: number;
@@ -90,14 +98,21 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     label: 'Machine Gun',
     short: 'MG',
     color: '#fbbf24',
-    rarity: 3,
-    damageMin: 8,
-    damageMax: 14,
+    // Common now: an MG in most streets, but a weaker one.
+    rarity: 6,
+    // Nerfed hard. It was doing bolt-action work at ten times the rate; what
+    // it is for is pinning a crowd, not killing one, so the damage came out
+    // and the stagger went in. A held burst now stops a charge dead without
+    // dropping much of it.
+    damageMin: 4,
+    damageMax: 8,
     bloom: 0.13,
     cooldownMs: 110,
     range: 700,
     ammo: 140,
     automatic: true,
+    slowMs: 700,
+    slowMul: 0.45,
   },
   shotgun: {
     id: 'shotgun',
@@ -124,7 +139,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'BOLT',
     color: '#d6b27c',
     // The common one. Turns up in houses more often than anything else.
-    rarity: 5,
+    rarity: 8,
     damageMin: 42,
     damageMax: 64,
     bloom: 0.012,
@@ -188,7 +203,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     ammo: 14,
     charge: true,
     chargeMs: 1300,
-    pierce: 9,
+    // One body per bar; the top bar also drives it through a wall or a door.
+    pierce: CHARGE_BARS,
   },
   flamethrower: {
     id: 'flamethrower',
@@ -202,9 +218,12 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     damageMax: 2,
     bloom: 0.06,
     cooldownMs: 55,
-    range: 260,
+    range: 340,
     ammo: 900,
     automatic: true,
+    // Heavy, awkward, and slow to bring round. Sweeping a street with it is
+    // meant to be a commitment rather than a flick of the wrist.
+    turnRate: 2.6,
     // Its damage is all in the fire it leaves, so say so outright.
     botWorth: 88,
     botIdealRange: 200,

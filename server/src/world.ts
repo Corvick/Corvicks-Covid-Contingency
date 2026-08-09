@@ -52,6 +52,8 @@ import {
   DOOR_SLAM_CHANCE,
   ZOMBIE_SMART_SHARE,
   OFFICER_SEEK_CHANCE,
+  BARRICADE_CHANCE,
+  FOLLOW_CROWD_CHANCE,
   RALLY_STARTING_CHARGES,
   FOLLOW_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
@@ -79,6 +81,8 @@ import { generateMap } from './mapgen.js';
 import { newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
+import { OUTSIDE, RoomMap } from './rooms.js';
+import { RumourField } from './rumour.js';
 import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
@@ -202,6 +206,13 @@ export interface AiState {
   lungeReadyAt: number;
   /** Winded after a grapple, or otherwise slowed. */
   slowUntil: number;
+  /**
+   * Where something worth chasing was last seen or heard, and when the memory
+   * of it lapses. Without the clock a zombie that can't get to the spot never
+   * arrives, never clears it, and so never reaches the branches below that
+   * would have noticed it was getting nowhere.
+   */
+  lastSeenUntil: number;
   lastSeenX: number | null;
   lastSeenY: number | null;
   wanderX: number;
@@ -275,12 +286,53 @@ export interface AiState {
   lockAlso: number;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
-  /** Bright enough to leave a room it has cleared. */
+  /**
+   * Searches well: gives up on an empty room quickly and picks the way out
+   * that leads somewhere unswept. A dull one still leaves, just slowly and by
+   * whichever door is nearest to hand.
+   */
   smartZombie: boolean;
   /** When the room it is in last looked empty, or 0. */
   roomClearSince: number;
+  /**
+   * Room this zombie reckons it is in, latched rather than read fresh — a
+   * doorway belongs to no room's floor, and re-deciding mid-threshold is what
+   * had one turning round in its own doorway.
+   */
+  searchRoom: number;
+  /** Room it came out of, so it doesn't immediately go back in. */
+  searchFrom: number;
+  /** Doorway it is making for, and the spot just past it that counts as through. */
+  searchExit: number;
+  searchAimX: number;
+  searchAimY: number;
+  searchUntil: number;
+  /** Last exit it gave up on, so the next choice doesn't land on it again. */
+  searchAvoid: number;
+  /** Closing on the chosen way out, or not — checked on an interval. */
+  searchGap: number;
+  searchProgressAt: number;
+  /** Building it is crossing the street to get into, or -1. */
+  searchBuilding: number;
+  /** When it started milling about outdoors with nothing to chase, or 0. */
+  streetSince: number;
   /** Runs to whoever has a gun rather than to a door. */
   officerSeeker: boolean;
+  /**
+   * Caught indoors with one of them, retreats deeper into the building and
+   * bolts a door behind rather than running for the street past it.
+   */
+  barricades: boolean;
+  /** Falls in behind a neighbour who is plainly getting away. */
+  followsCrowd: boolean;
+  /** The runner being followed right now, and how long that holds. */
+  crowdHeading: number;
+  crowdUntil: number;
+  nextCrowdCheck: number;
+  /** Next time this one might say something to whoever is protecting them. */
+  nextProtectSpeechAt: number;
+  /** A different doorway of the shelter to try first, after one was refused. */
+  shelterVia: number;
   /** When this one first noticed it was getting nowhere, or 0. */
   stuckSince: number;
   /** Freshly turned: no interest in doors while there is prey about. */
@@ -328,6 +380,17 @@ export interface World {
   /** Shared geodesic distance-to-nearest-zombie field. */
   danger: DangerField;
   nextDangerRebuild: number;
+  /**
+   * Which room every indoor spot belongs to, and the way out of each. Static
+   * for the round — it is built from walls and doorways, neither of which
+   * move — so it deliberately sits outside the `navDirty` rebuild.
+   */
+  rooms: RoomMap;
+  /**
+   * Where zombies have been *seen*, decaying. What the crowd knows, as against
+   * what `danger` knows, which is everything.
+   */
+  rumour: RumourField;
   /** Set when glass breaks; the tick loop rebuilds the nav grid once. */
   navDirty: boolean;
   entities: Map<string, Entity>;
@@ -337,6 +400,11 @@ export interface World {
   commands: Map<string, Command>;
   ai: Map<string, AiState>;
   grapples: Map<string, GrappleSession>;
+  /**
+   * Shrugged a grab off with kevlar and can't be seized again until this
+   * passes. Only the vest ever grants it.
+   */
+  grappleImmune: Map<string, number>;
   /** Bitten but not yet turned: id -> timestamp when they become a zombie. */
   pendingInfections: Map<string, number>;
   /** How many times each victim has been grappled — raises instant-turn odds. */
@@ -348,6 +416,17 @@ export interface World {
    * deployed; DEPLOY_MS after that timestamp it is actually steady.
    */
   deployStart: Map<string, number>;
+  /**
+   * Heavy MG being packed away: when it started, and how far up it had got.
+   * Present means still rooted, with the gauge draining from that height.
+   */
+  stowing: Map<string, { at: number; from: number }>;
+  /**
+   * Where each officer is actually pointing, as against where their mouse is.
+   * A weapon with a turnRate swings at a limited rate and the body follows;
+   * everything else keeps this equal to the mouse.
+   */
+  aimHeading: Map<string, number>;
   /** Charge rifle: id -> when the trigger went down, while winding up. */
   chargeSince: Map<string, number>;
   /** Sprint reserve for player officers. */
@@ -537,6 +616,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     lungeUntil: 0,
     lungeReadyAt: 0,
     slowUntil: 0,
+    lastSeenUntil: 0,
     lastSeenX: null,
     lastSeenY: null,
     wanderX: x,
@@ -583,7 +663,25 @@ export function newAiState(now: number, x: number, y: number): AiState {
     doorWaitUntil: 0,
     smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
     roomClearSince: 0,
+    searchRoom: OUTSIDE,
+    searchFrom: OUTSIDE,
+    searchExit: -1,
+    searchAimX: 0,
+    searchAimY: 0,
+    searchUntil: 0,
+    searchAvoid: -1,
+    searchGap: Infinity,
+    searchProgressAt: 0,
+    searchBuilding: -1,
+    streetSince: 0,
     officerSeeker: Math.random() < OFFICER_SEEK_CHANCE,
+    barricades: Math.random() < BARRICADE_CHANCE,
+    followsCrowd: Math.random() < FOLLOW_CROWD_CHANCE,
+    crowdHeading: 0,
+    crowdUntil: 0,
+    nextCrowdCheck: 0,
+    nextProtectSpeechAt: 0,
+    shelterVia: -1,
     stuckSince: 0,
     freshUntil: 0,
     breakingUntil: 0,
@@ -824,6 +922,8 @@ export function createWorld(): World {
     nav,
     danger: new DangerField(map, nav),
     nextDangerRebuild: 0,
+    rooms: new RoomMap(map),
+    rumour: new RumourField(map),
     navDirty: false,
     doors: [],
     doorGrid: new SpatialGrid<number>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
@@ -842,11 +942,14 @@ export function createWorld(): World {
     commands: new Map(),
     ai: new Map(),
     grapples: new Map(),
+    grappleImmune: new Map(),
     pendingInfections: new Map(),
     grappleCounts: new Map(),
     speedBoosts: new Map(),
     lastShotAt: new Map(),
     deployStart: new Map(),
+    stowing: new Map(),
+    aimHeading: new Map(),
     chargeSince: new Map(),
     stamina: new Map(),
     exhausted: new Set(),
@@ -896,6 +999,10 @@ export function resetWorld(world: World): void {
   world.map = generateMap();
   world.nav = new NavGrid(world.map);
   world.danger = new DangerField(world.map, world.nav);
+  // Rooms come from walls and doorways, so a fresh city needs a fresh map of
+  // them — but nothing short of a fresh city does. `rebuildNav` leaves it be.
+  world.rooms = new RoomMap(world.map);
+  world.rumour = new RumourField(world.map);
   world.nextDangerRebuild = 0;
   world.navDirty = false;
   // A fresh round is fresh news again — the first-sighting chatter is gated
@@ -927,11 +1034,14 @@ export function resetWorld(world: World): void {
   world.bots.clear();
   world.trackedTargets.clear();
   world.grapples.clear();
+  world.grappleImmune.clear();
   world.pendingInfections.clear();
   world.grappleCounts.clear();
   world.speedBoosts.clear();
   world.lastShotAt.clear();
   world.deployStart.clear();
+  world.stowing.clear();
+  world.aimHeading.clear();
   world.chargeSince.clear();
   world.shots.length = 0;
   world.spectators.clear();

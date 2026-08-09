@@ -58,6 +58,10 @@ Server modules and what each owns:
   ordinary blocks yield to all of it — so anything that must get its spot goes
   early
 - `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string pulling
+- `rooms.ts` — which room every indoor spot is in, the way out of each, and who
+  is in it. Static for the round; occupancy is recounted once a tick
+- `rumour.ts` — where zombies have been *seen*, decaying. What the crowd knows,
+  as against what `danger.ts` knows, which is everything
 - `danger.ts` — coarse geodesic distance-to-nearest-zombie field
 - `doors.ts` — door state, geometry, open/shut/lock/damage, wire serialisation
 - `doorplayer.ts` — the player's press-and-hold of E at a door, and its prompt
@@ -127,11 +131,14 @@ here and won't wander out · `witness` reacts to someone else running ·
 `panicScale` how long they stay rattled · `refugeBias` where in the candidate
 list they reach, so crowds fan out instead of funnelling into one doorway ·
 `shelterLarge` wants a landmark rather than the nearest front door ·
-`officerSeeker` runs to whoever has a gun and stands behind them.
+`officerSeeker` runs to whoever has a gun and stands behind them ·
+`barricades` retreats deeper into a building and bolts a door rather than
+running past the thing · `followsCrowd` falls in behind a neighbour who is
+plainly getting away.
 
-Zombies roll two of their own: `smartZombie` leaves a room once it is empty
-rather than pacing it, and `freshUntil` makes anything newly turned ignore
-doors entirely while there is prey about.
+Zombies roll two of their own: `smartZombie` decides how *well* one searches —
+every zombie leaves an emptied room now, see **Rooms** below — and `freshUntil`
+makes anything newly turned ignore doors entirely while there is prey about.
 
 `sawZombie` latches once someone has seen one, and gates the things only a
 naive person does — chasing after a running neighbour to find out why.
@@ -141,6 +148,135 @@ wandering · `locksDoors` shuts *and* bolts it when getting away from something 
 `begsAtDoors` hammers on a locked one rather than going elsewhere · `begHolds`
 stays there even with a zombie on them · `opensForStrangers` would let a
 stranger in, which most people would not.
+
+### Rooms
+
+`mapgen` carves buildings into a grid of rooms joined by a spanning tree of
+doorways and then **throws the room grid away** — all that survives is walls and
+doors. `rooms.ts` rebuilds it from the other end: plug every doorway, flood-fill
+what is left inside each footprint, and each puddle is a room.
+
+Reading the *finished* map rather than the generator is the whole point. It
+covers an ordinary block that was never partitioned (one room), a landmark
+carved into twenty, and the openings `repairEnclosures` cut afterwards, without
+any of those three knowing the room map exists. Measured over eight seeds:
+~100 rooms per city, zero without an exit, zero indoor samples unassigned.
+
+- **It is static.** Walls and doorways don't move, so unlike the nav grid it is
+  built once with the map and never rebuilt — `rebuildNav` deliberately leaves
+  it alone. A smashed pane is a hole in a room, not a reason for two rooms to
+  become one, so glass counts as a room boundary whether or not it survives.
+- **The doorway plug has to be thicker than the door slab.** A ten-pixel slab
+  can fall between two fourteen-pixel cell centres, and then the fill leaks
+  through the doorway and two rooms silently merge. `ROOM_DOOR_PLUG` widens it
+  until a solid line of centres lands inside.
+- **A room's id bleeds two cells past its floor** (`ROOM_DILATE_CELLS`).
+  Somebody standing in a doorway stands on no room's floor at all, and reading
+  that as "out in the street" made a zombie halfway through a door change its
+  mind about where it was.
+- **Occupancy rides on the loop that already counted survivors.** `preyIn(room)`
+  is an array lookup, not a spatial query — which is what makes "is there anyone
+  left in here" affordable for three hundred zombies. It is also *exact*: the
+  radius test it replaced counted a crowd through the wall of the room next
+  door, so a zombie alone in an empty room concluded it wasn't empty.
+
+### Zombies search room by room
+
+Everything a zombie does with nothing in front of it to chase is
+`zombieSearchTick`. Empty the room, leave by a way out it actually knows about,
+and go somewhere nobody has swept.
+
+- **Every zombie leaves an emptied room. `smartZombie` is how well.** A bright
+  one gives up after `ZOMBIE_ROOM_CLEAR_MS` and picks the exit leading to the
+  least recently swept room, avoiding the one it came from, the ones other
+  zombies are already in, and shut doors. A dull one dawdles for
+  `ZOMBIE_ROOM_CLEAR_SLOW_MS` and takes whatever is handy. That gap is what
+  keeps buildings occupied instead of everything draining into the street.
+- **The room underfoot is latched, not read fresh.** Re-deciding mid-threshold
+  is how one ends up turning round in its own doorway.
+- **It aims past the doorway, not at it.** Arriving *at* a door means standing
+  in the gap, where the room underfoot hasn't changed yet.
+- **Outdoors it mills about before hunting.** A horde that beelines from
+  building to building leaves the streets empty, so `ZOMBIE_STREET_WANDER_MS`
+  of aimlessness comes first, and only then does it pick a building.
+- **"Try the other door first" is emergent, not coded.** A shut door is scored
+  worse than an open one, so it walks to the open one; when every exit is shut
+  it goes to one and claws. And a way out it makes no progress toward for
+  `ZOMBIE_EXIT_PROGRESS_MS` is dropped and penalised in the next choice.
+- **`lastSeen` has to expire** (`ZOMBIE_LAST_SEEN_MS`). The chase-the-last-
+  sighting branch runs *above* every check that would notice a zombie getting
+  nowhere, so one making for a spot it can't reach — behind a bolted door,
+  across a wall — used to grind there for the rest of the round, invisible to
+  the stuck check and the room search alike. This was the single biggest cause
+  of the remaining long stalls once the search itself worked.
+
+Measured with the old behaviour gated back in, three seeds, 180s each — spells
+spent stuck in one empty room: median **17-20s → 8-12s**, p90 **65-76s →
+19-28s**, spells over 90s **14/7/3 → 0/0/0**. Rooms entered per zombie
+1.19-1.36 → 1.50-1.67. Tick cost was flat (+0.05-0.1ms median) despite 20-50%
+*more* zombies alive, because they find people. It is a harder game now:
+survivors at 180s fell from 187-263 to 80-176.
+
+### What the crowd knows
+
+**`danger.ts` is omniscient and `rumour.ts` is not, and that distinction is
+the point.** The danger field is sourced from every zombie on the map whether
+or not anybody has laid eyes on it. That is the right answer for the half
+second of running for your life — and the wrong one for deciding where to
+stroll, where to hole up, or which house to run into.
+
+So the split is: **flight reads `danger`, everything calmer reads `rumour`.**
+Only a human or an officer who actually *sees* a zombie writes to the rumour
+field, in `senseThreats`, and what they write fades over `RUMOUR_MEMORY_MS`.
+It is deliberately shared rather than per-person — people shout, so one
+sighting is a street the whole neighbourhood keeps out of for a while. That
+also makes it O(1) to read, which is the only reason four hundred of them can
+afford to consult it at all. No BFS: it is a memory, not a distance.
+
+Before this, nothing outside the flee branch consulted danger of any kind.
+`pickWanderTarget` took the first walkable ring sample and `chooseSettleGoal`
+sorted purely by distance, so a civilian would calmly settle into the house
+they had just watched a neighbour dragged out of.
+
+- **Nobody knows a door is locked until they try it.** No refuge choice reads
+  lock state anywhere — see `shelterAppeal`. What they can judge is how many
+  ways in and out a building has from the street, and whether anyone has been
+  shouting about the place. Finding a bolted door is a discovery: they beg
+  (`begsAtDoors`), or go round the side (`anotherWayIn` → `shelterVia`), and
+  only give the building up once every way in has been tried and refused.
+  `refusedDoors` only ever records a door somebody physically walked up to.
+- **"Covered" is about zombies, not locks.** A doorway is covered when a
+  zombie *they can see* is standing in it, or is closer to it than they are and
+  would plainly get there first. `openDoorInto` on the way in, `exitPointFor`
+  on the way out, same test both ways.
+- **Escape routes are scored along the way, not only at the far end.** Scoring
+  the destination alone picks somewhere lovely on the other side of the zombie,
+  and then the router walks them straight past it.
+- **A protector is an officer of any kind or a deployed pocket gunner**, and
+  the gunner wins from half again as far off. The spot offered is *behind* the
+  bags, so a crowd gathering at one doesn't wander into its own gun's arc. Some
+  of them say so (`PROTECT_LINES`), on a long interval — a chance re-rolled per
+  tick is a person who never stops talking.
+
+### Barricading, and why it is rarer than it sounds
+
+`threatSharesRefuge` asks whether a zombie is in this **room**, not this
+building. The building was the only question available before the room graph
+and it is far too coarse: it is the difference between being locked in with
+the thing and being two rooms and a bolted door away from it. Taking it as a
+veto is what made barricading impossible.
+
+**The limit is the city, not the AI.** Measured over three seeds, only ~3% of
+the ticks a frightened person spends indoors are spent somewhere with an
+interior door at all — `buildingAt` (the ordinary block) emits no partitions
+whatsoever, so most of the map is single-room buildings and `hasInnerExit` is
+false for them. Room-to-room barricading is therefore a landmark behaviour,
+firing single-digit times some rounds and a few hundred in others depending on
+how many big buildings the seed drew. If it should be common, the change is in
+`mapgen`: partition ordinary buildings too. That is a much bigger decision than
+it looks — it touches pathing, spawning, feel and cost — so it has not been
+made. What covers the rest of the city instead is the front door: `barricades`
+now also drives the door-slam path, so they shut and bolt the way they came in.
 
 ### Doors
 
@@ -170,6 +306,12 @@ otherwise demand.
   lasts half a second, ends with no infection, and spends one of three uses.
   It is an early return in `resolveGrapple` — the escape and infection rolls
   below it never run, which is what makes "can't be infected" absolute.
+  Shrugging one off also buys `KEVLAR_IMMUNE_MS` where **nothing can lay a hand
+  on you at all** (`world.grappleImmune`). Without that window the vest is worth
+  almost nothing in the only situation it exists for: in a crowd the next zombie
+  grabs on the same tick the last one let go, and all three uses are gone inside
+  a second and a half with the wearer never having moved. The zombies keep
+  chasing meanwhile — they just can't get a grip.
 - **The grenade launcher is never in the loot table.** Rarity 0 keeps it out by
   construction and it gets one roll for the whole city, so most rounds have
   none. Its shell and the smoke grenade are both real projectiles that bounce.
@@ -196,9 +338,38 @@ otherwise demand.
   the one charging you is the one you can take the head off. The **heavy MG**
   is hopeless from the hip until right-click plants it (`DEPLOY_MS`); the
   player is rooted from the moment they commit, not from when the pegs land.
-  The **charge rifle** fires on release, not press, and winding it fully drives
-  the round through `pierce` bodies. Bots share `fireHeld` and so fire all of
-  them, at full charge.
+  A second right-click **packs it up**, which takes `UNDEPLOY_MS` and roots you
+  for that too — getting up is a decision, not a free cancel. `world.stowing`
+  records how far up it had got, so a bipod cancelled halfway drains the gauge
+  from halfway rather than snapping to full, and the draining gauge is the only
+  thing telling the player why they still can't move.
+  The **charge rifle** fires on release, not press, in **four discrete bars**.
+  One bar is one body, each bar after that is one more, and the fourth also
+  drives the round through one wall or door — `throughWall` in `fire`, which
+  skips exactly one blocker in the sorted list. Below the first bar it doesn't
+  fire at all and costs nothing, so a mis-click isn't a wasted round.
+  Bots share `fireHeld` and so fire all of them, at full charge.
+- **Firing on whole bars is what lets the gauge tell the truth.** The charge
+  rifle used to fire on the raw held fraction, which no four-segment readout
+  can honestly show. `drawChargeBars` and the server both quantise to
+  `CHARGE_BARS`, so what you see filled is exactly what you get.
+- **The heavy MG is a pinning weapon, not a killing one.** Its damage was cut
+  to 4-8 and `slowMs`/`slowMul` added, because at 110ms cadence it was doing
+  bolt-action work ten times faster than the bolt action. A held burst now
+  stops a charge dead without dropping much of it.
+- **Every gun is in every city, derived from the registry.**
+  `GUARANTEED_ITEMS` was a hand-kept list of the rare ones, so adding a gun and
+  forgetting to list it produced maps that simply didn't have it.
+  `GUARANTEE_EVERY_GUN` walks `ITEMS` instead — rarity 0 excluded, since those
+  are placed by their own roll. Measured over five cities: ~29 pieces of loot
+  in buildings, no gun missing in any of them.
+- **A duplicate gun is ammunition, not a gun.** Picking up a second of
+  something already in the bag strips it for its rounds rather than taking a
+  slot — carrying two of the same is strictly worse than one loaded one, since
+  you can only fire the one. Checked *ahead* of the free-slot case for that
+  reason. Bots understand it through `lootWanted`, which scores a duplicate by
+  how empty the copy they carry is (`BOT_REFILL_APPETITE`), so a bot with a
+  full rifle ignores one and a bot down to its last few crosses the street.
 - **Bots walk past the dart gun and the riot shield** (`BOT_IGNORES`). Both
   already scored zero, since neither has a damage figure; the set says so out
   loud so giving the dart one later doesn't send every bot after it.
@@ -245,6 +416,91 @@ stream down a street leaves a dozen fires rather than three hundred.
 
 Officers don't catch. That is a deliberate early return in `ignite`, not an
 oversight: a flamethrower you can kill yourself with is one nobody uses.
+
+**It lands where the crosshair is.** `sprayFlame` takes the aim point and
+throws to it, clamped to `[FLAME_MIN_THROW, FLAME_RANGE]`. Before this the
+crosshair chose the direction and nothing chose the distance, so every burst
+went its full length and aiming at something close put the fire well behind it.
+
+**Nothing burns along the way — it all comes down in one place.** One patch at
+the landing point, plus `FLAME_SPLASH_COUNT` in a cone thrown on past it. The
+ground between the shooter and the crosshair stays clear. Earlier versions
+walked the stream dropping patches every `FLAME_STEP`, which is why a held
+trigger laid a carpet of fire across the shooter's own feet and read as
+"landing way too soon" — the fire appeared under the *middle* of the arc, which
+is its highest point. One pull is three patches.
+
+**Nothing crosses a wall, in either the simulation or the drawing**, and those
+needed separate fixes:
+- `blocked` (the throw was cut short) suppresses the forward cone entirely.
+  When a wall stopped the stream, that *is* where it stopped, and a cone past
+  it would be putting fire through the wall.
+- Each surviving cone spot is still checked against `nav.isBlocked` and
+  `nav.lineClear`, because a ray through a doorway can put the cone inside the
+  walls either side without the ray itself ever being blocked.
+- The **drawn** splash in `drawFlameStream` fans *back* toward the shooter
+  rather than on past the impact. This one is easy to miss: the endpoint is
+  already hard against whatever stopped the stream, so anything drawn forward
+  from it renders through the wall no matter what the server did. Splashback
+  off the thing you just hit is the truer picture anyway.
+
+**A heavy weapon is a `turnRate` on `ItemDef`, not a branch.** `steerAim` in
+`combat.ts` eases the officer's aim toward the mouse at that rate; absent, the
+aim snaps as it always did. The flamethrower's 2.6 rad/s puts a 180° swing at
+1.2 seconds, and that lag is the whole of its weight — the crosshair runs ahead
+while the body and the stream drag round after it.
+
+It has to be **one** value. `steerAim` is called once per tick from
+`updatePlayers`, before anything fires, and both `entity.facing` and the
+direction passed to `fireHeld` read it. Compute it twice and the drawn facing
+and the fired direction drift apart. The *distance* still comes from the
+cursor, so sweeping throws the stream behind where you are pointing — which is
+exactly the intended feel.
+
+**`FIRE_PATCH_SPACING` is a look, not just a cost.** `dropPatch` merges
+anything inside it, so widening it from 22 to 34 is what turns burning ground
+from one continuous orange smear back into a scatter of separate fires. The
+smear was the single biggest reason the real thing didn't match the mock — the
+mess on screen was never the stream, it was the ground fire piling up.
+
+**Drawing it is `drawFlameStream`, not three strokes.** Ruled lines read as a
+laser sight. It is a row of `FLAME_BLOBS` overlapping circles along the throw,
+fattest at the midpoint (6.6 → 15.7 → 3.4 px), lifted off the ground by
+`FLAME_ARC_LIFT` on a sine so it rises and comes back down, with a flattened
+black ellipse tracking it along the *unlifted* line — without the shadow the
+lift reads as the stream being aimed off to one side rather than as height.
+Every blob wobbles across the line so the edge is ragged.
+
+**The arc is screen-space, so it has to shrink when you fire up or down.** The
+lift only reads as *height* when it is across the line of travel. Fired north
+or south it is along that line instead, where the same arc stops looking like
+height and starts looking like the stream falling short.
+`FLAME_ARC_VERTICAL_MIN` keeps 28% of it at the vertical, scaled by
+`|dx| / len`.
+
+**Napalm needs its own tracer clock.** `TRACER_LIFETIME_MS` is 90ms, which is a
+blink — that is what made it blip out of existence. `FLAME_TRACER_MS` is 320,
+and both the radius and the alpha fall off across it, so at 95% of its life it
+is still 48% of its original size at 1.5% alpha. Fading alone still ends on a
+visible edge; shrinking as well is what makes it die away. `main.ts` culls on
+the same per-kind clock — culling flames at 90ms would cut the fade short.
+
+**Burning ground needs the same treatment, and didn't have it.** The old curve
+bottomed out at 45% size and a quarter opaque and *then* the patch was deleted,
+which is a fire vanishing rather than a fire dying. `FIRE_FADE_FRACTION` gives
+the last 45% of a patch's life over to going out, and the curve reaches
+genuinely nothing: 0.34 alpha down to 0.000, 1.0 scale down to 0.30.
+
+**Civilians cannot be burned to death, by construction.** `ignite` caps them at
+`HUMAN_BURN_MS` (700ms) rather than extending, they take
+`HUMAN_BURN_DAMAGE_PER_SEC` (2) instead of 26, and `updateFires` clamps them at
+`HUMAN_BURN_FLOOR`. All three are needed: the cap alone still lets a civilian
+parked in a fire be re-lit every tick, and 2/s is still a kill given a minute.
+Verified — two solid minutes stood in a fire leaves them on exactly 25hp and
+alive. This is a rule about the game, not about fire: without it the
+flamethrower is a tool for clearing a street of the people you are there to
+save, and burning the uninfected is a cheaper way to stop an outbreak than
+fighting it. Same shape as kevlar's absolute "can't be infected".
 
 ### Bot officers
 
@@ -310,6 +566,10 @@ magazine, which made swapping a way to manufacture ammo.
   entity, not per tick; bush scanning and refuge choice are cached per entity.
 - **The danger field is the scaling primitive.** One BFS from all zombies at 6Hz
   serves every human in O(1). Prefer adding to it over per-entity searches.
+  The **room map** is the second one, and the same trick: build the answer once
+  for everybody rather than letting each entity go and look. `RoomMap` costs
+  1-8ms alongside `generateMap`, once per round, and occupancy is two counters
+  folded into the survivor walk the tick was already paying for.
 - Current cost: **~2.4ms median / 3.2ms p95 per 33.3ms tick at 411 entities.**
   A headless harness driving only `updateAi` + collision measures ~1.0ms median
   / 2.3ms p95 — not comparable to the figure above, which includes fog and
@@ -358,6 +618,12 @@ magazine, which made swapping a way to manufacture ammo.
   L/T shaped; bbox tests wrongly report the outdoor notch as indoors. Anything
   aiming at a building aims at an `interiorPointOf` it, never its bbox centre.
 - **Doors are stored** (`map.doors`) so NPCs reason about actual exits.
+- **Rooms are derived from the finished map, not exported by the generator.**
+  `partitionRooms` knows the room grid and could hand it over, but only for the
+  buildings it partitions — an ordinary block, an L-shaped footprint and a
+  `repairEnclosures` cut would all need their own answer. Flood-filling the
+  finished geometry gets all four for one algorithm, and can't drift out of
+  step with what was actually built.
 - **Every indoor space is reachable from the street, by construction and then by
   check.** Rooms are a grid joined by a spanning tree of doorways; a partition
   laid as one long wall with a single gap in it seals off whole corners. On top
