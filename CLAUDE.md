@@ -377,10 +377,18 @@ otherwise demand.
   city" had the guarantee satisfied by the test heap while the actual buildings
   went without. `inACity` excludes anything with a `loot-test-` id.
 - **A second pistol is the other hand, not a gun.** It costs no slot: `collect`
-  sets `inv.dual` and slot 0 becomes `dualPistols` — same round, about twice as
-  often, still unlimited. Slot 0 stays undroppable either way.
+  sets `inv.dual` and slot 0 becomes `dualPistols`. It fires **two rounds a pull
+  down parallel lines** — `pellets: 2` with `parallel: 9`, which offsets each
+  round sideways from the body's centre line rather than spreading it by angle
+  the way a shotgun's cone does. The wobble is rolled **once for the pull** and
+  both barrels take it; roll it per pellet and the two lines splay or converge,
+  which is precisely what stops it reading as two guns. Still unlimited, and
+  slot 0 stays undroppable either way.
+- **The sling and the pack are worn, not slotted.** They are flags on the
+  inventory rather than entries in `utilities`, so they take no number key at
+  all — a thing you have on, not a thing you select.
 - **Slot counts are per-bag, not constants.** `gunSlots()` and `utilitySlots()`
-  read the gunsling and the backpack out of the utilities list, and the wire
+  read those two flags, and the wire
   carries both so the HUD draws only the cells that bag can actually use. The
   numbering is **contiguous** — a gunsling shifts the utilities along by one and
   the HUD renumbers with them, so what is on screen is what the key selects.
@@ -396,6 +404,18 @@ otherwise demand.
   reason. Bots understand it through `lootWanted`, which scores a duplicate by
   how empty the copy they carry is (`BOT_REFILL_APPETITE`), so a bot with a
   full rifle ignores one and a bot down to its last few crosses the street.
+- **Bots carry the belt too.** They value the radio highest (four better-aiming
+  officers), then the sling and pack — worn, so free — then thermal, frags,
+  mines and boots. A frag only goes at a cluster of `BOT_FRAG_MIN_TARGETS`,
+  because a bot spending its last one on a straggler has nothing left when the
+  street fills; a mine is only laid while `bolting`, since it is a thing you
+  retreat over rather than a weapon.
+- **Bots carry the belt too.** They value the radio highest (four better-aiming
+  officers who then stay with them), then the sling and pack — worn, so free —
+  then thermal, frags, mines and boots. A frag only goes at a cluster of
+  `BOT_FRAG_MIN_TARGETS`, because a bot spending its last one on a straggler
+  has nothing left when the street fills; a mine is only laid while `bolting`,
+  since it is a thing you retreat over rather than a weapon.
 - **Bots walk past the dart gun and the riot shield** (`BOT_IGNORES`). Both
   already scored zero, since neither has a damage figure; the set says so out
   loud so giving the dart one later doesn't send every bot after it.
@@ -587,6 +607,16 @@ magazine, which made swapping a way to manufacture ammo.
 
 ## Performance rules (these matter — 400+ entities)
 
+- **The park was overdraw, not the fog.** Walking through the trees stuttered
+  because `drawBushes` filled a hundred-odd *translucent* overlapping circles
+  separately, and that fill-rate cost is paid per pixel per frame. They all go
+  into one path now, filled once — the union costs about what a single blob
+  does. Worth recording what it was *not*: measured, the fog polygon is
+  **faster** in the park (0.30ms) than in a street (0.74ms), there are fewer
+  entities in view there than at the busiest spot (12 vs 31), and the
+  bush-refuge scan is 0.37ms across every hider on the map. All three were
+  plausible and all three were wrong.
+
 - **Everything expensive is budgeted or cached.** A\* is capped at
   `PATH_BUDGET_PER_TICK` (10) searches; AI perception runs at 10Hz staggered per
   entity, not per tick; bush scanning and refuge choice are cached per entity.
@@ -746,12 +776,18 @@ differences: a car has to arrive down a street, and it stays parked afterwards
 instead of flying off — a patrol car on the corner is free scenery and a
 landmark for where your backup came from.
 
-**"Down a street" is a clear straight line from off the map, not a road list.**
-The generator doesn't keep one. But the city is blocks with roads between them,
-so the spots with an unobstructed run to the edge are overwhelmingly the roads
-— `hasWallClearPath` from an edge point is a cheap stand-in that needs no new
-data, and it fails safe: if nothing has a clear run the car parks at the edge
-and the crew walk in.
+**It stops at the map edge and the crew walk the rest.** A squad car threading
+a city to arrive at your shoulder is both a hard pathing problem and the wrong
+picture; it pulls up at the cordon and they come the rest of the way on foot,
+which is the bit worth watching. The spot is the first clear ground in from the
+boundary along the bearing to the caller — measured **from the boundary**, not
+from the off-map entry point, which is what had it clamped flush against the
+perimeter wall.
+
+**The parked car is solid to bodies but not to sight or gunfire**, the same
+trade the sandbags make and for the same reason: it is cover you shoot over.
+Deliberately not in the nav grid — routes are planned as though it weren't
+there and whoever walks into one deals with it — and it can't be destroyed.
 
 **The bubble and the crackle back are not decoration.** The car enters off-map
 and is the best part of eight seconds away, so without them picking the radio
@@ -786,8 +822,15 @@ the way kevlar does, thrown through the launcher's own shell).
 whatever crosses it for a full minute — the stun is enormous because a mine is
 a one-shot you had to carry, place and walk away from. `survivorBeacon` plants
 a mast and frees its slot; the order pointing people at it lives on the Q wheel
-afterwards and, unlike the rally shout, costs nothing and can be given again
-and again, because the mast is a *place* rather than a spot you clicked.
+afterwards, costs a rally charge like any other command, and can be repeated
+from anywhere in earshot — the mast is a *place* rather than a spot you
+clicked, which is what makes it worth carrying.
+
+**The wheel's hit test has to be told how many options are on screen.** It read
+a fixed count off a module-level `WHEEL_OPTIONS` while `drawWheel` used the
+live list, so the moment a third option appeared it was drawn and then could
+never be clicked — the arithmetic still divided the circle in two. Anything
+added to the wheel needs the count threaded, not just the label.
 
 **A stun is folded into the frozen set.** `computeFrozen` already returns the
 ids `updateAi` skips, so adding the stunned there is what keeps the mine from
@@ -796,10 +839,25 @@ grabs nobody without any of them checking for it.
 
 **Thermal goggles are the one hole in server-enforced fog**, and it is kept as
 narrow as it can be and still work: **zombies only**, inside `THERMAL_RANGE`,
-flagged `thermal` so the client draws a soft heat blob *instead of* a body —
-an early return at the top of `drawEntity`, because you have not laid eyes on
-it and it must not read as though you have. A wallhack for survivors or loot
-stays impossible by construction.
+and **only for ones you cannot already see** — a zombie in plain view is sent
+normally and drawn normally. They are **worn, not held**: goggles on your head
+work whatever is in your hands.
+
+The contacts are drawn in their own pass **after the fog**, not with the other
+bodies. That ordering is the whole thing — put them in the entity pass and the
+fog lays over them and dims the one readout you bought the goggles for. A
+wallhack for survivors or loot stays impossible by construction.
+
+**Bots get the same thing through `senseThreats` — but awareness only.** A heat
+contact goes into `threatPoints`, which drives bolting, the safest heading and
+where they choose to stand. It is deliberately kept *out* of `nearest`, which
+becomes `targetId` and is what a bot aims and fires along. Let one through and
+a bot stands in a corridor emptying a magazine into the wall the zombie is
+behind — knowing where something is and having a shot at it are different
+things, and that split is the line between them.
+
+Measured with a zombie 120px through a wall and goggles on: aware of it every
+tick, the firing target on **0 of 240**, zero rounds fired.
 
 **The cure gun is the only thing that tells you about yourself.** `selfInfected`
 is null on the wire unless one is in hand, so the answer isn't merely hidden by

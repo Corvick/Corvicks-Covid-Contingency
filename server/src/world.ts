@@ -250,6 +250,8 @@ export interface AiState {
   botWinded: boolean;
   /** Earliest a bot will pop another smoke. */
   nextSmokeAt: number;
+  /** Earliest a bot will throw a frag or lay a mine. Shared between the two. */
+  nextThrowAt: number;
   /**
    * Latched: walking in, or giving ground. Held between two thresholds rather
    * than recomputed against one, or a bot sitting near its ideal range flips
@@ -677,6 +679,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     botStamina: STAMINA_MAX,
     botWinded: false,
     nextSmokeAt: 0,
+    nextThrowAt: 0,
     botClosing: false,
     botGiving: false,
 

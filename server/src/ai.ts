@@ -112,6 +112,9 @@ import {
   RADIO_CALL_SCAN_MS,
   ESCORT_NEAR,
   ESCORT_FAR,
+  THERMAL_RANGE,
+  BOT_FRAG_MIN_TARGETS,
+  BOT_THROW_INTERVAL_MS,
   FOLLOW_RADIUS,
   FOLLOW_ARRIVE_DIST,
   FOLLOW_SPEED_MUL,
@@ -227,7 +230,7 @@ import {
   DOOR_DEFY_LINES,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
-import { collect, dropHeld, heldGunSlot, heldItem, type Inventory } from './inventory.js';
+import { collect, dropHeld, gunSlots, heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { zombieAtSandbag } from './emplacement.js';
 import { OUTSIDE } from './rooms.js';
 
@@ -360,19 +363,44 @@ function senseThreats(
   /** Officers are looking for these; a hedge doesn't hide one from them. */
   throughBushes = false,
 ): void {
-  const nearby = world.entityGrid.queryCircle(e.x, e.y, sight, new Set<Entity>());
+  const inv0 = world.inventories.get(e.id);
+  const reach = inv0?.utilities.includes('thermalGoggles') ? Math.max(sight, THERMAL_RANGE) : sight;
+  const nearby = world.entityGrid.queryCircle(e.x, e.y, reach, new Set<Entity>());
 
   state.threatPoints.length = 0;
   let nearest: Entity | null = null;
   let nearestDist = Infinity;
 
+  // Goggles are the bot's version of the orange blob: inside their range a
+  // wall stops mattering, so a goggled bot reacts to the room it is walking
+  // into exactly as a player does to a contact they can see through it.
+  const inv = world.inventories.get(e.id);
+  const thermal = inv?.utilities.includes('thermalGoggles') ? THERMAL_RANGE : 0;
+
+  // Goggles tell you something is *there*. They do not give you a shot at it,
+  // so a heat contact is kept out of `nearest` — which is what becomes
+  // `targetId`, and what the bot aims and fires along. Let one through and a
+  // bot stands in a corridor emptying a magazine into the wall it is behind.
   for (const other of nearby) {
     if (other.type !== 'zombie') continue;
     const dist = Math.hypot(other.x - e.x, other.y - e.y);
-    if (dist > sight) continue;
-    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, throughBushes)) continue;
+    const seen =
+      dist <= sight && hasLineOfSight(world, e.x, e.y, other.x, other.y, throughBushes);
+    const felt = thermal > 0 && dist <= thermal;
+    if (!seen && !felt) continue;
 
+    // Awareness either way: this drives bolting, the safest heading and where
+    // they choose to stand, all of which should know about something behind a
+    // wall if the goggles do.
     state.threatPoints.push({ x: other.x, y: other.y });
+    if (!seen) continue;
+
+    // Only what was actually *seen* goes into the crowd's memory. That is what
+    // keeps the rumour field honest — it holds what somebody witnessed, and a
+    // heat blob through a wall is not a witness account. Stamped here rather
+    // than in a second pass so the line-of-sight test is only paid once.
+    world.rumour.stamp(other.x, other.y, now);
+
     if (dist < nearestDist) {
       nearestDist = dist;
       nearest = other;
@@ -380,13 +408,6 @@ function senseThreats(
   }
 
   state.threatCount = state.threatPoints.length;
-
-  // Anything actually seen goes into the crowd's memory. This is the only way
-  // the rumour field is ever written to, which is what keeps it honest: it
-  // holds what somebody witnessed, not what is true.
-  if (state.threatCount > 0) {
-    for (const threat of state.threatPoints) world.rumour.stamp(threat.x, threat.y, now);
-  }
 
   // Stick with whoever we were already onto unless something is meaningfully
   // closer. Taking the nearest outright made officers flick between two
@@ -3031,6 +3052,26 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
     } else if (p.item === 'pocketGunner' && utilityRoom && !inv.utilities.includes('pocketGunner')) {
       // A second officer and a machine gun, for the cost of a utility slot.
       want = 70;
+    } else if (p.item === 'radio' && utilityRoom && !inv.utilities.includes('radio')) {
+      // Four better-aiming officers who then stick with you. The best value in
+      // a utility slot there is, and worth crossing a street for.
+      want = 85;
+    } else if (p.item === 'grenade' && utilityRoom && inv.grenades <= 0) {
+      want = 55;
+    } else if (p.item === 'zapMine' && utilityRoom && inv.mines <= 0) {
+      want = 45;
+    } else if (p.item === 'thermalGoggles' && utilityRoom && !inv.utilities.includes('thermalGoggles')) {
+      // Seeing them through a wall is worth as much to a bot as to a player:
+      // `senseThreats` reads the same range and stops caring about line of
+      // sight, so a goggled bot fights the room it is walking into.
+      want = 65;
+    } else if (p.item === 'gunsling' && !inv.sling) {
+      // Worn, so they cost no slot at all — always worth stopping for.
+      want = 75;
+    } else if (p.item === 'backpack' && !inv.pack) {
+      want = 70;
+    } else if (p.item === 'combatBoots' && utilityRoom && !inv.utilities.includes('combatBoots')) {
+      want = 40;
     } else if (p.item === 'ammoBox') {
       // Boxes top up the total now rather than only refilling a magazine, so
       // one is worth having whether or not anything has actually run dry.
@@ -3103,6 +3144,53 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
  * Smoke is cover, not a weapon. It goes to either side or behind — putting it
  * on the zombie would only blind the bot to the thing it is trying to watch.
  */
+/**
+ * A frag into a crowd. Only when there are enough of them to be worth a
+ * grenade — one zombie is a rifle's job, and a bot throwing its last frag at a
+ * straggler is a bot that has nothing left when the street fills up.
+ */
+function lobFrag(world: World, e: Entity, state: AiState, aim: number, now: number): boolean {
+  const inv = world.inventories.get(e.id);
+  if (!inv || inv.grenades <= 0) return false;
+  if (now < state.nextThrowAt) return false;
+
+  let clustered = 0;
+  for (const t of state.threatPoints) {
+    if (Math.hypot(t.x - state.threatX, t.y - state.threatY) < BLAST_RADIUS) clustered++;
+  }
+  if (clustered < BOT_FRAG_MIN_TARGETS) return false;
+  // Never at their own feet.
+  const gap = Math.hypot(state.threatX - e.x, state.threatY - e.y);
+  if (gap < BLAST_RADIUS * 1.2) return false;
+
+  state.nextThrowAt = now + BOT_THROW_INTERVAL_MS;
+  const slot = inv.activeSlot;
+  inv.activeSlot = gunSlots(inv) + 1 + inv.utilities.indexOf('grenade');
+  const threw = fireHeld(world, e, inv, aim, now, 1, { x: state.threatX, y: state.threatY });
+  if (!inv.utilities.includes('grenade')) inv.activeSlot = 0;
+  else inv.activeSlot = slot;
+  return threw;
+}
+
+/**
+ * A mine at their feet while giving ground. Laid *behind* the fight rather
+ * than thrown into it — it is a thing you retreat over, not a weapon.
+ */
+function dropMine(world: World, e: Entity, state: AiState, now: number): boolean {
+  const inv = world.inventories.get(e.id);
+  if (!inv || inv.mines <= 0) return false;
+  if (!state.bolting) return false; // only worth it when they are backing off
+  if (now < state.nextThrowAt) return false;
+
+  state.nextThrowAt = now + BOT_THROW_INTERVAL_MS;
+  const slot = inv.activeSlot;
+  inv.activeSlot = gunSlots(inv) + 1 + inv.utilities.indexOf('zapMine');
+  const laid = fireHeld(world, e, inv, state.heading, now);
+  if (!inv.utilities.includes('zapMine')) inv.activeSlot = 0;
+  else inv.activeSlot = slot;
+  return laid;
+}
+
 function popSmoke(world: World, e: Entity, state: AiState, toThreat: number, now: number): boolean {
   if (now < state.nextSmokeAt) return false;
   const inv = world.inventories.get(e.id);
@@ -3244,6 +3332,10 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Smoke goes up the moment something is seen, before the shooting starts —
     // it is what buys the room to back off through.
     if (popSmoke(world, e, state, aim, now)) return;
+    // A frag first if the crowd is worth one, then a mine underfoot if they are
+    // about to give ground over it.
+    if (lobFrag(world, e, state, aim, now)) return;
+    if (dropMine(world, e, state, now)) return;
     // And a gun crew goes down facing whatever it just saw.
     if (gunnerTick(world, e, state, inv, aim, now)) return;
 

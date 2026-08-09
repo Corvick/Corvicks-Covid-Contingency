@@ -141,12 +141,20 @@ export function fire(
   damageMul = 1,
   /** A round with enough behind it to carry through one wall or door. */
   throughWall = false,
+  /**
+   * Sideways offset from the body's centre line. Two pistols fire parallel a
+   * hand's width apart rather than from the same muzzle, so the pair reads as
+   * two guns instead of one shot drawn twice.
+   */
+  offset = 0,
 ): void {
   const angle = aim + (Math.random() * 2 - 1) * bloom;
   const range = def?.range ?? GUN_RANGE;
   // Start the round at the drawn barrel tip rather than the body centre.
-  const muzzleX = shooter.x + Math.cos(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
-  const muzzleY = shooter.y + Math.sin(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
+  const sideX = -Math.sin(angle) * offset;
+  const sideY = Math.cos(angle) * offset;
+  const muzzleX = shooter.x + Math.cos(angle) * shooter.radius * MUZZLE_OFFSET_MUL + sideX;
+  const muzzleY = shooter.y + Math.sin(angle) * shooter.radius * MUZZLE_OFFSET_MUL + sideY;
   const endX = muzzleX + Math.cos(angle) * range;
   const endY = muzzleY + Math.sin(angle) * range;
 
@@ -560,8 +568,18 @@ export function fireHeld(
     const throughWall = def.charge === true && level >= CHARGE_BARS;
 
     const pellets = def.pellets ?? 1;
+    // A shotgun throws its pellets in a cone from one barrel; dual pistols fire
+    // theirs down parallel lines from two. `parallel` picks which.
+    const gap = def.parallel ?? 0;
+    // Parallel means *parallel*: the wobble is rolled once for the pull and
+    // both barrels take it, rather than each round drifting on its own — roll
+    // it per pellet and the two lines converge or splay and the whole point of
+    // firing two guns is lost.
+    const shared = gap === 0 ? aim : aim + (Math.random() * 2 - 1) * bloom;
     for (let i = 0; i < pellets; i++) {
-      fire(world, shooter, aim, bloom, now, def, pierce, damageMul, throughWall);
+      const offset = gap === 0 ? 0 : (i - (pellets - 1) / 2) * gap;
+      const angle = gap === 0 ? aim : shared;
+      fire(world, shooter, angle, gap === 0 ? bloom : 0, now, def, pierce, damageMul, throughWall, offset);
     }
   }
   return true;

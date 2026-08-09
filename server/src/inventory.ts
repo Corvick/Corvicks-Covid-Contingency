@@ -47,6 +47,13 @@ export interface Inventory {
   grenades: number;
   /** Mines left, same bundle-in-one-slot arrangement. */
   mines: number;
+  /**
+   * Worn upgrades. They take no numbered slot of their own — a sling and a
+   * pack are things you have on, not things you select — so they are flags
+   * rather than entries in `utilities`.
+   */
+  sling: boolean;
+  pack: boolean;
   /** When E was pressed down, or null while released. */
   holdSince: number | null;
   /** Suppresses the tap-to-collect once a hold has already dropped something. */
@@ -64,6 +71,8 @@ export function newInventory(): Inventory {
     dual: false,
     grenades: 0,
     mines: 0,
+    sling: false,
+    pack: false,
     holdSince: null,
     holdConsumed: false,
   };
@@ -71,12 +80,12 @@ export function newInventory(): Inventory {
 
 /** Gun slots this bag can use right now — three, or four with a sling. */
 export function gunSlots(inv: Inventory): number {
-  return GUN_SLOTS + (inv.utilities.includes('gunsling') ? GUNSLING_SLOTS : 0);
+  return GUN_SLOTS + (inv.sling ? GUNSLING_SLOTS : 0);
 }
 
 /** Utility slots this bag can use right now. The pack pays for its own slot. */
 export function utilitySlots(inv: Inventory): number {
-  return UTILITY_SLOTS + (inv.utilities.includes('backpack') ? BACKPACK_SLOTS : 0);
+  return UTILITY_SLOTS + (inv.pack ? BACKPACK_SLOTS : 0);
 }
 
 /** Scatter loot through the city. Most buildings come up empty. */
@@ -278,10 +287,17 @@ function applyUtility(world: World, playerId: string, inv: Inventory, item: Item
     inv.mines += ZAP_MINE_COUNT;
     return inv.utilities.includes('zapMine') ? 'used' : 'carry';
   }
-  // One sling and one pack is all a person can wear. A second of either is
-  // dead weight, so it stays on the floor rather than eating a slot.
-  if ((item === 'gunsling' || item === 'backpack') && inv.utilities.includes(item)) {
-    return 'refuse';
+  // Worn rather than carried: they cost no slot, so picking one up is pure
+  // gain and a second of either is dead weight left on the floor.
+  if (item === 'gunsling') {
+    if (inv.sling) return 'refuse';
+    inv.sling = true;
+    return 'used';
+  }
+  if (item === 'backpack') {
+    if (inv.pack) return 'refuse';
+    inv.pack = true;
+    return 'used';
   }
   return 'carry'; // boots, binoculars, tracker, smoke, and anything else worn
 }
@@ -394,16 +410,6 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
   const item = heldItem(inv);
   // Slot 0 is bolted down, pair or not.
   if (!item || item === 'pistol' || item === 'dualPistols') return null;
-
-  // Taking the pack off with more in the bag than you can hold without it
-  // would have to spill something. Refusing is clearer than choosing for them.
-  if (item === 'backpack' && inv.utilities.length > utilitySlots(inv) - BACKPACK_SLOTS) {
-    return 'too full to take the pack off';
-  }
-  if (item === 'gunsling') {
-    const carried = inv.guns.filter((g) => g !== null).length;
-    if (carried > GUN_SLOTS) return 'unsling a gun first';
-  }
 
   // Guns go down with what was left in them, so an empty one stays empty on
   // the floor and reads as not worth the walk.

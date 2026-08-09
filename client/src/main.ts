@@ -74,6 +74,7 @@ import {
   drawStamina,
   drawTracers,
   drawTracker,
+  drawThermal,
   drawSpeechBubbles,
   drawWalls,
   drawWindows,
@@ -160,6 +161,8 @@ const input = trackInput(canvas);
 function abilityUsable(id: AbilityId): boolean {
   if (id === "rally") return rallyCharges > 0;
   if (id === "follow") return followCharges > 0;
+  // The beacon shout is a command like any other, and costs the same charge.
+  if (id === "beacon") return rallyCharges > 0;
   return true; // releasing people you already have costs nothing
 }
 
@@ -354,7 +357,7 @@ canvas.addEventListener(
     if (wheel.open) {
       e.stopImmediatePropagation();
       const options = wheelOptions(following, towers.length > 0);
-      const index = hitTest(wheel, input.mouseX, input.mouseY);
+      const index = hitTest(wheel, input.mouseX, input.mouseY, options.length);
       if (index < 0) return;
 
       const picked = options[index];
@@ -491,6 +494,13 @@ interface Tracked {
 }
 const tracked = new Map<string, Tracked>();
 
+/** Just the thermal contacts, for the pass that draws them over the fog. */
+function* thermalContacts(): Generator<EntityState> {
+  for (const entry of tracked.values()) {
+    if (entry.state.thermal) yield entry.state;
+  }
+}
+
 /**
  * Fold a freshly parsed snapshot into the objects we already hold, field by
  * field, rather than keeping the parsed ones.
@@ -518,6 +528,7 @@ const ENTITY_FIELDS = [
   'armour',
   'shield',
   'stunned',
+  'thermal',
   'breaking',
   'burning',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
@@ -995,6 +1006,8 @@ function render() {
     ) {
       continue;
     }
+    // Heat contacts are drawn after the fog instead, so they carry through it.
+    if (s.thermal) continue;
     // Your own character never fades — it's always fully in view.
     const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;
@@ -1038,6 +1051,17 @@ function render() {
   if (!spectating && me) drawFog(me, view, now);
   mark('fog');
 
+  // Thermal contacts go on *top* of the fog. They are precisely the things you
+  // cannot see, so drawing them under it dims the one readout the goggles are
+  // for — the whole point is that they cut through it.
+  if (!spectating) {
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.translate(-view.x, -view.y);
+    drawThermal(ctx, thermalContacts(), view, now);
+    ctx.restore();
+  }
+
   // HUD sits above the fog so guidance stays legible.
   drawBeacons(ctx, beacons, view, scale, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
 
@@ -1053,13 +1077,18 @@ function render() {
     }
     drawStamina(ctx, stamina, STAMINA_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, exhausted);
     if (wheel.open) {
-      wheel.hover = hitTest(wheel, input.mouseX, input.mouseY);
+      wheel.hover = hitTest(wheel, input.mouseX, input.mouseY, wheelOptions(following, towers.length > 0).length);
       drawWheel(
         ctx,
         wheel,
         wheelOptions(following, towers.length > 0),
         (o) => abilityUsable(o.id),
-        (o) => (o.id === "rally" ? rallyCharges : o.id === "follow" ? followCharges : null),
+        (o) =>
+          o.id === "rally" || o.id === "beacon"
+            ? rallyCharges
+            : o.id === "follow"
+              ? followCharges
+              : null,
         now,
       );
     }

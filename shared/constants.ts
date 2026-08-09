@@ -297,6 +297,14 @@ export const BOT_LOOT_SCAN_MS = 900;
  * the street for it.
  */
 export const BOT_REFILL_APPETITE = 55;
+/**
+ * A bot only spends a frag on a crowd. One zombie is a rifle's job, and a bot
+ * throwing its last grenade at a straggler has nothing left when the street
+ * fills up.
+ */
+export const BOT_FRAG_MIN_TARGETS = 3;
+/** One thrown or placed thing at a time, whichever it is. */
+export const BOT_THROW_INTERVAL_MS = 5000;
 
 /** Some people run to whoever has a gun rather than to a door. */
 export const OFFICER_SEEK_CHANCE = 0.16;
@@ -1125,9 +1133,15 @@ export const ESCORT_FAR = 170;
 /** The squad car itself: how fast, where it parks, and how it empties. */
 export const CAR_SPEED = 240;
 export const CAR_ARRIVE_DIST = 16;
-export const CAR_PARK_MIN = 170;
-export const CAR_PARK_MAX = 430;
-export const CAR_PARK_SAMPLES = 20;
+/**
+ * How far the car starts off the map, and how far *in from the boundary* it
+ * looks for clear ground to pull up on. Measuring the search from the entry
+ * point rather than the boundary is what had it clamped flush against the
+ * perimeter wall.
+ */
+export const CAR_ENTRY_OFFSET = 200;
+export const CAR_PARK_MIN = 90;
+export const CAR_PARK_MAX = 700;
 export const CAR_DOOR_INTERVAL_MS = 420;
 export const CAR_LENGTH = 46;
 export const CAR_WIDTH = 22;

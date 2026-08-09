@@ -22,9 +22,6 @@ export function wheelOptions(following: boolean, hasBeacon = false): WheelOption
   return out;
 }
 
-/** Kept for the hit test's arithmetic; the labels come from wheelOptions. */
-export const WHEEL_OPTIONS: WheelOption[] = wheelOptions(false);
-
 const RADIUS = 118;
 const INNER = 46;
 /** Cursor must be at least this far from centre to count as a selection. */
@@ -47,12 +44,17 @@ export function newWheelState(): WheelState {
 }
 
 /** Which sector the cursor sits in, or -1 when inside the dead zone. */
-export function hitTest(wheel: WheelState, mx: number, my: number): number {
+/**
+ * Which slice the cursor is over. `count` has to be the number of options
+ * actually on screen — it used to read a fixed two off `WHEEL_OPTIONS` while
+ * `drawWheel` used the live list, so a third option was drawn and then could
+ * never be clicked.
+ */
+export function hitTest(wheel: WheelState, mx: number, my: number, count: number): number {
   const dx = mx - wheel.cx;
   const dy = my - wheel.cy;
   if (Math.hypot(dx, dy) < DEAD_ZONE) return -1;
-
-  const count = WHEEL_OPTIONS.length;
+  if (count <= 0) return -1;
   if (count === 1) return 0; // a single option owns every direction
 
   const slice = (Math.PI * 2) / count;

@@ -4,8 +4,10 @@ import {
   CAR_DOOR_INTERVAL_MS,
   CAR_PARK_MAX,
   CAR_PARK_MIN,
-  CAR_PARK_SAMPLES,
+  CAR_ENTRY_OFFSET,
   CAR_SPEED,
+  CAR_LENGTH,
+  CAR_WIDTH,
   ENTITY_RADIUS,
   RADIO_BACKUP_COUNT,
   RADIO_CALL_LINE,
@@ -15,6 +17,7 @@ import {
   WORLD_HEIGHT,
   WORLD_WIDTH,
 } from '../../shared/constants.js';
+import { resolveCircleBox, type OrientedBox } from './geometry.js';
 import {
   findSpawnNear,
   hasWallClearPath,
@@ -54,38 +57,47 @@ let counter = 0;
 function edgePointFor(x: number, y: number): { x: number; y: number } {
   const dists = [y, WORLD_WIDTH - x, WORLD_HEIGHT - y, x];
   const side = dists.indexOf(Math.min(...dists));
-  if (side === 0) return { x, y: -200 };
-  if (side === 1) return { x: WORLD_WIDTH + 200, y };
-  if (side === 2) return { x, y: WORLD_HEIGHT + 200 };
-  return { x: -200, y };
+  if (side === 0) return { x, y: -CAR_ENTRY_OFFSET };
+  if (side === 1) return { x: WORLD_WIDTH + CAR_ENTRY_OFFSET, y };
+  if (side === 2) return { x, y: WORLD_HEIGHT + CAR_ENTRY_OFFSET };
+  return { x: -CAR_ENTRY_OFFSET, y };
 }
 
 /**
- * Somewhere near the caller that a car could plausibly have driven to.
+ * Where the car stops: just inside the map edge on the side nearest whoever
+ * called, on open ground.
  *
- * The test is a clear straight line from off the map, which is a cheap stand-in
- * for "down a street": the city is blocks with roads between them, so the spots
- * with an unobstructed run to the edge are overwhelmingly the roads. It avoids
- * needing a road list the generator doesn't keep, and it fails safe — if
- * nothing has a clear run, the car parks at the edge and the crew walk in.
+ * It does **not** drive to you. A squad car threading a city to arrive at your
+ * shoulder is both a hard pathing problem and the wrong picture — what should
+ * happen is that it pulls up at the cordon and the crew come the rest of the
+ * way on foot, which is also the bit worth watching.
  */
-function parkingSpot(world: World, x: number, y: number): { spot: { x: number; y: number }; entry: { x: number; y: number } } {
-  let fallback: { spot: { x: number; y: number }; entry: { x: number; y: number } } | null = null;
+function parkingSpot(
+  world: World,
+  x: number,
+  y: number,
+): { spot: { x: number; y: number }; entry: { x: number; y: number } } {
+  const entry = edgePointFor(x, y);
+  // Walk in from the edge along the line to the caller until the ground is
+  // clear — the perimeter wall is the first thing in the way, always.
+  const dx = x - entry.x;
+  const dy = y - entry.y;
+  const len = Math.hypot(dx, dy) || 1;
 
-  for (let i = 0; i < CAR_PARK_SAMPLES; i++) {
-    const angle = (i / CAR_PARK_SAMPLES) * Math.PI * 2;
-    const reach = CAR_PARK_MIN + Math.random() * (CAR_PARK_MAX - CAR_PARK_MIN);
-    const px = Math.max(60, Math.min(WORLD_WIDTH - 60, x + Math.cos(angle) * reach));
-    const py = Math.max(60, Math.min(WORLD_HEIGHT - 60, y + Math.sin(angle) * reach));
+  // Distances are from the boundary, not from the off-map entry point.
+  for (let d = CAR_ENTRY_OFFSET + CAR_PARK_MIN; d <= CAR_ENTRY_OFFSET + CAR_PARK_MAX; d += 20) {
+    const px = Math.max(60, Math.min(WORLD_WIDTH - 60, entry.x + (dx / len) * d));
+    const py = Math.max(60, Math.min(WORLD_HEIGHT - 60, entry.y + (dy / len) * d));
     if (world.nav.isBlocked(px, py) || !world.nav.isReachable(px, py)) continue;
-
-    const entry = edgePointFor(px, py);
-    const candidate = { spot: { x: px, y: py }, entry };
-    fallback ??= candidate;
-    if (hasWallClearPath(world, entry.x, entry.y, px, py)) return candidate;
+    if (!hasWallClearPath(world, entry.x, entry.y, px, py)) continue;
+    return { spot: { x: px, y: py }, entry };
   }
 
-  return fallback ?? { spot: { x, y }, entry: edgePointFor(x, y) };
+  // Nowhere clear on that bearing: stop at the edge and let them walk it all.
+  const back = CAR_ENTRY_OFFSET + CAR_PARK_MIN;
+  const px = Math.max(60, Math.min(WORLD_WIDTH - 60, entry.x + (dx / len) * back));
+  const py = Math.max(60, Math.min(WORLD_HEIGHT - 60, entry.y + (dy / len) * back));
+  return { spot: { x: px, y: py }, entry };
 }
 
 /**
@@ -165,6 +177,25 @@ export function updatePoliceCars(world: World, now: number, dt: number): void {
     car.facing = Math.atan2(dy, dx);
     car.x += (dx / dist) * CAR_SPEED * dt;
     car.y += (dy / dist) * CAR_SPEED * dt;
+  }
+}
+
+/**
+ * The car is solid to bodies but not to sight or gunfire — the same trade the
+ * sandbags make, and for the same reason: it is cover you can shoot over, and
+ * routes are planned as though it weren't there so whoever walks into one
+ * deals with it. Deliberately not in the nav grid, and it can't be destroyed.
+ */
+export function carBox(car: PoliceCar): OrientedBox {
+  return { x: car.x, y: car.y, hw: CAR_LENGTH / 2, hh: CAR_WIDTH / 2, angle: car.facing };
+}
+
+export function resolveCarCollisions(world: World): void {
+  if (world.cars.size === 0) return;
+  for (const car of world.cars.values()) {
+    if (car.phase !== 'parked') continue; // still driving in; nothing to bump
+    const box = carBox(car);
+    for (const e of world.entities.values()) resolveCircleBox(e, box);
   }
 }
 

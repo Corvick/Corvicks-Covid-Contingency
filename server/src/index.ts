@@ -84,7 +84,7 @@ import {
   updateEmplacements,
 } from './emplacement.js';
 import { firesToWire, updateFires } from './fire.js';
-import { carsToWire, updatePoliceCars } from './police.js';
+import { carsToWire, resolveCarCollisions, updatePoliceCars } from './police.js';
 import { minesToWire, updateMines } from './mines.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 import {
@@ -319,10 +319,15 @@ wss.on('connection', (socket) => {
         const officer = world.entities.get(id);
         const now = Date.now();
         const tower = nearestTower(officer);
-        if (officer && officer.type === 'officer' && tower) {
+        if (!officer || officer.type !== 'officer' || !tower) {
+          // Nothing to point at.
+        } else if ((world.rallyCharges.get(id) ?? 0) > 0) {
+          world.rallyCharges.set(id, (world.rallyCharges.get(id) ?? 0) - 1);
           world.speech.set(id, { text: BEACON_SHOUT, until: now + BEACON_SHOUT_MS });
           const moved = rallyHumans(world, officer.x, officer.y, tower.x, tower.y);
           console.log(`[server] ${id} sent ${moved} civilians to the beacon`);
+        } else {
+          world.speech.set(id, { text: RALLY_NO_CHARGE_LINE, until: now + RALLY_NO_CHARGE_MS });
         }
       } else if (msg.type === 'spectate') {
         // Normally a fresh game to watch; `restart: false` drops into the one
@@ -563,8 +568,8 @@ function visibleTo(viewer: Entity, now: number): EntityState[] {
    * than a body. Nothing else about the fog rule bends, so a wallhack for
    * survivors or loot is still impossible by construction.
    */
-  const held = inv ? heldItem(inv) : null;
-  const thermal = held === 'thermalGoggles' ? THERMAL_RANGE : 0;
+  // Worn, not held: goggles on your head work whatever is in your hands.
+  const thermal = inv?.utilities.includes('thermalGoggles') ? THERMAL_RANGE : 0;
 
   for (const other of world.entities.values()) {
     if (other.id === viewer.id) {
@@ -695,6 +700,9 @@ function tick(): void {
     // planned as though they weren't there and whoever walks into one deals
     // with it. So the push-out happens here, once everyone has moved.
     resolveEmplacementCollisions(world);
+    // A parked squad car is solid to bodies, like the sandbags, and pushed out
+    // of here rather than through the nav grid for the same reason.
+    resolveCarCollisions(world);
 
     rebuildEntityGrid(world);
     updateEmplacements(world, now, dt);

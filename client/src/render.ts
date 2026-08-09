@@ -240,17 +240,29 @@ export function drawDucks(ctx: CanvasRenderingContext2D, ducks: DuckState[], vie
 
 /** Bushes draw over entities so anyone standing in one is partly concealed. */
 export function drawBushes(ctx: CanvasRenderingContext2D, bushes: Bush[], view: Viewport): void {
+  // Every visible bush goes into **one** path, filled once.
+  //
+  // The park is a hundred-odd overlapping circles, and drawing them separately
+  // meant a hundred-odd translucent fills stacked on top of each other — the
+  // fill-rate cost of that overdraw is paid per pixel, per frame, and it is
+  // what made walking through the trees stutter. One path with nonzero winding
+  // fills the union exactly once, so the thicket costs about what a single
+  // blob does and stops darkening where bushes overlap.
+  ctx.beginPath();
+  let any = false;
   for (const bush of bushes) {
     if (!visible(view, bush.x, bush.y, bush.r + 8)) continue;
-
-    ctx.beginPath();
+    ctx.moveTo(bush.x + bush.r, bush.y);
     ctx.arc(bush.x, bush.y, bush.r, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(24, 86, 48, 0.88)';
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(15, 58, 32, 0.95)';
-    ctx.stroke();
+    any = true;
   }
+  if (!any) return;
+
+  ctx.fillStyle = 'rgba(24, 86, 48, 0.88)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(15, 58, 32, 0.95)';
+  ctx.stroke();
 }
 
 /**
@@ -485,26 +497,6 @@ export function drawEntity(
   simple = false,
 ): void {
   const radius = ENTITY_RADIUS[e.type];
-
-  // Seen only on thermal: a soft heat blob drawn *instead of* a body. You have
-  // not laid eyes on this one — it is through a wall — so it must not read as
-  // though you have. Nothing else about it is drawn, and this returns before
-  // the body does.
-  if (e.thermal) {
-    ctx.save();
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = '#fb923c';
-    ctx.beginPath();
-    ctx.arc(e.x, e.y, radius + 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 0.85;
-    ctx.fillStyle = '#fed7aa';
-    ctx.beginPath();
-    ctx.arc(e.x, e.y, radius * 0.45, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
 
   // A bot officer holds a player's slot, so it is picked out from the ambient
   // grey ones rather than lumped in with them.
@@ -937,37 +929,62 @@ export function drawPoliceCars(
   view: Viewport,
   now: number,
 ): void {
+  const L = CAR_LENGTH / 2;
+  const W = CAR_WIDTH / 2;
   for (const car of cars) {
     if (!visible(view, car.x, car.y, CAR_LENGTH)) continue;
     ctx.save();
     ctx.translate(car.x, car.y);
     ctx.rotate(car.facing);
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-    ctx.fillRect(-CAR_LENGTH / 2 + 3, -CAR_WIDTH / 2 + 4, CAR_LENGTH, CAR_WIDTH);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
+    ctx.beginPath();
+    ctx.roundRect(-L + 3, -W + 4, CAR_LENGTH, CAR_WIDTH, 7);
+    ctx.fill();
 
-    ctx.fillStyle = '#1e293b';
+    // Wheels first, so the body sits over them the way it does from above.
+    ctx.fillStyle = '#111827';
+    for (const fx of [-L + 9, L - 11]) {
+      for (const fy of [-W - 1, W - 4]) ctx.fillRect(fx, fy, 8, 5);
+    }
+
+    // Body: a rounded shell, nose slightly narrower than the tail.
+    ctx.beginPath();
+    ctx.roundRect(-L, -W, CAR_LENGTH, CAR_WIDTH, 7);
+    ctx.fillStyle = '#f1f5f9';
+    ctx.fill();
     ctx.strokeStyle = '#0f172a';
     ctx.lineWidth = 1.5;
-    ctx.fillRect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
-    ctx.strokeRect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
+    ctx.stroke();
 
-    // Flank stripe and windscreen, so it reads as a car rather than a crate.
-    ctx.fillStyle = '#e2e8f0';
-    ctx.fillRect(-CAR_LENGTH / 2 + 6, -CAR_WIDTH / 2 + 3, CAR_LENGTH - 12, 4);
-    ctx.fillStyle = 'rgba(148, 197, 253, 0.55)';
-    ctx.fillRect(CAR_LENGTH / 2 - 15, -CAR_WIDTH / 2 + 3, 9, CAR_WIDTH - 6);
+    // The dark panel down each flank is what makes it read as a squad car.
+    ctx.fillStyle = '#1e3a8a';
+    ctx.fillRect(-L + 7, -W + 1, CAR_LENGTH - 16, 5);
+    ctx.fillRect(-L + 7, W - 6, CAR_LENGTH - 16, 5);
+
+    // Cabin: windscreen, roof, rear window.
+    ctx.fillStyle = 'rgba(30, 41, 59, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(-5, -W + 3, 15, CAR_WIDTH - 6, 3);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(148, 197, 253, 0.6)';
+    ctx.fillRect(L - 16, -W + 4, 5, CAR_WIDTH - 8);
+    ctx.fillRect(-L + 11, -W + 4, 4, CAR_WIDTH - 8);
+
+    // Headlights at the nose.
+    ctx.fillStyle = '#fef9c3';
+    ctx.fillRect(L - 3, -W + 3, 3, 4);
+    ctx.fillRect(L - 3, W - 7, 3, 4);
 
     // The lightbar alternates rather than blinking together.
     const beat = Math.sin(now * 0.012) > 0;
-    ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.7)';
-    ctx.fillRect(-3, -CAR_WIDTH / 2 - 1, 6, 5);
-    ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.7)' : '#3b82f6';
-    ctx.fillRect(-3, CAR_WIDTH / 2 - 4, 6, 5);
+    ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.65)';
+    ctx.fillRect(-4, -W + 2, 8, 4);
+    ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.65)' : '#3b82f6';
+    ctx.fillRect(-4, W - 6, 8, 4);
     ctx.restore();
   }
 }
-
 /**
  * Zap mines on the ground. Dark and inert while arming, then a slow pulsing
  * ring — you have to be able to see your own minefield to fight in front of it.
@@ -1026,22 +1043,35 @@ export function drawBeaconTowers(
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
     ctx.beginPath();
-    ctx.ellipse(t.x, t.y + 4, 11, 5, 0, 0, Math.PI * 2);
+    ctx.ellipse(t.x, t.y + 6, 13, 6, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // Tripod legs and a mast, drawn small — it is a marker, not a building.
     ctx.strokeStyle = '#a16207';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2.5;
     ctx.beginPath();
     for (const a of [-2.2, -0.94, 0.32]) {
-      ctx.moveTo(t.x, t.y - 14);
-      ctx.lineTo(t.x + Math.cos(a) * 9, t.y + Math.sin(a) * 9 + 4);
+      ctx.moveTo(t.x, t.y - 30);
+      ctx.lineTo(t.x + Math.cos(a) * 12, t.y + Math.sin(a) * 12 + 6);
     }
+    // The mast itself, above the tripod.
+    ctx.moveTo(t.x, t.y - 30);
+    ctx.lineTo(t.x, t.y - 44);
+    ctx.stroke();
+
+    // Cross-braces, so the height reads as structure rather than a stick.
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(161, 98, 7, 0.7)';
+    ctx.beginPath();
+    ctx.moveTo(t.x - 6, t.y - 14);
+    ctx.lineTo(t.x + 6, t.y - 14);
+    ctx.moveTo(t.x - 3, t.y - 24);
+    ctx.lineTo(t.x + 3, t.y - 24);
     ctx.stroke();
 
     ctx.fillStyle = '#facc15';
     ctx.beginPath();
-    ctx.arc(t.x, t.y - 17, 4, 0, Math.PI * 2);
+    ctx.arc(t.x, t.y - 47, 5, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -1438,6 +1468,50 @@ export function drawFires(
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * Thermal contacts — zombies the goggles pick out through a wall or a hedge.
+ *
+ * Drawn **after** the fog rather than with the bodies, because the whole point
+ * is that these are the things you cannot see: put them in the entity pass and
+ * the fog lays over them and dims the one readout you bought them for. They
+ * are heat, not bodies, so nothing about the figure is drawn — just a bright
+ * pulsing blob that sits on top of everything.
+ */
+export function drawThermal(
+  ctx: CanvasRenderingContext2D,
+  entities: Iterable<EntityState>,
+  view: Viewport,
+  now: number,
+): void {
+  const pulse = 0.75 + Math.sin(now * 0.006) * 0.25;
+  for (const e of entities) {
+    if (!e.thermal) continue;
+    if (!visible(view, e.x, e.y, 40)) continue;
+    const radius = ENTITY_RADIUS[e.type];
+
+    // A wide soft halo so it carries through the dark, then a hot core.
+    const glow = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, radius * 2.6);
+    glow.addColorStop(0, `rgba(255, 237, 213, ${0.95 * pulse})`);
+    glow.addColorStop(0.45, `rgba(251, 146, 60, ${0.8 * pulse})`);
+    glow.addColorStop(1, 'rgba(234, 88, 12, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, radius * 2.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff7ed';
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, radius * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(249, 115, 22, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, radius + 5, 0, Math.PI * 2);
+    ctx.stroke();
   }
 }
 

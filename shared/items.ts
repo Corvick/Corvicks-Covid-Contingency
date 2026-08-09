@@ -48,6 +48,11 @@ export interface ItemDef {
   range?: number;
   /** Rounds fired per trigger pull — the shotgun's spread. */
   pellets?: number;
+  /**
+   * Offset each pellet sideways by this much rather than spreading it by
+   * angle: two pistols fire *parallel*, a hand's width apart, not in a cone.
+   */
+  parallel?: number;
   /** Starting ammo when picked up. Absent means unlimited. */
   ammo?: number;
   /** Fires while the trigger is held rather than once per click. */
@@ -115,10 +120,14 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     rarity: 0, // never loot: it is what slot 0 becomes
     damageMin: 15,
     damageMax: 25,
-    // Alternating hands: the same round, about twice as often, and looser.
-    bloom: 0.1,
-    cooldownMs: 480,
+    // Both hands at once: two rounds side by side per pull, on the pistol's
+    // own cadence. `pellets` is what fires them; `parallel` is what keeps them
+    // apart, so they read as two guns rather than one with a wide barrel.
+    bloom: 0.06,
+    cooldownMs: 1000,
     range: 720,
+    pellets: 2,
+    parallel: 9,
   },
   machineGun: {
     id: 'machineGun',
