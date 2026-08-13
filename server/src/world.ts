@@ -10,6 +10,7 @@ import type {
   Shot,
   Wall,
 } from '../../shared/types.js';
+import type { ItemId } from '../../shared/items.js';
 import type { DoorRuntime } from './doors.js';
 
 /** What a player's press or hold of E is doing to a door. */
@@ -21,6 +22,7 @@ import {
   WORLD_HEIGHT,
   ENTITY_RADIUS,
   ENTITY_MAX_HEALTH,
+  TURNING_TELL_MS,
   HUMAN_COUNT,
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
@@ -78,7 +80,7 @@ import {
 import { SpatialGrid } from './spatial.js';
 import { clamp, resolveCircleRect, segmentCircleT, segmentRectT } from './geometry.js';
 import { generateMap } from './mapgen.js';
-import { newInventory, spawnPickups } from './inventory.js';
+import { dropDebugKit, newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
 import { OUTSIDE, RoomMap } from './rooms.js';
@@ -235,9 +237,25 @@ export interface AiState {
   nextWindowHitAt: number;
   /** Cooldown on scanning for panicking neighbours. */
   nextWitnessCheck: number;
+  /**
+   * They have already said their piece about not feeling well. Once each, or
+   * a dying man repeats himself thirty times a second.
+   */
+  saidTurning: boolean;
   /** Loot a bot officer is walking to, and when it last looked. */
   lootId: string | null;
+  /**
+   * What was lying there when it set off. A swap leaves a *different* item
+   * under the same pickup id, so arriving and taking whatever the id now holds
+   * is how a bot trades a rifle for the pistol somebody else just put down.
+   */
+  lootItem: ItemId | null;
   nextLootScanAt: number;
+  /**
+   * Pickups this bot has just had a go at, and when it may look at them again.
+   * Keyed by pickup id — see BOT_LOOT_SNUB_MS.
+   */
+  lootSnub: Map<string, number>;
   /**
    * A bot has broken off and is running rather than trading shots. Latched
    * with hysteresis: it goes on inside BOT_BOLT_DIST and only off again past
@@ -442,6 +460,8 @@ export interface World {
   deployWanted: Set<string>;
   /** Earliest each officer may bash again. */
   bashReadyAt: Map<string, number>;
+  /** Shoving right now — drives the client animation. */
+  bashUntil: Map<string, number>;
   /**
    * Where each officer is actually pointing, as against where their mouse is.
    * A weapon with a turnRate swings at a limited rate and the body follows;
@@ -673,8 +693,11 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextShotAt: now + Math.random() * 2000,
     nextWindowHitAt: 0,
     nextWitnessCheck: now + Math.random() * 500,
+    saidTurning: false,
     lootId: null,
+    lootItem: null,
     nextLootScanAt: 0,
+    lootSnub: new Map(),
     bolting: false,
     botStamina: STAMINA_MAX,
     botWinded: false,
@@ -992,6 +1015,7 @@ export function createWorld(): World {
     rightSpent: new Set(),
     deployWanted: new Set(),
     bashReadyAt: new Map(),
+    bashUntil: new Map(),
     aimHeading: new Map(),
     chargeSince: new Map(),
     stamina: new Map(),
@@ -1040,7 +1064,7 @@ export function createWorld(): World {
   initDoors(world);
   initDucks(world);
   populate(world);
-  spawnPickups(world, playerOneStart(world));
+  spawnPickups(world);
   return world;
 }
 
@@ -1095,6 +1119,7 @@ export function resetWorld(world: World): void {
   world.rightSpent.clear();
   world.deployWanted.clear();
   world.bashReadyAt.clear();
+  world.bashUntil.clear();
   world.cars.clear();
   world.towers.length = 0;
   world.mines.clear();
@@ -1114,7 +1139,7 @@ export function resetWorld(world: World): void {
   world.burning.clear();
 
   populate(world);
-  spawnPickups(world, playerOneStart(world));
+  spawnPickups(world);
 
   // Player one gets the designated start point; everyone else spawns at random.
   let first = true;
@@ -1130,6 +1155,9 @@ export function resetWorld(world: World): void {
     world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
     world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
     world.inventories.set(id, newInventory());
+    // A restart is a spawn: the heap comes with them to the new city. After
+    // `spawnPickups` above, which clears the table.
+    dropDebugKit(world, id, spawn.x, spawn.y);
   }
 }
 
@@ -1266,7 +1294,18 @@ function populate(world: World): void {
     const spawn = findSpawn(world, ENTITY_RADIUS.officer);
     const id = `bot-${i}`;
     world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
-    world.ai.set(id, newAiState(now, spawn.x, spawn.y));
+    const state = newAiState(now, spawn.x, spawn.y);
+    // An officer clearing a building does not stop to tidy up after itself.
+    // The door traits are a civilian's business — shutting one behind you,
+    // bolting it, running back across a room to see to it — and every one of
+    // them is a bot standing still in a doorway instead of fighting. Cleared
+    // as data rather than branched on in `doorTick`, so nothing downstream has
+    // to know bots are different. Opening a door it needs through is untouched.
+    state.closesDoors = false;
+    state.locksDoors = false;
+    state.slamsDoors = false;
+    state.barricades = false;
+    world.ai.set(id, state);
     world.inventories.set(id, newInventory());
     world.stamina.set(id, STAMINA_MAX);
     world.bots.add(id);
@@ -1480,6 +1519,15 @@ export function toWire(
   // a cure gun in the bag, since a cure you can't aim is no use. Merely having
   // it is enough; you don't have to be holding it to spot them.
   if (revealInfected && world.pendingInfections.has(e.id)) state.infected = true;
+  // The last few seconds of it, though, are visible to *everyone*. This is
+  // deliberately not gated behind `revealInfected`: the point of the tell is
+  // that whoever is stood next to them can see it coming and get clear, which
+  // a secret would not do. Derived from the clock rather than latched, so it
+  // cannot drift out of step with when they actually turn.
+  const turnAt = world.pendingInfections.get(e.id);
+  if (turnAt !== undefined && turnAt - now <= TURNING_TELL_MS) {
+    state.turning = Math.round(Math.max(0, 1 - (turnAt - now) / TURNING_TELL_MS) * 100) / 100;
+  }
   if (e.type === 'officer' && !world.playerIds.has(e.id)) state.npc = true;
   if (world.bots.has(e.id)) state.bot = true;
   if (world.burning.has(e.id)) state.burning = true;
@@ -1500,6 +1548,11 @@ export function toWire(
   // visible on the body rather than only in the HUD.
   if (worn && worn.shield > 0) state.shield = worn.shieldUp ? 1 : -1;
   if (world.stunned.has(e.id)) state.stunned = true;
+  const bashing = world.bashUntil.get(e.id);
+  if (bashing !== undefined) {
+    if (now < bashing) state.bashing = true;
+    else world.bashUntil.delete(e.id);
+  }
 
   const line = world.speech.get(e.id);
   if (line !== undefined) {

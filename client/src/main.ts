@@ -15,9 +15,12 @@ import {
   MATERIALIZE_MS,
   GUN_SLOTS,
   UTILITY_SLOTS,
-  SNIPER_ZOOM,
-  BINOCULAR_ZOOM,
+  SCOPE_PUSH,
+  BINOCULAR_PUSH,
+  CAMERA_PAN_X,
+  CAMERA_PAN_Y,
   SCOPE_EASE_MS,
+  BEACON_CALL_RADIUS,
 } from '../../shared/constants.js';
 import type {
   DoorPrompt,
@@ -75,6 +78,8 @@ import {
   drawTracers,
   drawTracker,
   drawThermal,
+  drawPark,
+  drawSelfMarker,
   drawSpeechBubbles,
   drawWalls,
   drawWindows,
@@ -158,11 +163,25 @@ let worstResetAt = 0;
 const input = trackInput(canvas);
 
 /** Whether the wheel should offer an ability, or grey it out and refuse it. */
+/**
+ * Is a survivor mast close enough to shout about?
+ *
+ * The wheel used to offer the order whenever a mast existed *anywhere*, while
+ * the server requires one within BEACON_CALL_RADIUS — so out in the city you
+ * could pick it, watch nothing happen, and not even be charged for it. Now the
+ * option greys out and flashes red instead of lying about what it will do.
+ */
+function beaconInEarshot(): boolean {
+  const me = self();
+  if (!me) return false;
+  return towers.some((t) => Math.hypot(t.x - me.x, t.y - me.y) <= BEACON_CALL_RADIUS);
+}
+
 function abilityUsable(id: AbilityId): boolean {
   if (id === "rally") return rallyCharges > 0;
   if (id === "follow") return followCharges > 0;
   // The beacon shout is a command like any other, and costs the same charge.
-  if (id === "beacon") return rallyCharges > 0;
+  if (id === "beacon") return rallyCharges > 0 && beaconInEarshot();
   return true; // releasing people you already have costs nothing
 }
 
@@ -299,7 +318,8 @@ function standDown(): void {
   input.rightDown = false;
   input.shooting = false;
   input.slotPressed = -1;
-  scopeZoom = 1;
+  pushX = 0;
+  pushY = 0;
   tracked.clear();
   tracers = [];
   gameOverPanel.classList.add('hidden');
@@ -356,7 +376,7 @@ canvas.addEventListener(
 
     if (wheel.open) {
       e.stopImmediatePropagation();
-      const options = wheelOptions(following, towers.length > 0);
+      const options = wheelOptions(following, beaconInEarshot());
       const index = hitTest(wheel, input.mouseX, input.mouseY, options.length);
       if (index < 0) return;
 
@@ -528,6 +548,8 @@ const ENTITY_FIELDS = [
   'armour',
   'shield',
   'stunned',
+  'turning',
+  'bashing',
   'thermal',
   'breaking',
   'burning',
@@ -604,39 +626,116 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
       scale,
     };
   }
-  // Down a scope the camera pulls back, which is what "aiming beyond your
-  // screen" actually means here — the extra ground has to be on screen before
-  // you can put the reticle on it. The server widens what it sends to match.
-  const scale = scopeZoom;
-  const w = VIEWPORT_WIDTH / scale;
-  const h = VIEWPORT_HEIGHT / scale;
+  // A player's camera is always 1:1. Down a scope it slides off the officer
+  // toward the reticle rather than zooming out — see `updateScope`.
+  const w = VIEWPORT_WIDTH;
+  const h = VIEWPORT_HEIGHT;
   return {
     view: {
-      x: w >= WORLD_WIDTH ? (WORLD_WIDTH - w) / 2 : clamp(view.x - w / 2, 0, WORLD_WIDTH - w),
-      y: h >= WORLD_HEIGHT ? (WORLD_HEIGHT - h) / 2 : clamp(view.y - h / 2, 0, WORLD_HEIGHT - h),
+      x:
+        w >= WORLD_WIDTH
+          ? (WORLD_WIDTH - w) / 2
+          : clamp(view.x + pushX - w / 2, 0, WORLD_WIDTH - w),
+      y:
+        h >= WORLD_HEIGHT
+          ? (WORLD_HEIGHT - h) / 2
+          : clamp(view.y + pushY - h / 2, 0, WORLD_HEIGHT - h),
       w,
       h,
     },
-    scale,
+    scale: 1,
   };
 }
 
 /**
- * Eased so raising and lowering the scope is a movement rather than a jump —
- * a hard cut re-frames the whole screen in one frame and reads as a glitch.
+ * How far the camera has run off the officer, in world pixels. Eased, so
+ * raising and lowering the scope is a movement rather than a jump — a hard cut
+ * re-frames the whole screen in one frame and reads as a glitch.
  */
-let scopeZoom = 1;
-function updateScope(dt: number): void {
-  // Binoculars pull back gently; a scope pulls back hard. Same easing either
-  // way, so raising either one is a movement rather than a jump.
+let pushX = 0;
+let pushY = 0;
+
+/** How far a scope lets the camera run: 0 for anything ordinary. */
+function scopeReach(): number {
   const held = heldItemId();
-  const want = ITEMS[held ?? 'pistol']?.scope
-    ? SNIPER_ZOOM
-    : held === 'binoculars'
-      ? BINOCULAR_ZOOM
-      : 1;
-  const step = (1 - SNIPER_ZOOM) * (dt / SCOPE_EASE_MS);
-  scopeZoom = want < scopeZoom ? Math.max(want, scopeZoom - step) : Math.min(want, scopeZoom + step);
+  if (ITEMS[held ?? 'pistol']?.scope) return SCOPE_PUSH;
+  if (held === 'binoculars') return BINOCULAR_PUSH;
+  return 0;
+}
+
+/**
+ * How far the camera may run off the officer on each axis.
+ *
+ * The pan rides on top of whatever the scope gives, and it is not a scope
+ * feature at all — it is there because the viewport is wider than it is tall,
+ * so without it you are aware of 480px of street to either side and only 300px
+ * above and below. `CAMERA_PAN_Y` is derived to carry that 180px difference,
+ * so both axes reach the same distance at every zoom level: 540 with nothing
+ * in hand, 970 down a scope.
+ */
+function cameraReach(): { x: number; y: number } {
+  const scope = scopeReach();
+  return { x: scope + CAMERA_PAN_X, y: scope + CAMERA_PAN_Y };
+}
+
+function updateScope(dt: number): void {
+  const reach = cameraReach();
+
+  // Off the *middle of the screen*, not off the officer. He is no longer stood
+  // in the middle once the camera has moved, so measuring from him feeds the
+  // push back into itself and it slams to the cap on the first twitch of the
+  // mouse. The screen centre is fixed, so this mapping is stable.
+  const dx = input.mouseX - VIEWPORT_WIDTH / 2;
+  const dy = input.mouseY - VIEWPORT_HEIGHT / 2;
+  const len = Math.hypot(dx, dy);
+
+  // Measured as *how far to the edge of the screen the cursor has got*, not as
+  // raw pixels. The screen is half again as wide as it is tall, so counting
+  // pixels gave up-and-down barely half the reach of left-and-right and the
+  // camera would hardly lift at all when you aimed up the street. Against the
+  // edge in whatever direction you are pointing, you get the whole of it.
+  const ux = dx / (len || 1);
+  const uy = dy / (len || 1);
+  const toEdge = Math.min(
+    Math.abs(ux) > 1e-4 ? VIEWPORT_WIDTH / 2 / Math.abs(ux) : Infinity,
+    Math.abs(uy) > 1e-4 ? VIEWPORT_HEIGHT / 2 / Math.abs(uy) : Infinity,
+  );
+  const outward = Math.min(1, len / toEdge);
+  const wantX = ux * reach.x * outward;
+  const wantY = uy * reach.y * outward;
+
+  // Exponential ease toward it, framerate-independent.
+  const k = Math.min(1, dt / SCOPE_EASE_MS);
+  pushX += (wantX - pushX) * k;
+  pushY += (wantY - pushY) * k;
+}
+
+/**
+ * How far the fog reaches from the officer.
+ *
+ * It has to cover wherever the camera can put the screen, or the extra ground
+ * is drawn and then blacked out again — which is exactly what raising the
+ * sniper used to look like: the server was already sending entities out to
+ * SNIPER_SIGHT_RADIUS while the client kept punching a PLAYER_SIGHT_RADIUS
+ * hole in the fog, so the far half of the new view was solid dark.
+ *
+ * Taken as the furthest screen corner the push can produce, *sampled* rather
+ * than bounded. The push follows a unit direction, so the two axes cannot both
+ * be at their maximum at once and the loose bound over-reaches by a fifth —
+ * which is a fifth more ground for the polygon to light for no reason.
+ */
+function fogRadius(): number {
+  const reach = cameraReach();
+  let worst = 0;
+  for (let i = 0; i <= 8; i++) {
+    const a = (i / 8) * (Math.PI / 2);
+    const d = Math.hypot(
+      VIEWPORT_WIDTH / 2 + Math.cos(a) * reach.x,
+      VIEWPORT_HEIGHT / 2 + Math.sin(a) * reach.y,
+    );
+    if (d > worst) worst = d;
+  }
+  return Math.max(PLAYER_SIGHT_RADIUS, Math.round(worst) + 24);
 }
 
 /** Whatever is in the active slot, as an item id. */
@@ -736,6 +835,8 @@ let cachedPoly: FogPoint[] = [];
 let cachedAt = 0;
 let cachedX = Number.NaN;
 let cachedY = Number.NaN;
+/** Raising a scope changes how far the polygon reaches, so it can't be reused. */
+let cachedRadius = -1;
 let fogComputeMs = 0;
 /** Latches the fog fault so only its edges are logged, not every frame. */
 let fogFailing = false;
@@ -768,17 +869,34 @@ function occludersFor(map: MapData): Wall[] {
 
 function visibilityFor(me: EntityState, now: number): FogPoint[] {
   if (!map) return [];
+  const radius = fogRadius();
   const moved = Math.hypot(me.x - cachedX, me.y - cachedY);
-  if (cachedPoly.length > 0 && moved < FOG_MOVE_EPSILON && now - cachedAt < FOG_UPDATE_MS) {
+  if (
+    cachedPoly.length > 0 &&
+    radius === cachedRadius &&
+    moved < FOG_MOVE_EPSILON &&
+    now - cachedAt < FOG_UPDATE_MS
+  ) {
     return cachedPoly;
   }
 
+  // Nothing outside the frame can shadow anything inside it, so the occluders
+  // are culled to what the camera can reach rather than to the sight circle.
+  // Sized off the item's *maximum* push, not the live one — the live push moves
+  // with the mouse, and a clip that moved with it would throw this cache away
+  // every frame. FOG_MOVE_EPSILON of slack covers the walking the cache allows
+  // between rebuilds.
+  const reach = cameraReach();
+  const slack = FOG_MOVE_EPSILON + 40;
+  const clipW = VIEWPORT_WIDTH / 2 + reach.x + slack;
+  const clipH = VIEWPORT_HEIGHT / 2 + reach.y + slack;
   const t0 = performance.now();
-  cachedPoly = visibilityPolygon(me.x, me.y, PLAYER_SIGHT_RADIUS, occludersFor(map), map.bushes);
+  cachedPoly = visibilityPolygon(me.x, me.y, radius, occludersFor(map), map.bushes, clipW, clipH);
   fogComputeMs = performance.now() - t0;
   cachedAt = now;
   cachedX = me.x;
   cachedY = me.y;
+  cachedRadius = radius;
 
   // Watchdog: if the visible region covers nearly the whole sight circle while
   // walls are standing right next to us, occlusion has failed. Log it with
@@ -788,11 +906,18 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     area += (cachedPoly[j].x + cachedPoly[i].x) * (cachedPoly[j].y - cachedPoly[i].y);
   }
   area = Math.abs(area / 2);
-  const full = Math.PI * PLAYER_SIGHT_RADIUS * PLAYER_SIGHT_RADIUS;
-  const R = PLAYER_SIGHT_RADIUS;
+  const full = Math.PI * radius * radius;
+  // Counted over the *clip*, not the sight circle — those are the occluders
+  // the polygon was actually built from. Counting the wider set would have the
+  // watchdog cry off in open ground, where the buildings it can see are all
+  // beyond the frame and were culled on purpose.
   const occluding = occludersFor(map);
   const near = occluding.filter(
-    (w) => w.x - R <= me.x && w.x + w.w + R >= me.x && w.y - R <= me.y && w.y + w.h + R >= me.y,
+    (w) =>
+      w.x - clipW <= me.x &&
+      w.x + w.w + clipW >= me.x &&
+      w.y - clipH <= me.y &&
+      w.y + w.h + clipH >= me.y,
   ).length;
   // Two ways of noticing: occlusion has all but vanished with walls standing
   // right there, or the visible area jumped sharply between two computations a
@@ -841,7 +966,7 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
   if (poly.length > 2) {
     const cx = (me.x - view.x) * s;
     const cy = (me.y - view.y) * s;
-    const r = PLAYER_SIGHT_RADIUS * s;
+    const r = fogRadius() * s;
 
     // Fade only the last sliver of range; the blur handles the rest.
     const gradient = fogCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
@@ -974,6 +1099,8 @@ function render() {
 
   if (map) {
     drawGround(ctx, map);
+    // Under everything else: it is ground, and the bushes stand on it.
+    drawPark(ctx, map.park, view);
     drawPond(ctx, map.pond, view);
     drawWalls(ctx, map.walls, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
@@ -1076,12 +1203,17 @@ function render() {
       drawInventory(ctx, inventory, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     }
     drawStamina(ctx, stamina, STAMINA_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, exhausted);
+    // Aiming hard up or down runs the camera off a screen that is only 600
+    // tall. Rather than shorten the vertical reach to keep the officer in
+    // frame — which is the very thing the scope is for — he goes off the edge
+    // and this marks where. Over the slot bar, not under it.
+    if (me) drawSelfMarker(ctx, me.x - view.x, me.y - view.y, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     if (wheel.open) {
-      wheel.hover = hitTest(wheel, input.mouseX, input.mouseY, wheelOptions(following, towers.length > 0).length);
+      wheel.hover = hitTest(wheel, input.mouseX, input.mouseY, wheelOptions(following, beaconInEarshot()).length);
       drawWheel(
         ctx,
         wheel,
-        wheelOptions(following, towers.length > 0),
+        wheelOptions(following, beaconInEarshot()),
         (o) => abilityUsable(o.id),
         (o) =>
           o.id === "rally" || o.id === "beacon"

@@ -31,6 +31,13 @@ export interface EntityState {
   /** Dropped by a zap mine and going nowhere. */
   stunned?: boolean;
   /**
+   * How far through the last few seconds before they turn, 0 to 1. Absent
+   * until it starts to show. Unlike `infected` this is sent to *everyone* —
+   * the body reddening is the warning, and a warning nobody can see is not
+   * one. See `TURNING_TELL_MS`.
+   */
+  turning?: number;
+  /**
    * Seen only through thermal goggles — through a wall or a hedge. Drawn as a
    * heat blob rather than a body, because you have not actually laid eyes on
    * it and it should not read as though you have.
@@ -41,6 +48,8 @@ export interface EntityState {
    * the back. Absent for everyone else.
    */
   shield?: number;
+  /** Mid shield-shove: the client throws the arc forward. */
+  bashing?: boolean;
   /** Tearing at a door — the client claws its arms at it. */
   breaking?: boolean;
   /** Alight: the client wreathes it in flame. */
@@ -203,6 +212,18 @@ export interface DuckState {
   climb?: number;
 }
 
+/**
+ * The park, and the dirt path worn through it.
+ *
+ * The path is a centre line rather than a shape: everything that cares about
+ * it — the drawing, and keeping the undergrowth off it — measures distance to
+ * the polyline, so there is nothing to keep in step.
+ */
+export interface Park extends Wall {
+  path: Array<{ x: number; y: number }>;
+  pathWidth: number;
+}
+
 export interface MapData {
   seed: number;
   width: number;
@@ -214,6 +235,7 @@ export interface MapData {
   buildings: Building[];
   doors: Door[];
   pond: Pond;
+  park: Park;
 }
 
 /** A shotgun blast is several tracers from one trigger pull. */
@@ -371,6 +393,8 @@ export interface InventoryState {
   grenades: number;
   /** Mines left in the bundle. */
   mines: number;
+  /** Cure doses left. */
+  cureDoses: number;
   /** How many of each kind of slot this bag can use, sling and pack included. */
   gunSlots: number;
   utilitySlots: number;

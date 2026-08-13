@@ -40,6 +40,17 @@ export interface ItemDef {
   color: string;
   /** Ground pickups are weighted by this; higher shows up more often. */
   rarity: number;
+  /**
+   * A gun that is carried in a *utility* slot rather than a gun slot.
+   *
+   * `kind` decides which loot table something rolls on and how it fires;
+   * this decides where it lives in the bag. They are separate questions and
+   * the cure gun is the case that proves it — it spawns in houses like a gun
+   * and shoots like one, but it is not a weapon and should never be competing
+   * with your rifle for a slot. Its doses count down in the one slot the way
+   * grenades and kevlar do.
+   */
+  utilitySlot?: boolean;
   /** Guns only. */
   damageMin?: number;
   damageMax?: number;
@@ -136,7 +147,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'MG',
     color: '#fbbf24',
     // Common now: an MG in most streets, but a weaker one.
-    rarity: 6,
+    rarity: 11,
     // Nerfed hard. It was doing bolt-action work at ten times the rate; what
     // it is for is pinning a crowd, not killing one, so the damage came out
     // and the stagger went in. A held burst now stops a charge dead without
@@ -157,7 +168,10 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     label: 'Shotgun',
     short: 'SHTG',
     color: '#fb923c',
-    rarity: 3,
+    // One of the three the city is meant to be full of, alongside the bolt
+    // action and the machine gun. The rares are left at 1 so raising these
+    // makes the common guns commoner rather than everything commoner.
+    rarity: 9,
     damageMin: 7,
     damageMax: 13,
     bloom: 0.3,
@@ -176,7 +190,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'BOLT',
     color: '#d6b27c',
     // The common one. Turns up in houses more often than anything else.
-    rarity: 8,
+    rarity: 12,
     damageMin: 42,
     damageMax: 64,
     bloom: 0.012,
@@ -278,6 +292,10 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'CURE',
     color: '#4ade80',
     rarity: 1,
+    // Rolls on the gun table and fires like a gun, but rides in a utility
+    // slot: it is medicine, not a weapon, and it should not be the reason you
+    // leave a rifle on the floor. `ammo` is the dose count.
+    utilitySlot: true,
     bloom: 0.05,
     cooldownMs: 1100,
     range: 520,

@@ -1,8 +1,8 @@
 import type { EntityType } from './types.js';
 
 // ---------------------------------------------------------------- world
-export const WORLD_WIDTH = 4600;
-export const WORLD_HEIGHT = 3400;
+export const WORLD_WIDTH = 5000;
+export const WORLD_HEIGHT = 3700;
 export const VIEWPORT_WIDTH = 960;
 export const VIEWPORT_HEIGHT = 600;
 export const TICK_RATE = 30;
@@ -39,6 +39,32 @@ export const WINDOW_ATTACK_INTERVAL_MS = 600;
 /** The park is the one dense thicket; everywhere else bushes stay sparse. */
 export const PARK_BUSHES_PER_BLOCK = 34;
 export const SCATTER_BUSH_COUNT = 16;
+/**
+ * The park thins out toward its edges rather than stopping dead at a line.
+ * `PARK_EDGE_FADE` is how far in the thinning reaches and
+ * `PARK_EDGE_DENSITY` is what is left of it right on the boundary, so you can
+ * see into the trees from the street instead of meeting a wall of them.
+ */
+export const PARK_EDGE_FADE = 130;
+export const PARK_EDGE_DENSITY = 0.16;
+/**
+ * A dirt path worn across it. Nothing grows on the path, which makes it the
+ * quick way through — bushes slow you down, so a clear line through the
+ * thicket is worth taking without any rule saying so.
+ */
+export const PARK_PATH_WIDTH = 52;
+/** Undergrowth is kept this much clear of the path's edge on top of that. */
+export const PARK_PATH_CLEARANCE = 12;
+/**
+ * Things stashed in the park. Not a lot — it is a cache, not a shop — and
+ * every one has to be within `PARK_LOOT_COVER` of a bush, so you go into the
+ * trees for it rather than spotting it from the road. Kept well off the dirt
+ * path, since something lying on the one clear line through is not hidden.
+ */
+export const PARK_LOOT_COUNT = 5;
+export const PARK_LOOT_GUN_SHARE = 0.45;
+export const PARK_LOOT_COVER = 26;
+export const PARK_LOOT_PATH_GAP = 70;
 
 // ---------------------------------------------------------------- entities
 export const PLAYER_RADIUS = 14;
@@ -48,8 +74,29 @@ export const PLAYER_RADIUS = 14;
  * multipliers on these, so every relative pace is untouched.
  */
 export const PLAYER_SPEED = 160;
-/** Big enough to cover the viewport — fog is about occlusion, not range. */
-export const PLAYER_SIGHT_RADIUS = 640;
+/**
+ * Big enough to cover the viewport — fog is about occlusion, not range. Raised
+ * from 640 when the camera pan went in: the far corner of a panned screen is
+ * hypot(480, 540) = 722 from the officer, and a client lighting ground the
+ * server never sent entities for is the bug this constant exists to prevent.
+ */
+export const PLAYER_SIGHT_RADIUS = 760;
+/**
+ * How far the camera drifts as the cursor nears the edge of the screen.
+ * Nothing to do with scopes or equipment.
+ *
+ * Sideways it is a small thing — the screen is already wide and there is no
+ * awareness to win there, so this is just the camera answering the mouse.
+ */
+export const CAMERA_PAN_X = 60;
+/**
+ * Up and down it carries the difference between the two axes on top of that,
+ * which is the whole reason the pan exists: the viewport is 960x600, so
+ * without it you are aware of 480px of street to either side and only 300px
+ * above and below. Derived rather than written down, so the two stay square
+ * with each other if either the pan or the viewport ever changes.
+ */
+export const CAMERA_PAN_Y = CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / 2;
 
 // ---------------------------------------------------------------- fog of war
 /** Visibility is recomputed on this cadence rather than every frame. */
@@ -70,7 +117,7 @@ export const FOG_BLUR_PX = 9;
 export const ENTITY_FADE_MS = 160;
 
 export const HUMAN_RADIUS = 13;
-export const HUMAN_COUNT = 400;
+export const HUMAN_COUNT = 500;
 /**
  * NPC footspeeds are scaled down together by 0.8 from their original values,
  * so every human/zombie ratio — chase closing rate, escape bursts, lunges —
@@ -247,6 +294,15 @@ export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;
 export const BLAST_DAMAGE_MIN = 35;
 export const BLAST_MS = 520;
+/**
+ * What a charge does to a door. Rated against DOOR_HEALTH rather than against
+ * the figures above: a frag at a body is a wound, a frag at a door is either
+ * off its hinges or it isn't, and one that merely scratches a door is one
+ * nobody would ever throw at a door. Point blank takes it out; from the far
+ * edge of the blast it needs a second one.
+ */
+export const BLAST_DOOR_DAMAGE_MAX = 2000;
+export const BLAST_DOOR_DAMAGE_MIN = 800;
 
 /** The pond, its lily pads, and the flock that lives on it. */
 export const POND_MIN_RADIUS = 110;
@@ -259,6 +315,61 @@ export const DUCK_SCARE_RADIUS = 260;
 export const DUCK_FLY_SPEED = 260;
 /** Up and gone: they clear the scene quickly rather than settling again. */
 export const DUCK_FLY_MS = 1500;
+
+/**
+ * The last stretch of the incubation, when it starts to show.
+ *
+ * Turning used to be a single frame: a green body one tick and a red one the
+ * next, with nothing in between and no warning to anybody stood next to them.
+ * Across this window they redden from human green to zombie red, and most of
+ * them say so. Before it the infection is invisible to everyone but a cure
+ * gun; during it, anybody looking can see what is about to happen and has this
+ * long to get out of reach.
+ */
+export const TURNING_TELL_MS = 4000;
+/** Not all of them say it. A whole street announcing it at once is noise. */
+export const TURNING_LINE_CHANCE = 0.7;
+export const TURNING_LINES = [
+  "I don't feel so good...",
+  'Something is wrong. Something is really wrong.',
+  "I'm burning up.",
+  "My hands — I can't feel my hands.",
+  'Stay back. Stay back from me.',
+  "It's happening, isn't it?",
+  "I can't breathe right.",
+  "Don't look at me. Please.",
+  'Tell them I was sorry.',
+  'Is it cold in here? It is so cold.',
+  "I think I've got it. I think I've got it.",
+  'Run. Just run, will you?',
+  'My head. Oh God, my head.',
+  "I don't want to be one of them.",
+  'It is in me. I can feel it moving.',
+  "Somebody hold my hand. I don't want to be on my own.",
+];
+/**
+ * A body coming up off the floor is not instantly at full pace. It *moves*
+ * straight away — a stun read as a bug, a thing standing frozen while you
+ * walked round it — but it comes up slow, which is the window whoever was
+ * stood next to them gets to use.
+ *
+ * A slow rather than a freeze also means it goes through the same
+ * `slowUntil`/`slowMul` every other stagger in the game uses, so being shot on
+ * the way up stacks with it instead of arguing with it.
+ */
+export const FRESH_ZOMBIE_SLOW_MS = 1000;
+export const FRESH_ZOMBIE_SLOW_MUL = 0.65;
+
+/**
+ * You can still work a trigger with something on you, but barely: an 80% cut
+ * to the rate, which is this multiplier on every cooldown. Applied inside
+ * `fireHeld` rather than at the call sites, so a player, a bot and a grey
+ * officer all get it from the one place.
+ *
+ * The point is that being grabbed stops being a death sentence you watch —
+ * you get a chance to do something about it, at a price.
+ */
+export const GRAPPLED_COOLDOWN_MUL = 5;
 
 /** Someone turning in the room with you, and nobody else turned in here yet. */
 export const TURNED_REMARK_RANGE = 280;
@@ -297,6 +408,27 @@ export const BOT_LOOT_SCAN_MS = 900;
  * the street for it.
  */
 export const BOT_REFILL_APPETITE = 55;
+/**
+ * How much better a gun has to be before a bot with a full bag will trade one
+ * of its own for it. Zero was what let a pile of loot cycle forever: each swap
+ * puts a gun back on the floor that is still an upgrade for somebody, so a
+ * knot of officers stood at the same heap shuffled the same three rifles
+ * between them for the rest of the round.
+ */
+export const BOT_SWAP_MARGIN = 12;
+/**
+ * How long a bot leaves a pickup alone after touching it. The other half of
+ * the same fix: a swap leaves the gun it gave up under the *same* pickup id,
+ * so without this the next scan a fifth of a second later sees a brand new
+ * upgrade lying at its feet. It also covers anything `collect` refuses
+ * outright, which would otherwise be retried thirty times a second forever.
+ *
+ * Long, deliberately. Five seconds stopped the tight loop but still let an
+ * officer stroll off a heap and turn straight back to it, which from outside
+ * is indistinguishable from the loop it replaced. Measured, bots finish
+ * shopping a pile well inside twenty seconds, so this costs them nothing.
+ */
+export const BOT_LOOT_SNUB_MS = 20000;
 /**
  * A bot only spends a frag on a crowd. One zombie is a rifle's job, and a bot
  * throwing its last grenade at a straggler has nothing left when the street
@@ -535,8 +667,34 @@ export const SHOT_SLOW_MULTIPLIER = 0.36;
  * range the fog and shoot at ground with nothing drawn on it.
  */
 export const SNIPER_SIGHT_RADIUS = 1500;
-/** How far the client pulls the camera back while scoped. */
-export const SNIPER_ZOOM = 0.58;
+/**
+ * Aiming past your own screen, the way Foxhole does it: the camera slides off
+ * the officer toward the reticle rather than zooming out.
+ *
+ * Zooming was the obvious answer and the wrong one. It shrinks the officer,
+ * the city and every body in it, so the moment you raise the scope the thing
+ * you are trying to look *at* gets smaller — and it re-frames the whole screen
+ * to show you ground behind you that you did not ask for. Pushing the camera
+ * keeps everything the size it was and spends the whole budget on the
+ * direction you are actually pointing.
+ *
+ * How far the camera may run off the officer, in world pixels. It is measured
+ * from the *screen centre* rather than from the officer, who is no longer
+ * stood there once the camera has moved — referencing him feeds the push back
+ * into itself and it pins to the cap on the first twitch of the mouse. And it
+ * is scaled by how far to the edge of the screen the cursor has got, not by
+ * raw pixels: the screen is wider than it is tall, so counting pixels gave
+ * aiming up and down barely half the reach of aiming along a street.
+ *
+ * 430 is more than half the viewport's height, so aiming hard up or down takes
+ * the officer off the bottom of the screen. That is deliberate and it is what
+ * `drawSelfMarker` is for; the alternative is cutting the vertical reach back
+ * to the very thing the scope exists to fix.
+ *
+ * Bots get no camera, obviously. For them a scope is `BOT_SCOPE_SIGHT`.
+ */
+export const SCOPE_PUSH = 430;
+export const BINOCULAR_PUSH = 300;
 /** Seconds of easing in and out of the scope, so it doesn't snap. */
 export const SCOPE_EASE_MS = 220;
 /**
@@ -562,8 +720,15 @@ export const UNDEPLOY_MS = 420;
  * through a wall or a door as well.
  */
 export const CHARGE_BARS = 4;
-/** Damage at the first bar, as a fraction of the gun's figure. The last is full. */
+/**
+ * Damage at the first bar and at the last, as multiples of the gun's figure.
+ * The top bar used to be exactly the paper damage, which made a full wind-up
+ * worth no more per round than a tap — all you bought was the pierce. It now
+ * hits properly hard, which is what the second and a half of standing still is
+ * actually for.
+ */
 export const CHARGE_BASE_MUL = 0.4;
+export const CHARGE_TOP_MUL = 2.4;
 /** How long a grey officer keeps running after being grabbed. */
 export const OFFICER_FLEE_MS = 20000;
 
@@ -595,19 +760,48 @@ export const SPRINT_MULTIPLIER = 1.7;
  */
 export const BOT_WALK_SPEED = PLAYER_SPEED * 0.72;
 export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER * 0.85;
-/** Inside this, stop shooting, turn, and run. */
-export const BOT_BOLT_DIST = 165;
+/**
+ * Inside this, stop shooting, turn, and run. Deliberately tight: an officer
+ * that breaks off at the first sight of one is an officer that never fights,
+ * and there is a whole kiting band above this where it gives ground *while*
+ * shooting rather than turning its back.
+ */
+export const BOT_BOLT_DIST = 120;
 /**
  * And keep running until this far clear. The gap between the two is what stops
  * a bot flickering between standing and bolting on the edge of the threshold.
  */
-export const BOT_SAFE_DIST = 400;
+export const BOT_SAFE_DIST = 330;
+/**
+ * Backing off with the gun still up. Slower than a walk on purpose — you do
+ * not get to retreat at full pace *and* keep shooting, and at three quarters a
+ * zombie still closes, so kiting buys time rather than winning outright.
+ */
+export const BOT_KITE_SPEED_MUL = 0.75;
 /**
  * Where a hunting bot wants to be relative to the nearest zombie. Inside
  * NPC_OFFICER_SIGHT (420) on purpose — at the edge of its own vision a bot
  * hovers where it can neither see nor be reached, and never actually fights.
  */
 export const BOT_HUNT_STANDOFF = 260;
+/**
+ * A scope in a bot's hands. It has no camera to push, so the whole of what a
+ * scope means to a bot is *seeing further* — and that was the one thing it did
+ * not get: `senseThreats` ran on NPC_OFFICER_SIGHT whatever was in the bag, so
+ * a bot carrying the sniper stood at 420 with a gun good for 2200 and the
+ * scope bought it precisely nothing.
+ *
+ * Deliberately short of the player's SNIPER_SIGHT_RADIUS (1500). A bot's
+ * rounds go through the same `fireHeld` a player's do, so at the sniper's
+ * bloom it does not miss; the player keeps the better glass.
+ */
+export const BOT_SCOPE_SIGHT = 1200;
+/**
+ * And where it stands with one. Still comfortably inside its own sight — the
+ * rule that put BOT_HUNT_STANDOFF at 260 rather than 420 holds here too: a bot
+ * loitering at the edge of what it can see never fights.
+ */
+export const BOT_SCOPE_STANDOFF = 700;
 /** Swung, not snapped — the NPC officer's rate reads as twitching on a bot. */
 export const BOT_TURN_RATE = 7.5;
 /**
@@ -696,6 +890,26 @@ export const FLAME_SPLASH_SPREAD = 40;
 export const FLAME_LAND_INSET = 8;
 /** Napalm hangs far longer than a round's tracer, and dies away rather than off. */
 export const FLAME_TRACER_MS = 320;
+/**
+ * How long the front of the stream takes to reach the far end of the throw.
+ *
+ * Burning fuel is *thrown*, not fired: it leaves the nozzle and travels, and
+ * drawing the whole length in the frame the trigger goes down reads as a
+ * laser rather than a liquid. At 55ms between pulls, six or seven of these
+ * overlap while the trigger is held, so the composite is a continuous jet
+ * with a leading edge that visibly runs out to the target.
+ *
+ * The *ignition* is still worked out on the tick it was fired — this is the
+ * picture catching up with the simulation, not the simulation slowing down.
+ */
+export const FLAME_TRAVEL_MS = 170;
+/**
+ * How much wider the stream is at the far end than at the nozzle. A jet
+ * spreads as it goes and breaks up as it slows; fattest-in-the-middle read as
+ * a thrown blob rather than something under pressure.
+ */
+export const FLAME_MOUTH_WIDTH = 0.3;
+export const FLAME_TIP_WIDTH = 1.55;
 /** Screen-space lift at the peak of the arc, at full range. */
 export const FLAME_ARC_LIFT = 26;
 /**
@@ -814,6 +1028,13 @@ export const NPC_OFFICER_COLOR = '#9ca3af';
 export const INTERIOR_DOOR_SHARE = 0.55;
 export const DOOR_START_OPEN_CHANCE = 0.5;
 export const DOOR_HEALTH = 1600;
+/**
+ * Slack on a door claim past the moment the work should have finished. The
+ * claim has to outlive a hiccup — being shoved off the handle, a tick spent
+ * running from a grab — but it must not outlive its owner. See
+ * `doorBusyForOthers`.
+ */
+export const DOOR_CLAIM_GRACE_MS = 2500;
 /** ~33 seconds of work for a single zombie. */
 export const DOOR_ZOMBIE_DAMAGE = 18;
 export const DOOR_ATTACK_INTERVAL_MS = 600;
@@ -1021,8 +1242,8 @@ export const TAP_MAX_MS = 220;
  * They used to compete for the one item a house could hold, so a house with a
  * rifle in it never had a vest as well.
  */
-export const BUILDING_GUN_CHANCE = 0.42;
-export const BUILDING_UTILITY_CHANCE = 0.5;
+export const BUILDING_GUN_CHANCE = 0.58;
+export const BUILDING_UTILITY_CHANCE = 0.58;
 /** Two items in one house never land on top of each other. */
 export const LOOT_MIN_GAP = 44;
 
@@ -1034,8 +1255,7 @@ export const BOOTS_STAMINA_MUL = 0.62;
 /** Backpack and gunsling: extra slots while you carry them. */
 export const BACKPACK_SLOTS = 2;
 export const GUNSLING_SLOTS = 1;
-/** Binoculars pull the camera back, the way a scope does but gently. */
-export const BINOCULAR_ZOOM = 0.78;
+/** Binoculars push the camera out too, the way a scope does but gently. */
 export const BINOCULAR_SIGHT_RADIUS = 980;
 /** How far the zombie tracker will look before it gives up and points nowhere. */
 export const TRACKER_RANGE = 1600;
@@ -1065,6 +1285,8 @@ export const SHIELD_BASH_ARC = 1.1;
 export const SHIELD_BASH_PUSH = 46;
 export const SHIELD_BASH_SLOW_MS = 1400;
 export const SHIELD_BASH_SLOW_MUL = 0.35;
+/** How long the shove animation is shown for. */
+export const SHIELD_BASH_SHOW_MS = 260;
 export const SHIELD_BASH_COOLDOWN_MS = 700;
 /**
  * And what it costs. Roughly half a second of sprint per shove, out of the
@@ -1179,6 +1401,8 @@ export const BEACON_SHOUT = 'Go to the survivor beacon!';
 export const BEACON_SHOUT_MS = 3400;
 /** How far the call carries, and how close counts as arrived. */
 export const BEACON_CALL_RADIUS = 900;
+/** Shouted when the mast is too far off to be pointed at. */
+export const BEACON_TOO_FAR_LINE = 'Too far from the beacon to call it!';
 export const BEACON_ARRIVE_DIST = 60;
 
 // ---------------------------------------------------------------- HUD

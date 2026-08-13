@@ -89,14 +89,30 @@ export function visibilityPolygon(
   radius: number,
   walls: Wall[],
   bushes: Bush[],
+  /**
+   * Half-extents of the box that will actually be *drawn* — the viewport, in
+   * other words — defaulting to the sight circle, which is what the caller
+   * used to get.
+   *
+   * An occluder wholly outside this box cannot change anything inside it, and
+   * that is exact rather than approximate: the box is convex and the viewer is
+   * in it, so a ray that leaves it never comes back. Every point in such an
+   * occluder's shadow therefore lies outside the box too. Culling on it is
+   * what pays for the scope's much wider radius — cost here is roughly the
+   * square of the occluder count, since each wall contributes rays *and* is
+   * tested by every other wall's rays, so a third fewer walls is half the
+   * work.
+   */
+  clipW = radius,
+  clipH = radius,
 ): Point[] {
   const nearWalls: Wall[] = [];
   for (const w of walls) {
     if (
-      w.x - radius <= px &&
-      w.x + w.w + radius >= px &&
-      w.y - radius <= py &&
-      w.y + w.h + radius >= py
+      w.x - clipW <= px &&
+      w.x + w.w + clipW >= px &&
+      w.y - clipH <= py &&
+      w.y + w.h + clipH >= py
     ) {
       nearWalls.push(w);
     }
@@ -113,7 +129,7 @@ export function visibilityPolygon(
   for (const b of bushes) {
     const d = Math.hypot(b.x - px, b.y - py);
     if (d <= b.r) continue;
-    if (d <= radius + b.r) nearBushes.push(b);
+    if (Math.abs(b.x - px) <= clipW + b.r && Math.abs(b.y - py) <= clipH + b.r) nearBushes.push(b);
   }
   if (nearBushes.length > MAX_BUSH_OCCLUDERS) {
     nearBushes.sort(

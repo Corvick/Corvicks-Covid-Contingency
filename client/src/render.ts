@@ -8,6 +8,7 @@ import type {
   HelicopterState,
   InventoryState,
   MapData,
+  Park,
   PickupState,
   SmokeState,
   SpeechState,
@@ -44,6 +45,9 @@ import {
   FLAME_RANGE,
   FLAME_TRACER_MS,
   FLAME_ARC_LIFT,
+  FLAME_TRAVEL_MS,
+  FLAME_MOUTH_WIDTH,
+  FLAME_TIP_WIDTH,
   FLAME_BLOBS,
   FLAME_BLOB_RADIUS,
   CHARGE_BARS,
@@ -71,6 +75,24 @@ function shade(hex: string, amount: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+/**
+ * Blend two colours. Returns hex rather than `rgb()` so the result can be fed
+ * straight back through `shade`, which is how the head is derived from the
+ * body.
+ */
+function mix(from: string, to: string, t: number): string {
+  const a = parseInt(from.slice(1), 16);
+  const b = parseInt(to.slice(1), 16);
+  const k = Math.max(0, Math.min(1, t));
+  const lerp = (shift: number) => {
+    const av = (a >> shift) & 0xff;
+    const bv = (b >> shift) & 0xff;
+    return Math.round(av + (bv - av) * k);
+  };
+  const hex = (v: number) => v.toString(16).padStart(2, '0');
+  return `#${hex(lerp(16))}${hex(lerp(8))}${hex(lerp(0))}`;
+}
+
 function visible(view: Viewport, x: number, y: number, pad: number): boolean {
   return (
     x + pad >= view.x && x - pad <= view.x + view.w && y + pad >= view.y && y - pad <= view.y + view.h
@@ -80,6 +102,48 @@ function visible(view: Viewport, x: number, y: number, pad: number): boolean {
 export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
   ctx.fillStyle = '#23262b';
   ctx.fillRect(0, 0, map.width, map.height);
+}
+
+/**
+ * The park's grass and the dirt path worn across it.
+ *
+ * One stroked polyline rather than a run of blobs — the path is a shape, not a
+ * scatter, and a round cap and join are what stop the kinks reading as a
+ * chain of sausages. The soft edge is a second, wider, fainter pass
+ * underneath, which is cheaper than any kind of blur and reads as the grass
+ * giving way rather than the dirt stopping at a line.
+ */
+export function drawPark(ctx: CanvasRenderingContext2D, park: Park, view: Viewport): void {
+  if (
+    park.x > view.x + view.w ||
+    park.x + park.w < view.x ||
+    park.y > view.y + view.h ||
+    park.y + park.h < view.y
+  ) {
+    return;
+  }
+
+  // A shade of green under the trees, so the park reads as ground rather than
+  // as street that happens to have bushes on it.
+  ctx.fillStyle = '#232c25';
+  ctx.fillRect(park.x, park.y, park.w, park.h);
+
+  if (park.path.length < 2) return;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (const [width, colour] of [
+    [park.pathWidth + 14, 'rgba(74, 60, 43, 0.45)'],
+    [park.pathWidth, '#4a3c2b'],
+  ] as Array<[number, string]>) {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(park.path[0].x, park.path[0].y);
+    for (let i = 1; i < park.path.length; i++) ctx.lineTo(park.path[i].x, park.path[i].y);
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'miter';
 }
 
 export function drawWalls(ctx: CanvasRenderingContext2D, walls: Wall[], view: Viewport): void {
@@ -500,14 +564,20 @@ export function drawEntity(
 
   // A bot officer holds a player's slot, so it is picked out from the ambient
   // grey ones rather than lumped in with them.
-  const color = e.soldier
+  const base = e.soldier
     ? SOLDIER_COLOR
     : e.bot
       ? BOT_OFFICER_COLOR
       : e.npc && e.type === 'officer'
         ? NPC_OFFICER_COLOR
         : ENTITY_COLOR[e.type];
-  const headColor = e.bot ? BOT_OFFICER_HEAD_COLOR : shade(color, -45);
+
+  // Turning. The last few seconds of the incubation bleed the body toward
+  // zombie red rather than snapping to it, which is the only warning anybody
+  // stood next to them gets — see TURNING_TELL_MS. Everything downstream reads
+  // `color`, so the head, the limbs and the far-out dot all go with it.
+  const color = e.turning ? mix(base, ENTITY_COLOR.zombie, e.turning) : base;
+  const headColor = e.bot && !e.turning ? BOT_OFFICER_HEAD_COLOR : shade(color, -45);
 
   // Zoomed far out: one dot instead of forty-odd path operations. With four
   // hundred entities alive at the end of a round, the difference is the whole
@@ -673,12 +743,39 @@ export function drawEntity(
 
   if (e.shield) {
     const facing = e.facing + (e.shield > 0 ? 0 : Math.PI);
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = e.shield > 0 ? 'rgba(56, 189, 248, 0.95)' : 'rgba(56, 189, 248, 0.6)';
+    // The shove: the arc is thrown out in front and drawn heavier for the
+    // moment it lasts, so a bash reads as a shove rather than as nothing
+    // happening. Cheap on purpose — it is one number on the radius.
+    const thrust = e.bashing ? 9 : 0;
+    ctx.lineWidth = e.bashing ? 6 : 4;
+    ctx.strokeStyle = e.bashing
+      ? 'rgba(186, 230, 253, 1)'
+      : e.shield > 0
+        ? 'rgba(56, 189, 248, 0.95)'
+        : 'rgba(56, 189, 248, 0.6)';
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.arc(x, y, radius + 4, facing - SHIELD_FRONT_ARC, facing + SHIELD_FRONT_ARC);
+    ctx.arc(
+      x + Math.cos(facing) * thrust,
+      y + Math.sin(facing) * thrust,
+      radius + 4 + thrust * 0.4,
+      facing - SHIELD_FRONT_ARC,
+      facing + SHIELD_FRONT_ARC,
+    );
     ctx.stroke();
+
+    // A puff of motion lines ahead of it, so the shove has a direction.
+    if (e.bashing) {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(186, 230, 253, 0.55)';
+      for (const side of [-0.5, 0, 0.5]) {
+        const a = facing + side;
+        ctx.beginPath();
+        ctx.moveTo(x + Math.cos(a) * (radius + 14), y + Math.sin(a) * (radius + 14));
+        ctx.lineTo(x + Math.cos(a) * (radius + 24), y + Math.sin(a) * (radius + 24));
+        ctx.stroke();
+      }
+    }
     ctx.lineCap = 'butt';
   }
 
@@ -718,8 +815,13 @@ function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: num
   const nx = -dy / len;
   const ny = dx / len;
 
-  const shrink = 1 - age * 0.55;
   const fade = (1 - age) ** 1.4;
+
+  // How far down the throw the burning fuel has actually got. This is the
+  // whole difference between a jet and a laser: at the instant of firing there
+  // is a stub at the nozzle, and the front runs out to the target over
+  // FLAME_TRAVEL_MS. Held down, the streams overlap into one continuous jet.
+  const front = Math.min(1, (age * FLAME_TRACER_MS) / FLAME_TRAVEL_MS);
 
   // The lift is screen-space, so it only reads as *height* when it is across
   // the line of travel. Fired straight up or down the screen it is along that
@@ -732,8 +834,16 @@ function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: num
     (FLAME_ARC_VERTICAL_MIN + (1 - FLAME_ARC_VERTICAL_MIN) * uprightness);
   const seed = (tracer.x1 * 13 + tracer.y1 * 7) % 628;
 
-  /** How high off the ground the stream is at `t`, and how fat it is there. */
+  /** Height off the ground: an arc, peaking midway and coming back down. */
   const arcAt = (t: number) => Math.sin(Math.PI * t);
+  /**
+   * How fat the stream is at `t`. Narrow at the nozzle where the fuel is still
+   * under pressure, spreading and breaking up as it slows — a cone, not a
+   * sausage. Once the front has stopped advancing the whole thing swells and
+   * goes ragged as it burns out.
+   */
+  const bloomOut = 1 + (1 - fade) * 0.5;
+  const widthAt = (t: number) => (FLAME_MOUTH_WIDTH + FLAME_TIP_WIDTH * t) * bloomOut;
 
   // The shadow first, flat on the ground and directly under the arc, so the
   // lift reads as height rather than as the stream being aimed off to one side.
@@ -741,26 +851,38 @@ function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: num
   ctx.fillStyle = '#000';
   for (let i = 2; i <= FLAME_BLOBS; i += 2) {
     const t = i / FLAME_BLOBS;
-    const r = FLAME_BLOB_RADIUS * (0.3 + 0.8 * arcAt(t)) * shrink * 0.8;
+    if (t > front) break;
+    const r = FLAME_BLOB_RADIUS * widthAt(t) * 0.7;
     ctx.beginPath();
     ctx.ellipse(tracer.x1 + dx * t, tracer.y1 + dy * t, r, r * 0.38, 0, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Then the stream: dull red body, orange middle, near-white core.
-  for (const [scale, colour] of [
-    [1, 'rgba(220, 38, 38, 0.5)'],
-    [0.66, 'rgba(251, 146, 60, 0.72)'],
-    [0.32, 'rgba(254, 240, 138, 0.95)'],
-  ] as const) {
+  // Then the stream: dull red body, orange middle, near-white core. The core
+  // is only near the nozzle — that is where the fuel is freshest and hottest,
+  // and letting it run the whole length is what made this read as a solid bar
+  // of light rather than something burning as it travels.
+  for (const [scale, colour, reach] of [
+    [1, 'rgba(220, 38, 38, 0.5)', 1],
+    [0.6, 'rgba(251, 146, 60, 0.72)', 0.78],
+    [0.26, 'rgba(254, 240, 138, 0.95)', 0.4],
+  ] as Array<[number, string, number]>) {
     ctx.fillStyle = colour;
     for (let i = 1; i <= FLAME_BLOBS; i++) {
       const t = i / FLAME_BLOBS;
+      if (t > front) break;
+      // Each layer stops short of the last, so the tip is red and smoky and
+      // the throat is white.
+      const within = 1 - Math.min(1, t / reach);
+      if (within <= 0) continue;
+
       const arc = arcAt(t);
-      const r = FLAME_BLOB_RADIUS * (0.26 + 0.95 * arc) * scale * shrink;
-      // Wobble across the line, widening downrange, so the edge is ragged.
-      const wob = Math.sin(seed + i * 1.9) * 3.4 * arc;
-      ctx.globalAlpha = fade * (0.55 + 0.45 * arc);
+      const r = FLAME_BLOB_RADIUS * widthAt(t) * scale * (0.35 + 0.65 * within);
+      // Wobble across the line, widening downrange, so the edge is ragged, and
+      // rolling with the tracer's age so the jet churns rather than sitting.
+      const churn = seed + i * 1.9 + age * 5;
+      const wob = Math.sin(churn) * 4.2 * t;
+      ctx.globalAlpha = fade * (0.5 + 0.5 * within);
       ctx.beginPath();
       ctx.arc(
         tracer.x1 + dx * t + nx * wob,
@@ -780,14 +902,23 @@ function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: num
   // already hard against whatever stopped the stream, so anything thrown
   // forward from it is drawn through a wall — and splashback off the thing you
   // just hit is the truer picture anyway.
+  // Nothing splashes until the fuel has actually got there. Drawing this from
+  // the first frame was the other half of the stream looking instant: the
+  // impact appeared at the same moment as the trigger.
+  if (front < 1) return;
+  const settle = Math.min(
+    1,
+    (age * FLAME_TRACER_MS - FLAME_TRAVEL_MS) / Math.max(1, FLAME_TRACER_MS - FLAME_TRAVEL_MS),
+  );
+
   const aim = Math.atan2(dy, dx) + Math.PI;
   for (let k = 0; k < 3; k++) {
     const a = aim + ((k + 0.5) / 3 - 0.5) * 1.7;
-    const d = 10 + ((seed + k * 37) % 9) + age * 22;
+    const d = 10 + ((seed + k * 37) % 9) + settle * 22;
     ctx.globalAlpha = fade * 0.8;
     ctx.fillStyle = k === 1 ? '#fde047' : '#fb923c';
     ctx.beginPath();
-    ctx.arc(tracer.x2 + Math.cos(a) * d, tracer.y2 + Math.sin(a) * d, 6 * shrink, 0, Math.PI * 2);
+    ctx.arc(tracer.x2 + Math.cos(a) * d, tracer.y2 + Math.sin(a) * d, 6 * (1 - settle * 0.45), 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -1652,8 +1783,15 @@ export function drawInventory(
     cells.push({
       key: String(i + 1 + inv.gunSlots),
       item,
-      // Grenades count down in the bag the way rounds do in a magazine.
-      ammo: item === 'grenade' ? inv.grenades : null,
+      // Bundles count down in the bag the way rounds do in a magazine.
+      ammo:
+        item === 'grenade'
+          ? inv.grenades
+          : item === 'zapMine'
+            ? inv.mines
+            : item === 'cureGun'
+              ? inv.cureDoses
+              : null,
     });
   }
 
@@ -1881,6 +2019,54 @@ export function drawTracker(
   ctx.lineTo(-5, 6);
   ctx.closePath();
   ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Where you are, when the scope has pushed the camera off you.
+ *
+ * The screen is wider than it is tall, so aiming up or down a street runs the
+ * camera past your own officer long before aiming along one does. Rather than
+ * cut the vertical reach down to whatever keeps him in frame — which is the
+ * short reach the scope was meant to fix — he goes off the edge and this puts
+ * a mark where he went. Nothing is drawn while he is on screen.
+ *
+ * On *top* of the fog, like the thermal pass: it is the one thing you must
+ * never lose track of.
+ */
+export function drawSelfMarker(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  w: number,
+  h: number,
+): void {
+  // Deeper along the bottom, where the slot bar lives — a marker drawn behind
+  // your own inventory is a marker you cannot read.
+  const inset = 26;
+  const floor = 92;
+  if (sx >= inset && sx <= w - inset && sy >= inset && sy <= h - floor) return;
+
+  const cx = Math.max(inset, Math.min(w - inset, sx));
+  const cy = Math.max(inset, Math.min(h - floor, sy));
+  const angle = Math.atan2(sy - cy, sx - cx);
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(96, 165, 250, 0.9)';
+  ctx.fillStyle = 'rgba(96, 165, 250, 0.28)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 11, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // A chevron off the ring, pointing the way he actually is.
+  ctx.beginPath();
+  for (const spread of [-0.6, 0.6]) {
+    ctx.moveTo(cx + Math.cos(angle) * 20, cy + Math.sin(angle) * 20);
+    ctx.lineTo(cx + Math.cos(angle + spread) * 13, cy + Math.sin(angle + spread) * 13);
+  }
   ctx.stroke();
   ctx.restore();
 }

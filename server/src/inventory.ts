@@ -21,9 +21,14 @@ import {
   ONE_OFF_ITEMS,
   GUARANTEED_ITEMS,
   GUARANTEE_EVERY_GUN,
+  PARK_LOOT_COUNT,
+  PARK_LOOT_GUN_SHARE,
+  PARK_LOOT_COVER,
+  PARK_LOOT_PATH_GAP,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
+import { distToPath } from './mapgen.js';
 import { callBackup } from './police.js';
 
 export interface Inventory {
@@ -47,6 +52,8 @@ export interface Inventory {
   grenades: number;
   /** Mines left, same bundle-in-one-slot arrangement. */
   mines: number;
+  /** Cure doses left. Same arrangement again — see `utilitySlot`. */
+  cureDoses: number;
   /**
    * Worn upgrades. They take no numbered slot of their own — a sling and a
    * pack are things you have on, not things you select — so they are flags
@@ -71,6 +78,7 @@ export function newInventory(): Inventory {
     dual: false,
     grenades: 0,
     mines: 0,
+    cureDoses: 0,
     sling: false,
     pack: false,
     holdSince: null,
@@ -89,25 +97,38 @@ export function utilitySlots(inv: Inventory): number {
 }
 
 /** Scatter loot through the city. Most buildings come up empty. */
-export function spawnPickups(world: World, testDropAt?: { x: number; y: number }): void {
+/**
+ * TESTING: one of everything within arm's reach, dropped around whoever has
+ * just spawned.
+ *
+ * Deliberately *not* part of the city. It used to be laid down with the rest
+ * of the loot at world generation, which put a heap of every item in the game
+ * on the map before anybody had joined — bots walked to it, fought over it and
+ * kitted themselves out of it, and every measurement of how loot behaves was
+ * taken against a pile that would never exist in a real round.
+ *
+ * The *pistol* is in the pile on purpose — you start with one, and a second
+ * one is the thing worth testing. `dualPistols` is not: it is what slot 0
+ * turns into, not an object, and one lying on the ground is nonsense.
+ */
+export function dropDebugKit(world: World, owner: string, x: number, y: number): void {
+  if (!TEST_DROP_ALL_ITEMS) return;
+  const ids = (Object.keys(ITEMS) as ItemId[]).filter((id) => id !== 'dualPistols');
+  ids.forEach((item, i) => {
+    const angle = (i / ids.length) * Math.PI * 2;
+    const id = `loot-test-${owner}-${i}`;
+    world.pickups.set(id, {
+      id,
+      item,
+      x: x + Math.cos(angle) * TEST_DROP_RADIUS,
+      y: y + Math.sin(angle) * TEST_DROP_RADIUS,
+    });
+  });
+}
+
+export function spawnPickups(world: World): void {
   world.pickups.clear();
   let n = 0;
-
-  // TESTING: one of everything within arm's reach of the start point.
-  if (TEST_DROP_ALL_ITEMS && testDropAt) {
-    const ids = (Object.keys(ITEMS) as ItemId[]).filter((id) => id !== 'pistol');
-    ids.forEach((item, i) => {
-      const angle = (i / ids.length) * Math.PI * 2;
-      const id = `loot-test-${i}`;
-      world.pickups.set(id, {
-        id,
-        item,
-        x: testDropAt.x + Math.cos(angle) * TEST_DROP_RADIUS,
-        y: testDropAt.y + Math.sin(angle) * TEST_DROP_RADIUS,
-      });
-    });
-    n = ids.length;
-  }
 
   /**
    * Drop one item somewhere inside this building. Kept off the walls and
@@ -145,6 +166,45 @@ export function spawnPickups(world: World, testDropAt?: { x: number; y: number }
     }
     if (Math.random() < BUILDING_UTILITY_CHANCE) {
       placeIn(b, UTILITY_LOOT[Math.floor(Math.random() * UTILITY_LOOT.length)]);
+    }
+  }
+
+  // A few things stashed in the park, tucked into the undergrowth rather than
+  // left out on the grass — the whole point of putting loot there is that you
+  // have to go into the trees for it, so a candidate spot has to have a bush
+  // close enough to hide it. Kept off the dirt path for the same reason: a rifle
+  // lying on the one clear line through the park is not hidden at all.
+  const park = world.map.park;
+  for (let i = 0; i < PARK_LOOT_COUNT; i++) {
+    const table = Math.random() < PARK_LOOT_GUN_SHARE ? GUN_LOOT : UTILITY_LOOT;
+    const item = table[Math.floor(Math.random() * table.length)];
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const x = park.x + 30 + Math.random() * Math.max(1, park.w - 60);
+      const y = park.y + 30 + Math.random() * Math.max(1, park.h - 60);
+      if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+      if (distToPath(park.path, x, y) < park.pathWidth / 2 + PARK_LOOT_PATH_GAP) continue;
+
+      let hidden = false;
+      for (const bush of world.map.bushes) {
+        if (Math.hypot(bush.x - x, bush.y - y) <= bush.r + PARK_LOOT_COVER) {
+          hidden = true;
+          break;
+        }
+      }
+      if (!hidden) continue;
+
+      let crowded = false;
+      for (const p of world.pickups.values()) {
+        if (Math.hypot(p.x - x, p.y - y) < LOOT_MIN_GAP) {
+          crowded = true;
+          break;
+        }
+      }
+      if (crowded) continue;
+
+      const id = `loot-${n++}`;
+      world.pickups.set(id, { id, item, x, y });
+      break;
     }
   }
 
@@ -287,6 +347,12 @@ function applyUtility(world: World, playerId: string, inv: Inventory, item: Item
     inv.mines += ZAP_MINE_COUNT;
     return inv.utilities.includes('zapMine') ? 'used' : 'carry';
   }
+  // A gun by every other measure, but the doses stack in one slot rather than
+  // a second cure gun taking a second one.
+  if (item === 'cureGun') {
+    inv.cureDoses += ITEMS.cureGun.ammo ?? 0;
+    return inv.utilities.includes('cureGun') ? 'used' : 'carry';
+  }
   // Worn rather than carried: they cost no slot, so picking one up is pure
   // gain and a second of either is dead weight left on the floor.
   if (item === 'gunsling') {
@@ -337,7 +403,10 @@ export function collect(
     return 'not while you are carrying the shield';
   }
 
-  if (def.kind === 'utility') {
+  // `kind` says what it is; `utilitySlot` says where it goes. The cure gun is
+  // both a gun and a thing you carry on the belt, so the slot question is
+  // asked separately from every other question about it.
+  if (def.kind === 'utility' || def.utilitySlot) {
     const outcome = applyUtility(world, playerId, inv, pickup.item);
     if (outcome === 'refuse') return 'nothing that would use it';
     if (outcome === 'used') {
@@ -353,7 +422,15 @@ export function collect(
   // A second pistol isn't a gun, it's the other hand. It costs no slot and
   // upgrades the one you can never lose, so the sidearm stops being purely
   // the thing you fall back to when everything else is dry.
-  if (pickup.item === 'pistol') {
+  //
+  // `dualPistols` counts as one of these, not as a gun. It is what slot 0
+  // *becomes* and has no business sitting in a slot of its own — but it is a
+  // real entry in the registry, so anything that walks `ITEMS` can put one on
+  // the floor. Taken as a gun it lands in a slot with no rounds in it and
+  // never sets `dual`, which reads exactly as "duel pistols don't work and
+  // don't replace the pistol on slot 0". Handled here so it cannot happen
+  // whatever put it there.
+  if (pickup.item === 'pistol' || pickup.item === 'dualPistols') {
     if (inv.dual) return 'already holding a pair';
     inv.dual = true;
     world.pickups.delete(pickup.id);
@@ -424,6 +501,7 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
   if (item === 'kevlar') inv.kevlar = 0;
   if (item === 'grenade') inv.grenades = 0;
   if (item === 'zapMine') inv.mines = 0;
+  if (item === 'cureGun') inv.cureDoses = 0;
   if (item === 'riotShield') {
     inv.shield = 0;
     inv.shieldUp = false;
@@ -480,6 +558,7 @@ export function toWireInventory(
     dual: inv.dual,
     grenades: inv.grenades,
     mines: inv.mines,
+    cureDoses: inv.cureDoses,
     gunSlots: gunSlots(inv),
     utilitySlots: utilitySlots(inv),
     dropProgress: dropProgress(inv, now),

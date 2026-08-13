@@ -17,6 +17,7 @@ import {
   toWireInventory,
   gunSlots,
   utilitySlots,
+  dropDebugKit,
 } from './inventory.js';
 import { ITEMS } from '../../shared/items.js';
 import { grenadesToWire, helicoptersToWire, smokesToWire, updateAirSupport } from './heli.js';
@@ -51,6 +52,7 @@ import {
   THERMAL_RANGE,
   BEACON_SHOUT,
   BEACON_SHOUT_MS,
+  BEACON_TOO_FAR_LINE,
   BEACON_CALL_RADIUS,
   BOOTS_SPEED_MUL,
   BOOTS_STAMINA_MUL,
@@ -155,6 +157,9 @@ function spawnPlayer(id: string): void {
   world.stamina.set(id, STAMINA_MAX);
   world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
   world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
+  // TESTING: the debug heap follows whoever spawns rather than being laid into
+  // the city. No-ops unless TEST_DROP_ALL_ITEMS.
+  dropDebugKit(world, id, spawn.x, spawn.y);
 }
 
 /** Take a connection back out of the world — they've gone, or the lobby has. */
@@ -319,8 +324,14 @@ wss.on('connection', (socket) => {
         const officer = world.entities.get(id);
         const now = Date.now();
         const tower = nearestTower(officer);
-        if (!officer || officer.type !== 'officer' || !tower) {
-          // Nothing to point at.
+        if (!officer || officer.type !== 'officer') {
+          // Not somebody who can shout.
+        } else if (!tower) {
+          // A mast exists somewhere, or the wheel would not have offered this,
+          // but it is out of earshot. Say so — dropping the order silently is
+          // indistinguishable from the command being broken, which is exactly
+          // how it was reported.
+          world.speech.set(id, { text: BEACON_TOO_FAR_LINE, until: now + RALLY_NO_CHARGE_MS });
         } else if ((world.rallyCharges.get(id) ?? 0) > 0) {
           world.rallyCharges.set(id, (world.rallyCharges.get(id) ?? 0) - 1);
           world.speech.set(id, { text: BEACON_SHOUT, until: now + BEACON_SHOUT_MS });
@@ -555,7 +566,7 @@ function visibleTo(viewer: Entity, now: number): EntityState[] {
   // A cure gun anywhere in the bag picks the infected out of a crowd — you
   // can't aim a cure at somebody you can't tell apart from everyone else.
   const inv = world.inventories.get(viewer.id);
-  const carriesCure = inv ? inv.guns.some((g) => g?.item === 'cureGun') : false;
+  const carriesCure = inv ? inv.utilities.includes('cureGun') : false;
   const reveal = viewer.type === 'zombie' || carriesCure;
   const sight = sightRadiusFor(viewer);
 

@@ -3,6 +3,7 @@ import type {
   Bush,
   Door,
   MapData,
+  Park,
   Pond,
   Wall,
   Window as WindowPane,
@@ -18,6 +19,10 @@ import {
   MAP_MARGIN,
   EMPTY_LOT_CHANCE,
   PARK_BUSHES_PER_BLOCK,
+  PARK_EDGE_FADE,
+  PARK_EDGE_DENSITY,
+  PARK_PATH_WIDTH,
+  PARK_PATH_CLEARANCE,
   SCATTER_BUSH_COUNT,
   WINDOW_CHANCE,
   WINDOW_TILES,
@@ -730,6 +735,8 @@ function scatterBushes(
   h: number,
   count: number,
   buildings: Wall[],
+  /** Kept off the park's dirt path, which this scatter runs straight over. */
+  park?: Park,
 ): void {
   for (let i = 0; i < count; i++) {
     for (let attempt = 0; attempt < 12; attempt++) {
@@ -737,7 +744,94 @@ function scatterBushes(
       const bx = x + rand() * w;
       const by = y + rand() * h;
       if (overlapsAny(bx, by, r, buildings, 12)) continue;
+      if (park && distToPath(park.path, bx, by) < park.pathWidth / 2 + PARK_PATH_CLEARANCE + r) {
+        continue;
+      }
       bushes.push({ x: bx, y: by, r });
+      break;
+    }
+  }
+}
+
+/** Shortest distance from a point to a line segment. */
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const vx = bx - ax;
+  const vy = by - ay;
+  const len2 = vx * vx + vy * vy;
+  const t = len2 === 0 ? 0 : clampTo(((px - ax) * vx + (py - ay) * vy) / len2, 0, 1);
+  return Math.hypot(px - (ax + vx * t), py - (ay + vy * t));
+}
+
+/** Distance from a point to the nearest part of a polyline. */
+export function distToPath(path: Array<{ x: number; y: number }>, x: number, y: number): number {
+  let best = Infinity;
+  for (let i = 1; i < path.length; i++) {
+    const d = distToSegment(x, y, path[i - 1].x, path[i - 1].y, path[i].x, path[i].y);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+/**
+ * A dirt path worn right across the park, in one side and out the other.
+ *
+ * Two or three kinks rather than a straight line — a path that runs dead
+ * straight through a wood reads as a road. The ends sit just outside the park
+ * box so the dirt runs out to the street rather than stopping short of it.
+ */
+function parkPath(park: Wall, rand: Rng): Array<{ x: number; y: number }> {
+  const across = rand() < 0.5; // left-to-right, or top-to-bottom
+  const steps = 3 + Math.floor(rand() * 2);
+  const out: Array<{ x: number; y: number }> = [];
+  // How far off the centre line it may wander, kept clear of the park's edge.
+  const sway = (across ? park.h : park.w) * 0.28;
+  const midA = (across ? park.y : park.x) + (across ? park.h : park.w) / 2;
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    // The ends run a little past the boundary; the middle wanders.
+    const along = (across ? park.x : park.y) + (t * (across ? park.w : park.h));
+    const drift = i === 0 || i === steps ? 0 : (rand() - 0.5) * 2 * sway;
+    const overshoot = i === 0 ? -30 : i === steps ? 30 : 0;
+    out.push(
+      across
+        ? { x: along + overshoot, y: midA + drift }
+        : { x: midA + drift, y: along + overshoot },
+    );
+  }
+  return out;
+}
+
+/**
+ * Fill the park: dense in the middle, thinning toward the edges, and nothing
+ * at all on the path.
+ *
+ * The thinning is a rejection probability rather than a smaller count, so the
+ * core stays exactly as thick as it was — what changes is that you can see
+ * into the trees from the street instead of meeting a wall of them.
+ */
+function fillPark(bushes: Bush[], rand: Rng, park: Park, count: number, buildings: Wall[]): void {
+  for (let i = 0; i < count; i++) {
+    for (let attempt = 0; attempt < 14; attempt++) {
+      const r = 18 + rand() * 16;
+      const bx = park.x + rand() * park.w;
+      const by = park.y + rand() * park.h;
+
+      // Somewhere it simply cannot go: pick another spot for this same bush.
+      if (overlapsAny(bx, by, r, buildings, 12)) continue;
+      if (distToPath(park.path, bx, by) < park.pathWidth / 2 + PARK_PATH_CLEARANCE + r) continue;
+
+      // Thinner the closer it is to the boundary, on whichever side is nearest.
+      //
+      // A failed roll here **drops the bush** rather than re-rolling its
+      // position. Retrying would only move it inwards, which thickens the core
+      // instead of thinning the edge — measured, retrying left the edge at 73%
+      // of core density when the curve asks for well under half.
+      const inset = Math.min(bx - park.x, park.x + park.w - bx, by - park.y, park.y + park.h - by);
+      const core = clampTo(inset / PARK_EDGE_FADE, 0, 1);
+      if (rand() <= PARK_EDGE_DENSITY + (1 - PARK_EDGE_DENSITY) * core) {
+        bushes.push({ x: bx, y: by, r });
+      }
       break;
     }
   }
@@ -910,31 +1004,39 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   // landmarks, then perimeter blocks. Ordinary blocks yield to all of it.
   const landmarks: Wall[] = [];
 
-  // The park is staked out first, near the middle of the map, so nothing else
-  // can build over it and it never ends up stranded in a corner.
-  const parkW = BLOCK_SIZE * 2 + ROAD_SIZE;
-  const parkH = BLOCK_SIZE * 2 + ROAD_SIZE;
-  const park = {
-    x: clampTo(
-      WORLD_WIDTH / 2 + (rand() - 0.5) * WORLD_WIDTH * 0.22 - parkW / 2,
-      MAP_MARGIN,
-      WORLD_WIDTH - MAP_MARGIN - parkW,
-    ),
-    y: clampTo(
-      WORLD_HEIGHT / 2 + (rand() - 0.5) * WORLD_HEIGHT * 0.22 - parkH / 2,
-      MAP_MARGIN,
-      WORLD_HEIGHT - MAP_MARGIN - parkH,
-    ),
-    w: parkW,
-    h: parkH,
-  };
-  landmarks.push(park);
-
-  // The corner complex claims its ground before anything but the park, so it
-  // always gets the corner it picked rather than losing it to a block.
+  // The corner complex goes first. It claims a corner outright rather than
+  // sampling for a spot, so it is the one thing that cannot be asked to move —
+  // which makes it the thing everything else has to work around.
   const corner = cornerComplexAt(walls, windows, buildings, doors, rand);
   buildings.push(corner.building);
   landmarks.push(corner.box);
+
+  // The park goes anywhere on the map rather than hugging the middle. It still
+  // gets its pick before the pond and the big buildings, so it is never
+  // squeezed out — it just has to keep off what has already been claimed.
+  const parkW = BLOCK_SIZE * 2 + ROAD_SIZE;
+  const parkH = BLOCK_SIZE * 2 + ROAD_SIZE;
+  const park: Park = { x: 0, y: 0, w: parkW, h: parkH, path: [], pathWidth: PARK_PATH_WIDTH };
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const px = MAP_MARGIN + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - parkW);
+    const py = MAP_MARGIN + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - parkH);
+    const box = { x: px, y: py, w: parkW, h: parkH };
+    const clashes = landmarks.some(
+      (b) =>
+        box.x < b.x + b.w + 90 &&
+        box.x + box.w + 90 > b.x &&
+        box.y < b.y + b.h + 90 &&
+        box.y + box.h + 90 > b.y,
+    );
+    // The last attempt takes whatever it got: a city with the park overlapping
+    // something is better than one with no park at all.
+    if (clashes && attempt < 89) continue;
+    park.x = px;
+    park.y = py;
+    break;
+  }
+  park.path = parkPath(park, rand);
+  landmarks.push(park);
 
   // A pond, somewhere out of the way. Reserved with the landmarks so nothing
   // gets built on the water, and kept off the perimeter so it's approachable
@@ -1068,17 +1170,9 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     }
   }
 
-  // Fill the reserved park. Nothing was built here, so nothing gets rejected.
-  scatterBushes(
-    bushes,
-    rand,
-    park.x,
-    park.y,
-    park.w,
-    park.h,
-    PARK_BUSHES_PER_BLOCK * 4,
-    buildings,
-  );
+  // Fill the reserved park. Nothing was built here, so the only things turned
+  // away are the path and the thinning edge.
+  fillPark(bushes, rand, park, PARK_BUSHES_PER_BLOCK * 4, buildings);
 
   scatterBushes(
     bushes,
@@ -1089,6 +1183,7 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     WORLD_HEIGHT - MAP_MARGIN * 2,
     SCATTER_BUSH_COUNT,
     buildings,
+    park,
   );
 
   // Hard playable boundary, thicker than the interior walls. Pushed last so
@@ -1109,6 +1204,7 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     buildings,
     doors,
     pond,
+    park,
   };
   repairEnclosures(map, 4);
   return map;

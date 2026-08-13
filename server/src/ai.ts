@@ -141,12 +141,17 @@ import {
   NPC_OFFICER_TURN_RATE,
   BOT_LOOT_RANGE,
   BOT_LOOT_SCAN_MS,
+  BOT_LOOT_SNUB_MS,
+  BOT_SWAP_MARGIN,
   BOT_REFILL_APPETITE,
   BOT_WALK_SPEED,
   BOT_SPRINT_SPEED,
   BOT_BOLT_DIST,
   BOT_SAFE_DIST,
+  BOT_KITE_SPEED_MUL,
   BOT_HUNT_STANDOFF,
+  BOT_SCOPE_SIGHT,
+  BOT_SCOPE_STANDOFF,
   BOT_SMOKE_COOLDOWN_MS,
   BOT_PATROL_SAMPLES,
   BOT_PATROL_MIN,
@@ -157,7 +162,7 @@ import {
   STAMINA_SPRINT_FLOOR,
   STAMINA_RECOVERY_THRESHOLD,
   GUN_SLOTS,
-  UTILITY_SLOTS,
+  DOOR_CLAIM_GRACE_MS,
   WALL_TURN_PROBE,
   CORNER_CLEARANCE,
   CORNER_PUSH,
@@ -180,6 +185,11 @@ import {
   PJ_LINE,
   TURNED_LINES,
   TURNED_REMARK_RANGE,
+  TURNING_LINES,
+  TURNING_LINE_CHANCE,
+  TURNING_TELL_MS,
+  FRESH_ZOMBIE_SLOW_MS,
+  FRESH_ZOMBIE_SLOW_MUL,
   TURNED_REMARK_CHANCE,
   REPATH_INTERVAL_MS,
   WORLD_WIDTH,
@@ -230,7 +240,15 @@ import {
   DOOR_DEFY_LINES,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
-import { collect, dropHeld, gunSlots, heldGunSlot, heldItem, type Inventory } from './inventory.js';
+import {
+  collect,
+  dropHeld,
+  gunSlots,
+  heldGunSlot,
+  heldItem,
+  utilitySlots,
+  type Inventory,
+} from './inventory.js';
 import { zombieAtSandbag } from './emplacement.js';
 import { OUTSIDE } from './rooms.js';
 
@@ -239,8 +257,10 @@ import type { Bush, PickupState, Wall } from '../../shared/types.js';
 import {
   addPlea,
   alertZombiesToDoor,
+  claimDoor,
   clearExpiredPleas,
   damageDoor,
+  doorBusyForOthers,
   doorsNear,
   doorSide,
   canWorkLockFrom,
@@ -260,6 +280,7 @@ import {
   hasLineOfSight,
   hasWallClearPath,
   isInBush,
+  isInGrapple,
   isWindowIntact,
   newAiState,
   rollSpeedMul,
@@ -354,6 +375,17 @@ function slideToward(world: World, e: Entity, gx: number, gy: number): number {
   return direct;
 }
 
+/**
+ * Is this one visibly going over — the red they turn across `TURNING_TELL_MS`?
+ *
+ * The same window the client draws, read off the same clock, so what the crowd
+ * reacts to is exactly what a player can see on the body.
+ */
+function isVisiblyTurning(world: World, id: string, now: number): boolean {
+  const turnAt = world.pendingInfections.get(id);
+  return turnAt !== undefined && turnAt - now <= TURNING_TELL_MS;
+}
+
 function senseThreats(
   world: World,
   e: Entity,
@@ -382,11 +414,17 @@ function senseThreats(
   // `targetId`, and what the bot aims and fires along. Let one through and a
   // bot stands in a corridor emptying a magazine into the wall it is behind.
   for (const other of nearby) {
-    if (other.type !== 'zombie') continue;
+    if (other.id === e.id) continue;
+    // Somebody visibly going over counts as a threat to give room to, but
+    // never as something to shoot. They are still a person — see below.
+    const turning = other.type !== 'zombie' && isVisiblyTurning(world, other.id, now);
+    if (other.type !== 'zombie' && !turning) continue;
     const dist = Math.hypot(other.x - e.x, other.y - e.y);
     const seen =
       dist <= sight && hasLineOfSight(world, e.x, e.y, other.x, other.y, throughBushes);
-    const felt = thermal > 0 && dist <= thermal;
+    // Goggles read the dead, not the dying: a body still warm and still human
+    // is not a heat contact.
+    const felt = !turning && thermal > 0 && dist <= thermal;
     if (!seen && !felt) continue;
 
     // Awareness either way: this drives bolting, the safest heading and where
@@ -394,6 +432,14 @@ function senseThreats(
     // wall if the goggles do.
     state.threatPoints.push({ x: other.x, y: other.y });
     if (!seen) continue;
+
+    // The one thing a turning body is *not* is a target. Kept out of `nearest`
+    // — which becomes `targetId`, and is what an officer aims and fires along
+    // — exactly as a heat contact is, and for a stronger reason: nobody should
+    // be shooting somebody who has not turned yet. The rumour field is left
+    // alone too; it holds where *zombies* were seen, and they will stamp it
+    // themselves in a moment.
+    if (turning) continue;
 
     // Only what was actually *seen* goes into the crowd's memory. That is what
     // keeps the rumour field honest — it holds what somebody witnessed, and a
@@ -1579,12 +1625,19 @@ function beginDoorWork(
   const door = world.doors[index];
   if (!door) return;
 
-  door.busyBy = e.id;
   state.doorIndex = index;
   state.doorAction = action;
+  // A bot stands in a player's slot, so it works a handle the way a player
+  // does: opening is a tap, and a tap is instant. The 1.1-2s a civilian takes
+  // is fumbling with a door in a panic, which is not what an officer clearing
+  // a building is doing. Only opening — bolting one and kicking one down are
+  // deliberate acts and take as long for a bot as for anybody.
+  const instant = action === 'open' && world.bots.has(e.id);
   state.doorBusyUntil =
     now +
-    (action === 'open'
+    (instant
+      ? 0
+      : action === 'open'
       ? DOOR_OPEN_MIN_MS + Math.random() * (DOOR_OPEN_MAX_MS - DOOR_OPEN_MIN_MS)
       : action === 'lock'
         ? DOOR_LOCK_MIN_MS + Math.random() * (DOOR_LOCK_MAX_MS - DOOR_LOCK_MIN_MS)
@@ -1593,6 +1646,10 @@ function beginDoorWork(
           : action === 'kick'
             ? DOOR_KICK_MS
             : DOOR_CLOSE_MS);
+  // The claim lapses a beat after the work should have finished. `doorTick` is
+  // skipped outright while its owner is being dragged about, so the grace is
+  // what stops a door being taken off them mid-handle.
+  claimDoor(world, index, e.id, state.doorBusyUntil + DOOR_CLAIM_GRACE_MS);
 
   const target = world.map.doors[index];
   state.heading = Math.atan2(target.y - e.y, target.x - e.x);
@@ -1772,7 +1829,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
       // Gone, already shut by someone else, or too far to bother.
       state.doorFollowUp = -1;
       state.doorFollowUpLock = false;
-    } else if (crossed && (door.busyBy === null || door.busyBy === e.id)) {
+    } else if (crossed && !doorBusyForOthers(world, index, e.id, now)) {
       if (gone < reach) {
         beginDoorWork(world, e, state, index, 'close', now);
         return true;
@@ -1796,7 +1853,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
       state.doorSlam = -1;
     } else if (gap <= e.radius + 26) {
       state.doorSlam = -1;
-      if (door.busyBy === null || door.busyBy === e.id) {
+      if (!doorBusyForOthers(world, index, e.id, now)) {
         state.doorFollowUpLock = state.locksDoors || state.barricades;
         beginDoorWork(world, e, state, index, 'close', now);
         return true;
@@ -1822,7 +1879,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
       for (const index of doorsNear(world, e.x, e.y, DOOR_SLAM_RANGE)) {
         const door = world.doors[index];
         if (!door || door.broken || !door.open) continue;
-        if (door.busyBy !== null && door.busyBy !== e.id) continue;
+        if (doorBusyForOthers(world, index, e.id, now)) continue;
         const spec = world.map.doors[index];
         const gap = Math.hypot(spec.x - e.x, spec.y - e.y);
         if (gap < bestGap) {
@@ -1853,7 +1910,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
   if (ahead < 0) return false;
 
   const door = world.doors[ahead];
-  if (!door || (door.busyBy !== null && door.busyBy !== e.id)) return false;
+  if (!door || doorBusyForOthers(world, ahead, e.id, now)) return false;
 
   // Something is stood in this doorway. Don't crowd in behind whoever it is
   // eating — go and find another way in.
@@ -1901,6 +1958,14 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
   }
 
   beginDoorWork(world, e, state, ahead, 'open', now);
+  // Nothing to wait for: swing it and carry on walking in the same step, which
+  // is what "instantly" has to mean or the bot still pauses for a tick at every
+  // doorway. Anyone who takes time over it surrenders the tick as before.
+  if (state.doorBusyUntil <= now) {
+    state.doorBusyUntil = 0;
+    finishDoorWork(world, e, state, now);
+    return false;
+  }
   return true;
 }
 
@@ -2041,7 +2106,7 @@ function answerPleaTick(world: World, e: Entity, state: AiState, now: number, dt
   }
 
   if (!canWorkLockFrom(world, index, e.x, e.y)) return true; // still on our way round
-  if (door.busyBy !== null && door.busyBy !== e.id) return true; // wait their turn
+  if (doorBusyForOthers(world, index, e.id, now)) return true; // wait their turn
   beginDoorWork(world, e, state, index, 'unlock', now);
   state.answeringDoor = -1;
   world.doorPleas.delete(index);
@@ -2067,7 +2132,7 @@ function askForNeighbourDoor(
     if (index === justLocked) continue;
     const door = world.doors[index];
     if (!door || door.broken || door.locked) continue;
-    if (door.busyBy !== null && door.busyBy !== e.id) continue;
+    if (doorBusyForOthers(world, index, e.id, now)) continue;
     // Only a way into this building is worth bolting behind us.
     if (!canWorkLockFrom(world, index, e.x, e.y)) continue;
 
@@ -2120,7 +2185,7 @@ function lockAlsoTick(world: World, e: Entity, state: AiState, now: number, dt: 
   const index = state.lockAlso;
   const door = world.doors[index];
   const spec = world.map.doors[index];
-  if (!door || door.broken || door.locked || (door.busyBy !== null && door.busyBy !== e.id)) {
+  if (!door || door.broken || door.locked || doorBusyForOthers(world, index, e.id, now)) {
     state.lockAlso = -1;
     return false;
   }
@@ -2944,18 +3009,139 @@ function bestGun(inv: Inventory): { slot: number; worth: number } {
   return { slot, worth };
 }
 
+/**
+ * Is this bot looking down a scope?
+ *
+ * The scope is the one piece of kit whose whole value to a player is on the
+ * *camera*, which a bot does not have. What is left of it is the range, so
+ * that is what a bot gets: it sees to `BOT_SCOPE_SIGHT` and stands off at
+ * `BOT_SCOPE_STANDOFF` while the thing is in its hands, and goes back to the
+ * ordinary officer's eyes the moment it puts it away.
+ */
+function botScoped(world: World, e: Entity): boolean {
+  const inv = world.inventories.get(e.id);
+  if (!inv) return false;
+  const held = heldItem(inv);
+  return held !== null && ITEMS[held]?.scope === true;
+}
+
+/**
+ * The gun a bot would give up, and what it is worth.
+ *
+ * This is the one a full bag is measured against, *not* `bestGun`. Ranking a
+ * find against the best gun in the bag asks the wrong question twice over: it
+ * refuses a rifle that would plainly beat the pea-shooter in slot three, and
+ * when it does accept something it hands over the best gun it owns, because
+ * `collect` swaps whatever happens to be in hand. Two officers stood at the
+ * same heap therefore kept trading their best weapons for marginal upgrades
+ * and dropping something the other one then wanted — the loop in the report.
+ *
+ * Against the worst slot instead, every swap strictly improves the bag and
+ * strictly lowers what is left on the floor, so a pile settles.
+ */
+function worstGun(inv: Inventory): { slot: number; worth: number } {
+  let slot = -1;
+  let worth = Infinity;
+  for (let i = 0; i < inv.guns.length; i++) {
+    const g = inv.guns[i];
+    if (!g) continue;
+    // A dry gun is handled by the free-slot path, which puts it down instead.
+    const w = g.ammo > 0 ? gunWorth(g.item) : 0;
+    if (w < worth) {
+      worth = w;
+      slot = i + 1;
+    }
+  }
+  if (slot < 0) return { slot: 0, worth: gunWorth('pistol') };
+  return { slot, worth };
+}
+
+/** How far a bot will actually shoot this thing. */
+function botReach(item: ItemId | null): number {
+  const def = item ? ITEMS[item] : undefined;
+  if (!def) return GUN_RANGE;
+  const range = def.range ?? GUN_RANGE;
+  return Math.min(def.botIdealRange ?? range, range);
+}
+
+/**
+ * Which gun to bring to bear on something this far off.
+ *
+ * Ordinarily the best one, as before. But `bestGun` ranks on damage per pull
+ * alone, and by that measure a shotgun's eight pellets beat a sniper round —
+ * so a bot that had crossed the city for the sniper kept it in the bag and
+ * plinked at a street it couldn't cover. When the target is out of reach of
+ * the good gun, the answer is whatever *does* reach, which is what makes a
+ * scope worth carrying to something with no camera to look down.
+ */
+function longestGun(inv: Inventory): number {
+  // Reach first, damage second — an officer reaches for the gun that keeps the
+  // fight at arm's length and only takes out a close-quarters weapon when it
+  // has to. Ranking on damage per pull alone put a shotgun's eight pellets
+  // above a rifle, so a bot carrying both walked into shotgun range to use it.
+  //
+  // "Has to" is what the loaded check does: when the long gun runs dry it
+  // stops being an option and the next longest thing comes out.
+  //
+  // This deliberately does not depend on how far away the target is, which is
+  // what killed the old flip-flop outright: there is no boundary for a drifting
+  // target to cross, so there is nothing to latch and nothing to dither over.
+  let slot = -1;
+  let reach = -Infinity;
+  let worth = -Infinity;
+  for (let i = 0; i < inv.guns.length; i++) {
+    const g = inv.guns[i];
+    if (!g || g.ammo <= 0) continue;
+    const w = gunWorth(g.item);
+    if (w <= 0) continue; // the cure gun and the dart aren't weapons
+    const r = botReach(g.item);
+    if (r > reach || (r === reach && w > worth)) {
+      reach = r;
+      worth = w;
+      slot = i + 1;
+    }
+  }
+  // Nothing loaded worth firing: fall through to the pistol, which never runs
+  // out and is the only reason `bestGun` still exists here.
+  return slot < 0 ? bestGun(inv).slot : slot;
+}
+
 /** Index into `inv.guns` of a gun that has run dry, or -1. */
 function emptyGunSlot(inv: Inventory): number {
   return inv.guns.findIndex((g) => g !== null && g.ammo <= 0);
 }
 
-/** The cure gun's slot, if one is carried with a dose left in it. */
-function cureGunSlot(inv: Inventory): number {
+/**
+ * The slot an ammo box should go into: the emptiest real gun in the bag.
+ *
+ * `applyUtility` tops up whatever is *in hand*, and refuses outright when that
+ * is the pistol — which has no magazine to fill. A bot whose guns had all run
+ * dry is holding the pistol by then (`bestGun` falls through to it), so it
+ * would walk to a box, be refused, and be stood on top of the same box a fifth
+ * of a second later wanting it just as much. Forever.
+ */
+function refillSlot(inv: Inventory): number {
+  let slot = -1;
+  let need = 0;
   for (let i = 0; i < inv.guns.length; i++) {
     const g = inv.guns[i];
-    if (g && g.item === 'cureGun' && g.ammo > 0) return i + 1;
+    if (!g) continue;
+    const full = ITEMS[g.item].ammo ?? 0;
+    if (full <= 0) continue; // nothing that takes rounds
+    const missing = full - g.ammo;
+    if (missing > need) {
+      need = missing;
+      slot = i + 1;
+    }
   }
-  return -1;
+  return slot;
+}
+
+/** The cure gun's slot, if one is carried with a dose left in it. */
+function cureGunSlot(inv: Inventory): number {
+  if (inv.cureDoses <= 0) return -1;
+  const at = inv.utilities.indexOf('cureGun');
+  return at < 0 ? -1 : gunSlots(inv) + 1 + at;
 }
 
 /**
@@ -2981,7 +3167,8 @@ function cureTick(
   let best = Infinity;
   for (const id of world.pendingInfections.keys()) {
     const who = world.entities.get(id);
-    if (!who || who.type !== 'human') continue;
+    // A bitten officer is worth a dose as much as a bitten civilian is.
+    if (!who || who.type === 'zombie' || who.id === e.id) continue;
     const d = Math.hypot(who.x - e.x, who.y - e.y);
     if (d > reach || d >= best) continue;
     if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true)) continue;
@@ -3005,29 +3192,54 @@ function cureTick(
  * or a box of ammo when its good gun has run dry. Everything else is left for
  * whoever wants it.
  */
-function lootWanted(world: World, e: Entity, inv: Inventory, range: number): PickupState | null {
-  const held = bestGun(inv);
+function lootWanted(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  range: number,
+  now: number,
+): PickupState | null {
+  const spare = worstGun(inv);
   const dryGun = emptyGunSlot(inv) >= 0;
   // A gun that has run dry is as good as a free slot: they'll ditch it on
   // arrival. Without this a bot with three empty rifles is "full" and walks
   // past every gun in the city.
-  const hasRoom = inv.guns.some((g) => g === null) || dryGun;
-  const utilityRoom = inv.utilities.length < UTILITY_SLOTS;
+  const hasRoom = inv.guns.some((g, i) => g === null && i < gunSlots(inv)) || dryGun;
+  const utilityRoom = inv.utilities.length < utilitySlots(inv);
+  // Somewhere to put rounds. Without one an ammo box is refused at the pickup.
+  const canTakeRounds = refillSlot(inv) > 0;
 
   let best: PickupState | null = null;
   let bestScore = -Infinity;
 
   for (const p of world.pickups.values()) {
     if (BOT_IGNORES.has(p.item)) continue;
+    // Just had a go at this one. Let it lie for a while, whatever came of it.
+    const snubbed = state.lootSnub.get(p.id);
+    if (snubbed !== undefined) {
+      if (now < snubbed) continue;
+      state.lootSnub.delete(p.id);
+    }
     const dist = Math.hypot(p.x - e.x, p.y - e.y);
     if (dist > range) continue;
     if (!world.nav.isReachable(p.x, p.y)) continue;
 
     let want = 0;
-    if (ITEMS[p.item]?.kind === 'gun') {
+    if (p.item === 'cureGun') {
+      // Scored by hand, and this is why they never had one: it is `kind: gun`
+      // so it fell down the branch below, where worth is damage per pull and
+      // the cure gun's is zero — every bot in the city walked past every cure
+      // gun in it, and `cureTick` has been sitting there fully written and
+      // never once reached. A cured neighbour is one fewer zombie a minute
+      // from now, which is worth more than most of what it could carry.
+      if (utilityRoom && !inv.utilities.includes('cureGun')) want = 68;
+    } else if (ITEMS[p.item]?.kind === 'gun') {
       // Somebody else's empty gun is a decoration. Walking to one and finding
       // it dry is exactly what the grey marker exists to prevent.
       if (p.ammo === 0) continue;
+      // A pistol is the other hand, and there is only one other hand.
+      if (p.item === 'pistol' && inv.dual) continue;
 
       // A second of something already in the bag is ammunition — `collect`
       // strips it rather than taking the slot. Worth going for in proportion
@@ -3040,8 +3252,11 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
         want = Math.round(gunWorth(p.item) * room * BOT_REFILL_APPETITE);
       } else {
         const worth = gunWorth(p.item);
+        // Measured against the gun they'd give up, and it has to be a real
+        // upgrade — a couple of points of damage is not worth a shuffle, and
+        // shuffling is exactly what a margin of zero produces.
         if (hasRoom) want = worth;
-        else if (worth > held.worth) want = worth - held.worth;
+        else if (worth - spare.worth >= BOT_SWAP_MARGIN) want = worth - spare.worth;
       }
     } else if (p.item === 'kevlar' && inv.kevlar <= 0 && utilityRoom) {
       want = 30;
@@ -3072,9 +3287,10 @@ function lootWanted(world: World, e: Entity, inv: Inventory, range: number): Pic
       want = 70;
     } else if (p.item === 'combatBoots' && utilityRoom && !inv.utilities.includes('combatBoots')) {
       want = 40;
-    } else if (p.item === 'ammoBox') {
+    } else if (p.item === 'ammoBox' && canTakeRounds) {
       // Boxes top up the total now rather than only refilling a magazine, so
-      // one is worth having whether or not anything has actually run dry.
+      // one is worth having whether or not anything has actually run dry —
+      // but only with a gun in the bag that can hold the rounds.
       want = dryGun ? 40 : 18;
     }
     if (want <= 0) continue;
@@ -3110,6 +3326,10 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
   let best: { x: number; y: number } | null = null;
   let bestScore = -Infinity;
 
+  // A scope means standing further back. It is the same trade the player
+  // makes and the only one a bot can make with it.
+  const standoff = botScoped(world, e) ? BOT_SCOPE_STANDOFF : BOT_HUNT_STANDOFF;
+
   for (let i = 0; i < BOT_PATROL_SAMPLES; i++) {
     const angle = Math.random() * Math.PI * 2;
     const reach = BOT_PATROL_MIN + Math.random() * (BOT_PATROL_MAX - BOT_PATROL_MIN);
@@ -3121,7 +3341,7 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
 
     const danger = Math.min(world.danger.distanceAt(x, y), DANGER_MAX_DISTANCE);
     // Near the trouble, not stood in it.
-    let score = -Math.abs(danger - BOT_HUNT_STANDOFF);
+    let score = -Math.abs(danger - standoff);
     score += world.danger.opennessAt(x, y) * 30;
     if (score > bestScore) {
       bestScore = score;
@@ -3298,7 +3518,11 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
     // Bots look through foliage. A civilian loses someone behind a hedge; an
     // officer sweeping for them does not.
-    senseThreats(world, e, state, now, NPC_OFFICER_SIGHT, true);
+    // A scope in hand is a longer look, which is the whole of what one is
+    // worth to a bot. Without this it stood at 420 holding a gun good for
+    // 2200 and never once used the range it had picked the gun up for.
+    const sight = botScoped(world, e) ? BOT_SCOPE_SIGHT : NPC_OFFICER_SIGHT;
+    senseThreats(world, e, state, now, sight, true);
   }
 
   // Clicking on an empty chamber is checked every tick, not only when there's
@@ -3353,8 +3577,14 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Latched with a wide band: too close and they turn and run, and they keep
     // running until they are properly clear rather than the instant they are
     // one pixel past the line.
+    //
+    // **Running out of breath ends it too**, and that is not a refinement — a
+    // winded bot drops to BOT_WALK_SPEED, which is slower than a zombie, so
+    // `closest` never grows and it can never satisfy BOT_SAFE_DIST. It would
+    // jog away from something faster than it, not firing, for the rest of the
+    // round. Out of sprint means turn round and make the fight expensive.
     if (closest < BOT_BOLT_DIST) state.bolting = true;
-    else if (closest > BOT_SAFE_DIST) state.bolting = false;
+    else if (closest > BOT_SAFE_DIST || state.botWinded) state.bolting = false;
 
     if (state.bolting) {
       const speed = botStaminaTick(state, true, dt);
@@ -3373,8 +3603,8 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     botStaminaTick(state, false, dt);
     // A curable human nearby is worth the cure gun over anything else.
     if (!cureTick(world, e, state, inv, now, dt)) {
-      const best = bestGun(inv);
-      if (inv.activeSlot !== best.slot) inv.activeSlot = best.slot;
+      const want = longestGun(inv);
+      if (inv.activeSlot !== want) inv.activeSlot = want;
     }
 
     // Swung rather than snapped. At the NPC officer's rate the barrel jumps
@@ -3415,8 +3645,12 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     else if (dist > backAt * BOT_RANGE_SLACK) state.botGiving = false;
 
     if (state.botClosing || state.botGiving) {
+      // Giving ground here is *kiting*, not fleeing: the shot above has
+      // already gone off this tick and the bot is still facing the thing.
+      // Running away is the branch further up, and it only starts inside
+      // BOT_BOLT_DIST.
       const bearing = state.botClosing ? aim : Math.atan2(-dy, -dx);
-      const speed = speedAt(world, e.x, e.y, BOT_WALK_SPEED * 0.7);
+      const speed = speedAt(world, e.x, e.y, BOT_WALK_SPEED * BOT_KITE_SPEED_MUL);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
       // Slide along whichever axis is open rather than stopping dead.
@@ -3443,33 +3677,57 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   // tick, since it sweeps the loot list.
   if (now >= state.nextLootScanAt) {
     state.nextLootScanAt = now + BOT_LOOT_SCAN_MS;
-    const want = lootWanted(world, e, inv, BOT_LOOT_RANGE);
+    // Snubs for loot that has since been taken are never walked past again, so
+    // sweep them here rather than letting the map grow all round.
+    for (const [id, until] of state.lootSnub) {
+      if (now >= until) state.lootSnub.delete(id);
+    }
+    const want = lootWanted(world, e, state, inv, BOT_LOOT_RANGE, now);
     state.lootId = want ? want.id : null;
+    state.lootItem = want ? want.item : null;
   }
 
   if (state.lootId !== null) {
     const target = world.pickups.get(state.lootId);
-    if (!target) {
+    // Gone, or somebody swapped something else in under the same id while we
+    // were walking. Either way what is lying there is not what we came for.
+    if (!target || target.item !== state.lootItem) {
       state.lootId = null;
+      state.lootItem = null;
+      state.nextLootScanAt = Math.min(state.nextLootScanAt, now + 250);
     } else {
       const gap = Math.hypot(target.x - e.x, target.y - e.y);
       if (gap <= PICKUP_REACH) {
-        // Bag full but something in it is dry: put the dry one down first, so
-        // there's a slot to take this into. It lands here with zero rounds and
-        // draws grey, which tells everyone else to leave it alone.
+        // Whatever comes of this, leave the spot alone for a while. A swap
+        // puts the gun we gave up back under the *same* id, so without this
+        // the next scan finds a brand new upgrade at our own feet.
+        state.lootSnub.set(target.id, now + BOT_LOOT_SNUB_MS);
+
+        const isGunPickup = ITEMS[target.item]?.kind === 'gun';
         const spent = emptyGunSlot(inv);
-        if (
-          ITEMS[target.item]?.kind === 'gun' &&
-          spent >= 0 &&
-          !inv.guns.some((g) => g === null)
-        ) {
+        const full = !inv.guns.some((g, i) => g === null && i < gunSlots(inv));
+        if (isGunPickup && spent >= 0 && full) {
+          // Bag full but something in it is dry: put the dry one down first,
+          // so there's a slot to take this into. It lands here with zero
+          // rounds and draws grey, which tells everyone else to leave it
+          // alone.
           inv.activeSlot = spent + 1;
           dropHeld(world, inv, e.x, e.y);
+        } else if (isGunPickup && full) {
+          // A full bag and nothing dry in it means `collect` will swap for
+          // whatever is *in hand*, so the worst gun has to be in hand. This is
+          // the gun `lootWanted` scored against.
+          inv.activeSlot = worstGun(inv).slot;
+        } else if (target.item === 'ammoBox') {
+          // The box fills the gun you are holding, so hold the emptiest one.
+          const refill = refillSlot(inv);
+          if (refill > 0) inv.activeSlot = refill;
         }
         // Ask for the thing we walked here for by name — the nearest pickup
         // may well be the empty gun we just put down.
         const result = collect(world, e.id, inv, e.x, e.y, target.id);
         state.lootId = null;
+        state.lootItem = null;
         // Bring whatever we just took to hand if it beats what we had.
         inv.activeSlot = bestGun(inv).slot;
         if (result) state.nextLootScanAt = now + 200;
@@ -3575,6 +3833,9 @@ function attackBlockingWindow(
 
     e.facing = Math.atan2(dy, dx);
     state.heading = e.facing;
+    // Same clawing animation a door gets. Glass was the one thing they tore at
+    // with their arms by their sides.
+    state.breakingUntil = now + 400;
     if (now >= state.nextWindowHitAt) {
       state.nextWindowHitAt = now + WINDOW_ATTACK_INTERVAL_MS;
       damageWindow(world, index, WINDOW_ZOMBIE_DAMAGE);
@@ -4124,9 +4385,41 @@ function convert(world: World, target: Entity, now: number): void {
   // Newly turned and single-minded: it wants whoever is standing right there,
   // not a door it can hear somebody behind.
   state.freshUntil = now + FRESH_ZOMBIE_MS;
+  // It comes up slow rather than frozen. Set on the fresh state, so nothing
+  // it was carrying from its old life follows it over.
+  state.slowUntil = now + FRESH_ZOMBIE_SLOW_MS;
+  state.slowMul = FRESH_ZOMBIE_SLOW_MUL;
   world.ai.set(target.id, state);
 
+  // Whatever they were saying as it took them, they are not saying it now.
+  world.speech.delete(target.id);
+
   remarkOnTurning(world, target, now);
+}
+
+/**
+ * The last few seconds before somebody turns. They say something, once, and
+ * most of them do — see `TURNING_LINES`.
+ *
+ * The reddening is not here: that is derived from `pendingInfections` in
+ * `toWire`, so it needs no state and cannot get out of step with the clock it
+ * is counting down. This only exists because a line has to be said exactly
+ * once, and the latch rides on the AiState. Players have none, so a player
+ * turning says nothing — which is right; they have the cure gun's readout for
+ * that, and nobody narrates their own infection to themselves.
+ */
+function announceTurning(world: World, e: Entity, turnAt: number, now: number): void {
+  if (turnAt - now > TURNING_TELL_MS) return;
+  const state = world.ai.get(e.id);
+  if (!state || state.saidTurning) return;
+  state.saidTurning = true;
+  if (Math.random() >= TURNING_LINE_CHANCE) return;
+  if (world.speech.has(e.id)) return;
+
+  world.speech.set(e.id, {
+    text: TURNING_LINES[Math.floor(Math.random() * TURNING_LINES.length)],
+    until: now + Math.min(TURNING_TELL_MS, turnAt - now),
+  });
 }
 
 /**
@@ -4286,14 +4579,54 @@ function updateRadioCalls(world: World, now: number): void {
 
 export function processPendingInfections(world: World, now: number): void {
   for (const [id, turnAt] of Array.from(world.pendingInfections)) {
-    if (now < turnAt) continue;
     const entity = world.entities.get(id);
     if (!entity || entity.type === 'zombie') {
       world.pendingInfections.delete(id);
       continue;
     }
+    if (now < turnAt) {
+      announceTurning(world, entity, turnAt, now);
+      continue;
+    }
     convert(world, entity, now);
   }
+}
+
+/**
+ * An officer with something on them. They cannot move, path, loot or think —
+ * `updateAi` has already skipped all of that — but they can point the gun at
+ * whatever has hold of them and pull the trigger, at the rate `fireHeld`
+ * allows while grappled.
+ *
+ * A mine stun freezes them properly: this only runs for a grapple, which is
+ * the case the player gets a fighting chance in too.
+ */
+function pinnedOfficerTick(world: World, e: Entity, state: AiState, now: number): void {
+  if (!isInGrapple(world, e.id)) return;
+  const inv = world.inventories.get(e.id);
+  if (!inv) return;
+
+  // Whatever has hold of us, by preference — otherwise whatever we were on.
+  const session = world.grapples.get(e.id);
+  let attacker: Entity | undefined;
+  if (session) {
+    for (const zid of session.zombieIds) {
+      const z = world.entities.get(zid);
+      if (z) {
+        attacker = z;
+        break;
+      }
+    }
+  }
+  if (!attacker && state.targetId) attacker = world.entities.get(state.targetId);
+  if (!attacker || attacker.type !== 'zombie') return;
+
+  // No turn rate: the arm is being held, so it fires where it already points
+  // if it can, and the shot goes wide when it cannot.
+  const aim = Math.atan2(attacker.y - e.y, attacker.x - e.x);
+  e.facing = aim;
+  state.heading = aim;
+  fireHeld(world, e, inv, aim, now);
 }
 
 export function updateAi(world: World, now: number, dt: number, frozen: Set<string>): void {
@@ -4337,7 +4670,14 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
   for (const e of world.entities.values()) {
     // Players keep manual control even after they turn — no AI magnet.
     if (world.playerIds.has(e.id)) continue;
-    if (frozen.has(e.id)) continue;
+    if (frozen.has(e.id)) {
+      // Pinned, but an officer with a gun is not out of the fight. This is the
+      // only thing a frozen entity may do, and it is deliberately its own tiny
+      // branch rather than a flag threaded through the whole AI: everything
+      // about moving, looting and pathing stays switched off.
+      if (e.type === 'officer') pinnedOfficerTick(world, e, getAi(world, e, now), now);
+      continue;
+    }
 
     const state = getAi(world, e, now);
     if (e.type === 'human') updateHuman(world, e, state, now, dt);

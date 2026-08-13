@@ -29,12 +29,15 @@ import {
   SHIELD_BASH_SLOW_MS,
   SHIELD_BASH_SLOW_MUL,
   SHIELD_BASH_COOLDOWN_MS,
+  SHIELD_BASH_SHOW_MS,
   SHIELD_BASH_STAMINA,
   STAMINA_MAX,
   STAMINA_SPRINT_FLOOR,
   CHARGE_BARS,
   CHARGE_BASE_MUL,
+  CHARGE_TOP_MUL,
   UNDEPLOY_MS,
+  GRAPPLED_COOLDOWN_MUL,
 } from '../../shared/constants.js';
 import { throwGrenade } from './heli.js';
 import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
@@ -208,7 +211,14 @@ export function fire(
   const hits: Array<{ entity: Entity; t: number }> = [];
   const candidates = world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>());
   for (const other of candidates) {
-    if (other.type !== 'zombie' || other.id === shooter.id) continue;
+    if (other.id === shooter.id) continue;
+    // Rounds pass through the living, with one exception: the charge rifle
+    // will take down somebody already bitten. It is the one gun in the city
+    // that can, which is what makes carrying it a decision — everything else
+    // leaves you watching a neighbour turn.
+    const infectedTarget =
+      def?.charge === true && other.type !== 'zombie' && world.pendingInfections.has(other.id);
+    if (other.type !== 'zombie' && !infectedTarget) continue;
     const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
     if (t !== null && t < wallT) hits.push({ entity: other, t });
   }
@@ -356,8 +366,11 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
     // The cure also takes on someone already bitten but still walking. Healthy
     // bystanders are ignored rather than blocking the shot — a dose spent on
     // somebody who was never infected is a dose wasted.
+    // Anyone still on their feet, not just civilians. An infected *officer* —
+    // grey, bot or player — was being skipped outright here, so the dart went
+    // straight through the one person you most wanted to save.
     const curable =
-      kind === 'cure' && other.type === 'human' && world.pendingInfections.has(other.id);
+      kind === 'cure' && other.type !== 'zombie' && world.pendingInfections.has(other.id);
     if (other.type !== 'zombie' && !curable) continue;
     const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
     if (t !== null && t < victimT) {
@@ -378,8 +391,9 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
 
   if (!victim) return;
   if (kind === 'cure') {
-    if (victim.type === 'human') {
-      // Caught in time: the infection simply doesn't take.
+    if (victim.type !== 'zombie') {
+      // Caught in time: the infection simply doesn't take. Officers count —
+      // grey, bot or player. Only an actual zombie needs turning back.
       world.pendingInfections.delete(victim.id);
       world.grappleCounts.delete(victim.id);
     } else if (!world.playerIds.has(victim.id)) {
@@ -439,11 +453,16 @@ export function fireHeld(
   const held = heldItem(inv);
   if (!held) return false;
 
+  // Something has hold of you. You can still work the trigger — that is the
+  // whole point, being grabbed should be a fight rather than a cutscene — but
+  // barely. Every cooldown below is measured against this.
+  const grip = isInGrapple(world, id) ? GRAPPLED_COOLDOWN_MUL : 1;
+  const ready = (interval: number) => now - (world.lastShotAt.get(id) ?? 0) >= interval * grip;
+
   // Sets down a gun crew facing the way you are. Spent only if it actually
   // found room to stand — otherwise you keep the item and can try elsewhere.
   if (held === 'pocketGunner') {
-    const last = world.lastShotAt.get(id) ?? 0;
-    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (!ready(GRENADE_COOLDOWN_MS)) return false;
     if (!deployEmplacement(world, shooter, now)) return false;
     world.lastShotAt.set(id, now);
     const at = inv.utilities.indexOf('pocketGunner');
@@ -455,8 +474,7 @@ export function fireHeld(
   // A mast goes down where you stand and stays there. The order that points
   // people at it comes off the Q wheel afterwards, so this only plants it.
   if (held === 'survivorBeacon') {
-    const last = world.lastShotAt.get(id) ?? 0;
-    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (!ready(GRENADE_COOLDOWN_MS)) return false;
     world.lastShotAt.set(id, now);
     world.towers.push({ x: shooter.x, y: shooter.y });
     const slotOf = inv.utilities.indexOf('survivorBeacon');
@@ -467,8 +485,7 @@ export function fireHeld(
 
   // A mine goes down where you stand, arms after a beat, and is left behind.
   if (held === 'zapMine') {
-    const last = world.lastShotAt.get(id) ?? 0;
-    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (!ready(GRENADE_COOLDOWN_MS)) return false;
     if (inv.mines <= 0) return false;
     world.lastShotAt.set(id, now);
     inv.mines--;
@@ -484,8 +501,7 @@ export function fireHeld(
   // A frag goes the same way the smoke does, and detonates like a launcher
   // shell. Three to a bundle, and the slot clears itself when they run out.
   if (held === 'grenade') {
-    const last = world.lastShotAt.get(id) ?? 0;
-    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (!ready(GRENADE_COOLDOWN_MS)) return false;
     if (inv.grenades <= 0) return false;
     world.lastShotAt.set(id, now);
     inv.grenades--;
@@ -502,8 +518,7 @@ export function fireHeld(
 
   // Smoke goes underarm toward the aim point, then calls in the helicopter.
   if (held === 'smokeGrenade') {
-    const last = world.lastShotAt.get(id) ?? 0;
-    if (now - last < GRENADE_COOLDOWN_MS) return false;
+    if (!ready(GRENADE_COOLDOWN_MS)) return false;
     world.lastShotAt.set(id, now);
 
     const spot = landingSpot(shooter, aim, GRENADE_THROW_RANGE, at);
@@ -517,8 +532,7 @@ export function fireHeld(
   if (!isGun(held)) return false;
 
   const def = ITEMS[held];
-  const last = world.lastShotAt.get(id) ?? 0;
-  if (now - last < (def.cooldownMs ?? GUN_COOLDOWN_MS)) return false;
+  if (!ready(def.cooldownMs ?? GUN_COOLDOWN_MS)) return false;
 
   // The launcher lobs a shell at wherever you're pointing rather than tracing
   // a line, so it reuses the grenade's flight and detonates there.
@@ -534,11 +548,24 @@ export function fireHeld(
     return true;
   }
 
-  // Everything but the pistol burns rounds.
-  const slot = heldGunSlot(inv);
-  if (slot) {
-    if (slot.ammo <= 0) return false;
-    slot.ammo--;
+  // A gun in a utility slot has no magazine to draw on — its doses count down
+  // on the bag, the way grenades and mines do, and the slot clears itself when
+  // they run out.
+  if (held === 'cureGun') {
+    if (inv.cureDoses <= 0) return false;
+    inv.cureDoses--;
+    if (inv.cureDoses <= 0) {
+      const at2 = inv.utilities.indexOf('cureGun');
+      if (at2 >= 0) inv.utilities.splice(at2, 1);
+      inv.activeSlot = 0;
+    }
+  } else {
+    // Everything but the pistol burns rounds.
+    const slot = heldGunSlot(inv);
+    if (slot) {
+      if (slot.ammo <= 0) return false;
+      slot.ammo--;
+    }
   }
   world.lastShotAt.set(id, now);
 
@@ -563,7 +590,7 @@ export function fireHeld(
     const level = def.charge ? Math.max(1, Math.min(CHARGE_BARS, Math.round(charge * CHARGE_BARS))) : 0;
     const pierce = def.charge ? level : (def.pierce ?? 1);
     const damageMul = def.charge
-      ? CHARGE_BASE_MUL + (1 - CHARGE_BASE_MUL) * ((level - 1) / (CHARGE_BARS - 1))
+      ? CHARGE_BASE_MUL + (CHARGE_TOP_MUL - CHARGE_BASE_MUL) * ((level - 1) / (CHARGE_BARS - 1))
       : 1;
     const throughWall = def.charge === true && level >= CHARGE_BARS;
 
@@ -644,6 +671,10 @@ function shieldBash(world: World, shooter: Entity, now: number): void {
   if (left <= STAMINA_SPRINT_FLOOR) world.exhausted.add(shooter.id);
 
   world.bashReadyAt.set(shooter.id, now + SHIELD_BASH_COOLDOWN_MS);
+  // Drives the shove animation on the client. Set whether or not anything was
+  // standing there — a bash into thin air still costs the stamina, so it had
+  // better look like it happened.
+  world.bashUntil.set(shooter.id, now + SHIELD_BASH_SHOW_MS);
 
   for (const e of world.entityGrid.queryCircle(
     shooter.x,
@@ -773,7 +804,11 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
       world.rightSpent.delete(id);
     }
     updateDeploy(world, id, inv, !frozen.has(id) && world.deployWanted.has(id), now);
-    if (frozen.has(id)) {
+    // Being grabbed no longer takes the gun off you — `fireHeld` charges a
+    // heavy cooldown for it instead. Everything *else* frozen still is: a mine
+    // is meant to put you out, and planting a bipod with something on your arm
+    // is not a thing anybody is doing.
+    if (frozen.has(id) && !isInGrapple(world, id)) {
       world.chargeSince.delete(id);
       continue;
     }

@@ -286,6 +286,33 @@ Hung in every way into a building and in `INTERIOR_DOOR_SHARE` of the openings
 between rooms; half start open. Shut doors are solid to movement, sight and
 gunfire, and carry DOOR_HEALTH (1600).
 
+**A door claim has to be able to lapse, and could not.** `busyBy` says somebody
+is working this handle and nobody else may start, and only `finishDoorWork`
+ever gave it back — so anyone dragged off a handle, shot, or *turned* (which
+hands them a fresh AiState with no memory of the door) left it claimed for the
+rest of the round. `doorTick` then bows out for everyone, and since the nav
+grid plans routes as though every door were open, the whole room keeps walking
+into it. **That is the "officers stuck in a room" case, and civilians got it
+too.** `doorBusyForOthers` is now the only way to ask, and it drops a claim
+whose owner has left the world or whose deadline (`busyUntil`, set by
+`claimDoor`) has passed. Both are needed: turning leaves the entity in the
+world, and being shoved off a handle leaves it alive but past its deadline.
+Measured before the fix, one 120s run had a door claimed by a dead entity for
+726 consecutive ticks.
+
+**A charge takes a door off its hinges.** `blastDoors`, called from `detonate`,
+so a frag off the belt and a launcher shell both do it. Rated against
+DOOR_HEALTH rather than against what a blast does to a body
+(`BLAST_DOOR_DAMAGE_MAX` 2000, `MIN` 800) — a grenade that merely scratches a
+door is one nobody would ever throw at a door. Measured: point blank takes down
+116/116 doors in a city, at 92% of the blast radius 86 are hurt and standing
+and all 86 go down to a second charge, and beyond the radius nothing is
+touched. There is deliberately **no line-of-sight test to the door itself** —
+the door is what is being asked about, and a ray to it is blocked by the very
+slab in question. What stops a blast reaching round a corner is the check on a
+point 10px *short* of the slab, on the side the charge went off. Bushes are
+waved through; a hedge does not stop a blast.
+
 A door an officer bolted (`playerLocked`) is one no civilian will unlock or
 open. Civilians can draw the bolt on each other's locks from the inside, taking
 `DOOR_NPC_UNLOCK_MS`, which is what keeps a locked city from seizing up.
@@ -301,6 +328,34 @@ reach it. That is what makes finding one locked a discovery rather than
 something the pathfinder quietly steers around — and it keeps opening a door
 off the "rebuild the grid" path, which flipping cells 30 times a second would
 otherwise demand.
+
+### The park
+
+Reserved ground like any other landmark, but with two rules of its own.
+
+- **It goes anywhere on the map.** It used to be staked out first, clamped to
+  within 11% of the centre, and everything else worked around it. Now the
+  corner complex — the one thing that claims its ground outright rather than
+  sampling for it — goes first, and the park takes the next pick from the whole
+  map, retrying on a clash. Measured over 12 seeds its centre lands anywhere
+  from 16% to 84% across and 21% to 78% down, and it overlapped a building in
+  0 of them.
+- **It thins toward its edges** (`PARK_EDGE_FADE`, `PARK_EDGE_DENSITY`), so you
+  can see into the trees from the street instead of meeting a wall of them.
+  The thinning is a rejection that **drops the bush**, not one that re-rolls its
+  position: re-rolling only moves it inwards, which thickens the core rather
+  than thinning the edge. Measured, the edge sits at 56% of core density, which
+  is what the curve asks for; with the re-roll it was 75%.
+- **A dirt path runs right across it**, in one side and out the other with a
+  couple of kinks — dead straight reads as a road. Nothing grows within
+  `PARK_PATH_WIDTH / 2 + PARK_PATH_CLEARANCE` of it, and that applies to the
+  *general* bush scatter as well as the park's own fill; the scatter runs over
+  the whole map and was dropping bushes on the path until it was told about it.
+  Measured: 0 bushes on the path across 12 seeds.
+- **The path needs no nav or collision work.** Bushes slow you down, so a clear
+  line through a thicket is the quick way through without any rule saying so.
+  It is drawn under everything as ground, one stroked polyline with a wider
+  faint pass beneath for the soft edge.
 
 ### Items, orders and scenery
 
@@ -365,6 +420,12 @@ otherwise demand.
   `GUARANTEE_EVERY_GUN` walks `ITEMS` instead — rarity 0 excluded, since those
   are placed by their own roll. Measured over five cities: ~29 pieces of loot
   in buildings, no gun missing in any of them.
+- **The city is meant to be full of three guns.** `boltRifle`, `machineGun`
+  and `shotgun` carry the weight (12/11/9) and every rare stays at 1, so
+  raising them makes the common guns commoner rather than everything commoner.
+  With `BUILDING_GUN_CHANCE` at 0.58, measured over five cities: ~80 items and
+  ~42 guns per city, of which **75% are those three** (bolt 30%, shotgun 25%,
+  MG 20%) and the rares share the remainder.
 - **A house rolls for a gun and a utility separately.** They used to compete
   for the one item a building could hold, which is why a house with a rifle in
   it never also had a vest. `GUN_LOOT` and `UTILITY_LOOT` are separate weighted
@@ -372,10 +433,26 @@ otherwise demand.
   ~29, no gun missing, and 9-10 of the 11 utilities present — the point being
   that **utilities are deliberately not guaranteed**, so every city is missing
   something.
-- **The every-gun floor ignores the debug pile.** `TEST_DROP_ALL_ITEMS` drops
-  one of everything at the player's feet, and counting those as "already in the
-  city" had the guarantee satisfied by the test heap while the actual buildings
-  went without. `inACity` excludes anything with a `loot-test-` id.
+- **The debug heap is not part of the city.** `TEST_DROP_ALL_ITEMS` used to be
+  laid down by `spawnPickups` at world generation, which put one of every item
+  in the game on the map before anybody had joined: bots walked to it, fought
+  over it and kitted themselves out of it, and every measurement of how loot
+  behaves was taken against a pile that would never exist in a real round.
+  `dropDebugKit` is called from `spawnPlayer` and from the respawn loop in
+  `resetWorld` instead, so it follows whoever spawns. Ids are
+  `loot-test-${owner}-${i}`, so a second player gets their own pile and the
+  same player respawning repositions theirs rather than stacking a new one.
+  Measured over six cities: **0** debug pickups in a generated city, +27 the
+  moment somebody spawns.
+- **The every-gun floor still ignores it**, via `inACity` excluding any
+  `loot-test-` id — the heap can now appear mid-round, and counting it would
+  have the guarantee satisfied by test items while the buildings went without.
+- **Some loot is hidden in the park.** `PARK_LOOT_COUNT` (5) items, and every
+  one has to be within `PARK_LOOT_COVER` of a bush — the point of putting loot
+  in the park is that you go into the trees for it rather than spotting it from
+  the road. Kept `PARK_LOOT_PATH_GAP` clear of the dirt path for the same
+  reason: something lying on the one clear line through is not hidden at all.
+  Measured over six cities: 5.0 per park, 0 near the path, 0 out in the open.
 - **A second pistol is the other hand, not a gun.** It costs no slot: `collect`
   sets `inv.dual` and slot 0 becomes `dualPistols`. It fires **two rounds a pull
   down parallel lines** — `pellets: 2` with `parallel: 9`, which offsets each
@@ -384,6 +461,30 @@ otherwise demand.
   both barrels take it; roll it per pellet and the two lines splay or converge,
   which is precisely what stops it reading as two guns. Still unlimited, and
   slot 0 stays undroppable either way.
+- **`dualPistols` must never reach the floor as an item.** It is a real entry
+  in `ITEMS` — it has to be, it is what slot 0 becomes — and `rarity: 0` keeps
+  it out of the loot tables, but `TEST_DROP_ALL_ITEMS` walked the registry and
+  dropped one anyway. Taken as an ordinary gun it lands in a slot with no
+  rounds in it and never sets `inv.dual`, which reads exactly as "dual pistols
+  don't work and don't replace the pistol on slot 0". Fixed at both ends: the
+  debug pile drops a *pistol* — which is the thing actually worth testing,
+  since you start with one — and skips `dualPistols`, and `collect` treats a
+  `dualPistols` pickup as a second pistol so nothing downstream can end up
+  holding one whatever put it there.
+- **`kind` says what a thing is; `utilitySlot` says where it goes in the bag.**
+  Two separate questions, and the **cure gun** is the case that proves it: it
+  rolls on the gun loot table and fires through the gun path, but it rides in a
+  utility slot, because it is medicine and should never be the reason you leave
+  a rifle on the floor. Its doses count down in the one slot the way grenades
+  and kevlar do (`inv.cureDoses`), and the slot clears itself when they run
+  out. `heldGunSlot` is null for it, so `fireHeld` spends a dose rather than a
+  magazine.
+- **Bots knew how to use the cure gun all along and could never get one.**
+  `cureTick` has been fully written the whole time — it ranks curing *above*
+  shooting, since a cured neighbour is one fewer zombie a minute from now — but
+  `lootWanted` scored the cure gun down the gun branch, where worth is damage
+  per pull, and the cure gun's is zero. Every bot in the city walked past every
+  cure gun in it. It is scored by hand now.
 - **The sling and the pack are worn, not slotted.** They are flags on the
   inventory rather than entries in `utilities`, so they take no number key at
   all — a thing you have on, not a thing you select.
@@ -442,6 +543,147 @@ sandbags, facing whichever way you were. `server/src/emplacement.ts` owns it.
   concerned.
 - It barely scratches anything. Its job is `EMPLACEMENT_SLOW_MUL` — holding a
   street, not clearing one.
+
+### Being grabbed is a fight, not a cutscene
+
+**A grappled officer can still work the trigger, at `GRAPPLED_COOLDOWN_MUL`
+(5×) the cooldown** — an 80% cut to the rate. It is applied inside `fireHeld`,
+against every cooldown in it, so a player, a bot and a grey officer all get it
+from one place and no call site had to learn about it.
+
+- **Everything else frozen still is.** `processShooting` and `updateAi` now ask
+  `isInGrapple` rather than reading the `frozen` set alone: a zap mine is meant
+  to put you out, and planting a bipod with something on your arm is not a
+  thing anybody is doing. Only the grapple case is let through.
+- **NPCs needed their own way in**, because `updateAi` skips a frozen entity
+  outright. `pinnedOfficerTick` is that, and it is deliberately tiny — face
+  whatever has hold of you and pull the trigger. No movement, no pathing, no
+  looting, no turn rate: the arm is being held, so it fires where it already
+  points. Measured over two seeds: 4 and 12 shots across 499 and 1008 ticks
+  spent grappled, which is what a 5s cooldown buys.
+
+### Turning
+
+Being bitten and *turning* are separate things, and only the second one shows.
+`TURNING_TELL_MS` (4s) before it happens the body bleeds from human green to
+zombie red, and most of them say so.
+
+- **The reddening is sent to everybody**, unlike `infected`, which only the
+  zombie side and a cure-gun carrier ever see. The whole point of the tell is
+  that whoever is stood next to them can read it and get clear, so a secret
+  version of it would do nothing. It rides on `turning` (0..1) on the wire.
+- **It is derived from the clock, not latched.** `toWire` reads
+  `pendingInfections` and subtracts, so the ramp cannot drift out of step with
+  the moment they actually turn.
+- **The line is latched, because a line has to be said once.** `saidTurning`
+  on the AiState, which is why a *player* turning says nothing — they have no
+  AiState, and nobody narrates their own infection to themselves anyway.
+- **Only an incubated turn gets a tell.** A grab that converts outright
+  (`INSTANT_INFECT_BASE`) has no run-up to show, so most conversions in a busy
+  round have none. Measured over two seeds: 76 and 59 conversions, of which 16
+  and 19 incubated, and ~75% of *those* spoke — which is `TURNING_LINE_CHANCE`.
+- **Going red makes you a threat, but never a target.** Anyone inside the tell
+  window is fed into `state.threatPoints` by `senseThreats`, so the crowd runs
+  from them, keeps clearance in `safestHeading`, and slams doors on them — they
+  are treated as one of the dead. They are deliberately kept out of `nearest`,
+  which becomes `targetId` and is what an officer aims and fires along. That is
+  the same split thermal contacts use, for a stronger reason: nobody should be
+  shooting somebody who has not turned yet. The rumour field is left alone as
+  well — it records where *zombies* were seen, and they will stamp it
+  themselves in a moment. Measured over two seeds: **0** ticks of any human or
+  officer aiming at a body that had not turned, against 1278 and 3144 ticks of
+  civilians fleeing with no zombie targeted at all.
+- **A fresh one comes up slow, not stunned.** `FRESH_ZOMBIE_SLOW_MS` (1s) at
+  `FRESH_ZOMBIE_SLOW_MUL` (0.65). A stun read as a bug — a thing standing
+  frozen while you walked around it — where a body hauling itself upright
+  reads as what it is. It rides the same `slowUntil`/`slowMul` every other
+  stagger uses, set on the *fresh* AiState so nothing from its old life follows
+  it over, which also means being shot on the way up stacks with it rather than
+  arguing with it. Measured: every fresh zombie carries it, none are stunned.
+
+### Aiming past your own screen
+
+**The camera pans with the cursor, and this is not a scope feature.** It exists
+because the viewport is 960×600: without it you are aware of 480px of street to
+either side and only 300px above and below. `CAMERA_PAN_X` (60) is the small
+sideways one — there is no awareness to win there, it is just the camera
+answering the mouse — and `CAMERA_PAN_Y` is **derived** as
+`CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / 2`, so it carries the
+180px difference between the two axes on top. Both then reach the same
+distance: 540 with nothing in hand, 970 down a scope. Derived rather than
+written down so the two cannot drift apart if either the pan or the viewport
+changes.
+
+That is what pushed `PLAYER_SIGHT_RADIUS` from 640 to 760: the far corner of a
+panned screen is 727 from the officer, and a client lighting ground the server
+never sent entities for is the exact bug that constant exists to prevent.
+
+Fog cost with the pan in, measured over 200 spots: hip fire **0.62ms** median
+(still under the 0.87ms it was before any of this, because of the clip below),
+binoculars 1.98ms, a scope 2.93ms median / 7.5ms worst. The worst case is only
+paid while a scope is actually in hand and only on a rebuild (12.5Hz). If it
+ever needs trimming the knobs are `SCOPE_PUSH` and `CAMERA_PAN_X`.
+
+**The scope and the binoculars push the camera; they do not zoom it.** Zooming
+was the first answer and the wrong one — it shrinks the officer, the city and
+the thing you are trying to look *at*, and it re-frames the whole screen to
+show you ground behind you that you never asked for. `SCOPE_PUSH` (430) and
+`BINOCULAR_PUSH` (300) slide the camera off the officer toward the reticle
+instead, at 1:1, the way Foxhole's does. `scale` for a player is 1 again,
+always.
+
+- **The push is measured from the screen centre, not from the officer.** He is
+  no longer stood in the middle once the camera has moved, so referencing him
+  feeds the push back into itself and it pins to the cap on the first twitch of
+  the mouse.
+- **And it is scaled by how far to the *edge* the cursor has got, not by raw
+  pixels.** The screen is 960×600, so counting pixels gave aiming up and down
+  barely half the reach of aiming along a street. Against any edge you get the
+  whole of it.
+- **Which means the officer leaves the bottom of the screen**, since 430 > 300.
+  That is the Foxhole behaviour and the alternative is cutting the vertical
+  reach back to the thing the scope exists to fix, so `drawSelfMarker` puts a
+  ring and a chevron where he went. Drawn over the slot bar, and with a deeper
+  inset along the bottom — a marker behind your own inventory is unreadable.
+- **The client fog radius has to grow with the push, and did not.** The server
+  was already sending entities out to `SNIPER_SIGHT_RADIUS` while the client
+  kept punching a `PLAYER_SIGHT_RADIUS` hole in the fog, so raising the sniper
+  darkened exactly the ground it was for. `fogRadius()` walks the furthest
+  screen corner the push can produce and takes that, *sampled* over a quarter
+  turn rather than bounded — the push follows a unit direction, so the two axes
+  cannot both be at their maximum at once and the loose bound over-reaches by a
+  fifth, which is a fifth more ground to light for nothing.
+- **What pays for that is clipping the occluders to the frame.** Nothing
+  outside the viewport can shadow anything inside it — the box is convex and
+  the viewer is in it, so a ray that leaves never comes back and every shadow
+  from an outside occluder falls outside too. `visibilityPolygon` takes
+  `clipW`/`clipH` and the cost is roughly the square of the occluder count.
+  Measured over 200 spots at the time it went in: hip fire **0.87 → 0.27ms**
+  median, and a scope at r=1070 costing 1.98ms where unclipped it was 3.55ms.
+  Normal play got three times cheaper as a side effect, which is what later
+  paid for the camera pan.
+  - The clip is sized off the item's *maximum* push, not the live one. A clip
+    that moved with the mouse would throw the polygon cache away every frame.
+  - The fog watchdog counts its "occluders in range" over the clip for the
+    same reason. Counting the wider set has it cry off in open ground, where
+    the buildings it can see were culled on purpose.
+
+**A scope in a bot's hands is range, and nothing else.** It has no camera, so
+`BOT_SCOPE_SIGHT` (1200) and `BOT_SCOPE_STANDOFF` (700) are the whole of what
+one is worth to it. Two things were stopping that:
+- `senseThreats` ran on `NPC_OFFICER_SIGHT` whatever was in the bag, so a bot
+  stood at 420 with a gun good for 2200.
+- `bestGun` ranks on damage per pull, and a shotgun's eight pellets beat a
+  sniper round — so a bot that had crossed the city for the sniper never took
+  it out. `gunForRange` picks the best gun that actually *reaches* the target,
+  falling back to `bestGun`.
+
+Measured with the old behaviour gated back in, same seeds: seed 99 the bot
+carried the sniper the whole round with all 8 rounds still in it and fired it
+**0** times; with the fix it emptied it, 16 shots, median 464px, longest
+1076px. Seed 4711 fired it before but as a short-range gun (36 shots, median
+401px — capped by its own 420 eyes); after, median **1057px**, longest 1458px.
+Plain guns stay where they were, median ~350px.
 
 ### Fire
 
@@ -509,6 +751,28 @@ from one continuous orange smear back into a scatter of separate fires. The
 smear was the single biggest reason the real thing didn't match the mock — the
 mess on screen was never the stream, it was the ground fire piling up.
 
+**The stream is thrown, not fired.** Burning fuel leaves the nozzle and
+travels: `FLAME_TRAVEL_MS` (170) is how long the front takes to reach the far
+end of the throw, and `drawFlameStream` draws nothing past that front. Drawing
+the whole length on the frame the trigger went down read as a laser. At 55ms
+between pulls six or seven streams overlap while it is held, so the composite
+is a continuous jet with a leading edge that visibly runs out to the target.
+The splash at the far end waits for the front to arrive — showing the impact on
+the first frame was the other half of it looking instant.
+
+**The ignition is still worked out on the tick it was fired.** This is the
+picture catching up with the simulation, not the simulation slowing down: where
+the fire lands and what catches is unchanged. At 340px of range the gap is
+under two tenths of a second.
+
+**It is a cone, not a sausage.** `FLAME_MOUTH_WIDTH` → `FLAME_TIP_WIDTH`: thin
+at the nozzle where the fuel is still under pressure, spreading and breaking up
+as it slows. Fattest-in-the-middle read as a thrown blob. The three colour
+layers now stop at different distances — the near-white core only reaches 40%
+down the throw and the dull red runs the whole way — so the throat is white and
+the tip is red and smoky, instead of a solid bar of light. The cross-line
+wobble rolls with the tracer's age, so the jet churns rather than sitting.
+
 **Drawing it is `drawFlameStream`, not three strokes.** Ruled lines read as a
 laser sight. It is a row of `FLAME_BLOBS` overlapping circles along the throw,
 fattest at the midpoint (6.6 → 15.7 → 3.4 px), lifted off the ground by
@@ -568,6 +832,28 @@ races with zombies. A bot is meant to win them.
   house once they've stripped it: the test is whether the *target* is indoors,
   not where they're standing, so it fires once instead of re-rolling every tick
   they spend inside.
+- **Giving ground and running away are different things.** Above
+  `BOT_BOLT_DIST` (120) a bot *kites*: it backs off at `BOT_KITE_SPEED_MUL`
+  (0.75) with the gun still up and the shot already fired that tick. Only
+  inside that does it turn its back and run. The bolt distance came down from
+  165 and `BOT_SAFE_DIST` from 400, because an officer that breaks off at the
+  first sight of one is an officer that never fights. The kiting band is wide
+  for a rifle and narrow for a shotgun, which is right — a shotgun wants to be
+  close.
+- **Reach first, damage second.** `longestGun` holds the loaded gun with the
+  greatest `botReach`, so an officer keeps the fight at arm's length and only
+  takes out a close-quarters weapon when it *has* to — which is when the long
+  one runs dry. Ranking on damage per pull alone (`bestGun`) put a shotgun's
+  eight pellets above a rifle, so a bot carrying both walked into shotgun range
+  to use it. It also killed the flip-flop outright: the choice no longer
+  depends on how far away the target is, so there is no boundary for a drifting
+  target to cross and nothing to latch. `bestGun` survives only as the
+  fall-through to the pistol, which never runs out.
+- **Running out of breath ends a bolt.** This is not a refinement: a winded bot
+  drops to `BOT_WALK_SPEED`, which is *slower than a zombie*, so `closest`
+  never grows and it can never satisfy `BOT_SAFE_DIST`. It would jog away from
+  something faster than it, never firing, for the rest of the round. Out of
+  sprint now means turn round and kite.
 - **Hunting reads the danger field** — they steer toward `BOT_HUNT_STANDOFF`
   from the nearest zombie, one O(1) lookup per sample instead of a search. Keep
   the standoff inside `NPC_OFFICER_SIGHT`: at the edge of their own vision they
@@ -580,6 +866,23 @@ races with zombies. A bot is meant to win them.
   only guns with rounds left and falls through to the pistol when there are
   none. Ranked on damage it beats a machine gun on paper, so bots were putting
   a loaded MG away to plink with a sidearm.
+- **Bots don't tidy up after themselves.** `closesDoors`, `locksDoors`,
+  `slamsDoors` and `barricades` are cleared when a bot is spawned. Every one of
+  them is a civilian's business — shutting one behind you, bolting it, walking
+  back across a room to see to it — and every one is a bot standing in a
+  doorway instead of fighting. Cleared as *data* at spawn rather than branched
+  on in `doorTick`, so nothing downstream has to know bots are different.
+  Opening a door they need through is untouched, and so is kicking a locked one
+  down. Measured over two seeds: the only door action a bot performs is `kick`.
+- **A bot opens a door instantly, the way a player does.** For a player,
+  opening is a *tap* and a tap resolves the moment it is released; the 1.1-2s
+  in `DOOR_OPEN_MIN_MS`/`MAX` is a civilian fumbling with a handle in a panic,
+  which is not what an officer clearing a building is doing. `beginDoorWork`
+  hands a bot a zero duration and `doorTick` finishes it in the same tick
+  rather than surrendering one, or it still pauses at every doorway. Only
+  opening: bolting a door and kicking one down are deliberate acts and take a
+  bot as long as anyone. Measured over two seeds, `bot:open` went from ~1.5s a
+  door to never appearing as a spell at a handle at all.
 - **A locked door is not a wall to an officer.** Where a civilian hammers and
   hopes, a bot kicks it off its hinges — but only from the side it can't simply
   unbolt, the same rule the player's own prompt follows. A door a *player*
@@ -593,6 +896,29 @@ races with zombies. A bot is meant to win them.
   past every gun in the city. On arrival they drop the dry one *then* collect,
   and `collect` takes an optional pickup id because at that instant the nearest
   pickup is the empty gun at their own feet.
+- **A full bag is measured against its *worst* gun, and swaps that one.**
+  Measuring against `bestGun` asked the wrong question twice: it refused a
+  rifle that would plainly beat the pea-shooter in slot three, and when it did
+  accept something it handed over the best gun it owned, because `collect`
+  swaps whatever is in hand. Two officers at the same heap therefore traded
+  their best weapons for marginal upgrades and each put down something the
+  other then wanted. Against the worst slot every swap strictly improves the
+  bag and strictly lowers what is left on the floor, so a pile settles.
+- **Three more things keep it settled**, and all three were needed:
+  `BOT_SWAP_MARGIN` (a couple of points of damage is not worth a shuffle),
+  `BOT_LOOT_SNUB_MS` (a swap leaves the gun you gave up under the *same*
+  pickup id, so without it the next scan finds a brand new upgrade at your own
+  feet — and it also stops anything `collect` refuses being retried forever),
+  and re-checking on arrival that the pickup still holds the item it set out
+  for. Two refusals were outright infinite loops before this: a second pistol
+  with `dual` already set, and an ammo box with nothing in hand that takes
+  rounds. `lootWanted` now excludes both, and the bot puts the emptiest gun in
+  hand before collecting a box.
+  Measured over three seeds, 120s each, zombies removed so the runs are
+  comparable — swaps of a single pickup id: **223/0/242 → 0/0/0**; time a bot
+  spends stood on loot: **20.9/0/22.2% → 2.2/0/3.2%**; and they finish
+  shopping, one bot going from three guns and a radio to four guns and eight
+  utilities on the same seed.
 
 ### Pickups carry ammo
 
@@ -626,11 +952,16 @@ magazine, which made swapping a way to manufacture ammo.
   for everybody rather than letting each entity go and look. `RoomMap` costs
   1-8ms alongside `generateMap`, once per round, and occupancy is two counters
   folded into the survivor walk the tick was already paying for.
-- Current cost: **~2.4ms median / 3.2ms p95 per 33.3ms tick at 411 entities.**
-  A headless harness driving only `updateAi` + collision measures ~1.0ms median
-  / 2.3ms p95 — not comparable to the figure above, which includes fog and
-  per-viewer serialisation.
-- `generateMap` costs ~7ms, once per round. The connectivity repair pass builds
+- The city is **5000×3700** with `HUMAN_COUNT` 500, which works out very
+  slightly *denser* than the 4600×3400 / 400 it grew from. Measured after the
+  change, three seeds at 120s: 195/91/63 zombies, in line with what the same
+  seeds produced before, so the outbreak still takes hold at the larger size.
+  `generateMap` went ~7ms → ~17ms, once per round.
+- The headless harness — `updateAi` + collision + shooting, no fog and no
+  per-viewer serialisation — measures **1.74ms median / 2.47ms p95 at 516
+  entities** on the larger map. The older ~2.4ms/3.2ms figure quoted for a live
+  server includes fog and serialisation and is not comparable to it.
+- `generateMap` costs ~17ms, once per round. The connectivity repair pass builds
   a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
 - **The endgame stall was paint, not simulation.** Four hundred entities each
@@ -688,6 +1019,10 @@ magazine, which made swapping a way to manufacture ammo.
   with its one door opening into it, a door onto a pocket too narrow to walk,
   and a door on an L-notch leading nowhere. **Fix new cases there, not by
   special-casing the generator.** It never cuts the perimeter wall.
+- **Glass gets the same claws a door does.** `state.breakingUntil` drives the
+  clawing arms on the client, and the window-attack branch set the zombie's
+  *facing* but never that — so they tore at panes with their arms by their
+  sides. One line, and it is the same 400ms the door path uses.
 - **Shutting a door is what draws attention to it**, and the zombies who saw it
   happen are worked out *before* the door shuts — line of sight to a door is
   blocked by that very door the moment it closes, so checking afterwards alerts
@@ -721,7 +1056,10 @@ magazine, which made swapping a way to manufacture ammo.
 ## TESTING FLAGS CURRENTLY ON — turn off for real play
 
 In `shared/constants.ts`:
-- `TEST_DROP_ALL_ITEMS = true` — one of every item spawns around player one
+- `TEST_DROP_ALL_ITEMS = true` — one of every item drops around **each player
+  as they spawn**, not into the city at generation. Turning it off leaves the
+  map untouched, which is why it is safe to leave on while measuring anything
+  that is not about loot.
 - `PLAYER_ONE_SPAWN_AT_CENTER = true` — player one spawns mid-map, not on the outbreak
 - `PLAYER_ONE_SHOT_KILL = false` — already off; set true to one-shot zombies
 
@@ -751,9 +1089,22 @@ button has to carry two actions and only the server knows which are available,
 so the HUD is *told* what the bipod is doing (`deployWanted` on the wire)
 rather than keeping its own copy and drifting out of step.
 
-- **Tap**: bash if the shield is up, otherwise work the bipod.
+- **Tap**: bash if the shield is up, otherwise work the bipod. The shove is
+  drawn: `bashUntil` on the server becomes `bashing` on the wire for
+  `SHIELD_BASH_SHOW_MS`, and the client throws the shield arc forward, thickens
+  it and puts three short motion lines ahead of it. Set whether or not anything
+  was standing there — a bash into thin air costs the same stamina, so it had
+  better look like it happened.
 - **Hold** (`SHIELD_STOW_HOLD_MS`): sling the shield to your back, and back
   again. `rightSpent` latches it so it fires once per press.
+
+**The shield's three charges go fast, and that is the mechanism, not a bug.**
+Measured with a zombie glued to an officer's chest: it blocks exactly three
+times, then `shieldUp` clears and `riotShield` is spliced out of the utility
+slots — but all three are spent inside **1.2 seconds**, because the immunity
+window after a block is only `KEVLAR_IMMUNE_MS`. That is the same shape of
+problem the vest has, and the lever if it ever needs to last longer is a
+shield-specific window rather than more charges.
 
 The shield is **worn, not held**: it costs a utility slot like kevlar, goes up
 the moment you pick it up, and stays where you put it while you get on with
@@ -858,6 +1209,29 @@ things, and that split is the line between them.
 
 Measured with a zombie 120px through a wall and goggles on: aware of it every
 tick, the firing target on **0 of 240**, zero rounds fired.
+
+**A cure works on anyone still on their feet, not just civilians.**
+`fireSpecial` filtered candidates on `type === 'human'`, so an infected
+*officer* — grey, bot or player — was skipped entirely and the dart passed
+straight through the one person you most wanted to save. Both the candidate
+test and the effect now read `!== 'zombie'`; only an actual zombie needs
+`cure()` rather than simply dropping the pending infection.
+
+**The charge rifle is the one gun that can shoot the infected.** Every other
+round passes through the living. At any wind-up it will drop somebody already
+bitten (`world.pendingInfections`), and healthy bystanders are still ignored,
+so it is a decision rather than a hazard. Its top bar hits properly hard now —
+`CHARGE_TOP_MUL`, where the fourth bar used to be exactly the paper damage, so
+a full wind-up bought only the pierce. Measured per bar: 15 / 40 / 65 / 90, and
+one full-charge round kills an infected civilian.
+
+**"Go to the beacon" needs a mast in earshot, and now says so.** The wheel
+offered the order whenever a mast existed *anywhere* while the server wants one
+within `BEACON_CALL_RADIUS`, so out in the city you could pick it, watch
+nothing happen, and not even be charged for it. `beaconInEarshot` gates the
+option client-side and the server shouts `BEACON_TOO_FAR_LINE` rather than
+dropping the message. In range it always worked: measured, 31 civilians sent at
+once.
 
 **The cure gun is the only thing that tells you about yourself.** `selfInfected`
 is null on the wire unless one is in hand, so the answer isn't merely hidden by

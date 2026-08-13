@@ -33,6 +33,11 @@ export interface DoorRuntime {
   /** Somebody is working this door right now; nobody else may start. */
   busyBy: string | null;
   /**
+   * When that claim lapses. A claim without a deadline is a claim forever:
+   * see `doorBusyForOthers`.
+   */
+  busyUntil: number;
+  /**
    * Which face of the slab the building is on: -1, +1, or 0 when both faces
    * are indoors (a door between rooms) or neither is.
    */
@@ -59,6 +64,7 @@ export function initDoors(world: World): void {
       health: DOOR_HEALTH,
       rect: doorRect(door),
       busyBy: null,
+      busyUntil: 0,
       insideSign: 0,
     };
   });
@@ -77,6 +83,44 @@ export function initDoors(world: World): void {
 export function isDoorShut(world: World, index: number): boolean {
   const door = world.doors[index];
   return door !== null && door !== undefined && !door.open && !door.broken;
+}
+
+/**
+ * Is somebody *else* working this door?
+ *
+ * Only ever ask through here, because a claim has to be able to lapse. Whoever
+ * is stood at a handle can be dragged off it, shot, or turned — and turning
+ * hands them a brand new AiState with no memory of the door at all — and none
+ * of those paths runs `finishDoorWork`, which is the only thing that ever gave
+ * the claim back. A door left claimed by a ghost is one nobody may open again:
+ * `doorTick` bows out, and since the nav grid plans routes as though every
+ * door were open, everyone in that room keeps walking into it for the rest of
+ * the round. That is the "officers stuck in a room" case.
+ *
+ * Two ways out of it, because neither covers the other: the owner no longer
+ * exists, or the work they claimed it for should long since have finished.
+ */
+export function doorBusyForOthers(
+  world: World,
+  index: number,
+  byId: string,
+  now: number,
+): boolean {
+  const door = world.doors[index];
+  if (!door || door.busyBy === null || door.busyBy === byId) return false;
+  if (now >= door.busyUntil || !world.entities.has(door.busyBy)) {
+    door.busyBy = null;
+    return false;
+  }
+  return true;
+}
+
+/** Take the door for as long as this piece of work should need. */
+export function claimDoor(world: World, index: number, byId: string, until: number): void {
+  const door = world.doors[index];
+  if (!door) return;
+  door.busyBy = byId;
+  door.busyUntil = until;
 }
 
 /** Every door slab near a point, shut or not. */
@@ -229,7 +273,51 @@ export function damageDoor(world: World, index: number, amount: number): boolean
   door.locked = false;
   door.playerLocked = false;
   door.busyBy = null;
+  door.busyUntil = 0;
   return true;
+}
+
+/**
+ * A charge going off beside a door. Blast damage is rated against DOOR_HEALTH
+ * rather than against what it does to a body — see BLAST_DOOR_DAMAGE_MAX.
+ *
+ * Measured to the nearest point on the slab, not to the doorway's centre, so a
+ * wide double door reads evenly along its span. There is deliberately no line
+ * of sight test: the door is the thing being tested, and a ray to it is
+ * blocked by the very slab we are asking about. What keeps a blast from going
+ * through a wall to reach one is the check on the *approach* — a point just
+ * short of the slab, on the side the charge went off.
+ */
+export function blastDoors(
+  world: World,
+  x: number,
+  y: number,
+  radius: number,
+  damageMin: number,
+  damageMax: number,
+): void {
+  for (const index of doorsNear(world, x, y, radius)) {
+    const door = world.doors[index];
+    if (!door || door.open || door.broken) continue;
+
+    const slab = door.rect;
+    const nx = clamp(x, slab.x, slab.x + slab.w);
+    const ny = clamp(y, slab.y, slab.y + slab.h);
+    const dist = Math.hypot(x - nx, y - ny);
+    if (dist > radius) continue;
+
+    // Stand off the face by a hair and check we can actually reach it. A
+    // charge round the corner of the building is inside the radius and has no
+    // business touching this door.
+    const back = dist > 1 ? Math.min(dist, 10) : 0;
+    const ax = nx + ((x - nx) / (dist || 1)) * back;
+    const ay = ny + ((y - ny) / (dist || 1)) * back;
+    // Bushes are waved through — a hedge does not stop a blast wave.
+    if (back > 0 && !hasLineOfSight(world, x, y, ax, ay, true)) continue;
+
+    const falloff = 1 - dist / radius;
+    damageDoor(world, index, damageMin + (damageMax - damageMin) * falloff);
+  }
 }
 
 /** Anybody stood in the doorway, other than whoever is working the handle. */

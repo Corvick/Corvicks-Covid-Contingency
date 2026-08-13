@@ -5,9 +5,11 @@ import {
   DOOR_PLAYER_LOCK_MS,
   DOOR_PLAYER_OPEN_MS,
   DOOR_PLAYER_UNLOCK_MS,
+  DOOR_CLAIM_GRACE_MS,
   TAP_MAX_MS,
 } from '../../shared/constants.js';
 import {
+  claimDoor,
   damageDoor,
   doorAt,
   insideOfDoor,
@@ -184,9 +186,11 @@ export function processPlayerDoors(
   const action = options.hold ?? options.tap;
   if (action) {
     world.doorHolds.set(id, { index, startedAt: now, action });
-    // Claim it, so no civilian works the same handle mid-action.
-    const door = world.doors[index];
-    if (door) door.busyBy = id;
+    // Claim it, so no civilian works the same handle mid-action. The deadline
+    // is what lets it go again if the player is dragged off the handle and
+    // never releases the key — a claim nobody ever gives back is a door nobody
+    // may open.
+    claimDoor(world, index, id, now + durationOf(action) + DOOR_CLAIM_GRACE_MS);
   }
   return true;
 }

@@ -15,6 +15,8 @@ import {
   BLAST_RADIUS,
   BLAST_DAMAGE_MIN,
   BLAST_DAMAGE_MAX,
+  BLAST_DOOR_DAMAGE_MIN,
+  BLAST_DOOR_DAMAGE_MAX,
   GRENADE_BOUNCE,
 } from '../../shared/constants.js';
 import {
@@ -26,6 +28,7 @@ import {
   type World,
 } from './world.js';
 import { clamp } from './geometry.js';
+import { blastDoors } from './doors.js';
 import { scareDucks } from './ducks.js';
 
 /**
@@ -200,6 +203,11 @@ function dropSoldier(world: World, heli: Helicopter, now: number): void {
 function detonate(world: World, x: number, y: number, now: number): void {
   scareDucks(world, x, y, now);
   world.blasts.push({ x: Math.round(x), y: Math.round(y), at: now });
+
+  // A charge takes a door with it. Both kinds go through here — a frag off the
+  // belt and a launcher shell are the same detonation, so blowing a door is a
+  // thing either can do.
+  blastDoors(world, x, y, BLAST_RADIUS, BLAST_DOOR_DAMAGE_MIN, BLAST_DOOR_DAMAGE_MAX);
 
   for (const e of world.entityGrid.queryCircle(x, y, BLAST_RADIUS, new Set<Entity>())) {
     if (e.type !== 'zombie') continue;
