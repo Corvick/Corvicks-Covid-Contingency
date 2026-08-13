@@ -16,7 +16,6 @@ import {
   SHOT_SLOW_MS,
   SHOT_SLOW_MULTIPLIER,
   ENTITY_MAX_HEALTH,
-  TRACKER_DART_MS,
   GRENADE_THROW_RANGE,
   GRENADE_COOLDOWN_MS,
   HEADSHOT_ARC,
@@ -339,8 +338,8 @@ function cure(world: World, victim: Entity, now: number): void {
   world.ai.set(victim.id, newAiState(now, victim.x, victim.y));
 }
 
-/** Hitscan that heals instead of harming, and darts that only mark. */
-function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, kind: 'cure' | 'dart', now: number): void {
+/** Hitscan that heals instead of harming. */
+function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, kind: 'cure', now: number): void {
   const angle = aim + (Math.random() * 2 - 1) * (def.bloom ?? 0.05);
   const range = def.range ?? GUN_RANGE;
   const muzzleX = shooter.x + Math.cos(angle) * shooter.radius * MUZZLE_OFFSET_MUL;
@@ -367,10 +366,9 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
     // bystanders are ignored rather than blocking the shot — a dose spent on
     // somebody who was never infected is a dose wasted.
     // Anyone still on their feet, not just civilians. An infected *officer* —
-    // grey, bot or player — was being skipped outright here, so the dart went
+    // grey, bot or player — was being skipped outright here, so the dose went
     // straight through the one person you most wanted to save.
-    const curable =
-      kind === 'cure' && other.type !== 'zombie' && world.pendingInfections.has(other.id);
+    const curable = other.type !== 'zombie' && world.pendingInfections.has(other.id);
     if (other.type !== 'zombie' && !curable) continue;
     const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
     if (t !== null && t < victimT) {
@@ -390,18 +388,13 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
   });
 
   if (!victim) return;
-  if (kind === 'cure') {
-    if (victim.type !== 'zombie') {
-      // Caught in time: the infection simply doesn't take. Officers count —
-      // grey, bot or player. Only an actual zombie needs turning back.
-      world.pendingInfections.delete(victim.id);
-      world.grappleCounts.delete(victim.id);
-    } else if (!world.playerIds.has(victim.id)) {
-      cure(world, victim, now);
-    }
-  } else {
-    // Tracker dart: marks the target for the zombie-player hunt later on.
-    world.trackedTargets.set(victim.id, now + TRACKER_DART_MS);
+  if (victim.type !== 'zombie') {
+    // Caught in time: the infection simply doesn't take. Officers count —
+    // grey, bot or player. Only an actual zombie needs turning back.
+    world.pendingInfections.delete(victim.id);
+    world.grappleCounts.delete(victim.id);
+  } else if (!world.playerIds.has(victim.id)) {
+    cure(world, victim, now);
   }
 }
 
@@ -575,8 +568,6 @@ export function fireHeld(
     sprayFlame(world, shooter, aim, now, at);
   } else if (held === 'cureGun') {
     fireSpecial(world, shooter, aim, def, 'cure', now);
-  } else if (held === 'trackerDart') {
-    fireSpecial(world, shooter, aim, def, 'dart', now);
   } else {
     // A planted bipod is the whole reason to carry the heavy MG: from the hip
     // it sprays, off the pegs it is one of the most accurate guns in the city.

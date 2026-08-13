@@ -138,9 +138,10 @@ list they reach, so crowds fan out instead of funnelling into one doorway ·
 running past the thing · `followsCrowd` falls in behind a neighbour who is
 plainly getting away.
 
-Zombies roll two of their own: `smartZombie` decides how *well* one searches —
-every zombie leaves an emptied room now, see **Rooms** below — and `freshUntil`
-makes anything newly turned ignore doors entirely while there is prey about.
+Zombies roll three of their own: `smartZombie` decides how *well* one searches
+— every zombie leaves an emptied room now, see **Rooms** below — `spreadsOut`
+makes one pick somebody the pack isn't already after, and `freshUntil` makes
+anything newly turned ignore doors entirely while there is prey about.
 
 `sawZombie` latches once someone has seen one, and gates the things only a
 naive person does — chasing after a running neighbour to find out why.
@@ -218,6 +219,32 @@ spent stuck in one empty room: median **17-20s → 8-12s**, p90 **65-76s →
 1.19-1.36 → 1.50-1.67. Tick cost was flat (+0.05-0.1ms median) despite 20-50%
 *more* zombies alive, because they find people. It is a harder game now:
 survivors at 180s fell from 187-263 to 80-176.
+
+### Some of them fan out; a horde is not a conga line
+
+`senseTarget` scored on distance alone, so twenty zombies stood roughly
+together all picked the same nearest person and trailed after them in single
+file — while the crowd four paces past that person walked off untouched.
+
+- **`spreadsOut` is a rolled trait** (`ZOMBIE_SPREAD_SHARE`, 0.6), deliberately
+  not all of them: a pack where nothing ever doubles up also never brings
+  anybody down, and `MAX_GRAPPLERS` already caps the pile-up that matters.
+- **It rides the same score `INFECTED_TARGET_PENALTY` does**, as a multiplier
+  of `1 + claims * ZOMBIE_SPREAD_PENALTY`, so "already bitten" and "already
+  spoken for" compose rather than argue. It is a *penalty*, not a veto —
+  somebody twice as close is still worth taking off somebody else.
+- **Its own claim doesn't count against it**, or a zombie talks itself out of
+  the target it already has on every perception tick.
+- **`world.targetClaims` is counted once a tick**, in the walk `updateAi` was
+  already paying for survivors and room occupancy — the same trick, and the
+  same reason. One map lookup per zombie here against a spatial query per
+  zombie in `senseTarget` if each went and found out for itself.
+
+Measured with the trait gated off, three runs each, 180s — chasers per distinct
+target: median **1.80-2.00 → 1.60-1.67**, p90 **2.40-2.60 → 2.14-2.75**. Note
+the map is not seeded, so how far the outbreak got varies wildly between runs
+and the survivor counts are not comparable; the ratio is, and the two groups
+don't overlap on the median.
 
 ### What the crowd knows
 
@@ -414,25 +441,40 @@ Reserved ground like any other landmark, but with two rules of its own.
   to 4-8 and `slowMs`/`slowMul` added, because at 110ms cadence it was doing
   bolt-action work ten times faster than the bolt action. A held burst now
   stops a charge dead without dropping much of it.
-- **Every gun is in every city, derived from the registry.**
+- **Every gun *and every utility* is in every city, derived from the registry.**
   `GUARANTEED_ITEMS` was a hand-kept list of the rare ones, so adding a gun and
   forgetting to list it produced maps that simply didn't have it.
-  `GUARANTEE_EVERY_GUN` walks `ITEMS` instead — rarity 0 excluded, since those
-  are placed by their own roll. Measured over five cities: ~29 pieces of loot
-  in buildings, no gun missing in any of them.
+  `GUARANTEE_EVERY_GUN` and `GUARANTEE_EVERY_UTILITY` walk `ITEMS` instead —
+  rarity 0 excluded, since those are placed by their own roll, and the pistol
+  excluded because you always have one. That is 9 guns and 15 utilities.
+  Measured over six cities: 96-117 items, **0** guns and **0** utilities
+  missing in any of them.
+  - **The floor adds loot rather than displacing it.** It used to take an
+    ordinary spot over, which was fine when it was four rare guns and is not
+    when it is two dozen items — a third of the city's loot would have been the
+    guarantee eating the roll. `placeSomewhere` puts it in a house of its own,
+    and only falls back to a takeover if twelve tries find nowhere to stand.
+  - **Utilities used to be deliberately *not* guaranteed**, the idea being that
+    every city should be missing something. With fifteen of them that meant the
+    one piece of kit a round was built around simply wasn't anywhere, and there
+    is no way to tell that from inside the round. The scarcity worth keeping is
+    `ONE_OFF_ITEMS`, which is still exactly one per city.
+  - **`freeSpots` asks by pickup id, not by item.** The floor now covers nearly
+    the whole registry, so a set of already-placed *items* would leave nothing
+    takeable at all; `loot-oneoff-` and `loot-min-` ids are what is off limits.
 - **The city is meant to be full of three guns.** `boltRifle`, `machineGun`
   and `shotgun` carry the weight (12/11/9) and every rare stays at 1, so
   raising them makes the common guns commoner rather than everything commoner.
-  With `BUILDING_GUN_CHANCE` at 0.58, measured over five cities: ~80 items and
-  ~42 guns per city, of which **75% are those three** (bolt 30%, shotgun 25%,
-  MG 20%) and the rares share the remainder.
+  Between the two sit `semiAutoRifle` and `chargeRifle` at 5 — a middle tier of
+  guns you neither trip over nor go a whole round without.
+- **The semi-auto rifle is the bolt action's rate, at the bolt action's cost.**
+  Same class of round; two and a half times the cadence (470ms against 1150),
+  three times the bloom, less damage a round and a lighter stagger. It is what
+  the bolt action is *for* — one careful shot — given up for volume.
 - **A house rolls for a gun and a utility separately.** They used to compete
   for the one item a building could hold, which is why a house with a rifle in
   it never also had a vest. `GUN_LOOT` and `UTILITY_LOOT` are separate weighted
-  tables derived from the registry. Measured: ~54-77 items per city, up from
-  ~29, no gun missing, and 9-10 of the 11 utilities present — the point being
-  that **utilities are deliberately not guaranteed**, so every city is missing
-  something.
+  tables derived from the registry.
 - **The debug heap is not part of the city.** `TEST_DROP_ALL_ITEMS` used to be
   laid down by `spawnPickups` at world generation, which put one of every item
   in the game on the map before anybody had joined: bots walked to it, fought
@@ -447,12 +489,17 @@ Reserved ground like any other landmark, but with two rules of its own.
 - **The every-gun floor still ignores it**, via `inACity` excluding any
   `loot-test-` id — the heap can now appear mid-round, and counting it would
   have the guarantee satisfied by test items while the buildings went without.
-- **Some loot is hidden in the park.** `PARK_LOOT_COUNT` (5) items, and every
-  one has to be within `PARK_LOOT_COVER` of a bush — the point of putting loot
-  in the park is that you go into the trees for it rather than spotting it from
-  the road. Kept `PARK_LOOT_PATH_GAP` clear of the dirt path for the same
-  reason: something lying on the one clear line through is not hidden at all.
-  Measured over six cities: 5.0 per park, 0 near the path, 0 out in the open.
+- **Some loot is hidden in the park.** `PARK_LOOT_COUNT` (5) items rolled on
+  `PARK_LOOT_GUN_SHARE`, plus `PARK_LOOT_GUARANTEED_GUNS` and
+  `PARK_LOOT_GUARANTEED_UTILITIES` (one each) that are not left to the roll —
+  five coin flips come up all one kind often enough, and a park with nothing in
+  it worth carrying a gun for is a park nobody walks into twice. Every one has
+  to be within `PARK_LOOT_COVER` of a bush — the point of putting loot in the
+  park is that you go into the trees for it rather than spotting it from the
+  road. Kept `PARK_LOOT_PATH_GAP` clear of the dirt path for the same reason:
+  something lying on the one clear line through is not hidden at all.
+  Measured over six cities: 7.0 per park, at least one gun and one utility in
+  every one, 0 near the path, 0 out in the open.
 - **A second pistol is the other hand, not a gun.** It costs no slot: `collect`
   sets `inv.dual` and slot 0 becomes `dualPistols`. It fires **two rounds a pull
   down parallel lines** — `pellets: 2` with `parallel: 9`, which offsets each
@@ -506,20 +553,14 @@ Reserved ground like any other landmark, but with two rules of its own.
   how empty the copy they carry is (`BOT_REFILL_APPETITE`), so a bot with a
   full rifle ignores one and a bot down to its last few crosses the street.
 - **Bots carry the belt too.** They value the radio highest (four better-aiming
-  officers), then the sling and pack — worn, so free — then thermal, frags,
-  mines and boots. A frag only goes at a cluster of `BOT_FRAG_MIN_TARGETS`,
-  because a bot spending its last one on a straggler has nothing left when the
-  street fills; a mine is only laid while `bolting`, since it is a thing you
-  retreat over rather than a weapon.
-- **Bots carry the belt too.** They value the radio highest (four better-aiming
   officers who then stay with them), then the sling and pack — worn, so free —
   then thermal, frags, mines and boots. A frag only goes at a cluster of
   `BOT_FRAG_MIN_TARGETS`, because a bot spending its last one on a straggler
   has nothing left when the street fills; a mine is only laid while `bolting`,
   since it is a thing you retreat over rather than a weapon.
-- **Bots walk past the dart gun and the riot shield** (`BOT_IGNORES`). Both
-  already scored zero, since neither has a damage figure; the set says so out
-  loud so giving the dart one later doesn't send every bot after it.
+- **Bots walk past the riot shield** (`BOT_IGNORES`). It already scored zero,
+  having no damage figure; the set says so out loud so giving it one later
+  doesn't send every bot after one.
 
 ### The pocket gunner
 
@@ -752,18 +793,40 @@ smear was the single biggest reason the real thing didn't match the mock — the
 mess on screen was never the stream, it was the ground fire piling up.
 
 **The stream is thrown, not fired.** Burning fuel leaves the nozzle and
-travels: `FLAME_TRAVEL_MS` (170) is how long the front takes to reach the far
+travels: `FLAME_TRAVEL_MS` (300) is how long the front takes to reach the far
 end of the throw, and `drawFlameStream` draws nothing past that front. Drawing
 the whole length on the frame the trigger went down read as a laser. At 55ms
-between pulls six or seven streams overlap while it is held, so the composite
-is a continuous jet with a leading edge that visibly runs out to the target.
-The splash at the far end waits for the front to arrive — showing the impact on
-the first frame was the other half of it looking instant.
+between pulls several streams overlap while it is held, so the composite is a
+continuous jet with a leading edge that visibly runs out to the target. The
+splash at the far end waits for the front to arrive — showing the impact on the
+first frame was the other half of it looking instant.
 
-**The ignition is still worked out on the tick it was fired.** This is the
-picture catching up with the simulation, not the simulation slowing down: where
-the fire lands and what catches is unchanged. At 340px of range the gap is
-under two tenths of a second.
+**It was too fast at 170.** The front still crossed the whole throw in under a
+fifth of a second, which the eye reads as arriving everywhere at once, and the
+travel did no work. `FLAME_TRACER_MS` had to grow with it (320 → 560) to keep
+the *ratio* — `front` is `age * FLAME_TRACER_MS / FLAME_TRAVEL_MS`, so leave
+the tracer where it was and the tip reaches the far end at the exact moment the
+tracer dies, and the impact is never drawn. Both were scaled by ~1.75, so the
+stream's shape and the split between extending and burning out are unchanged
+and only the speed moved.
+
+**The burning ground waits for the fuel.** `sprayFlame` works out *where* the
+patches go on the tick the trigger went — against the geometry as it stands,
+with the wall tests and the cone's `nav` checks all paid there — and then
+queues them on `world.pendingFires` for `now + FLAME_TRAVEL_MS`. `updateFires`
+lays them when they land, ahead of its own sweep, so anybody stood in one
+catches on the same tick rather than the next.
+
+- **The merge into an existing fire happens on landing, not on queuing.** What
+  is burning by the time the fuel arrives is not what was burning when the
+  trigger went, and merging early folds a patch into a fire that has since gone
+  out.
+- **What is caught in the stream still catches on the tick it was fired.** That
+  part is the picture catching up with the simulation rather than the
+  simulation slowing down. Only the ground waits.
+- Measured: on the firing tick, **0** patches burning and 4 in the air; first
+  one catches at **333ms** (one tick past `FLAME_TRAVEL_MS`, which is the 30Hz
+  granularity), 3 patches on the ground after the fourth merged.
 
 **It is a cone, not a sausage.** `FLAME_MOUTH_WIDTH` → `FLAME_TIP_WIDTH`: thin
 at the nozzle where the fuel is still under pressure, spreading and breaking up
@@ -919,6 +982,45 @@ races with zombies. A bot is meant to win them.
   spends stood on loot: **20.9/0/22.2% → 2.2/0/3.2%**; and they finish
   shopping, one bot going from three guns and a radio to four guns and eight
   utilities on the same seed.
+
+#### A charge rifle is how a bot sees the infected
+
+`chargeInfectedTick`. It is the one gun in the city that can shoot somebody
+already bitten, and a weapon that does a job nobody can *see* the need for is a
+weapon nobody uses.
+
+- **Carrying one is the vision.** `CHARGE_INFECTED_SIGHT` (900) around a bot
+  holding one, reading `world.pendingInfections` directly. Everywhere else, an
+  infected body is invisible until the last four seconds of the tell
+  (`isVisiblyTurning`), and even then `senseThreats` deliberately keeps it out
+  of `targetId` so that nobody shoots a person who has not turned yet. This is
+  the one thing that makes it a decision instead of an accident, and it is the
+  same shape of hole in the fog thermal goggles punch for zombies.
+- **Server-side only, for now.** Nothing about it reaches the wire, so it
+  changes what a bot does and nothing about what a player sees.
+- **It winds the gun up properly**, to `BOT_CHARGE_BARS` (the top bar), rather
+  than firing at full charge the instant the trigger is touched the way bots do
+  with everything else. A bot lining a shot up on a civilian has no reason to
+  settle for a lesser round.
+- **Reached below the fight, not above it.** A live zombie is a fight now; an
+  incubating civilian is a fight in twenty seconds. So the branch runs only
+  with nothing inside `BOT_SAFE_DIST`, gated on `closest` rather than on the
+  target's distance — those are routinely different, and nobody spends a second
+  and a third of a second charging a rifle with something at their shoulder.
+  `cureTick` still ranks above it: a dose costs the patient nothing.
+- **Civilians only, and the lane is checked.** An infected *officer* is a
+  teammate and the answer there is the cure gun — and one who wanders into the
+  lane calls the shot off, since a top-bar round pierces four bodies and
+  "behind the target" is no protection from it.
+- **`BOT_CHARGE_GIVE_UP_MS` is the only thing that clears a stale wind-up**,
+  and that is deliberate: the branches that interrupt this one — bolting,
+  fighting, looting — shouldn't have to know it exists. A claim past its
+  deadline is dropped on re-entry and started again from the top.
+
+Measured over two 120s runs with the bots handed a charge rifle each, against
+the same runs with nothing in the slot: wind-ups **2 and 1 bots** against 0 and
+0, ticks spent charging **1714 and 160** against 0, peak charge **4/4 bars**,
+and infected removed before they turned **5 and 2** against 0 and 0.
 
 ### Pickups carry ammo
 
@@ -1212,7 +1314,7 @@ tick, the firing target on **0 of 240**, zero rounds fired.
 
 **A cure works on anyone still on their feet, not just civilians.**
 `fireSpecial` filtered candidates on `type === 'human'`, so an infected
-*officer* — grey, bot or player — was skipped entirely and the dart passed
+*officer* — grey, bot or player — was skipped entirely and the dose passed
 straight through the one person you most wanted to save. Both the candidate
 test and the effect now read `!== 'zombie'`; only an actual zombie needs
 `cure()` rather than simply dropping the pending infection.
@@ -1224,6 +1326,11 @@ so it is a decision rather than a hazard. Its top bar hits properly hard now —
 `CHARGE_TOP_MUL`, where the fourth bar used to be exactly the paper damage, so
 a full wind-up bought only the pierce. Measured per bar: 15 / 40 / 65 / 90, and
 one full-charge round kills an infected civilian.
+
+It sits at **rarity 5** rather than 1, alongside the semi-auto. Its one unique
+job has to come up often enough to be worth learning, and at rarity 1 most
+rounds never presented it. A bot carrying one can also *see* who is infected —
+see **A charge rifle is how a bot sees the infected** under Bot officers.
 
 **"Go to the beacon" needs a mast in earshot, and now says so.** The wheel
 offered the order whenever a mast existed *anywhere* while the server wants one
@@ -1243,8 +1350,12 @@ the client — it never leaves the server.
   can sit in one, the server counts it and logs it — but there is no dog, so
   whoever took one spawns as an officer.
 - Zombie master (the playable zombie) — `zombieMaster` type exists, unused
-- Tracker dart marks targets (`world.trackedTargets`) but nothing consumes it
 - Victory condition fires but has only been observed once, via a bot
+
+The **tracker dart** is gone — the item, `world.trackedTargets`, the `'dart'`
+shot kind and `TRACKER_DART_MS` with it. It marked a target for a hunt nothing
+ever consumed, so it was a gun that took a slot and did nothing, and every bot
+in the city was told to walk past it by name. Nothing else read the mark.
 
 ## How the user likes to work
 
@@ -1265,6 +1376,14 @@ the client — it never leaves the server.
   still* beside a wall as "grinding into" it, and one picked a "clear lane"
   from the nav grid, which cheerfully contains shut doors. When a check fails,
   suspect the check first — twice now it has been the test, not the code.
+- **Never compare tick cost across two separate `npx tsx` invocations.** This
+  box is noisy enough that the *same code* measured 1.97ms and 4.37ms on two
+  runs minutes apart, which read exactly like a change having doubled the cost.
+  Two things are needed and both of them: gate the old behaviour behind an env
+  var so both sides run in **one build**, and **alternate** them in one shell
+  loop so a busy interval hits both. And report zombies alive alongside the
+  cost — the map is not seeded, so how far the outbreak got dominates
+  everything and a run with 180 zombies is not comparable to one with 40.
 - **Put the bug back to prove the fix.** Gating old behaviour behind a
   temporary env var and running the same harness both ways turned "the grey
   officers look wrong" into "0 shots and 155° off target, versus 6 shots and

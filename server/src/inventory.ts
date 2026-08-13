@@ -21,7 +21,10 @@ import {
   ONE_OFF_ITEMS,
   GUARANTEED_ITEMS,
   GUARANTEE_EVERY_GUN,
+  GUARANTEE_EVERY_UTILITY,
   PARK_LOOT_COUNT,
+  PARK_LOOT_GUARANTEED_GUNS,
+  PARK_LOOT_GUARANTEED_UTILITIES,
   PARK_LOOT_GUN_SHARE,
   PARK_LOOT_COVER,
   PARK_LOOT_PATH_GAP,
@@ -136,10 +139,14 @@ export function spawnPickups(world: World): void {
    * building's notch is outdoors — and never on top of something already
    * lying there, since a house can hold more than one thing now.
    */
-  const placeIn = (b: (typeof world.map.buildings)[number], item: ItemId): void => {
+  const placeIn = (
+    b: (typeof world.map.buildings)[number],
+    item: ItemId,
+    prefix = 'loot',
+  ): boolean => {
     for (let attempt = 0; attempt < 18; attempt++) {
       const rect = b.rects[Math.floor(Math.random() * b.rects.length)];
-      if (!rect) return;
+      if (!rect) return false;
       const x = rect.x + 18 + Math.random() * Math.max(1, rect.w - 36);
       const y = rect.y + 6 + Math.random() * Math.max(1, rect.h - 12);
       if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
@@ -151,10 +158,22 @@ export function spawnPickups(world: World): void {
         }
       }
       if (crowded) continue;
-      const id = `loot-${n++}`;
+      const id = `${prefix}-${n++}`;
       world.pickups.set(id, { id, item, x, y });
-      return;
+      return true;
     }
+    return false;
+  };
+
+  /** Somewhere indoors, anywhere. Tries a handful of houses and gives up. */
+  const placeSomewhere = (item: ItemId, prefix: string): boolean => {
+    const houses = world.map.buildings;
+    if (houses.length === 0) return false;
+    for (let tries = 0; tries < 12; tries++) {
+      const b = houses[Math.floor(Math.random() * houses.length)];
+      if (placeIn(b, item, prefix)) return true;
+    }
+    return false;
   };
 
   // A house rolls for a gun and, separately, for something to go with it.
@@ -174,9 +193,19 @@ export function spawnPickups(world: World): void {
   // have to go into the trees for it, so a candidate spot has to have a bush
   // close enough to hide it. Kept off the dirt path for the same reason: a rifle
   // lying on the one clear line through the park is not hidden at all.
+  //
+  // The first two entries are a gun and a utility outright. The rest roll on
+  // the share, which can easily come up all one kind — and a park with nothing
+  // in it worth carrying a gun for is a park nobody walks into twice.
   const park = world.map.park;
-  for (let i = 0; i < PARK_LOOT_COUNT; i++) {
-    const table = Math.random() < PARK_LOOT_GUN_SHARE ? GUN_LOOT : UTILITY_LOOT;
+  const parkTables: ItemId[][] = [
+    ...Array<ItemId[]>(PARK_LOOT_GUARANTEED_GUNS).fill(GUN_LOOT),
+    ...Array<ItemId[]>(PARK_LOOT_GUARANTEED_UTILITIES).fill(UTILITY_LOOT),
+    ...Array.from({ length: PARK_LOOT_COUNT }, () =>
+      Math.random() < PARK_LOOT_GUN_SHARE ? GUN_LOOT : UTILITY_LOOT,
+    ),
+  ];
+  for (const table of parkTables) {
     const item = table[Math.floor(Math.random() * table.length)];
     for (let attempt = 0; attempt < 24; attempt++) {
       const x = park.x + 30 + Math.random() * Math.max(1, park.w - 60);
@@ -209,14 +238,17 @@ export function spawnPickups(world: World): void {
   }
 
   // Spots that may be taken over by a placed item — anything already placed by
-  // hand is off limits, or the second placement would eat the first. The debug
+  // hand is off limits, or the second placement would eat the first. Asked by
+  // *id* rather than by item, since the floor below now covers nearly the whole
+  // registry and a set of items would leave nothing takeable at all. The debug
   // pile is off limits too: it sits at the player's feet rather than in a
   // building, and counting it would have the every-gun floor satisfied by a
   // heap of test items and never place anything in the city at all.
-  const placed = new Set<ItemId>([...ONE_OFF_ITEMS, ...GUARANTEED_ITEMS]);
   const inACity = (p: PickupState) => !p.id.startsWith('loot-test-');
+  const byHand = (p: PickupState) =>
+    p.id.startsWith('loot-oneoff-') || p.id.startsWith('loot-min-');
   const freeSpots = () =>
-    Array.from(world.pickups.values()).filter((p) => inACity(p) && !placed.has(p.item));
+    Array.from(world.pickups.values()).filter((p) => inACity(p) && !byHand(p));
 
   // Exactly one of each one-off item, placed by taking over an ordinary loot
   // spot. They are out of the loot table entirely, so this is the only way
@@ -230,27 +262,42 @@ export function spawnPickups(world: World): void {
     world.pickups.set(id, { id, item, x: at.x, y: at.y });
   }
 
-  // And a floor under every gun: if the loot table happened not to roll one
-  // anywhere, put one in. A gun that is missing entirely is a worse kind of
-  // rare than a scarce one, and deriving the list from the registry means a
-  // gun added later is covered without anyone remembering to list it.
+  // And a floor under every gun *and* every utility: if the loot table happened
+  // not to roll one anywhere, put one in. Something missing from the map
+  // entirely is a worse kind of rare than a scarce one, and deriving the list
+  // from the registry means anything added later is covered without anyone
+  // remembering to list it.
   //
   // Rarity 0 is excluded because those are placed by their own roll above,
   // and so is the pistol, which you always have.
-  const everyGun = GUARANTEE_EVERY_GUN
-    ? (Object.keys(ITEMS) as ItemId[]).filter(
-        (id) => isGun(id) && id !== 'pistol' && ITEMS[id].rarity > 0,
-      )
-    : [];
-  for (const item of new Set<ItemId>([...GUARANTEED_ITEMS, ...everyGun])) {
-    let already = false;
-    for (const p of world.pickups.values()) {
-      if (inACity(p) && p.item === item) {
-        already = true;
-        break;
-      }
-    }
-    if (already) continue;
+  const floorOf = (kind: 'gun' | 'utility'): ItemId[] =>
+    (Object.keys(ITEMS) as ItemId[]).filter(
+      (id) =>
+        isGun(id) === (kind === 'gun') &&
+        id !== 'pistol' &&
+        id !== 'dualPistols' &&
+        ITEMS[id].rarity > 0,
+    );
+  const everyGun = GUARANTEE_EVERY_GUN ? floorOf('gun') : [];
+  const everyUtility = GUARANTEE_EVERY_UTILITY ? floorOf('utility') : [];
+
+  // Counted once rather than per item: the floor is two dozen entries now, and
+  // re-walking every pickup for each of them is a sweep of the whole map two
+  // dozen times over for an answer that cannot change while we look.
+  const inTheCity = new Set<ItemId>();
+  for (const p of world.pickups.values()) {
+    if (inACity(p)) inTheCity.add(p.item);
+  }
+
+  for (const item of new Set<ItemId>([...GUARANTEED_ITEMS, ...everyGun, ...everyUtility])) {
+    if (inTheCity.has(item)) continue;
+    // Placed into a house of its own where there is room for one, rather than
+    // taking an existing spot over. The floor used to displace an ordinary
+    // item, which was fine when it was four rare guns and is not when it is
+    // every gun and every utility — a third of the city's loot would have been
+    // the guarantee eating the roll. Falling back to a takeover keeps the
+    // promise absolute on a map with no room left.
+    if (placeSomewhere(item, 'loot-min')) continue;
     const spots = freeSpots();
     if (spots.length === 0) break;
     const at = spots[Math.floor(Math.random() * spots.length)];

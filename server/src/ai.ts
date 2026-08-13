@@ -49,6 +49,12 @@ import {
   FOLLOW_CROWD_MARGIN,
   GRAPPLE_REACH_BONUS,
   INFECTED_TARGET_PENALTY,
+  ZOMBIE_SPREAD_PENALTY,
+  CHARGE_BARS,
+  CHARGE_INFECTED_SIGHT,
+  BOT_CHARGE_BARS,
+  BOT_CHARGE_AIM_TOLERANCE,
+  BOT_CHARGE_GIVE_UP_MS,
   MAX_GRAPPLERS,
   WINDOW_ATTACK_INTERVAL_MS,
   WINDOW_ZOMBIE_DAMAGE,
@@ -239,7 +245,7 @@ import {
   DOOR_WARN_LINES,
   DOOR_DEFY_LINES,
 } from '../../shared/constants.js';
-import { angleDelta, clamp, segmentRectT, turnToward } from './geometry.js';
+import { angleDelta, clamp, segmentCircleT, segmentRectT, turnToward } from './geometry.js';
 import {
   collect,
   dropHeld,
@@ -2965,13 +2971,12 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
  * rather than for one pellet's damage.
  */
 /**
- * Loot a bot officer walks straight past. The dart marks a target for a hunt
- * nothing consumes yet, and the shield does nothing at all — a bot crossing
- * two blocks for either is a bot not holding a gun. Both scored zero already;
- * this says so out loud, so giving the dart a damage figure later doesn't
+ * Loot a bot officer walks straight past. The shield does nothing for one — a
+ * bot crossing two blocks for it is a bot not holding a gun. It scored zero
+ * already; this says so out loud, so giving it a damage figure later doesn't
  * quietly send every bot after one.
  */
-const BOT_IGNORES = new Set<ItemId>(['trackerDart', 'riotShield']);
+const BOT_IGNORES = new Set<ItemId>(['riotShield']);
 
 function gunWorth(item: ItemId | null): number {
   if (!item) return 0;
@@ -2997,8 +3002,8 @@ function bestGun(inv: Inventory): { slot: number; worth: number } {
     const g = inv.guns[i];
     if (!g || g.ammo <= 0) continue;
     const w = gunWorth(g.item);
-    // The cure gun and the dart aren't weapons. Scoring zero, they'd otherwise
-    // beat the pistol's fallback and leave a bot pointing a syringe at a horde.
+    // The cure gun isn't a weapon. Scoring zero, it would otherwise beat the
+    // pistol's fallback and leave a bot pointing a syringe at a horde.
     if (w <= 0) continue;
     if (w > worth) {
       worth = w;
@@ -3093,7 +3098,7 @@ function longestGun(inv: Inventory): number {
     const g = inv.guns[i];
     if (!g || g.ammo <= 0) continue;
     const w = gunWorth(g.item);
-    if (w <= 0) continue; // the cure gun and the dart aren't weapons
+    if (w <= 0) continue; // the cure gun isn't a weapon
     const r = botReach(g.item);
     if (r > reach || (r === reach && w > worth)) {
       reach = r;
@@ -3184,6 +3189,108 @@ function cureTick(
   if (Math.abs(angleDelta(state.heading, aim)) < 0.12) {
     fireHeld(world, e, inv, state.heading, now);
   }
+  return true;
+}
+
+/** The charge rifle's slot number, with rounds left in it, or -1. */
+function chargeRifleSlot(inv: Inventory): number {
+  for (let i = 0; i < inv.guns.length; i++) {
+    const g = inv.guns[i];
+    if (g && g.item === 'chargeRifle' && g.ammo > 0) return i + 1;
+  }
+  return -1;
+}
+
+/**
+ * The charge rifle is the one gun in the city that can shoot somebody already
+ * bitten, and carrying one is what lets a bot *see* who that is: the infected
+ * are otherwise invisible until the last four seconds of the tell, and even
+ * then `senseThreats` deliberately keeps them out of `targetId` so nobody
+ * shoots a person who has not turned yet. Holding this weapon is the one thing
+ * that makes that a decision rather than an accident.
+ *
+ * It goes off on the top bar, wound up properly rather than fired the instant
+ * the trigger is touched — a bot lining a shot up on a civilian with the dead
+ * about has no reason to settle for a lesser round.
+ *
+ * Deliberately **only reached with no zombie being engaged**. Stopping a
+ * firefight to spend a second and a third of a second winding up at a
+ * bystander is a bot that dies holding a full charge, and the ranking that
+ * matters — cure first, because a cured neighbour costs nobody anything — is
+ * already made by `cureTick` sitting above this.
+ *
+ * Civilians only. An infected *officer* is a teammate and the answer there is
+ * the cure gun; and a friendly already incubating who wanders into the lane
+ * calls the shot off, since a top-bar round pierces four bodies and would go
+ * straight through them on its way.
+ *
+ * Returns true when it has taken the tick over.
+ */
+function chargeInfectedTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  now: number,
+  dt: number,
+): boolean {
+  const give = (): boolean => {
+    world.chargeSince.delete(e.id);
+    return false;
+  };
+  if (world.pendingInfections.size === 0) return give();
+  const slot = chargeRifleSlot(inv);
+  if (slot < 0) return give();
+
+  const def = ITEMS.chargeRifle;
+  const reach = Math.min(def.range ?? GUN_RANGE, CHARGE_INFECTED_SIGHT);
+
+  let target: Entity | null = null;
+  let best = Infinity;
+  for (const id of world.pendingInfections.keys()) {
+    const who = world.entities.get(id);
+    if (!who || who.type !== 'human') continue;
+    const d = Math.hypot(who.x - e.x, who.y - e.y);
+    if (d > reach || d >= best) continue;
+    if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true)) continue;
+    best = d;
+    target = who;
+  }
+  if (!target) return give();
+
+  inv.activeSlot = slot;
+  const aim = Math.atan2(target.y - e.y, target.x - e.x);
+  state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
+  e.facing = state.heading;
+
+  const since = world.chargeSince.get(e.id);
+  if (since === undefined) {
+    world.chargeSince.set(e.id, now);
+    return true;
+  }
+  const chargeMs = def.chargeMs ?? 1200;
+  // Stood there winding up at something it can no longer get a shot at, or —
+  // more usually — a wind-up abandoned to fight something and picked back up
+  // much later. Either way the deadline is what ends it: it clears the claim,
+  // and the wind-up starts from the top on the next tick. This is also the
+  // *only* thing that clears a stale entry, which is deliberate — the branches
+  // that interrupt this one shouldn't have to know it exists.
+  if (now - since > chargeMs + BOT_CHARGE_GIVE_UP_MS) return give();
+  if (now - since < chargeMs * (BOT_CHARGE_BARS / CHARGE_BARS)) return true;
+  if (Math.abs(angleDelta(state.heading, aim)) > BOT_CHARGE_AIM_TOLERANCE) return true;
+
+  // A friendly already incubating, stood in the way. The round pierces four
+  // bodies at this charge, so "behind the target" is no protection either.
+  for (const id of world.pendingInfections.keys()) {
+    const who = world.entities.get(id);
+    if (!who || who.type !== 'officer') continue;
+    if (segmentCircleT(e.x, e.y, target.x, target.y, who.x, who.y, who.radius + 6) !== null) {
+      return give();
+    }
+  }
+
+  world.chargeSince.delete(e.id);
+  fireHeld(world, e, inv, state.heading, now, BOT_CHARGE_BARS / CHARGE_BARS);
   return true;
 }
 
@@ -3599,6 +3706,15 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       return;
     }
 
+    // There is a zombie in view, but nothing near enough to be pressing, and
+    // somebody in front of us is incubating. Winding up on them is the better
+    // use of the second: the one across the street is a fight, and the one at
+    // our elbow is a fight in twenty seconds' time that nobody else can even
+    // see coming. Gated on `closest` rather than on the target's distance,
+    // since those are routinely different — no bot spends a second and a third
+    // charging a rifle with something at its shoulder.
+    if (closest > BOT_SAFE_DIST && chargeInfectedTick(world, e, state, inv, now, dt)) return;
+
     // Standing and fighting: face it, hold the best gun, and open up.
     botStaminaTick(state, false, dt);
     // A curable human nearby is worth the cure gun over anything else.
@@ -3666,8 +3782,11 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     return;
   }
 
-  // No zombie in view, but somebody nearby is turning. Cure them.
+  // No zombie in view, but somebody nearby is turning. Cure them if there is a
+  // dose for it — that costs them nothing — and put a charged round through
+  // them if there isn't and there is a charge rifle in the bag.
   if (cureTick(world, e, state, inv, now, dt)) return;
+  if (chargeInfectedTick(world, e, state, inv, now, dt)) return;
 
   // Nothing in sight: stop running and get the wind back.
   state.bolting = false;
@@ -3782,7 +3901,18 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
 
     // Already-bitten prey is worth far less than clean prey, so a zombie will
     // walk right past someone incubating to reach an uninfected target.
-    const score = dist * (world.pendingInfections.has(other.id) ? INFECTED_TARGET_PENALTY : 1);
+    let score = dist * (world.pendingInfections.has(other.id) ? INFECTED_TARGET_PENALTY : 1);
+
+    // And already-*spoken-for* prey is worth less to the ones that think that
+    // way. Without this, twenty zombies stood roughly together all score on
+    // distance alone, all pick the same nearest person, and trail after them
+    // in single file while the crowd four paces past them walks off untouched.
+    // Our own claim doesn't count against us, or a zombie would talk itself
+    // out of the target it already has every perception tick.
+    if (state.spreadsOut) {
+      const claims = (world.targetClaims.get(other.id) ?? 0) - (state.targetId === other.id ? 1 : 0);
+      if (claims > 0) score *= 1 + claims * ZOMBIE_SPREAD_PENALTY;
+    }
     if (score >= bestScore) continue;
     if (!hasLineOfSight(world, e.x, e.y, other.x, other.y)) continue;
 
@@ -4655,14 +4785,21 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
   // a door. Room occupancy rides along in the same walk: it is what turns "is
   // there anyone left in this room" from a spatial query per zombie into an
   // array lookup, and at 400 entities the walk was already being paid for.
+  //
+  // Who the pack is already onto rides along too, for the same reason and by
+  // the same trick — one map lookup per zombie here, against a spatial query
+  // per zombie in `senseTarget` if it had to go and find out for itself.
   let survivors = 0;
   world.rooms.beginCount();
+  world.targetClaims.clear();
   for (const e of world.entities.values()) {
     if (e.type === 'human' || e.type === 'officer') {
       survivors++;
       world.rooms.addPrey(e.x, e.y);
     } else if (e.type === 'zombie') {
       world.rooms.addZombie(e.x, e.y);
+      const onto = world.ai.get(e.id)?.targetId;
+      if (onto) world.targetClaims.set(onto, (world.targetClaims.get(onto) ?? 0) + 1);
     }
   }
   world.survivorCount = survivors;

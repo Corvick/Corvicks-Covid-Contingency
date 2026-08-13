@@ -6,12 +6,12 @@ export type ItemId =
   | 'machineGun'
   | 'shotgun'
   | 'boltRifle'
+  | 'semiAutoRifle'
   | 'sniper'
   | 'heavyMg'
   | 'chargeRifle'
   | 'flamethrower'
   | 'cureGun'
-  | 'trackerDart'
   | 'kevlar'
   | 'riotShield'
   | 'lozenge'
@@ -201,6 +201,28 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     slowMs: 900,
     slowMul: 0.35,
   },
+  semiAutoRifle: {
+    id: 'semiAutoRifle',
+    kind: 'gun',
+    label: 'Semi-Automatic Rifle',
+    short: 'SEMI',
+    color: '#d97757',
+    // The middle tier: not one of the three the city is full of, and not one of
+    // the ones you might go a whole round without seeing either.
+    rarity: 5,
+    // The bolt action's rifle round, fired as fast as you can pull rather than
+    // as fast as you can work the bolt — so it gives up the thing the bolt is
+    // actually for. Less damage per round, three times the bloom, and a lighter
+    // stagger, in exchange for two and a half times the rate.
+    damageMin: 26,
+    damageMax: 40,
+    bloom: 0.04,
+    cooldownMs: 470,
+    range: 820,
+    ammo: 30,
+    slowMs: 450,
+    slowMul: 0.55,
+  },
   sniper: {
     id: 'sniper',
     kind: 'gun',
@@ -249,7 +271,10 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     label: 'Charge Rifle',
     short: 'CHRG',
     color: '#c084fc',
-    rarity: 1,
+    // Middle tier, alongside the semi-auto. It is the only gun that can shoot
+    // somebody already bitten, which is a job that has to come up often enough
+    // to be worth learning — at rarity 1 most rounds never presented it.
+    rarity: 5,
     damageMin: 30,
     damageMax: 45,
     bloom: 0.02,
@@ -300,18 +325,6 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     cooldownMs: 1100,
     range: 520,
     ammo: 6,
-  },
-  trackerDart: {
-    id: 'trackerDart',
-    kind: 'gun',
-    label: 'Tracker Dart',
-    short: 'DART',
-    color: '#a78bfa',
-    rarity: 2,
-    bloom: 0.04,
-    cooldownMs: 1200,
-    range: 620,
-    ammo: 10,
   },
   grenadeLauncher: {
     id: 'grenadeLauncher',

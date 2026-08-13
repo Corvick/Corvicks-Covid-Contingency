@@ -62,6 +62,14 @@ export const PARK_PATH_CLEARANCE = 12;
  * path, since something lying on the one clear line through is not hidden.
  */
 export const PARK_LOOT_COUNT = 5;
+/**
+ * On top of those, one gun and one utility that are *always* in the park. The
+ * random five roll on the shares below and can easily come up all-utility, so
+ * without these there is no promise the trees are worth going into for a
+ * weapon at all.
+ */
+export const PARK_LOOT_GUARANTEED_GUNS = 1;
+export const PARK_LOOT_GUARANTEED_UTILITIES = 1;
 export const PARK_LOOT_GUN_SHARE = 0.45;
 export const PARK_LOOT_COVER = 26;
 export const PARK_LOOT_PATH_GAP = 70;
@@ -289,6 +297,19 @@ export const GUARANTEED_ITEMS = ['sniper', 'heavyMg', 'chargeRifle', 'flamethrow
  * and so is anything with rarity 0, which is placed by its own roll.
  */
 export const GUARANTEE_EVERY_GUN = true;
+/**
+ * And every utility too, on the same terms.
+ *
+ * Utilities used to be deliberately *not* guaranteed — the idea being that
+ * every city should be missing something — but with fifteen of them on the
+ * belt, "missing something" in practice meant the one piece of kit a given
+ * round was built around simply wasn't anywhere, and there is no way to tell
+ * that from inside the round. The scarcity that is worth keeping is the
+ * one-offs, which are still exactly one per city.
+ *
+ * Rarity 0 stays excluded: the smoke grenade is placed by its own roll.
+ */
+export const GUARANTEE_EVERY_UTILITY = true;
 /** Its shell detonates where it lands, hurting everything close to it. */
 export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;
@@ -483,6 +504,23 @@ export const GRAPPLE_REACH_BONUS = 5;
 
 /** Effective-distance multiplier for a victim who is already infected. */
 export const INFECTED_TARGET_PENALTY = 3;
+
+/**
+ * Some of them look at who the pack is already after and go somewhere else.
+ *
+ * Without this a horde is a conga line: everything in sight scores on distance
+ * alone, so twenty zombies standing roughly together all pick the same nearest
+ * person and trail after them in single file while the crowd four paces behind
+ * that person walks away untouched. `ZOMBIE_SPREAD_SHARE` is how many of them
+ * think that way — deliberately not all, because a pack that *never* doubles
+ * up also never brings anybody down — and `ZOMBIE_SPREAD_PENALTY` is the
+ * effective-distance multiplier each zombie already onto that target adds.
+ *
+ * It rides on the same score `INFECTED_TARGET_PENALTY` does, so "already
+ * bitten" and "already spoken for" compose rather than arguing.
+ */
+export const ZOMBIE_SPREAD_SHARE = 0.6;
+export const ZOMBIE_SPREAD_PENALTY = 0.85;
 
 /** AI perception runs on its own budget rather than every tick. */
 export const SENSE_INTERVAL_MS = 100;
@@ -889,20 +927,29 @@ export const FLAME_SPLASH_SPREAD = 40;
 /** How far back from the impact point the fire actually settles. */
 export const FLAME_LAND_INSET = 8;
 /** Napalm hangs far longer than a round's tracer, and dies away rather than off. */
-export const FLAME_TRACER_MS = 320;
+export const FLAME_TRACER_MS = 560;
 /**
  * How long the front of the stream takes to reach the far end of the throw.
  *
  * Burning fuel is *thrown*, not fired: it leaves the nozzle and travels, and
  * drawing the whole length in the frame the trigger goes down reads as a
- * laser rather than a liquid. At 55ms between pulls, six or seven of these
- * overlap while the trigger is held, so the composite is a continuous jet
- * with a leading edge that visibly runs out to the target.
+ * laser rather than a liquid. At 55ms between pulls, several of these overlap
+ * while the trigger is held, so the composite is a continuous jet with a
+ * leading edge that visibly runs out to the target.
  *
- * The *ignition* is still worked out on the tick it was fired — this is the
- * picture catching up with the simulation, not the simulation slowing down.
+ * Slowed from 170: at that speed the front still crossed the whole throw in
+ * under a fifth of a second, which is fast enough that the eye reads the jet
+ * as arriving everywhere at once and the travel does no work. It has to be
+ * comfortably under FLAME_TRACER_MS or the front reaches the far end at the
+ * exact moment the tracer dies and the tip is never actually drawn.
+ *
+ * **The ground fire waits for it.** `sprayFlame` queues its patches for
+ * `now + FLAME_TRAVEL_MS` rather than laying them the moment the trigger goes
+ * — burning ground appearing before the fuel gets there was the single most
+ * obvious tell that the stream was a picture painted over an instant weapon.
+ * What is *caught in the stream* still catches on the tick it was fired.
  */
-export const FLAME_TRAVEL_MS = 170;
+export const FLAME_TRAVEL_MS = 300;
 /**
  * How much wider the stream is at the far end than at the nozzle. A jet
  * spreads as it goes and breaks up as it slows; fattest-in-the-middle read as
@@ -1260,6 +1307,35 @@ export const BINOCULAR_SIGHT_RADIUS = 980;
 /** How far the zombie tracker will look before it gives up and points nowhere. */
 export const TRACKER_RANGE = 1600;
 
+/**
+ * The charge rifle reads the infected.
+ *
+ * It is the one gun in the city that can shoot somebody already bitten, and a
+ * weapon that can do a job nobody can *see* the need for is a weapon nobody
+ * uses. Carrying one picks the incubating out of a crowd inside this range —
+ * the same shape of hole in the fog thermal goggles punch for zombies, and
+ * kept as narrow: it reveals nothing else about them, and it only reaches ids
+ * already in `pendingInfections`.
+ *
+ * Server-side awareness only, for now: it drives what a bot officer does, and
+ * nothing about it reaches the wire.
+ */
+export const CHARGE_INFECTED_SIGHT = 900;
+/**
+ * How wound up a bot takes the charge rifle before letting go at somebody
+ * incubating. One bar drops a body; the top bar is what puts a round through
+ * the wall they are stood behind, and a bot lining up a shot on a civilian
+ * with the dead about has no reason to settle for less.
+ */
+export const BOT_CHARGE_BARS = CHARGE_BARS;
+/**
+ * How near the aim has to be before it lets go, and how long it will stand
+ * there winding up before giving the whole idea up. Without the deadline a
+ * bot that loses line of sight mid-wind holds the trigger forever.
+ */
+export const BOT_CHARGE_AIM_TOLERANCE = 0.1;
+export const BOT_CHARGE_GIVE_UP_MS = 3000;
+
 /** Hits a kevlar vest soaks before it's spent. */
 export const KEVLAR_POINTS = 3;
 
@@ -1294,8 +1370,6 @@ export const SHIELD_BASH_COOLDOWN_MS = 700;
  * bashing your way clear leaves you without the legs to use the gap.
  */
 export const SHIELD_BASH_STAMINA = 24;
-/** How long a tracker dart keeps a target lit up. */
-export const TRACKER_DART_MS = 30000;
 /** TESTING: scatter one of every item around player one's start point. */
 export const TEST_DROP_ALL_ITEMS = true;
 export const TEST_DROP_RADIUS = 90;

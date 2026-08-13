@@ -53,6 +53,7 @@ import {
   DOOR_OPENS_FOR_STRANGERS_CHANCE,
   DOOR_SLAM_CHANCE,
   ZOMBIE_SMART_SHARE,
+  ZOMBIE_SPREAD_SHARE,
   OFFICER_SEEK_CHANCE,
   BARRICADE_CHANCE,
   FOLLOW_CROWD_CHANCE,
@@ -91,7 +92,7 @@ import { initDucks, type Duck } from './ducks.js';
 import type { Emplacement } from './emplacement.js';
 import type { PoliceCar } from './police.js';
 import type { Mine } from './mines.js';
-import type { FirePatch } from './fire.js';
+import type { FirePatch, PendingPatch } from './fire.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -314,6 +315,13 @@ export interface AiState {
    * whichever door is nearest to hand.
    */
   smartZombie: boolean;
+  /**
+   * Looks at who the pack is already after and picks somebody else.
+   *
+   * Not all of them, deliberately — a horde where nothing ever doubles up
+   * never brings anybody down. See `ZOMBIE_SPREAD_SHARE`.
+   */
+  spreadsOut: boolean;
   /** When the room it is in last looked empty, or 0. */
   roomClearSince: number;
   /**
@@ -518,8 +526,6 @@ export interface World {
   /** Loot lying on the floor, keyed by pickup id. */
   pickups: Map<string, PickupState>;
   inventories: Map<string, Inventory>;
-  /** Entity id -> when a tracker dart mark expires. */
-  trackedTargets: Map<string, number>;
   grenades: Map<string, Grenade>;
   smokes: Map<string, Smoke>;
   /** The flock on the pond. Scenery that reacts, not entities. */
@@ -549,8 +555,24 @@ export interface World {
   nextRadioScan: number;
   /** Deployed pocket gunners, keyed by the officer manning each one. */
   emplacements: Map<string, Emplacement>;
+  /**
+   * How many zombies are currently onto each victim, keyed by victim id.
+   *
+   * Recounted once a tick off the walk that was already happening, the same
+   * trick room occupancy uses: it turns "is the pack already after this one"
+   * from a spatial query per zombie into a map lookup. Only zombies that
+   * actually care read it — see `spreadsOut`.
+   */
+  targetClaims: Map<string, number>;
   /** Ground still alight, and who is on fire until when. */
   fires: FirePatch[];
+  /**
+   * Napalm in the air: where each pull of the flamethrower will set the ground
+   * alight once the stream actually gets there. Burning ground appearing under
+   * the crosshair before the fuel has crossed the street is the whole reason
+   * this exists — see `FLAME_TRAVEL_MS`.
+   */
+  pendingFires: PendingPatch[];
   burning: Map<string, number>;
   /** Frozen: a solo round with its pause panel up. */
   paused: boolean;
@@ -723,6 +745,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     lockAlso: -1,
     doorWaitUntil: 0,
     smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
+    spreadsOut: Math.random() < ZOMBIE_SPREAD_SHARE,
     roomClearSince: 0,
     searchRoom: OUTSIDE,
     searchFrom: OUTSIDE,
@@ -1034,7 +1057,6 @@ export function createWorld(): World {
     followers: new Set(),
     pickups: new Map(),
     inventories: new Map(),
-    trackedTargets: new Map(),
     grenades: new Map(),
     smokes: new Map(),
     blasts: [],
@@ -1051,7 +1073,9 @@ export function createWorld(): World {
     radioReplies: [],
     nextRadioScan: 0,
     emplacements: new Map(),
+    targetClaims: new Map(),
     fires: [],
+    pendingFires: [],
     burning: new Map(),
     paused: false,
     names: new Map(),
@@ -1106,7 +1130,6 @@ export function resetWorld(world: World): void {
   world.helicopters.clear();
   world.soldiers.clear();
   world.bots.clear();
-  world.trackedTargets.clear();
   world.grapples.clear();
   world.grappleImmune.clear();
   world.pendingInfections.clear();
@@ -1135,7 +1158,9 @@ export function resetWorld(world: World): void {
   world.victory = false;
   world.paused = false;
   world.emplacements.clear();
+  world.targetClaims.clear();
   world.fires.length = 0;
+  world.pendingFires.length = 0;
   world.burning.clear();
 
   populate(world);

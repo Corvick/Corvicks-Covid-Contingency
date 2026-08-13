@@ -239,7 +239,7 @@ export interface MapData {
 }
 
 /** A shotgun blast is several tracers from one trigger pull. */
-export type ShotKind = 'bullet' | 'cure' | 'dart' | 'flame';
+export type ShotKind = 'bullet' | 'cure' | 'flame';
 
 /** A patch of ground alight. `life` is 1 when fresh and 0 as it dies. */
 export interface FireState {

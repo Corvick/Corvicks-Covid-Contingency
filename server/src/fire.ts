@@ -17,6 +17,7 @@ import {
   FLAME_SPLASH_SPREAD,
   FLAME_LAND_INSET,
   FLAME_SPREAD,
+  FLAME_TRAVEL_MS,
 } from '../../shared/constants.js';
 import { segmentCircleT, segmentRectT } from './geometry.js';
 import { isWindowIntact, type Entity, type World } from './world.js';
@@ -37,6 +38,17 @@ export interface FirePatch {
   until: number;
 }
 
+/**
+ * Napalm still in the air. Where the ground will catch, and when the fuel gets
+ * there — see `FLAME_TRAVEL_MS`.
+ */
+export interface PendingPatch {
+  x: number;
+  y: number;
+  /** When it lands. */
+  at: number;
+}
+
 /** Lay a patch down, unless one is already burning about there. */
 function dropPatch(world: World, x: number, y: number, now: number): void {
   for (const patch of world.fires) {
@@ -47,6 +59,18 @@ function dropPatch(world: World, x: number, y: number, now: number): void {
     }
   }
   world.fires.push({ x, y, until: now + FIRE_GROUND_MS });
+}
+
+/**
+ * Where a patch *will* be, once the stream reaches it.
+ *
+ * The merge into an existing fire deliberately happens on landing rather than
+ * here: what is burning by the time the fuel arrives is not what was burning
+ * when the trigger went, and merging early would fold a patch into a fire that
+ * has since gone out.
+ */
+function queuePatch(world: World, x: number, y: number, now: number): void {
+  world.pendingFires.push({ x, y, at: now + FLAME_TRAVEL_MS });
 }
 
 /**
@@ -125,9 +149,15 @@ export function sprayFlame(
   // one place: the pavement between you and where you are pointing stays
   // clear. That is what a thrown stream looks like, and it is also what stops
   // a held trigger laying a carpet of fire across the shooter's own feet.
+  //
+  // And it comes down *late*. Where the fire lands is worked out now, on the
+  // tick the trigger went, against the geometry as it stands — but the ground
+  // does not catch until the drawn front actually reaches it. Fire blooming
+  // under the crosshair while the stream was still halfway across the street
+  // was the loudest tell that the travel was a picture over an instant weapon.
   const landX = stopX - dirX * FLAME_LAND_INSET;
   const landY = stopY - dirY * FLAME_LAND_INSET;
-  dropPatch(world, landX, landY, now);
+  queuePatch(world, landX, landY, now);
 
   // And a couple more thrown on past it, in a narrow cone — but not when a
   // wall stopped the stream. Then this *is* where it stopped, and throwing
@@ -143,7 +173,7 @@ export function sprayFlame(
       // is every solid thing the splash could be flung over.
       if (world.nav.isBlocked(sx, sy)) continue;
       if (!world.nav.lineClear(landX, landY, sx, sy)) continue;
-      dropPatch(world, sx, sy, now);
+      queuePatch(world, sx, sy, now);
     }
   }
 
@@ -185,6 +215,16 @@ export function ignite(world: World, victim: Entity, now: number, ms: number): v
  * anything alight takes damage and moves badly while it does.
  */
 export function updateFires(world: World, now: number, dt: number): void {
+  // Napalm that has finished its flight sets the ground alight now. Done ahead
+  // of the sweep below so a patch that lands this tick is one anybody standing
+  // in it catches from immediately, rather than a tick late.
+  for (let i = world.pendingFires.length - 1; i >= 0; i--) {
+    const inFlight = world.pendingFires[i];
+    if (now < inFlight.at) continue;
+    world.pendingFires.splice(i, 1);
+    dropPatch(world, inFlight.x, inFlight.y, now);
+  }
+
   for (let i = world.fires.length - 1; i >= 0; i--) {
     if (now >= world.fires[i].until) world.fires.splice(i, 1);
   }
