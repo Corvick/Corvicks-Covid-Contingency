@@ -48,7 +48,8 @@ import {
   FLAME_TRAVEL_MS,
   FLAME_MOUTH_WIDTH,
   FLAME_TIP_WIDTH,
-  FLAME_BLOBS,
+  FLAME_SLUG_MS,
+  FLAME_STREAM_STEP,
   FLAME_BLOB_RADIUS,
   CHARGE_BARS,
   FLAME_ARC_VERTICAL_MIN,
@@ -797,31 +798,46 @@ export interface Tracer {
   kind?: ShotKind;
   hit: boolean;
   born: number;
+  /** Flame only: which shooter's stream this pull belongs to. */
+  who?: string;
 }
 
 /**
- * One lick of napalm: a stream of overlapping blobs that leaves the nozzle
- * flat, arcs up and fattens through the middle, and comes down at the far end
- * in a splash — with a soft shadow tracking it along the ground underneath.
+ * A hose, not a volley.
  *
- * Three ruled strokes, which is what this replaced, read as a laser sight. A
- * stream has to have a ragged edge and some weight to it, and it has to die
- * away rather than switch off, so everything here shrinks as well as fades.
+ * **A pull of the trigger is a parcel of fuel, not a line.** That is the whole
+ * of this. Each pull used to draw its own full-length stream from the nozzle to
+ * where it landed, so holding the trigger and sweeping put six independent
+ * straight streams on screen at six different bearings — a fan of ribs, which
+ * is exactly what it looked like. Nothing about it could bend, because every
+ * rib was drawn as a straight chord of its own.
+ *
+ * What is actually in the air at any instant is the fuel from the last few
+ * pulls, each at a different distance and each launched on a different bearing.
+ * Join those and you get a *curve*: the newest fuel at the nozzle on the
+ * current bearing, the oldest out at the far end on the bearing from a third of
+ * a second ago. Sweep and the stream trails behind the crosshair and bends,
+ * the way water out of a hose does. Hold still and the curve straightens by
+ * itself — no special case, the parcels simply line up.
+ *
+ * One vertex per parcel is only four or five points, so the polyline is
+ * resampled through a Catmull-Rom spline before anything is drawn; joining
+ * them with straight segments puts a visible kink at every pull.
  */
-function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: number): void {
+interface FlameVertex {
+  x: number;
+  y: number;
+  /** Where it is on the ground, before the arc lifts it. For the shadow. */
+  gy: number;
+  /** This parcel's own fade, so the tip burns out ahead of the throat. */
+  fade: number;
+}
+
+/** Where one parcel's fuel has got to along its own chord, `t` in 0..1. */
+function flameVertex(tracer: Tracer, t: number, now: number): FlameVertex {
   const dx = tracer.x2 - tracer.x1;
   const dy = tracer.y2 - tracer.y1;
   const len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len;
-  const ny = dx / len;
-
-  const fade = (1 - age) ** 1.4;
-
-  // How far down the throw the burning fuel has actually got. This is the
-  // whole difference between a jet and a laser: at the instant of firing there
-  // is a stub at the nozzle, and the front runs out to the target over
-  // FLAME_TRAVEL_MS. Held down, the streams overlap into one continuous jet.
-  const front = Math.min(1, (age * FLAME_TRACER_MS) / FLAME_TRAVEL_MS);
 
   // The lift is screen-space, so it only reads as *height* when it is across
   // the line of travel. Fired straight up or down the screen it is along that
@@ -832,94 +848,195 @@ function drawFlameStream(ctx: CanvasRenderingContext2D, tracer: Tracer, age: num
     FLAME_ARC_LIFT *
     Math.min(1, len / FLAME_RANGE) *
     (FLAME_ARC_VERTICAL_MIN + (1 - FLAME_ARC_VERTICAL_MIN) * uprightness);
-  const seed = (tracer.x1 * 13 + tracer.y1 * 7) % 628;
 
-  /** Height off the ground: an arc, peaking midway and coming back down. */
-  const arcAt = (t: number) => Math.sin(Math.PI * t);
-  /**
-   * How fat the stream is at `t`. Narrow at the nozzle where the fuel is still
-   * under pressure, spreading and breaking up as it slows — a cone, not a
-   * sausage. Once the front has stopped advancing the whole thing swells and
-   * goes ragged as it burns out.
-   */
-  const bloomOut = 1 + (1 - fade) * 0.5;
-  const widthAt = (t: number) => (FLAME_MOUTH_WIDTH + FLAME_TIP_WIDTH * t) * bloomOut;
+  const gx = tracer.x1 + dx * t;
+  const gy = tracer.y1 + dy * t;
+  const age = Math.min(1, (now - tracer.born) / FLAME_TRACER_MS);
+  return {
+    x: gx,
+    // An arc, peaking midway along the parcel's own throw and coming back down.
+    y: gy - Math.sin(Math.PI * t) * lift,
+    gy,
+    fade: (1 - age) ** 1.4,
+  };
+}
 
-  // The shadow first, flat on the ground and directly under the arc, so the
-  // lift reads as height rather than as the stream being aimed off to one side.
-  ctx.globalAlpha = 0.16 * fade;
-  ctx.fillStyle = '#000';
-  for (let i = 2; i <= FLAME_BLOBS; i += 2) {
-    const t = i / FLAME_BLOBS;
-    if (t > front) break;
-    const r = FLAME_BLOB_RADIUS * widthAt(t) * 0.7;
-    ctx.beginPath();
-    ctx.ellipse(tracer.x1 + dx * t, tracer.y1 + dy * t, r, r * 0.38, 0, 0, Math.PI * 2);
-    ctx.fill();
+const catmull = (p0: number, p1: number, p2: number, p3: number, t: number): number => {
+  const t2 = t * t;
+  return (
+    0.5 *
+    (2 * p1 +
+      (p2 - p0) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t2 * t)
+  );
+};
+
+/** How far along its own chord one parcel's fuel has got, 0..1. */
+const flameHead = (tracer: Tracer, now: number): number =>
+  Math.min(1, (now - tracer.born) / FLAME_TRAVEL_MS);
+
+/**
+ * The spine of one shooter's stream, nozzle first: the fuel from every pull of
+ * theirs still in the air, in the order it comes off the nozzle.
+ *
+ * Exported because it *is* the shape — whether the thing bends and whether it
+ * is continuous are both properties of this list, and both are worth being able
+ * to measure without a canvas. `group` must arrive newest first.
+ */
+export function flameStreamSpine(group: Tracer[], now: number): FlameVertex[] {
+  // The nozzle end is where the newest slug's *tail* has got to. While the
+  // trigger is down that is still at the muzzle, so the stream stays joined to
+  // the officer; let go and it advances, and the stream pulls away from the
+  // nozzle the way the last of the water does.
+  const newest = group[0];
+  const tailT = Math.max(0, Math.min(1, (now - newest.born - FLAME_SLUG_MS) / FLAME_TRAVEL_MS));
+
+  const verts: FlameVertex[] = [flameVertex(newest, tailT, now)];
+  for (const tracer of group) {
+    const head = flameHead(tracer, now);
+    const v = flameVertex(tracer, head, now);
+    const last = verts[verts.length - 1];
+    // A duplicate vertex gives the spline nothing to work with and can send it
+    // off sideways, so near-coincident parcels are folded together.
+    if (Math.hypot(v.x - last.x, v.y - last.y) > 1.5) verts.push(v);
+    // Fuel that has landed is ground fire, not stream. The first one to have
+    // arrived anchors the tip at the impact; everything older than it has
+    // arrived too, and drops out of the stream entirely — leaving it hanging
+    // in the air is what would drag the tip round to wherever you were
+    // pointing half a second ago.
+    if (head >= 1) break;
   }
+  return verts;
+}
 
-  // Then the stream: dull red body, orange middle, near-white core. The core
-  // is only near the nozzle — that is where the fuel is freshest and hottest,
-  // and letting it run the whole length is what made this read as a solid bar
-  // of light rather than something burning as it travels.
-  for (const [scale, colour, reach] of [
-    [1, 'rgba(220, 38, 38, 0.5)', 1],
-    [0.6, 'rgba(251, 146, 60, 0.72)', 0.78],
-    [0.26, 'rgba(254, 240, 138, 0.95)', 0.4],
-  ] as Array<[number, string, number]>) {
-    ctx.fillStyle = colour;
-    for (let i = 1; i <= FLAME_BLOBS; i++) {
-      const t = i / FLAME_BLOBS;
-      if (t > front) break;
-      // Each layer stops short of the last, so the tip is red and smoky and
-      // the throat is white.
-      const within = 1 - Math.min(1, t / reach);
-      if (within <= 0) continue;
+/**
+ * One shooter's stream: every pull of theirs still in the air, joined nozzle to
+ * tip. `group` arrives newest first.
+ */
+function drawFlameStream(ctx: CanvasRenderingContext2D, group: Tracer[], now: number): void {
+  const newest = group[0];
+  const verts = flameStreamSpine(group, now);
 
-      const arc = arcAt(t);
-      const r = FLAME_BLOB_RADIUS * widthAt(t) * scale * (0.35 + 0.65 * within);
-      // Wobble across the line, widening downrange, so the edge is ragged, and
-      // rolling with the tracer's age so the jet churns rather than sitting.
-      const churn = seed + i * 1.9 + age * 5;
-      const wob = Math.sin(churn) * 4.2 * t;
-      ctx.globalAlpha = fade * (0.5 + 0.5 * within);
+  if (verts.length >= 2) {
+    let length = 0;
+    for (let i = 1; i < verts.length; i++) {
+      length += Math.hypot(verts[i].x - verts[i - 1].x, verts[i].y - verts[i - 1].y);
+    }
+    const steps = Math.max(6, Math.min(96, Math.round(length / FLAME_STREAM_STEP)));
+
+    // Resample the spline once, then draw every layer off the same points.
+    const pts: FlameVertex[] = [];
+    const n = verts.length;
+    for (let s = 0; s <= steps; s++) {
+      const f = (s / steps) * (n - 1);
+      const i = Math.min(n - 2, Math.floor(f));
+      const t = f - i;
+      const p0 = verts[Math.max(0, i - 1)];
+      const p1 = verts[i];
+      const p2 = verts[i + 1];
+      const p3 = verts[Math.min(n - 1, i + 2)];
+      pts.push({
+        x: catmull(p0.x, p1.x, p2.x, p3.x, t),
+        y: catmull(p0.y, p1.y, p2.y, p3.y, t),
+        gy: catmull(p0.gy, p1.gy, p2.gy, p3.gy, t),
+        fade: p1.fade + (p2.fade - p1.fade) * t,
+      });
+    }
+
+    const seed = (newest.x1 * 13 + newest.y1 * 7) % 628;
+    const churnAt = (i: number) => Math.sin(seed + i * 1.9 + (now / 90) % 628);
+    /**
+     * How fat the stream is at `u`. Narrow at the nozzle where the fuel is
+     * still under pressure, spreading and breaking up as it slows — a cone,
+     * not a sausage. Fattest-in-the-middle read as a thrown blob.
+     */
+    const widthAt = (u: number) => FLAME_MOUTH_WIDTH + FLAME_TIP_WIDTH * u;
+
+    // The shadow first, flat on the ground and directly under the arc, so the
+    // lift reads as height rather than as the stream being aimed off to one
+    // side.
+    ctx.fillStyle = '#000';
+    for (let i = 0; i < pts.length; i += 3) {
+      const p = pts[i];
+      const r = FLAME_BLOB_RADIUS * widthAt(i / steps) * 0.7;
+      ctx.globalAlpha = 0.16 * p.fade;
       ctx.beginPath();
-      ctx.arc(
-        tracer.x1 + dx * t + nx * wob,
-        tracer.y1 + dy * t + ny * wob - arc * lift,
-        r,
-        0,
-        Math.PI * 2,
-      );
+      ctx.ellipse(p.x, p.gy, r, r * 0.38, 0, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // Then the stream: dull red body, orange middle, near-white core. The core
+    // is only near the nozzle — that is where the fuel is freshest and
+    // hottest, and letting it run the whole length made this read as a solid
+    // bar of light rather than something burning as it travels.
+    for (const [scale, colour, reach] of [
+      [1, 'rgba(220, 38, 38, 0.5)', 1],
+      [0.6, 'rgba(251, 146, 60, 0.72)', 0.78],
+      [0.26, 'rgba(254, 240, 138, 0.95)', 0.4],
+    ] as Array<[number, string, number]>) {
+      ctx.fillStyle = colour;
+      for (let i = 0; i < pts.length; i++) {
+        const u = i / steps;
+        // Each layer stops short of the last, so the tip is red and smoky and
+        // the throat is white.
+        const within = 1 - Math.min(1, u / reach);
+        if (within <= 0) continue;
+        const p = pts[i];
+
+        // Wobble across the stream, widening downrange, so the edge is ragged
+        // — taken from the local tangent rather than from one fixed bearing,
+        // since the stream is a curve now and has no single direction.
+        const prev = pts[Math.max(0, i - 1)];
+        const next = pts[Math.min(pts.length - 1, i + 1)];
+        const tx = next.x - prev.x;
+        const ty = next.y - prev.y;
+        const tl = Math.hypot(tx, ty) || 1;
+        const wob = churnAt(i) * 4.2 * u;
+
+        const r = FLAME_BLOB_RADIUS * widthAt(u) * scale * (0.35 + 0.65 * within);
+        ctx.globalAlpha = p.fade * (0.5 + 0.5 * within);
+        ctx.beginPath();
+        ctx.arc(p.x + (-ty / tl) * wob, p.y + (tx / tl) * wob, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 
-  // And the splash where it comes down, thrown further out as it ages so it
-  // spreads rather than sitting still and fading.
+  // And the splash where each parcel came down, thrown further out as it ages
+  // so it spreads rather than sitting still and fading. Swept, that leaves an
+  // arc of impacts along the ground, which is right — it is where the fire
+  // actually went.
   //
   // It fans *back* toward the shooter, not on past the impact. The endpoint is
   // already hard against whatever stopped the stream, so anything thrown
   // forward from it is drawn through a wall — and splashback off the thing you
   // just hit is the truer picture anyway.
-  // Nothing splashes until the fuel has actually got there. Drawing this from
-  // the first frame was the other half of the stream looking instant: the
-  // impact appeared at the same moment as the trigger.
-  if (front < 1) return;
-  const settle = Math.min(
-    1,
-    (age * FLAME_TRACER_MS - FLAME_TRAVEL_MS) / Math.max(1, FLAME_TRACER_MS - FLAME_TRAVEL_MS),
-  );
-
-  const aim = Math.atan2(dy, dx) + Math.PI;
-  for (let k = 0; k < 3; k++) {
-    const a = aim + ((k + 0.5) / 3 - 0.5) * 1.7;
-    const d = 10 + ((seed + k * 37) % 9) + settle * 22;
-    ctx.globalAlpha = fade * 0.8;
-    ctx.fillStyle = k === 1 ? '#fde047' : '#fb923c';
-    ctx.beginPath();
-    ctx.arc(tracer.x2 + Math.cos(a) * d, tracer.y2 + Math.sin(a) * d, 6 * (1 - settle * 0.45), 0, Math.PI * 2);
-    ctx.fill();
+  for (const tracer of group) {
+    if (flameHead(tracer, now) < 1) continue; // nothing splashes before the fuel arrives
+    const elapsed = now - tracer.born;
+    const fade = (1 - Math.min(1, elapsed / FLAME_TRACER_MS)) ** 1.4;
+    const settle = Math.min(
+      1,
+      (elapsed - FLAME_TRAVEL_MS) / Math.max(1, FLAME_TRACER_MS - FLAME_TRAVEL_MS),
+    );
+    const seed = (tracer.x1 * 13 + tracer.y1 * 7) % 628;
+    const aim = Math.atan2(tracer.y2 - tracer.y1, tracer.x2 - tracer.x1) + Math.PI;
+    for (let k = 0; k < 3; k++) {
+      const a = aim + ((k + 0.5) / 3 - 0.5) * 1.7;
+      const d = 10 + ((seed + k * 37) % 9) + settle * 22;
+      ctx.globalAlpha = fade * 0.8;
+      ctx.fillStyle = k === 1 ? '#fde047' : '#fb923c';
+      ctx.beginPath();
+      ctx.arc(
+        tracer.x2 + Math.cos(a) * d,
+        tracer.y2 + Math.sin(a) * d,
+        6 * (1 - settle * 0.45),
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
   }
 }
 
@@ -930,17 +1047,35 @@ export function drawTracers(
   lifetime: number,
 ): void {
   ctx.lineCap = 'butt';
-  for (const tracer of tracers) {
-    // Napalm hangs about far longer than a round does, and is the whole reason
-    // tracers carry a kind at all.
-    const life = tracer.kind === 'flame' ? FLAME_TRACER_MS : lifetime;
-    const age = (now - tracer.born) / life;
-    if (age >= 1) continue;
 
-    if (tracer.kind === 'flame') {
-      drawFlameStream(ctx, tracer, age);
-      continue;
+  // Napalm is gathered rather than drawn pull by pull: one shooter's pulls are
+  // one stream, and drawing them separately is what put a fan of straight ribs
+  // on screen instead of a hose. Keyed by shooter so two flamethrowers side by
+  // side don't get spliced into each other's streams; `who` is only sent for
+  // flame, and a stream with none falls back to a single shared group, which is
+  // the old spectator-replay case and no worse than it was.
+  let streams: Map<string, Tracer[]> | null = null;
+  for (const tracer of tracers) {
+    if (tracer.kind !== 'flame') continue;
+    if (now - tracer.born >= FLAME_TRACER_MS) continue;
+    streams ??= new Map();
+    const key = tracer.who ?? '';
+    const group = streams.get(key);
+    if (group) group.push(tracer);
+    else streams.set(key, [tracer]);
+  }
+  if (streams) {
+    for (const group of streams.values()) {
+      // Newest first: that end of the list is the nozzle.
+      group.sort((a, b) => b.born - a.born);
+      drawFlameStream(ctx, group, now);
     }
+  }
+
+  for (const tracer of tracers) {
+    if (tracer.kind === 'flame') continue; // gathered into streams above
+    const age = (now - tracer.born) / lifetime;
+    if (age >= 1) continue;
 
     ctx.globalAlpha = 1 - age;
     ctx.strokeStyle = '#fde68a';

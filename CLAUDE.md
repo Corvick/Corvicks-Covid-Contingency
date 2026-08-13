@@ -836,13 +836,62 @@ down the throw and the dull red runs the whole way — so the throat is white an
 the tip is red and smoky, instead of a solid bar of light. The cross-line
 wobble rolls with the tracer's age, so the jet churns rather than sitting.
 
+**A pull is a parcel of fuel, not a line — and that is what makes it a hose.**
+
+This is the single most important thing about the drawing. Each pull used to
+draw its own full-length stream, nozzle to impact, as a straight chord of its
+own. Hold the trigger and sweep and that puts six independent straight streams
+on screen at six different bearings: a fan of ribs. Nothing about it could
+*bend*, because every rib was straight by construction and none of them knew
+about the others.
+
+What is actually in the air at any instant is the fuel from the last few pulls,
+each at a different distance and each launched on a different bearing. Join
+those and you get a curve — newest fuel at the nozzle on the current bearing,
+oldest out at the far end on the bearing from a third of a second ago. Sweep and
+the stream trails the crosshair and bends the way water out of a hose does; hold
+still and it straightens by itself. There is no "bending" code: the parcels
+simply line up differently.
+
+- **`flameStreamSpine` is the shape**, and it is exported so it can be measured
+  without a canvas. Nozzle end first — the newest slug's *tail*, which sits at
+  the muzzle while the trigger is down and advances once it is let go, so the
+  stream detaches from the nozzle the way the last of the water does.
+- **Fuel that has landed leaves the stream.** The first parcel to have arrived
+  anchors the tip at the impact and everything older drops out — leaving them
+  in would drag the tip round to wherever you were pointing half a second ago.
+  They keep drawing their splash, so a sweep still leaves an arc of impacts,
+  which is right: that is where the fire actually went.
+- **It is splined, not joined with straight lines.** Four or five parcels is
+  four or five vertices, and joining those with segments puts a visible kink at
+  every pull. Catmull-Rom, resampled every `FLAME_STREAM_STEP`.
+- **`who` on `Shot` exists only for this.** One shooter's pulls are one stream,
+  and two officers stood together must not have theirs spliced into each other.
+  Sent for `flame` and nothing else.
+- **Continuity now costs something it didn't.** There is one body of fuel rather
+  than six ribs laid over each other, so nothing is covering the gaps any more:
+  `FLAME_STREAM_STEP` has to stay under the *narrowest* blob the stream draws,
+  which is at the throat, and `FLAME_MOUTH_WIDTH` went 0.3 → 0.5 because a 4px
+  thread that was fine under six overlapping ribs is not fine alone.
+
+Measured by counting how many separate lit bands cross a circle round the
+nozzle — one continuous stream gives 1, a fan gives one per rib, which is the
+complaint itself rather than a proxy for it. Old drawing at the flamethrower's
+full 2.6 rad/s sweep: **up to 6 bands**, and only 16 of 86 cross-sections showed
+a single one. New: **one band in 96%** of cross-sections at the same sweep, and
+100% holding still. Reproduce it with a page under `client/` that imports the
+real `drawTracers` and drives frames by hand — rAF is throttled to nothing while
+the browser pane isn't compositing, so it must not drive itself.
+
 **Drawing it is `drawFlameStream`, not three strokes.** Ruled lines read as a
-laser sight. It is a row of `FLAME_BLOBS` overlapping circles along the throw,
-fattest at the midpoint (6.6 → 15.7 → 3.4 px), lifted off the ground by
+laser sight. It is a row of overlapping circles every `FLAME_STREAM_STEP` along
+the spine, widening from the throat to the tip, lifted off the ground by
 `FLAME_ARC_LIFT` on a sine so it rises and comes back down, with a flattened
 black ellipse tracking it along the *unlifted* line — without the shadow the
 lift reads as the stream being aimed off to one side rather than as height.
-Every blob wobbles across the line so the edge is ragged.
+Every blob wobbles across the stream so the edge is ragged, and the wobble is
+taken from the **local tangent**: the stream is a curve now and has no single
+direction to be across.
 
 **The arc is screen-space, so it has to shrink when you fire up or down.** The
 lift only reads as *height* when it is across the line of travel. Fired north

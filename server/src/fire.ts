@@ -184,6 +184,9 @@ export function sprayFlame(
     y2: Math.round(stopY),
     hit: true,
     kind: 'flame',
+    // The client joins one shooter's pulls into a single bending stream, so it
+    // has to be able to tell two flamethrowers apart.
+    who: shooter.id,
   });
 }
 

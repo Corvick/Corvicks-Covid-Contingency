@@ -287,6 +287,13 @@ export interface Shot {
   y2: number;
   hit: boolean;
   kind?: ShotKind;
+  /**
+   * Who fired it. Only sent for `flame`, and only because the client has to
+   * join one shooter's pulls into a single stream — a hose is one continuous
+   * thing, and two officers stood together must not have theirs spliced into
+   * each other. Nothing else needs it, so nothing else pays for it.
+   */
+  who?: string;
 }
 
 export interface InputState {

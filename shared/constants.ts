@@ -955,7 +955,10 @@ export const FLAME_TRAVEL_MS = 300;
  * spreads as it goes and breaks up as it slows; fattest-in-the-middle read as
  * a thrown blob rather than something under pressure.
  */
-export const FLAME_MOUTH_WIDTH = 0.3;
+// Raised from 0.3 when the stream became one continuous body rather than a
+// stack of overlapping ribs: at 0.3 the throat is a 4px thread, which was
+// hidden while six pulls were drawn on top of each other and is not now.
+export const FLAME_MOUTH_WIDTH = 0.5;
 export const FLAME_TIP_WIDTH = 1.55;
 /** Screen-space lift at the peak of the arc, at full range. */
 export const FLAME_ARC_LIFT = 26;
@@ -967,8 +970,27 @@ export const FLAME_ARC_LIFT = 26;
  * stops looking like an arc and starts looking like the stream mis-aimed.
  */
 export const FLAME_ARC_VERTICAL_MIN = 0.28;
-/** Blobs drawn along one stream, and how fat it gets at its middle. */
-export const FLAME_BLOBS = 12;
+/**
+ * How long one pull's fuel takes to pass a point — the *length of the slug*,
+ * in time.
+ *
+ * A pull is a parcel of burning fuel, not a line. It has a head and a tail,
+ * and the tail is what keeps the stream anchored to the nozzle while the
+ * trigger is down: at 30Hz a 55ms cooldown fires every other tick, so parcels
+ * leave 67ms apart and anything shorter than that leaves gaps between them.
+ * Comfortably longer, so consecutive slugs overlap into one body of fuel.
+ */
+export const FLAME_SLUG_MS = 150;
+/**
+ * How far apart the blobs are drawn along the stream, in pixels.
+ *
+ * This is what continuity now costs: there is one body of fuel rather than six
+ * ribs laid over each other, so nothing else is covering the gaps. It has to
+ * stay under the *narrowest* blob the stream draws, which is at the throat —
+ * `FLAME_BLOB_RADIUS * FLAME_MOUTH_WIDTH`, 6.5px — or the jet reads as dotted
+ * where it leaves the nozzle.
+ */
+export const FLAME_STREAM_STEP = 5;
 export const FLAME_BLOB_RADIUS = 13;
 export const FLAME_COOLDOWN_MS = 55;
 /** Fuel. Deliberately generous: a flamethrower with ten shots is a novelty. */
