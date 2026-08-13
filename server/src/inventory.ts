@@ -1,5 +1,5 @@
 import type { GunSlot, InventoryState, PickupState } from '../../shared/types.js';
-import { GUN_LOOT, ITEMS, UTILITY_LOOT, isGun, type ItemId } from '../../shared/items.js';
+import { GUN_LOOT, ITEMS, UTILITY_LOOT, isGun, rarestOf, type ItemId } from '../../shared/items.js';
 import {
   GUN_SLOTS,
   UTILITY_SLOTS,
@@ -28,10 +28,13 @@ import {
   PARK_LOOT_GUN_SHARE,
   PARK_LOOT_COVER,
   PARK_LOOT_PATH_GAP,
+  POND_LOOT_GAP,
+  POND_LOOT_BAND,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
+import { pondRadiusAt } from '../../shared/pond.js';
 import { callBackup } from './police.js';
 
 export interface Inventory {
@@ -232,6 +235,39 @@ export function spawnPickups(world: World): void {
       if (crowded) continue;
 
       const id = `loot-${n++}`;
+      world.pickups.set(id, { id, item, x, y });
+      break;
+    }
+  }
+
+  // And a pair on the bank of the duck pond: one gun and one utility, both out
+  // of the scarcest tier there is. The pond was the one landmark with nothing
+  // to do in it — ornamental water, a flock of ducks, and no reason to walk
+  // over. Placed independently rather than side by side, so finding one is not
+  // finding both and you have to work your way round the water for the other.
+  const pond = world.map.pond;
+  for (const table of [rarestOf('gun'), rarestOf('utility')]) {
+    const item = table[Math.floor(Math.random() * table.length)];
+    for (let attempt = 0; attempt < 40; attempt++) {
+      // A bearing off the pond's centre, then out past the water's edge at
+      // that bearing. The edge is a radius-per-bearing rather than a circle,
+      // so this is the only honest way to sit *on the bank* all the way round.
+      const angle = Math.random() * Math.PI * 2;
+      const out = pondRadiusAt(pond, angle) + POND_LOOT_GAP + Math.random() * POND_LOOT_BAND;
+      const x = pond.x + Math.cos(angle) * out;
+      const y = pond.y + Math.sin(angle) * out;
+      if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+
+      let crowded = false;
+      for (const p of world.pickups.values()) {
+        if (Math.hypot(p.x - x, p.y - y) < LOOT_MIN_GAP) {
+          crowded = true;
+          break;
+        }
+      }
+      if (crowded) continue;
+
+      const id = `loot-pond-${item}`;
       world.pickups.set(id, { id, item, x, y });
       break;
     }
@@ -568,22 +604,37 @@ export function dropProgress(inv: Inventory, now: number): number {
 }
 
 /**
- * Bearing to the nearest zombie, or null. The tracker is the one thing that
- * sees past the fog, which is the whole of what it is for — but only while it
- * is actually in your hand, and only out to `TRACKER_RANGE`.
+ * Bearing to the nearest zombie anywhere on the map, and how far off it is.
+ *
+ * Walks every entity, so it is deliberately *not* something to call per tick
+ * per bot — see `botPatrolTarget`, which reads it only when it re-picks a
+ * destination. For a player it is once a tick, and only with one in hand.
  */
-function trackBearing(world: World, inv: Inventory, x: number, y: number): number | null {
-  if (heldItem(inv) !== 'zombieTracker') return null;
-  let best: number | null = null;
+export function nearestZombieBearing(
+  world: World,
+  x: number,
+  y: number,
+): { bearing: number; dist: number } | null {
+  let best: { bearing: number; dist: number } | null = null;
   let bestDist = TRACKER_RANGE;
   for (const e of world.entities.values()) {
     if (e.type !== 'zombie') continue;
     const d = Math.hypot(e.x - x, e.y - y);
     if (d >= bestDist) continue;
     bestDist = d;
-    best = Math.atan2(e.y - y, e.x - x);
+    best = { bearing: Math.atan2(e.y - y, e.x - x), dist: d };
   }
   return best;
+}
+
+/**
+ * The tracker is the one thing that sees past the fog, which is the whole of
+ * what it is for — but only while it is actually in your hand. That cost is
+ * the point: consulting it means not holding a gun.
+ */
+function trackBearing(world: World, inv: Inventory, x: number, y: number): number | null {
+  if (heldItem(inv) !== 'zombieTracker') return null;
+  return nearestZombieBearing(world, x, y)?.bearing ?? null;
 }
 
 export function toWireInventory(

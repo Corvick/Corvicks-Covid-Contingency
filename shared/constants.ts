@@ -73,6 +73,21 @@ export const PARK_LOOT_GUARANTEED_UTILITIES = 1;
 export const PARK_LOOT_GUN_SHARE = 0.45;
 export const PARK_LOOT_COVER = 26;
 export const PARK_LOOT_PATH_GAP = 70;
+/**
+ * A pair of good things dropped on the bank of the duck pond — one gun and one
+ * utility, both out of the scarcest tier there is (`rarestOf`).
+ *
+ * The pond is the one landmark with nothing to do in it: ornamental water, a
+ * flock of ducks, and no reason to walk over there. This gives it one. They are
+ * placed independently rather than side by side, so finding one is not finding
+ * both, and you have to work round the water.
+ *
+ * On the bank rather than in the reeds: `POND_LOOT_GAP` clear of the edge so
+ * nothing lands in water you cannot cross, and within `POND_LOOT_BAND` of it so
+ * it still reads as *pond* loot rather than as something dropped nearby.
+ */
+export const POND_LOOT_GAP = 26;
+export const POND_LOOT_BAND = 120;
 
 // ---------------------------------------------------------------- entities
 export const PLAYER_RADIUS = 14;
@@ -1326,8 +1341,16 @@ export const BACKPACK_SLOTS = 2;
 export const GUNSLING_SLOTS = 1;
 /** Binoculars push the camera out too, the way a scope does but gently. */
 export const BINOCULAR_SIGHT_RADIUS = 980;
-/** How far the zombie tracker will look before it gives up and points nowhere. */
-export const TRACKER_RANGE = 1600;
+/**
+ * How far the zombie tracker will look before it gives up and points nowhere.
+ *
+ * The whole map, and then some — derived from the diagonal so it cannot fall
+ * short if the city ever grows. It used to be 1600, which meant the one tool
+ * that sees past the fog went blank in exactly the situation it exists for:
+ * out in a quiet quarter with no idea which way the outbreak is. A compass
+ * that only works when you can nearly see the thing is not a compass.
+ */
+export const TRACKER_RANGE = Math.hypot(WORLD_WIDTH, WORLD_HEIGHT) + 100;
 
 /**
  * The charge rifle reads the infected.

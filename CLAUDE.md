@@ -500,6 +500,19 @@ Reserved ground like any other landmark, but with two rules of its own.
   something lying on the one clear line through is not hidden at all.
   Measured over six cities: 7.0 per park, at least one gun and one utility in
   every one, 0 near the path, 0 out in the open.
+- **A pair of rare things on the bank of the duck pond.** One gun and one
+  utility, both out of `rarestOf` — the scarcest tier that still appears in the
+  loot table, derived rather than hand-listed so a new rare is covered the day
+  it exists. Currently that is sniper/heavyMg/flamethrower/cureGun and
+  shield/gunner/sling/beacon/goggles/radio/pack.
+  The pond was the one landmark with nothing to do in it: ornamental water, a
+  flock of ducks, and no reason to walk over. The two are placed
+  *independently*, so finding one is not finding both and you have to work
+  round the water for the other. Positioned by bearing off the pond's centre
+  and then out past `pondRadiusAt` — the edge is a radius-per-bearing, not a
+  circle, so that is the only honest way to sit on the bank all the way round.
+  Measured over eight cities: 2/2 every time, both on the bank, 0 in the water,
+  0 unreachable, all within the band.
 - **A second pistol is the other hand, not a gun.** It costs no slot: `collect`
   sets `inv.dual` and slot 0 becomes `dualPistols`. It fires **two rounds a pull
   down parallel lines** — `pellets: 2` with `parallel: 9`, which offsets each
@@ -1318,6 +1331,25 @@ looking at fog) · `zombieTracker` (an arrow orbiting you, pointing at the
 nearest one; the only thing in the game that sees past the fog, which is why
 it must be *in hand*) · `grenade` (three to a bundle, counting down in one slot
 the way kevlar does, thrown through the launcher's own shell).
+
+**The tracker reaches the whole map.** `TRACKER_RANGE` is derived from the
+city's diagonal rather than written down (it was 1600), so it cannot fall short
+if the map grows. At 1600 the one tool that sees past the fog went blank in
+exactly the situation it exists for — out in a quiet quarter with no idea which
+way the outbreak is — and a compass that only works when you can nearly see the
+thing is not a compass. It also matters for the *endgame*: victory is
+`zombies === 0`, so the last few have to be hunted down across the whole city.
+
+**A bot uses it too, and pays the same price for it.** `botPatrolTarget` reads
+`nearestZombieBearing` and walks down it, but *only* when no patrol sample
+found anything near — which is the one case the danger field cannot cover. The
+field is sampled at fourteen points inside `BOT_PATROL_MAX`, so once the
+nearest zombie is further off than that, every sample reads the same maximum
+and the choice collapses to a random walk. The bot holds the tracker to consult
+it, exactly as a player must; that costs it nothing at the time because there
+is nothing to shoot at, and the fight branch puts a gun back in its hands the
+moment `senseThreats` finds something. Read on re-pick, never per tick —
+`nearestZombieBearing` walks every entity.
 
 **Three of them are placeables, and they all go down where you stand.**
 `zapMine` arms after `ZAP_ARM_MS` so you can step off your own, then drops

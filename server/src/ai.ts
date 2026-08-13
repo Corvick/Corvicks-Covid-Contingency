@@ -252,6 +252,7 @@ import {
   gunSlots,
   heldGunSlot,
   heldItem,
+  nearestZombieBearing,
   utilitySlots,
   type Inventory,
 } from './inventory.js';
@@ -3143,10 +3144,15 @@ function refillSlot(inv: Inventory): number {
 }
 
 /** The cure gun's slot, if one is carried with a dose left in it. */
+/** Which number a utility sits on in this bag, or -1. Numbering is contiguous. */
+function utilitySlotOf(inv: Inventory, item: ItemId): number {
+  const at = inv.utilities.indexOf(item);
+  return at < 0 ? -1 : gunSlots(inv) + 1 + at;
+}
+
 function cureGunSlot(inv: Inventory): number {
   if (inv.cureDoses <= 0) return -1;
-  const at = inv.utilities.indexOf('cureGun');
-  return at < 0 ? -1 : gunSlots(inv) + 1 + at;
+  return utilitySlotOf(inv, 'cureGun');
 }
 
 /**
@@ -3392,6 +3398,11 @@ function lootWanted(
       want = 75;
     } else if (p.item === 'backpack' && !inv.pack) {
       want = 70;
+    } else if (p.item === 'zombieTracker' && utilityRoom && !inv.utilities.includes('zombieTracker')) {
+      // A compass to the outbreak. Worth a slot for the same reason it is worth
+      // one to a player: the danger field only reaches as far as a bot samples
+      // it, so without this a bot with nothing in sight is walking at random.
+      want = 50;
     } else if (p.item === 'combatBoots' && utilityRoom && !inv.utilities.includes('combatBoots')) {
       want = 40;
     } else if (p.item === 'ammoBox' && canTakeRounds) {
@@ -3453,6 +3464,31 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
     if (score > bestScore) {
       bestScore = score;
       best = { x, y };
+    }
+  }
+
+  // Nothing anywhere in the sampled ring is near trouble, and there is a
+  // tracker in the bag. This is the case the tracker exists for and the one
+  // the danger field cannot cover: the field is read at fourteen points inside
+  // `BOT_PATROL_MAX`, so once the nearest zombie is further off than that,
+  // every sample reads the same maximum and the choice collapses to random.
+  // The tracker points at the nearest one *on the map*, so it turns a random
+  // walk into a bearing to walk down.
+  //
+  // Held, not merely carried, exactly as a player must hold it — a bot with
+  // the tracker out is a bot not holding a gun. It costs nothing here because
+  // there is nothing to shoot at; the moment `senseThreats` finds something,
+  // the fight branch puts a gun back in its hands.
+  const bag = world.inventories.get(e.id);
+  const trackerSlot = bag ? utilitySlotOf(bag, 'zombieTracker') : -1;
+  if (bag && trackerSlot > 0 && bestScore <= -DANGER_MAX_DISTANCE + standoff) {
+    const fix = nearestZombieBearing(world, e.x, e.y);
+    if (fix) {
+      bag.activeSlot = trackerSlot;
+      const reach = Math.min(fix.dist, BOT_PATROL_MAX);
+      const x = clamp(e.x + Math.cos(fix.bearing) * reach, 70, WORLD_WIDTH - 70);
+      const y = clamp(e.y + Math.sin(fix.bearing) * reach, 70, WORLD_HEIGHT - 70);
+      if (!world.nav.isBlocked(x, y) && world.nav.isReachable(x, y)) best = { x, y };
     }
   }
 

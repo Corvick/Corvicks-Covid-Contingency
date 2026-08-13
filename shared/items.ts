@@ -491,6 +491,26 @@ const weighted = (kind: ItemKind): ItemId[] =>
 export const GUN_LOOT: ItemId[] = weighted('gun');
 export const UTILITY_LOOT: ItemId[] = weighted('utility');
 
+/**
+ * The scarcest tier of a kind — everything sharing the lowest rarity weight
+ * that still appears in the loot table at all.
+ *
+ * Derived rather than hand-listed for the same reason the every-gun floor is:
+ * a hand-kept list of "the good ones" goes stale the moment something is added
+ * or re-weighted, and nothing tells you. For guns that is currently the
+ * sniper, the heavy MG, the flamethrower and the cure gun; for utilities the
+ * shield, the pocket gunner, the sling, the beacon, the goggles, the radio and
+ * the pack. Rarity 0 is excluded — those are placed by their own roll and are
+ * not a tier, they are a quota.
+ */
+export function rarestOf(kind: ItemKind): ItemId[] {
+  const ids = (Object.keys(ITEMS) as ItemId[]).filter(
+    (id) => ITEMS[id].kind === kind && ITEMS[id].rarity > 0 && id !== 'pistol',
+  );
+  const floor = Math.min(...ids.map((id) => ITEMS[id].rarity));
+  return ids.filter((id) => ITEMS[id].rarity === floor);
+}
+
 export function isGun(id: ItemId): boolean {
   return ITEMS[id].kind === 'gun';
 }
