@@ -35,7 +35,7 @@ import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';
-import { callBackup } from './police.js';
+import { callBackup } from './swat.js';
 
 export interface Inventory {
   /**

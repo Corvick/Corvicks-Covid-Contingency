@@ -22,6 +22,8 @@ export interface EntityState {
   bot?: boolean;
   /** Helicopter-dropped trooper: better shot, drawn in olive. */
   soldier?: boolean;
+  /** Out of a SWAT van: black gear, a riot shield, and a rifle to match. */
+  swat?: boolean;
   /** Still fading into existence — client dithers it in. */
   materializing?: boolean;
   /** Speech bubble text, while one is active. */
@@ -133,8 +135,8 @@ export interface MineState {
   armed: boolean;
 }
 
-/** A squad car answering the radio. Scenery once it has parked and emptied. */
-export interface PoliceCarState {
+/** A SWAT van answering the radio. Scenery once it has parked and emptied. */
+export interface SwatVanState {
   x: number;
   y: number;
   facing: number;
@@ -525,7 +527,7 @@ export type ServerMessage =
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */
       emplacements: EmplacementState[];
-      cars: PoliceCarState[];
+      vans: SwatVanState[];
       mines: MineState[];
       towers: BeaconState[];
       zaps: Array<{ x: number; y: number; at: number }>;

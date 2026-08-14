@@ -39,7 +39,7 @@ import type {
   BeaconState,
   FireState,
   MineState,
-  PoliceCarState,
+  SwatVanState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -66,7 +66,7 @@ import {
   drawBlasts,
   drawDucks,
   drawEmplacements,
-  drawPoliceCars,
+  drawSwatVans,
   drawMines,
   drawZaps,
   drawBeaconTowers,
@@ -143,7 +143,7 @@ let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
-let cars: PoliceCarState[] = [];
+let vans: SwatVanState[] = [];
 let mines: MineState[] = [];
 let towers: BeaconState[] = [];
 let zaps: Array<{ x: number; y: number; at: number }> = [];
@@ -262,7 +262,7 @@ const { send } = connect((msg) => {
     blasts = msg.blasts;
     ducks = msg.ducks;
     emplacements = msg.emplacements;
-    cars = msg.cars;
+    vans = msg.vans;
     mines = msg.mines;
     towers = msg.towers;
     zaps = msg.zaps;
@@ -1108,7 +1108,7 @@ function render() {
     // Under the entities, so the officer stands on his own emplacement rather
     // than behind it.
     // Under the bodies: officers pile out of it and stand in front of it.
-    drawPoliceCars(ctx, cars, view, now);
+    drawSwatVans(ctx, vans, view, now);
     drawMines(ctx, mines, view, now);
     drawBeaconTowers(ctx, towers, view, now);
     drawEmplacements(ctx, emplacements, view);

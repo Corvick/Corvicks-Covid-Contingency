@@ -862,6 +862,30 @@ export const BOT_SHAKEN_MS = 3500;
  * a quarter of its ticks winded, at walking pace, with the pack still coming.
  */
 export const BOT_SPRINT_TRIGGER = 220;
+/**
+ * The near field, when running.
+ *
+ * `escapeDestination` scores the far end of a bearing and its midpoint on the
+ * danger field and *nothing in between*, so a zombie sixty pixels along the
+ * chosen line costs that bearing nothing at all — and then `headingToward`
+ * routes around walls, which a body is not, and walks the bot into it at a
+ * sprint. This is the last hundred and fifty pixels, read off real positions
+ * rather than off the coarse field, and it is only ever a steer: the bot is
+ * still going where it was going.
+ */
+export const BOT_DODGE_RANGE = 150;
+/** How far off the running line something still counts as being in the way. */
+export const BOT_DODGE_CONE = 0.8;
+/** How far ahead each way round is tested for being walkable. */
+export const BOT_DODGE_PROBE = 110;
+/**
+ * How hard it swings round. Scaled by how close the body is: one at arm's
+ * length has to be gone round, one at the edge of the near field only needs
+ * leaning away from, and a fixed swing does one of those two badly.
+ */
+export const BOT_DODGE_SWING_MIN = 0.45;
+export const BOT_DODGE_SWING_MAX = 1.3;
+
 /** How far a bot probes when picking a bearing to give ground along. */
 export const BOT_GIVE_GROUND_PROBE = 130;
 /** How hard it prefers "directly away" over "roomiest" while doing it. */
@@ -1535,21 +1559,54 @@ export const RADIO_CALL_SCAN_MS = 700;
 export const ESCORT_NEAR = 90;
 export const ESCORT_FAR = 170;
 
-/** The squad car itself: how fast, where it parks, and how it empties. */
-export const CAR_SPEED = 240;
-export const CAR_ARRIVE_DIST = 16;
+/** The van itself: how fast, where it parks, and how it empties. */
+export const VAN_SPEED = 240;
+export const VAN_ARRIVE_DIST = 16;
 /**
- * How far the car starts off the map, and how far *in from the boundary* it
+ * How far the van starts off the map, and how far *in from the boundary* it
  * looks for clear ground to pull up on. Measuring the search from the entry
  * point rather than the boundary is what had it clamped flush against the
  * perimeter wall.
  */
-export const CAR_ENTRY_OFFSET = 200;
-export const CAR_PARK_MIN = 90;
-export const CAR_PARK_MAX = 700;
-export const CAR_DOOR_INTERVAL_MS = 420;
-export const CAR_LENGTH = 46;
-export const CAR_WIDTH = 22;
+export const VAN_ENTRY_OFFSET = 200;
+export const VAN_PARK_MIN = 90;
+export const VAN_PARK_MAX = 700;
+export const VAN_DOOR_INTERVAL_MS = 420;
+/**
+ * Much bigger than the patrol car it replaces (46×22). It is an armoured box
+ * with six people in the back, and at the old size the thing that turned up
+ * with a SWAT team in it looked like a hatchback.
+ */
+export const VAN_LENGTH = 82;
+export const VAN_WIDTH = 38;
+/**
+ * How much room the van needs either side of the lane it drives in down, and
+ * how finely that lane is checked. It must not arrive *through* a building —
+ * the old car was a point test against the nav grid, which a 38px-wide body
+ * with a 20px shoulder either side of it walks straight past.
+ */
+export const VAN_LANE_CLEARANCE = 30;
+export const VAN_LANE_STEP = 24;
+/**
+ * Lanes to try either side of the one lined up with the caller, before giving
+ * that edge up. One building across the caller's own line shouldn't rule out
+ * a whole side of the map when the street beside it is wide open.
+ */
+export const VAN_LANE_OFFSETS = [0, 150, -150, 300, -300, 460, -460, 620, -620];
+
+/**
+ * The crew: black gear, a riot shield each, and a semi-automatic rifle they
+ * are genuinely good with. Tighter than the dropped soldiers (0.07) because
+ * these are the ones who came when you asked, and a slower trigger than the
+ * player's own semi-auto (470ms) so a four-man stack doesn't level a street
+ * before you have crossed it.
+ */
+export const SWAT_BLOOM_RAD = 0.045;
+export const SWAT_SHOOT_INTERVAL_MS = 620;
+export const SWAT_SIGHT = 560;
+export const SWAT_COLOR = '#1c1f26';
+/** The helmet. Lighter than the gear, or the head vanishes into the body. */
+export const SWAT_HELMET_COLOR = '#4b5563';
 
 // ---------------------------------------------------------------- zap mines
 /**

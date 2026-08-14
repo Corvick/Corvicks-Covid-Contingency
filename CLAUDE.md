@@ -45,7 +45,7 @@ broadcasts. Nothing about position or combat is trusted from the client.
 Tick order in `server/src/index.ts`: rebuild nav grid if `navDirty` → rebuild
 entity grid → compute frozen (grappled) set → move players → `updateAi` →
 resolve collisions → push bodies out of sandbags → rebuild grid → work the
-emplacements → interactions → shooting → air support → squad cars → ducks → fires →
+emplacements → interactions → shooting → air support → SWAT vans → ducks → fires →
 per-viewer serialise. The whole block is skipped while `world.paused`, but
 snapshots still go out.
 
@@ -73,7 +73,7 @@ Server modules and what each owns:
 - `fire.ts` — the flamethrower stream, burning ground, and who is alight
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
-- `police.ts` — the radio's answer: a squad car in off the map, and its crew
+- `swat.ts` — the radio's answer: a SWAT van in off the map, and its crew
 - `mines.ts` — zap mines on the ground, and who they have dropped
 - `ducks.ts` — the flock on the pond
 - `spatial.ts` / `geometry.ts` — uniform grid broadphase, math primitives
@@ -1098,6 +1098,18 @@ costing the outbreak, where breaking off sooner bought nothing and cost plenty.
   neither the pace nor the cheaper drain and was carrying a slot of nothing.
   `botStaminaTick` and `botWalkSpeed` read them now, which is also what takes
   its sprint from two seconds to three and a half, and they are scored to match.
+- **Running somewhere is not the same as running there in a straight line.**
+  `escapeDestination` scores a bearing at its far end and at its midpoint on
+  the danger field and *nothing in between*, and `headingToward` then routes
+  around walls — which a body is not. So a zombie sixty pixels along the chosen
+  line cost that line nothing and the bot sprinted into it with the whole
+  street open beside it. `dodgeThreats` is the near field: the closest thing
+  inside `BOT_DODGE_RANGE` that the running line points at, gone round on
+  whichever side has more room, swinging wider the closer it is. It returns the
+  heading **unchanged** when neither way round is walkable, which is exactly
+  the cornered case — pressing on is right there. `skirtThreat` is the civilian
+  version and reads only the one tracked threat, which for a bot is routinely
+  not the one it is about to run into.
 - **Giving ground is scored against every zombie it knows about.** Kiting
   stepped on `atan2(-dy, -dx)` — directly away from the one being shot at, which
   is how you back into the second one or into the wall behind you.
@@ -1393,37 +1405,79 @@ pickup means nothing downstream ever has to cope with both.
 
 ### The radio
 
-**`police.ts` is `heli.ts` with its feet on the ground.** Something comes in
-from off the map, stops, puts people out, and the people are what matter. Two
-differences: a car has to arrive down a street, and it stays parked afterwards
-instead of flying off — a patrol car on the corner is free scenery and a
+**`swat.ts` is `heli.ts` with its feet on the ground.** Something comes in from
+off the map, stops, puts people out, and the people are what matter. Two
+differences: a van has to arrive down a street, and it stays parked afterwards
+instead of flying off — an armoured box on the corner is free scenery and a
 landmark for where your backup came from.
 
-**It stops at the map edge and the crew walk the rest.** A squad car threading
-a city to arrive at your shoulder is both a hard pathing problem and the wrong
+**It stops at the map edge and the crew walk the rest.** A van threading a city
+to arrive at your shoulder is both a hard pathing problem and the wrong
 picture; it pulls up at the cordon and they come the rest of the way on foot,
-which is the bit worth watching. The spot is the first clear ground in from the
-boundary along the bearing to the caller — measured **from the boundary**, not
-from the off-map entry point, which is what had it clamped flush against the
-perimeter wall.
+which is the bit worth watching.
 
-**The parked car is solid to bodies but not to sight or gunfire**, the same
+**Two rules about where it may come in, and both are about the whole body.**
+
+- **Never through a building.** `vanFits` tests the footprint — five points
+  down its length by three across its width, `VAN_LANE_CLEARANCE` proud —
+  against `buildingIndexAt` *and* the nav grid, and `laneClear` sweeps the same
+  width down the whole run in from the edge. The old patrol car asked
+  `nav.isBlocked` at one point, which an 82×38 body walks straight past: half
+  of it can be in a shop while its centre stands in the street.
+- **Never on the side the outbreak walked in from.** `world.outbreakSide` is
+  recorded when the breach is placed and the van picks the nearest *other*
+  edge. Backup arriving out of the breach is backup arriving through the
+  horde, and it reads as the game putting your reinforcements in the worst
+  place on the map on purpose.
+
+It tries `VAN_LANE_OFFSETS` lanes either side of the one lined up with the
+caller before giving an edge up — one building across your own line shouldn't
+rule out a whole side of the map when the street beside it is wide open.
+
+**The lane test has to start inside the perimeter.** The boundary wall is in
+the wall grid, so a ray from an off-map entry point to anywhere at all crosses
+it and `hasWallClearPath` says no. That rejected every candidate on every lane
+and quietly dropped the old patrol car onto its unchecked fallback *every
+single time* — which is why it used to park flush against the wall. Measured
+over 40 cities after the fix: 40/40 arrived, **0** on the outbreak side, **0**
+lanes through a building, **0** parked in one.
+
+**The parked van is solid to bodies but not to sight or gunfire**, the same
 trade the sandbags make and for the same reason: it is cover you shoot over.
 Deliberately not in the nav grid — routes are planned as though it weren't
 there and whoever walks into one deals with it — and it can't be destroyed.
 
-**The bubble and the crackle back are not decoration.** The car enters off-map
+**The crew are SWAT, and every part of that is real rather than drawn.** Black
+gear (`SWAT_COLOR`, with a lighter helmet or the head vanishes into the body),
+a riot shield that is an actual `riotShield` on an actual inventory — so the
+grab-denial in `updateZombie` and the band on the body in `toWire` both just
+work — and `ITEMS.semiAutoRifle` passed to `fire` as its `def`, so their rounds
+hit and carry exactly like the one a player can pick up. `SWAT_BLOOM_RAD`
+(0.045) is tighter than the dropped soldiers' 0.07: these are the ones who came
+when you asked. The trigger is slower than a player's semi-auto (620 against
+470) so a four-man stack doesn't level a street before you have crossed it.
+
+**The bubble and the crackle back are not decoration.** The van enters off-map
 and is the best part of eight seconds away, so without them picking the radio
 up does nothing at all as far as the player can tell. The reply is drawn as a
 jagged bubble (`SpeechState.radio`) because a voice coming out of your own hip
 must not read as somebody standing next to you.
 
+**The lightbar was the best thing about the patrol car and is kept.** It goes
+on flashing after the van parks, so an arrival you didn't watch still reads as
+"backup came from over there" a minute later. On something this size there is
+room for a proper bar across the roof with the halves alternating, grille
+flashers on the opposite beat, and a wash of colour on the ground — which is
+what stops it reading as a painted stripe.
+
 **Two kinds of escort, and the difference matters.** `escortId` on an NPC
 officer means "stick with this person". The crew a call dispatches keep theirs
-for good and are added to `world.soldiers`, which already means *aims far
-better* — exactly right for a unit sent to you. Grey officers already on the
-street only get one while the radio is genuinely in your hand, and lose it when
-you put it away.
+for good — `world.swat` and `world.soldiers` are both exempt from the rescan,
+exactly right for a unit sent to you. Grey officers already on the street only
+get one while the radio is genuinely in your hand, and lose it when you put it
+away. There are **three tiers of grey officer** and the whole difference is
+sight, bloom, cadence and gun: ambient (`NPC_OFFICER_*`), helicopter-dropped
+(`SOLDIER_*`, olive), and van crew (`SWAT_*`, black).
 
 The escort branch sits **below** the officer's fighting and **above** its
 patrol. An escort that breaks off a firefight to close the last twenty pixels

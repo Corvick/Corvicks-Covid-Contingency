@@ -90,7 +90,7 @@ import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
 import type { Emplacement } from './emplacement.js';
-import type { PoliceCar } from './police.js';
+import type { SwatVan } from './swat.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
 
@@ -554,8 +554,8 @@ export interface World {
    * branch having to remember to check.
    */
   stunned: Map<string, number>;
-  /** Squad cars answering the radio, and the crackle back from the handset. */
-  cars: Map<string, PoliceCar>;
+  /** SWAT vans answering the radio, and the crackle back from the handset. */
+  vans: Map<string, SwatVan>;
   radioReplies: Array<{ id: string; at: number }>;
   /** Next time to check who is holding a radio. Rarely anybody, so it's slow. */
   nextRadioScan: number;
@@ -586,11 +586,20 @@ export interface World {
   names: Map<string, string>;
   /** Ids of helicopter-dropped troops — they aim far better. */
   soldiers: Set<string>;
+  /** Ids of the crew out of a SWAT van: black gear, a shield, a rifle. */
+  swat: Set<string>;
   pathBudget: number;
   gameOver: boolean;
   victory: boolean;
   /** Where the first zombie appears — player one spawns here for testing. */
   outbreakOrigin: { x: number; y: number };
+  /**
+   * Which edge the outbreak walked in from: 0 N, 1 E, 2 S, 3 W. Kept because a
+   * SWAT van must not arrive on it — backup coming in out of the breach is
+   * backup coming in through the horde, and it reads as the game putting your
+   * reinforcements in the worst place on the map on purpose.
+   */
+  outbreakSide: number;
 }
 
 const ENTITY_CELL = 96;
@@ -1071,13 +1080,14 @@ export function createWorld(): World {
     ducks: [],
     helicopters: new Map(),
     soldiers: new Set(),
+    swat: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
     towers: [],
     mines: new Map(),
     zaps: [],
     stunned: new Map(),
-    cars: new Map(),
+    vans: new Map(),
     radioReplies: [],
     nextRadioScan: 0,
     emplacements: new Map(),
@@ -1091,6 +1101,7 @@ export function createWorld(): World {
     gameOver: false,
     victory: false,
     outbreakOrigin: { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 },
+    outbreakSide: 0,
   };
   buildStaticGrids(world);
   initDoors(world);
@@ -1137,6 +1148,7 @@ export function resetWorld(world: World): void {
   world.smokes.clear();
   world.helicopters.clear();
   world.soldiers.clear();
+  world.swat.clear();
   world.bots.clear();
   world.grapples.clear();
   world.grappleImmune.clear();
@@ -1151,7 +1163,7 @@ export function resetWorld(world: World): void {
   world.deployWanted.clear();
   world.bashReadyAt.clear();
   world.bashUntil.clear();
-  world.cars.clear();
+  world.vans.clear();
   world.towers.length = 0;
   world.mines.clear();
   world.zaps.length = 0;
@@ -1346,6 +1358,8 @@ function populate(world: World): void {
 
   // The outbreak walks in from one randomly chosen edge, spread along it.
   const side = Math.floor(Math.random() * 4); // 0 N, 1 E, 2 S, 3 W
+  // Recorded because backup is not allowed to arrive on it — see `outbreakSide`.
+  world.outbreakSide = side;
   const inset = BOUNDARY_THICKNESS + ENTITY_RADIUS.zombie + 24;
   let originX = 0;
   let originY = 0;
@@ -1565,6 +1579,7 @@ export function toWire(
   if (world.bots.has(e.id)) state.bot = true;
   if (world.burning.has(e.id)) state.burning = true;
   if (world.soldiers.has(e.id)) state.soldier = true;
+  if (world.swat.has(e.id)) state.swat = true;
 
   const until = world.materializeUntil.get(e.id);
   if (until !== undefined) {

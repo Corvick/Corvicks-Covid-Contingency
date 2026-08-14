@@ -98,6 +98,9 @@ import {
   SOLDIER_BLOOM_RAD,
   SOLDIER_SHOOT_INTERVAL_MS,
   SOLDIER_SIGHT,
+  SWAT_SIGHT,
+  SWAT_BLOOM_RAD,
+  SWAT_SHOOT_INTERVAL_MS,
   DANGER_REBUILD_MS,
   DANGER_MAX_DISTANCE,
   ESCAPE_SAMPLES,
@@ -157,6 +160,11 @@ import {
   BOT_SAFE_DIST,
   BOT_SHAKEN_MS,
   BOT_SPRINT_TRIGGER,
+  BOT_DODGE_RANGE,
+  BOT_DODGE_CONE,
+  BOT_DODGE_PROBE,
+  BOT_DODGE_SWING_MIN,
+  BOT_DODGE_SWING_MAX,
   BOT_GIVE_GROUND_PROBE,
   BOT_GIVE_GROUND_BIAS,
   BOT_DOOR_LISTEN_RANGE,
@@ -2880,11 +2888,22 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
 // ---------------------------------------------------------------- NPC officers
 
 function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
-  // Dropped troops see further, fire more often and shoot far straighter.
+  // Three tiers of grey officer, and the difference between them is entirely
+  // in these three numbers plus the gun. A SWAT crew out of a van is the best
+  // of the three: they came because you asked, and they brought rifles.
+  const swat = world.swat.has(e.id);
   const elite = world.soldiers.has(e.id);
-  const sight = elite ? SOLDIER_SIGHT : NPC_OFFICER_SIGHT;
-  const bloom = elite ? SOLDIER_BLOOM_RAD : NPC_OFFICER_BLOOM_RAD;
-  const interval = elite ? SOLDIER_SHOOT_INTERVAL_MS : NPC_OFFICER_SHOOT_INTERVAL_MS;
+  const sight = swat ? SWAT_SIGHT : elite ? SOLDIER_SIGHT : NPC_OFFICER_SIGHT;
+  const bloom = swat ? SWAT_BLOOM_RAD : elite ? SOLDIER_BLOOM_RAD : NPC_OFFICER_BLOOM_RAD;
+  const interval = swat
+    ? SWAT_SHOOT_INTERVAL_MS
+    : elite
+      ? SOLDIER_SHOOT_INTERVAL_MS
+      : NPC_OFFICER_SHOOT_INTERVAL_MS;
+  // A real gun rather than a damage number: `fire` takes an ItemDef and reads
+  // its damage and reach off it, so the crew's rifle hits exactly as hard as
+  // the one a player can pick up, and carries as far.
+  const gun = swat ? ITEMS.semiAutoRifle : undefined;
 
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
@@ -2918,7 +2937,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Don't fire until roughly on target, or they shoot at where they were.
     if (now >= state.nextShotAt && Math.abs(angleDelta(state.heading, aim)) < 0.22) {
       state.nextShotAt = now + interval;
-      fire(world, e, state.heading, bloom, now);
+      fire(world, e, state.heading, bloom, now, gun);
     }
 
     // Walk backwards to hold the far edge of their sight line, never turning
@@ -3720,6 +3739,64 @@ function nearestThreat(e: Entity, state: AiState): number {
 }
 
 /**
+ * Steer round whatever is standing in the way of where a bot is running.
+ *
+ * The route to an escape destination is planned by `headingToward`, which
+ * knows about walls and knows nothing about bodies, and the destination itself
+ * was scored on the danger field at its far end and its midpoint — so a zombie
+ * in the first hundred pixels of the chosen line costs that line nothing and
+ * the bot sprints straight into it. That is the "ran at it with somewhere else
+ * to go" case, and it is not the cornered one: this returns `desired`
+ * unchanged when neither way round is walkable, which is exactly when pressing
+ * on is right.
+ *
+ * `skirtThreat` is the civilian version and reads only `threatX/threatY` — the
+ * single tracked threat, which for a bot is routinely not the one it is about
+ * to run into. This walks `threatPoints`, already built on the perception tick.
+ */
+function dodgeThreats(world: World, e: Entity, state: AiState, desired: number): number {
+  let blockX = 0;
+  let blockY = 0;
+  let blockDist = Infinity;
+
+  for (const p of state.threatPoints) {
+    const dx = p.x - e.x;
+    const dy = p.y - e.y;
+    const d = Math.hypot(dx, dy);
+    if (d > BOT_DODGE_RANGE || d >= blockDist) continue;
+    if (Math.abs(angleDelta(desired, Math.atan2(dy, dx))) > BOT_DODGE_CONE) continue;
+    blockDist = d;
+    blockX = p.x;
+    blockY = p.y;
+  }
+  if (blockDist === Infinity) return desired;
+
+  // How much room a candidate leaves, or -Infinity for one that isn't walkable.
+  const roomAt = (angle: number): number => {
+    const px = e.x + Math.cos(angle) * BOT_DODGE_PROBE;
+    const py = e.y + Math.sin(angle) * BOT_DODGE_PROBE;
+    if (world.nav.isBlocked(px, py) || !world.nav.lineClear(e.x, e.y, px, py)) return -Infinity;
+    let clear = Infinity;
+    for (const p of state.threatPoints) {
+      const d = Math.hypot(px - p.x, py - p.y);
+      if (d < clear) clear = d;
+    }
+    return clear;
+  };
+
+  const t = 1 - Math.min(1, blockDist / BOT_DODGE_RANGE);
+  const swing = BOT_DODGE_SWING_MIN + (BOT_DODGE_SWING_MAX - BOT_DODGE_SWING_MIN) * t;
+  // Both ways round are scored rather than taking the first that is open: the
+  // near side is often the one with the rest of the pack standing on it.
+  const left = desired + swing;
+  const right = desired - swing;
+  const roomLeft = roomAt(left);
+  const roomRight = roomAt(right);
+  if (roomLeft === -Infinity && roomRight === -Infinity) return desired;
+  return roomLeft >= roomRight ? left : right;
+}
+
+/**
  * A bearing to back off along that accounts for every zombie in sight, not
  * only the one being shot at.
  *
@@ -3929,7 +4006,7 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
-      step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+      step(world, e, state, dodgeThreats(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
       return;
     }
   }
@@ -4001,7 +4078,10 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
-      step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+      // Whatever is stood in the first hundred pixels of that line is gone
+      // round rather than run at — the destination was scored on the danger
+      // field, which is far too coarse to have noticed it.
+      step(world, e, state, dodgeThreats(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
       return;
     }
 
@@ -5012,8 +5092,9 @@ function updateRadioCalls(world: World, now: number): void {
     if (world.playerIds.has(e.id) || world.bots.has(e.id)) continue;
     const state = world.ai.get(e.id);
     if (!state) continue;
-    // The dispatched crew keep theirs whatever the caller is holding now.
-    if (world.soldiers.has(e.id)) continue;
+    // The dispatched crew keep theirs whatever the caller is holding now —
+    // both the ones off a helicopter and the ones out of a van.
+    if (world.soldiers.has(e.id) || world.swat.has(e.id)) continue;
 
     let nearest: Entity | null = null;
     let bestDist = RADIO_CALL_RANGE;

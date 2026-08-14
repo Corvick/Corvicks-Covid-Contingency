@@ -19,7 +19,7 @@ import type {
   FireState,
   BeaconState,
   MineState,
-  PoliceCarState,
+  SwatVanState,
   ShotKind,
   Wall,
   Window as WindowPane,
@@ -36,6 +36,8 @@ import {
   EMPTY_PICKUP_COLOR,
   EMPLACEMENT_AMMO,
   SOLDIER_COLOR,
+  SWAT_COLOR,
+  SWAT_HELMET_COLOR,
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
   WALL_THICKNESS,
@@ -55,8 +57,8 @@ import {
   FLAME_ARC_VERTICAL_MIN,
   FIRE_FADE_FRACTION,
   SHIELD_FRONT_ARC,
-  CAR_LENGTH,
-  CAR_WIDTH,
+  VAN_LENGTH,
+  VAN_WIDTH,
   ZAP_FLASH_MS,
   ZAP_MINE_RADIUS,
 } from '../../shared/constants.js';
@@ -564,21 +566,32 @@ export function drawEntity(
   const radius = ENTITY_RADIUS[e.type];
 
   // A bot officer holds a player's slot, so it is picked out from the ambient
-  // grey ones rather than lumped in with them.
-  const base = e.soldier
-    ? SOLDIER_COLOR
-    : e.bot
-      ? BOT_OFFICER_COLOR
-      : e.npc && e.type === 'officer'
-        ? NPC_OFFICER_COLOR
-        : ENTITY_COLOR[e.type];
+  // grey ones rather than lumped in with them. SWAT come first: they are the
+  // one kind that is also `npc`, and black gear is the point of them.
+  const base = e.swat
+    ? SWAT_COLOR
+    : e.soldier
+      ? SOLDIER_COLOR
+      : e.bot
+        ? BOT_OFFICER_COLOR
+        : e.npc && e.type === 'officer'
+          ? NPC_OFFICER_COLOR
+          : ENTITY_COLOR[e.type];
 
   // Turning. The last few seconds of the incubation bleed the body toward
   // zombie red rather than snapping to it, which is the only warning anybody
   // stood next to them gets — see TURNING_TELL_MS. Everything downstream reads
   // `color`, so the head, the limbs and the far-out dot all go with it.
   const color = e.turning ? mix(base, ENTITY_COLOR.zombie, e.turning) : base;
-  const headColor = e.bot && !e.turning ? BOT_OFFICER_HEAD_COLOR : shade(color, -45);
+  // SWAT are the one case where shading the body down for the head produces
+  // black on black: their gear is already almost the darkest thing on screen.
+  // The helmet goes *lighter* instead, which is also what a helmet does.
+  const headColor =
+    e.bot && !e.turning
+      ? BOT_OFFICER_HEAD_COLOR
+      : e.swat && !e.turning
+        ? SWAT_HELMET_COLOR
+        : shade(color, -45);
 
   // Zoomed far out: one dot instead of forty-odd path operations. With four
   // hundred entities alive at the end of a round, the difference is the whole
@@ -1185,69 +1198,118 @@ export function drawStamina(
  * doesn't, so you can hear someone hammering on a door you can't see.
  */
 /**
- * A squad car. Drawn as a body with a white flank stripe and a lightbar that
- * keeps flashing after it parks, so an arrival you didn't watch still reads as
- * "your backup came from over there" a minute later.
+ * A SWAT van. An armoured box rather than a car: a long flat roof, a short
+ * bonnet at the nose, roof hatches down the spine and rear doors at the tail
+ * — which is where the crew actually come out of, so it is worth being able
+ * to see which end that is.
+ *
+ * The lightbar is kept from the patrol car it replaces and is the best thing
+ * about it: it goes on flashing after the van parks, so an arrival you didn't
+ * watch still reads as "your backup came from over there" a minute later. On
+ * something this size there is room to run it as a proper bar across the roof
+ * with the two halves alternating, plus grille flashers at the nose.
  */
-export function drawPoliceCars(
+export function drawSwatVans(
   ctx: CanvasRenderingContext2D,
-  cars: PoliceCarState[],
+  vans: SwatVanState[],
   view: Viewport,
   now: number,
 ): void {
-  const L = CAR_LENGTH / 2;
-  const W = CAR_WIDTH / 2;
-  for (const car of cars) {
-    if (!visible(view, car.x, car.y, CAR_LENGTH)) continue;
+  const L = VAN_LENGTH / 2;
+  const W = VAN_WIDTH / 2;
+  for (const van of vans) {
+    if (!visible(view, van.x, van.y, VAN_LENGTH)) continue;
     ctx.save();
-    ctx.translate(car.x, car.y);
-    ctx.rotate(car.facing);
+    ctx.translate(van.x, van.y);
+    ctx.rotate(van.facing);
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
+    // The wash of light on the ground goes down *first*, under everything.
+    // Drawn over the body it reads as a stain on the paintwork rather than as
+    // a light, which is what it looked like the first time.
+    const beat = Math.sin(now * 0.012) > 0;
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = beat ? '#ef4444' : '#3b82f6';
     ctx.beginPath();
-    ctx.roundRect(-L + 3, -W + 4, CAR_LENGTH, CAR_WIDTH, 7);
+    ctx.ellipse(-4, 0, VAN_LENGTH * 0.62, VAN_WIDTH * 1.05, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
+    ctx.beginPath();
+    ctx.roundRect(-L + 4, -W + 5, VAN_LENGTH, VAN_WIDTH, 6);
     ctx.fill();
 
     // Wheels first, so the body sits over them the way it does from above.
-    ctx.fillStyle = '#111827';
-    for (const fx of [-L + 9, L - 11]) {
-      for (const fy of [-W - 1, W - 4]) ctx.fillRect(fx, fy, 8, 5);
+    // Six of them: a heavy chassis reads as heavy partly through the axles.
+    ctx.fillStyle = '#0b0f16';
+    for (const fx of [-L + 12, 2, L - 20]) {
+      for (const fy of [-W - 2, W - 5]) ctx.fillRect(fx, fy, 11, 7);
     }
 
-    // Body: a rounded shell, nose slightly narrower than the tail.
+    // Body: a slab, near-black, with a slightly narrower bonnet at the nose.
     ctx.beginPath();
-    ctx.roundRect(-L, -W, CAR_LENGTH, CAR_WIDTH, 7);
-    ctx.fillStyle = '#f1f5f9';
+    ctx.roundRect(-L, -W, VAN_LENGTH, VAN_WIDTH, 6);
+    ctx.fillStyle = '#232a35';
     ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#080b10';
+    ctx.lineWidth = 2;
     ctx.stroke();
 
-    // The dark panel down each flank is what makes it read as a squad car.
-    ctx.fillStyle = '#1e3a8a';
-    ctx.fillRect(-L + 7, -W + 1, CAR_LENGTH - 16, 5);
-    ctx.fillRect(-L + 7, W - 6, CAR_LENGTH - 16, 5);
-
-    // Cabin: windscreen, roof, rear window.
-    ctx.fillStyle = 'rgba(30, 41, 59, 0.85)';
     ctx.beginPath();
-    ctx.roundRect(-5, -W + 3, 15, CAR_WIDTH - 6, 3);
+    ctx.roundRect(L - 20, -W + 4, 20, VAN_WIDTH - 8, 5);
+    ctx.fillStyle = '#2b3340';
     ctx.fill();
-    ctx.fillStyle = 'rgba(148, 197, 253, 0.6)';
-    ctx.fillRect(L - 16, -W + 4, 5, CAR_WIDTH - 8);
-    ctx.fillRect(-L + 11, -W + 4, 4, CAR_WIDTH - 8);
+    ctx.stroke();
+
+    // Armoured flank plating, and POLICE picked out along it in white.
+    ctx.fillStyle = '#171d26';
+    ctx.fillRect(-L + 8, -W + 2, VAN_LENGTH - 32, 6);
+    ctx.fillRect(-L + 8, W - 8, VAN_LENGTH - 32, 6);
+    ctx.fillStyle = 'rgba(226, 232, 240, 0.85)';
+    ctx.fillRect(-L + 16, -1.5, 26, 3);
+
+    // Rear doors, at the tail — the end the crew step out of.
+    ctx.strokeStyle = '#0b0f16';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-L + 5, -W + 5);
+    ctx.lineTo(-L + 5, W - 5);
+    ctx.moveTo(-L + 5, 0);
+    ctx.lineTo(-L + 1, 0);
+    ctx.stroke();
+
+    // Windscreen and the two small armoured side ports.
+    ctx.fillStyle = 'rgba(120, 150, 190, 0.5)';
+    ctx.fillRect(L - 12, -W + 6, 5, VAN_WIDTH - 12);
+    ctx.fillStyle = 'rgba(90, 115, 150, 0.42)';
+    ctx.fillRect(6, -W + 3, 9, 4);
+    ctx.fillRect(6, W - 7, 9, 4);
+
+    // Roof hatches down the spine.
+    ctx.strokeStyle = 'rgba(10, 14, 20, 0.85)';
+    ctx.lineWidth = 1;
+    for (const hx of [-16, 0]) ctx.strokeRect(hx, -7, 13, 14);
 
     // Headlights at the nose.
     ctx.fillStyle = '#fef9c3';
-    ctx.fillRect(L - 3, -W + 3, 3, 4);
-    ctx.fillRect(L - 3, W - 7, 3, 4);
+    ctx.fillRect(L - 3, -W + 5, 3, 5);
+    ctx.fillRect(L - 3, W - 10, 3, 5);
 
-    // The lightbar alternates rather than blinking together.
-    const beat = Math.sin(now * 0.012) > 0;
-    ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.65)';
-    ctx.fillRect(-4, -W + 2, 8, 4);
-    ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.65)' : '#3b82f6';
-    ctx.fillRect(-4, W - 6, 8, 4);
+    // The lightbar: a full-width bar across the roof, the two halves
+    // alternating rather than blinking together, with grille flashers picking
+    // up the opposite beat so the whole vehicle pulses.
+    const red = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.6)';
+    const blue = beat ? 'rgba(30, 60, 140, 0.6)' : '#3b82f6';
+    ctx.fillStyle = 'rgba(12, 16, 22, 0.95)';
+    ctx.fillRect(-9, -W + 1, 11, VAN_WIDTH - 2);
+    ctx.fillStyle = red;
+    ctx.fillRect(-8, -W + 2, 9, W - 2);
+    ctx.fillStyle = blue;
+    ctx.fillRect(-8, 1, 9, W - 3);
+    ctx.fillStyle = blue;
+    ctx.fillRect(L - 7, -W + 5, 3, 5);
+    ctx.fillStyle = red;
+    ctx.fillRect(L - 7, W - 10, 3, 5);
     ctx.restore();
   }
 }
