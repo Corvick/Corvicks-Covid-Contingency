@@ -19,7 +19,7 @@ import type {
   FireState,
   BeaconState,
   MineState,
-  SwatVanState,
+  BackupVehicleState,
   ShotKind,
   Wall,
   Window as WindowPane,
@@ -58,7 +58,10 @@ import {
   FIRE_FADE_FRACTION,
   SHIELD_FRONT_ARC,
   VAN_LENGTH,
+  CAR_LENGTH,
+  CAR_WIDTH,
   VAN_WIDTH,
+  RADIO_COOLDOWN_MS,
   ZAP_FLASH_MS,
   ZAP_MINE_RADIUS,
 } from '../../shared/constants.js';
@@ -1209,16 +1212,121 @@ export function drawStamina(
  * something this size there is room to run it as a proper bar across the roof
  * with the two halves alternating, plus grille flashers at the nose.
  */
-export function drawSwatVans(
+export function drawBackupVehicles(
   ctx: CanvasRenderingContext2D,
-  vans: SwatVanState[],
+  vehicles: BackupVehicleState[],
+  view: Viewport,
+  now: number,
+): void {
+  // Tyre marks go down before any of the bodies, so a van parked over the end
+  // of its own skid sits on top of it rather than under it.
+  for (const v of vehicles) {
+    if (v.skidX === undefined || v.skidY === undefined) continue;
+    if (!visible(view, v.x, v.y, 400)) continue;
+    const dx = v.x - v.skidX;
+    const dy = v.y - v.skidY;
+    const len = Math.hypot(dx, dy);
+    if (len < 4) continue;
+    const ux = dx / len;
+    const uy = dy / len;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(18, 20, 24, 0.5)';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    // A pair, spaced across the line of travel — which is the line the van
+    // kept sliding down while its body came round, so the marks are straight
+    // even though the vehicle at the end of them is sideways.
+    for (const side of [-1, 1]) {
+      const ox = -uy * side * (VAN_WIDTH / 2 - 5);
+      const oy = ux * side * (VAN_WIDTH / 2 - 5);
+      ctx.beginPath();
+      ctx.moveTo(v.skidX + ox, v.skidY + oy);
+      ctx.lineTo(v.x + ox, v.y + oy);
+      ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+    ctx.restore();
+  }
+
+  for (const vehicle of vehicles) {
+    if (vehicle.kind === 'car') drawPatrolCar(ctx, vehicle, view, now);
+    else drawSwatVan(ctx, vehicle, view, now);
+  }
+}
+
+/**
+ * The patrol car the second and third radio calls send. Kept as it always was
+ * — a white shell with a blue flank and a two-tone bar — because the whole
+ * point of it is that it is visibly *not* the van: smaller, ordinary, and
+ * carrying two officers instead of a team.
+ */
+function drawPatrolCar(
+  ctx: CanvasRenderingContext2D,
+  car: BackupVehicleState,
+  view: Viewport,
+  now: number,
+): void {
+  const L = CAR_LENGTH / 2;
+  const W = CAR_WIDTH / 2;
+  if (!visible(view, car.x, car.y, CAR_LENGTH)) return;
+  ctx.save();
+  ctx.translate(car.x, car.y);
+  ctx.rotate(car.facing);
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
+  ctx.beginPath();
+  ctx.roundRect(-L + 3, -W + 4, CAR_LENGTH, CAR_WIDTH, 7);
+  ctx.fill();
+
+  ctx.fillStyle = '#111827';
+  for (const fx of [-L + 9, L - 11]) {
+    for (const fy of [-W - 1, W - 4]) ctx.fillRect(fx, fy, 8, 5);
+  }
+
+  ctx.beginPath();
+  ctx.roundRect(-L, -W, CAR_LENGTH, CAR_WIDTH, 7);
+  ctx.fillStyle = '#f1f5f9';
+  ctx.fill();
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // The dark panel down each flank is what makes it read as a squad car.
+  ctx.fillStyle = '#1e3a8a';
+  ctx.fillRect(-L + 7, -W + 1, CAR_LENGTH - 16, 5);
+  ctx.fillRect(-L + 7, W - 6, CAR_LENGTH - 16, 5);
+
+  // Cabin: windscreen, roof, rear window.
+  ctx.fillStyle = 'rgba(30, 41, 59, 0.85)';
+  ctx.beginPath();
+  ctx.roundRect(-5, -W + 3, 15, CAR_WIDTH - 6, 3);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(148, 197, 253, 0.6)';
+  ctx.fillRect(L - 16, -W + 4, 5, CAR_WIDTH - 8);
+  ctx.fillRect(-L + 11, -W + 4, 4, CAR_WIDTH - 8);
+
+  ctx.fillStyle = '#fef9c3';
+  ctx.fillRect(L - 3, -W + 3, 3, 4);
+  ctx.fillRect(L - 3, W - 7, 3, 4);
+
+  const beat = Math.sin(now * 0.012) > 0;
+  ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.65)';
+  ctx.fillRect(-4, -W + 2, 8, 4);
+  ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.65)' : '#3b82f6';
+  ctx.fillRect(-4, W - 6, 8, 4);
+  ctx.restore();
+}
+
+function drawSwatVan(
+  ctx: CanvasRenderingContext2D,
+  van: BackupVehicleState,
   view: Viewport,
   now: number,
 ): void {
   const L = VAN_LENGTH / 2;
   const W = VAN_WIDTH / 2;
-  for (const van of vans) {
-    if (!visible(view, van.x, van.y, VAN_LENGTH)) continue;
+  {
+    if (!visible(view, van.x, van.y, VAN_LENGTH)) return;
     ctx.save();
     ctx.translate(van.x, van.y);
     ctx.rotate(van.facing);
@@ -1964,6 +2072,7 @@ export function drawInventory(
   inv: InventoryState,
   vw: number,
   vh: number,
+  now: number,
 ): void {
   // Only the slots this bag can actually use are drawn: the fourth gun slot
   // appears with a gunsling, the last two utility slots with a backpack. A
@@ -1988,7 +2097,12 @@ export function drawInventory(
             ? inv.mines
             : item === 'cureGun'
               ? inv.cureDoses
-              : null,
+              : // Three calls in a radio and a minute between them, and both
+                // of those are decisions rather than trivia — the count has to
+                // be on the bar the same way a bundle's is.
+                item === 'radio'
+                ? inv.radioUses
+                : null,
     });
   }
 
@@ -2041,6 +2155,17 @@ export function drawInventory(
       ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
       ctx.fillText(String(cell.ammo), x + size - 3, y + size - 2);
+    }
+
+    // The radio's minute, as a bar draining across the bottom of its own cell.
+    // A number counting down would be read as ammunition; the whole question
+    // here is "can I press it yet", and a bar answers that without being read.
+    if (cell.item === 'radio' && inv.radioReadyAt > now) {
+      const left = Math.max(0, Math.min(1, (inv.radioReadyAt - now) / RADIO_COOLDOWN_MS));
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+      ctx.fillRect(x + 1, y + size - 5, size - 2, 4);
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.9)';
+      ctx.fillRect(x + 1, y + size - 5, (size - 2) * left, 4);
     }
   });
 

@@ -13,6 +13,7 @@ import {
   LOOT_MIN_GAP,
   GRENADE_COUNT,
   ZAP_MINE_COUNT,
+  RADIO_USES,
   BACKPACK_SLOTS,
   GUNSLING_SLOTS,
   TRACKER_RANGE,
@@ -35,7 +36,7 @@ import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';
-import { callBackup } from './swat.js';
+import { callBackup } from './backup.js';
 
 export interface Inventory {
   /**
@@ -61,6 +62,15 @@ export interface Inventory {
   /** Cure doses left. Same arrangement again — see `utilitySlot`. */
   cureDoses: number;
   /**
+   * Calls left on the radio, and the earliest it will answer again.
+   *
+   * Both ride the *pickup* through a drop, so putting it down and picking it
+   * up again is neither a way to get the good first call back nor a way to
+   * skip the minute's wait.
+   */
+  radioUses: number;
+  radioReadyAt: number;
+  /**
    * Worn upgrades. They take no numbered slot of their own — a sling and a
    * pack are things you have on, not things you select — so they are flags
    * rather than entries in `utilities`.
@@ -85,6 +95,8 @@ export function newInventory(): Inventory {
     grenades: 0,
     mines: 0,
     cureDoses: 0,
+    radioUses: 0,
+    radioReadyAt: 0,
     sling: false,
     pack: false,
     holdSince: null,
@@ -378,7 +390,14 @@ export function heldGunSlot(inv: Inventory): GunSlot | null {
  */
 type UtilityOutcome = 'used' | 'carry' | 'refuse';
 
-function applyUtility(world: World, playerId: string, inv: Inventory, item: ItemId): UtilityOutcome {
+function applyUtility(
+  world: World,
+  playerId: string,
+  inv: Inventory,
+  item: ItemId,
+  /** The thing on the floor, for kit that remembers what is left of it. */
+  pickup?: PickupState,
+): UtilityOutcome {
   // An ammo box tops up the gun in your hands and is gone. The pistol has
   // unlimited rounds, so it refuses rather than letting you waste the box.
   // A box is rounds, not a magazine: it adds to whatever the gun in your hands
@@ -409,10 +428,13 @@ function applyUtility(world: World, playerId: string, inv: Inventory, item: Item
   // Worn like the vest, and like the vest it costs a slot for as long as it
   // lasts. It goes up the moment you pick it up — a shield on your back is a
   // decision, not a default.
-  // The radio calls a car in the moment it is picked up, and then keeps
-  // working as long as you hold it out. One call per radio.
+  // The radio is worked by hand now rather than going off on pickup — see the
+  // `radio` branch in `fireHeld`. What happens here is only that it remembers:
+  // a radio lying on the floor carries what is left of it, so the one you find
+  // may already have had its best call spent by whoever dropped it.
   if (item === 'radio') {
-    callBackup(world, world.entities.get(playerId)!, Date.now());
+    inv.radioUses = pickup?.uses ?? RADIO_USES;
+    inv.radioReadyAt = pickup?.readyAt ?? 0;
     return 'carry';
   }
   if (item === 'riotShield') {
@@ -490,7 +512,7 @@ export function collect(
   // both a gun and a thing you carry on the belt, so the slot question is
   // asked separately from every other question about it.
   if (def.kind === 'utility' || def.utilitySlot) {
-    const outcome = applyUtility(world, playerId, inv, pickup.item);
+    const outcome = applyUtility(world, playerId, inv, pickup.item, pickup);
     if (outcome === 'refuse') return 'nothing that would use it';
     if (outcome === 'used') {
       world.pickups.delete(pickup.id);
@@ -590,8 +612,23 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
     inv.shieldUp = false;
   }
 
+  // Unlike every other bundle above, the radio's count is not thrown away —
+  // it goes down with the set. A radio remembers what it has already sent, so
+  // the one you find on a floor may have had its best call spent already, and
+  // dropping your own is not a way to get that call back.
+  const uses = item === 'radio' ? inv.radioUses : undefined;
+  const readyAt = item === 'radio' ? inv.radioReadyAt : undefined;
+  if (item === 'radio') {
+    inv.radioUses = 0;
+    inv.radioReadyAt = 0;
+  }
+
   const id = `loot-drop-${Math.random().toString(36).slice(2, 9)}`;
-  world.pickups.set(id, ammo === undefined ? { id, item, x, y } : { id, item, x, y, ammo });
+  const dropped: PickupState = { id, item, x, y };
+  if (ammo !== undefined) dropped.ammo = ammo;
+  if (uses !== undefined) dropped.uses = uses;
+  if (readyAt !== undefined) dropped.readyAt = readyAt;
+  world.pickups.set(id, dropped);
   inv.activeSlot = 0;
   return `dropped ${ITEMS[item].label}`;
 }
@@ -657,6 +694,8 @@ export function toWireInventory(
     grenades: inv.grenades,
     mines: inv.mines,
     cureDoses: inv.cureDoses,
+    radioUses: inv.radioUses,
+    radioReadyAt: inv.radioReadyAt,
     gunSlots: gunSlots(inv),
     utilitySlots: utilitySlots(inv),
     dropProgress: dropProgress(inv, now),

@@ -135,12 +135,22 @@ export interface MineState {
   armed: boolean;
 }
 
-/** A SWAT van answering the radio. Scenery once it has parked and emptied. */
-export interface SwatVanState {
+/**
+ * Whatever the radio sent. Scenery once it has parked and emptied.
+ *
+ * `facing` is the *body* angle, which during a hard stop is not the direction
+ * of travel — the van slews. The tyre marks are drawn from `skidX`/`skidY`,
+ * the point the brakes went on, so the client doesn't have to remember when
+ * that was.
+ */
+export interface BackupVehicleState {
+  kind: 'van' | 'car';
   x: number;
   y: number;
   facing: number;
   parked: boolean;
+  skidX?: number;
+  skidY?: number;
 }
 
 /** What pressing or holding E would do to the door you're stood at. */
@@ -377,6 +387,13 @@ export interface PickupState {
    * is how everyone else knows not to bother walking over for it.
    */
   ammo?: number;
+  /**
+   * Calls left on a dropped radio, and when it will next answer. A radio
+   * remembers what it has already sent: putting it down and picking it up
+   * again is not a way to get the good call back, or to skip the minute.
+   */
+  uses?: number;
+  readyAt?: number;
 }
 
 /** One of the three gun slots. */
@@ -404,6 +421,9 @@ export interface InventoryState {
   mines: number;
   /** Cure doses left. */
   cureDoses: number;
+  /** Calls left on the radio, and when it will next answer (0 for ready). */
+  radioUses: number;
+  radioReadyAt: number;
   /** How many of each kind of slot this bag can use, sling and pack included. */
   gunSlots: number;
   utilitySlots: number;
@@ -527,7 +547,7 @@ export type ServerMessage =
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */
       emplacements: EmplacementState[];
-      vans: SwatVanState[];
+      vehicles: BackupVehicleState[];
       mines: MineState[];
       towers: BeaconState[];
       zaps: Array<{ x: number; y: number; at: number }>;

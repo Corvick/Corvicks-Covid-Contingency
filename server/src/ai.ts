@@ -101,6 +101,9 @@ import {
   SWAT_SIGHT,
   SWAT_BLOOM_RAD,
   SWAT_SHOOT_INTERVAL_MS,
+  RIFLEMAN_SIGHT,
+  RIFLEMAN_BLOOM_RAD,
+  RIFLEMAN_SHOOT_INTERVAL_MS,
   DANGER_REBUILD_MS,
   DANGER_MAX_DISTANCE,
   ESCAPE_SAMPLES,
@@ -278,7 +281,7 @@ import {
 import { zombieAtSandbag } from './emplacement.js';
 import { OUTSIDE } from './rooms.js';
 
-import { ITEMS, type ItemId } from '../../shared/items.js';
+import { ITEMS, type ItemDef, type ItemId } from '../../shared/items.js';
 import type { Bush, PickupState, Wall } from '../../shared/types.js';
 import {
   addPlea,
@@ -2887,23 +2890,52 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
 
 // ---------------------------------------------------------------- NPC officers
 
-function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
-  // Three tiers of grey officer, and the difference between them is entirely
-  // in these three numbers plus the gun. A SWAT crew out of a van is the best
-  // of the three: they came because you asked, and they brought rifles.
-  const swat = world.swat.has(e.id);
-  const elite = world.soldiers.has(e.id);
-  const sight = swat ? SWAT_SIGHT : elite ? SOLDIER_SIGHT : NPC_OFFICER_SIGHT;
-  const bloom = swat ? SWAT_BLOOM_RAD : elite ? SOLDIER_BLOOM_RAD : NPC_OFFICER_BLOOM_RAD;
-  const interval = swat
-    ? SWAT_SHOOT_INTERVAL_MS
-    : elite
-      ? SOLDIER_SHOOT_INTERVAL_MS
-      : NPC_OFFICER_SHOOT_INTERVAL_MS;
+/**
+ * What kind of shot a grey officer is. Four grades, and the whole of the
+ * difference between them is these four values — how far they see, how wide
+ * they spray, how often they pull, and what they are pulling.
+ *
+ * A lookup rather than a chain of ternaries because there are four of them
+ * now: ambient officers who were already on the street and can barely hit a
+ * wall, the two riflemen out of a patrol car, a SWAT team out of a van, and
+ * troops off a helicopter. Anybody the radio sent is better than anybody who
+ * was already standing there, which is the point of picking the handset up.
+ */
+function officerGrade(
+  world: World,
+  id: string,
+): { sight: number; bloom: number; interval: number; gun?: ItemDef } {
   // A real gun rather than a damage number: `fire` takes an ItemDef and reads
-  // its damage and reach off it, so the crew's rifle hits exactly as hard as
-  // the one a player can pick up, and carries as far.
-  const gun = swat ? ITEMS.semiAutoRifle : undefined;
+  // its damage and reach off it, so a crew's rifle hits exactly as hard as the
+  // one a player can pick up off the floor, and carries as far.
+  if (world.swat.has(id)) {
+    return {
+      sight: SWAT_SIGHT,
+      bloom: SWAT_BLOOM_RAD,
+      interval: SWAT_SHOOT_INTERVAL_MS,
+      gun: ITEMS.semiAutoRifle,
+    };
+  }
+  if (world.riflemen.has(id)) {
+    return {
+      sight: RIFLEMAN_SIGHT,
+      bloom: RIFLEMAN_BLOOM_RAD,
+      interval: RIFLEMAN_SHOOT_INTERVAL_MS,
+      gun: ITEMS.boltRifle,
+    };
+  }
+  if (world.soldiers.has(id)) {
+    return { sight: SOLDIER_SIGHT, bloom: SOLDIER_BLOOM_RAD, interval: SOLDIER_SHOOT_INTERVAL_MS };
+  }
+  return {
+    sight: NPC_OFFICER_SIGHT,
+    bloom: NPC_OFFICER_BLOOM_RAD,
+    interval: NPC_OFFICER_SHOOT_INTERVAL_MS,
+  };
+}
+
+function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
+  const { sight, bloom, interval, gun } = officerGrade(world, e.id);
 
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
@@ -3926,6 +3958,30 @@ function doorWatchTick(
 }
 
 /**
+ * Call it in. A bot has to work the handset the way a player does now — the
+ * radio used to fire its one call the instant it was picked up, and moving
+ * that to a click would otherwise leave every bot in the city carrying one it
+ * never pressed.
+ *
+ * Held for exactly the moment it takes, like the pocket gunner: a bot with a
+ * radio in its hands is a bot not holding a gun, and there is a fight on. The
+ * count and the cooldown both live on the bag, so this can be asked every tick
+ * something is in sight and will simply refuse until it is ready.
+ */
+function radioTick(world: World, e: Entity, inv: Inventory, now: number): boolean {
+  if (inv.radioUses <= 0 || now < inv.radioReadyAt) return false;
+  const slot = utilitySlotOf(inv, 'radio');
+  if (slot <= 0) return false;
+
+  inv.activeSlot = slot;
+  const called = fireHeld(world, e, inv, e.facing, now);
+  // Back to a gun whatever came of it. `bestGun` rather than the slot it was
+  // on: a spent radio has just been spliced out and everything after it moved.
+  inv.activeSlot = bestGun(inv).slot;
+  return called;
+}
+
+/**
  * Sprint reserve: spent while bolting, refilled while doing anything else.
  *
  * Boots are read here because nothing else was reading them. They are applied
@@ -4035,6 +4091,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     if (dropMine(world, e, state, now)) return;
     // And a gun crew goes down facing whatever it just saw.
     if (gunnerTick(world, e, state, inv, aim, now)) return;
+    // Backup takes seconds to arrive, so the moment to ask for it is the
+    // moment something is seen rather than the moment things are going badly.
+    if (radioTick(world, e, inv, now)) return;
 
     // Judged on the *nearest* zombie in sight, not the one being shot at —
     // those are often different, and a bot trading fire with something across
@@ -5092,9 +5151,11 @@ function updateRadioCalls(world: World, now: number): void {
     if (world.playerIds.has(e.id) || world.bots.has(e.id)) continue;
     const state = world.ai.get(e.id);
     if (!state) continue;
-    // The dispatched crew keep theirs whatever the caller is holding now —
-    // both the ones off a helicopter and the ones out of a van.
-    if (world.soldiers.has(e.id) || world.swat.has(e.id)) continue;
+    // Anyone a call sent keeps theirs whatever the caller is holding now. That
+    // includes the van's *driver*, who is an ordinary grey officer by every
+    // other measure and would otherwise be rescanned off your shoulder the
+    // moment you put the handset away.
+    if (world.dispatched.has(e.id) || world.soldiers.has(e.id)) continue;
 
     let nearest: Entity | null = null;
     let bestDist = RADIO_CALL_RANGE;

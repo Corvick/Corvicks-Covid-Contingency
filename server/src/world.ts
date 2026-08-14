@@ -90,7 +90,7 @@ import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { initDucks, type Duck } from './ducks.js';
 import type { Emplacement } from './emplacement.js';
-import type { SwatVan } from './swat.js';
+import type { BackupVehicle } from './backup.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
 
@@ -554,8 +554,8 @@ export interface World {
    * branch having to remember to check.
    */
   stunned: Map<string, number>;
-  /** SWAT vans answering the radio, and the crackle back from the handset. */
-  vans: Map<string, SwatVan>;
+  /** Whatever the radio sent, and the crackle back from the handset. */
+  vehicles: Map<string, BackupVehicle>;
   radioReplies: Array<{ id: string; at: number }>;
   /** Next time to check who is holding a radio. Rarely anybody, so it's slow. */
   nextRadioScan: number;
@@ -588,6 +588,15 @@ export interface World {
   soldiers: Set<string>;
   /** Ids of the crew out of a SWAT van: black gear, a shield, a rifle. */
   swat: Set<string>;
+  /** Ids of the two out of a patrol car: grey, but with bolt action rifles. */
+  riflemen: Set<string>;
+  /**
+   * Everyone a radio call sent, whatever grade. This is the one that keeps an
+   * escort: the van driver is an ordinary grey officer by every other measure
+   * and would otherwise be rescanned off your shoulder the moment you put the
+   * handset away.
+   */
+  dispatched: Set<string>;
   pathBudget: number;
   gameOver: boolean;
   victory: boolean;
@@ -1081,13 +1090,15 @@ export function createWorld(): World {
     helicopters: new Map(),
     soldiers: new Set(),
     swat: new Set(),
+    riflemen: new Set(),
+    dispatched: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
     towers: [],
     mines: new Map(),
     zaps: [],
     stunned: new Map(),
-    vans: new Map(),
+    vehicles: new Map(),
     radioReplies: [],
     nextRadioScan: 0,
     emplacements: new Map(),
@@ -1149,6 +1160,8 @@ export function resetWorld(world: World): void {
   world.helicopters.clear();
   world.soldiers.clear();
   world.swat.clear();
+  world.riflemen.clear();
+  world.dispatched.clear();
   world.bots.clear();
   world.grapples.clear();
   world.grappleImmune.clear();
@@ -1163,7 +1176,7 @@ export function resetWorld(world: World): void {
   world.deployWanted.clear();
   world.bashReadyAt.clear();
   world.bashUntil.clear();
-  world.vans.clear();
+  world.vehicles.clear();
   world.towers.length = 0;
   world.mines.clear();
   world.zaps.length = 0;

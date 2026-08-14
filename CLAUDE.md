@@ -45,7 +45,7 @@ broadcasts. Nothing about position or combat is trusted from the client.
 Tick order in `server/src/index.ts`: rebuild nav grid if `navDirty` → rebuild
 entity grid → compute frozen (grappled) set → move players → `updateAi` →
 resolve collisions → push bodies out of sandbags → rebuild grid → work the
-emplacements → interactions → shooting → air support → SWAT vans → ducks → fires →
+emplacements → interactions → shooting → air support → radio backup → ducks → fires →
 per-viewer serialise. The whole block is skipped while `world.paused`, but
 snapshots still go out.
 
@@ -73,7 +73,7 @@ Server modules and what each owns:
 - `fire.ts` — the flamethrower stream, burning ground, and who is alight
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
-- `swat.ts` — the radio's answer: a SWAT van in off the map, and its crew
+- `backup.ts` — the radio's answer: a van or a car in off the map, and its crew
 - `mines.ts` — zap mines on the ground, and who they have dropped
 - `ducks.ts` — the flock on the pond
 - `spatial.ts` / `geometry.ts` — uniform grid broadphase, math primitives
@@ -565,8 +565,12 @@ Reserved ground like any other landmark, but with two rules of its own.
   reason. Bots understand it through `lootWanted`, which scores a duplicate by
   how empty the copy they carry is (`BOT_REFILL_APPETITE`), so a bot with a
   full rifle ignores one and a bot down to its last few crosses the street.
-- **Bots carry the belt too.** They value the radio highest (four better-aiming
-  officers who then stay with them), then the sling and pack — worn, so free —
+- **Bots carry the belt too.** They value the radio highest (a van, a SWAT
+  team, and two patrol cars after it, all of whom then stay with them), and
+  `radioTick` works the handset the moment something comes into view — the
+  radio fires on a *click* now rather than on pickup, and without that every
+  bot in the city would carry one it never pressed. Then the sling and pack —
+  worn, so free —
   then thermal, frags, mines and boots. A frag only goes at a cluster of
   `BOT_FRAG_MIN_TARGETS`, because a bot spending its last one on a straggler
   has nothing left when the street fills; a mine is only laid while `bolting`,
@@ -1405,11 +1409,57 @@ pickup means nothing downstream ever has to cope with both.
 
 ### The radio
 
-**`swat.ts` is `heli.ts` with its feet on the ground.** Something comes in from
-off the map, stops, puts people out, and the people are what matter. Two
-differences: a van has to arrive down a street, and it stays parked afterwards
-instead of flying off — an armoured box on the corner is free scenery and a
-landmark for where your backup came from.
+**`backup.ts` is `heli.ts` with its feet on the ground.** Something comes in
+from off the map, stops, puts people out, and the people are what matter. Two
+differences: it has to arrive down a street, and it stays parked afterwards
+instead of flying off — a vehicle on the corner is free scenery and a landmark
+for where your backup came from.
+
+**The handset is three calls and then it is gone, and they are not equal.** The
+first sends the **van** and the SWAT team in it; the second and third send a
+**patrol car** with two officers who have bolt action rifles. That is the whole
+decision the item poses — the good call is the one you spend early, on the
+wrong fight, because you had it.
+
+- **A minute between calls** (`RADIO_COOLDOWN_MS`), and squeezing it before
+  dispatch will talk to you again gets `RADIO_STATIC_LINE` back in the same
+  jagged bubble a real reply comes in. It is coming out of the same handset on
+  your own hip, and without it pressing the button during the wait does
+  nothing whatsoever as far as the player can tell — which is the exact
+  problem the reply bubble was added to fix in the first place.
+- **The radio remembers, and it remembers on the floor.** `radioUses` and
+  `radioReadyAt` ride the *pickup* through a drop, like a gun's rounds do, so a
+  radio you find may have had its van spent by whoever left it — and dropping
+  your own is neither a way to get that call back nor a way to skip the minute.
+  Every other bundle (`grenades`, `mines`, `cureDoses`) is zeroed on drop; this
+  one deliberately is not.
+- **It is worked by hand, not by picking it up.** It used to fire its one call
+  the instant it was collected, which is no decision at all. It is a branch in
+  `fireHeld` now, like the mine and the beacon.
+- **The count and the minute are both on the slot bar** — the count where a
+  bundle's is, the minute as a bar draining across the bottom of the cell. A
+  number counting down reads as ammunition; the only question here is "can I
+  press it yet", and a bar answers that without being read.
+
+**The van comes in hot and stops like it.** `VAN_APPROACH_SPEED` in,
+`VAN_BRAKE_DIST` out the brakes go on, and the body slews `VAN_SLEW_ANGLE` off
+the line it is still sliding down — the momentum carries straight on while the
+back end comes round, which is the whole of what a handbrake stop looks like
+from above. `heading` is the line of travel and never bends; `facing` is the
+body and is what goes on the wire. That split is what makes it read as a slide
+rather than as a turn. Tyre marks are laid from the moment the brakes go on
+(`skidX`/`skidY`) and stay there afterwards.
+
+The **car does none of it**. Two officers turning up is a smaller event than a
+SWAT team arriving and should read as one.
+
+**Who gets out of where is not decoration.** The van empties out of the
+**back** — four SWAT, that is where the doors are — and then **one ordinary
+grey officer with ordinary bad aim gets out of the cab at the front**, because
+somebody was driving. `stepDown` holds the side it was given rather than using
+`findSpawnNear`, which scatters in a random direction and had the team spread
+around the whole vehicle with the driver arriving behind it. Measured: 4 out
+the back, 1 out the front.
 
 **It stops at the map edge and the crew walk the rest.** A van threading a city
 to arrive at your shoulder is both a hard pathing problem and the wrong
@@ -1456,6 +1506,27 @@ hit and carry exactly like the one a player can pick up. `SWAT_BLOOM_RAD`
 (0.045) is tighter than the dropped soldiers' 0.07: these are the ones who came
 when you asked. The trigger is slower than a player's semi-auto (620 against
 470) so a four-man stack doesn't level a street before you have crossed it.
+
+**Four grades of grey officer, and `officerGrade` is all of the difference.**
+Sight, bloom, cadence, and what they are holding — a lookup rather than a chain
+of ternaries, because there are four now:
+
+| | sight | bloom | cadence | gun |
+|---|---|---|---|---|
+| ambient, already on the street | 420 | 0.22 | 2000 | — |
+| the van's **driver** | as ambient — he was driving, not shooting |
+| **riflemen**, out of a patrol car | 620 | 0.045 | 1150 | bolt action |
+| **SWAT**, out of a van | 560 | 0.045 | 620 | semi-auto |
+| **soldiers**, off a helicopter | 520 | 0.07 | 850 | — |
+
+Anybody the radio sent is a better shot than anybody who was already standing
+there, which is most of the point of picking the handset up. Only SWAT and
+soldiers carry a wire flag — riflemen and the driver are grey like any other
+officer, and nothing about them needs drawing differently.
+
+**`world.dispatched` is what keeps an escort**, not `world.soldiers`. The van's
+driver is an ordinary grey officer by every other measure and would otherwise
+be rescanned off your shoulder the moment you put the handset away.
 
 **The bubble and the crackle back are not decoration.** The van enters off-map
 and is the best part of eight seconds away, so without them picking the radio

@@ -18,6 +18,10 @@ import {
   ENTITY_MAX_HEALTH,
   GRENADE_THROW_RANGE,
   GRENADE_COOLDOWN_MS,
+  RADIO_USES,
+  RADIO_COOLDOWN_MS,
+  RADIO_STATIC_LINE,
+  RADIO_SPEECH_MS,
   HEADSHOT_ARC,
   DEPLOY_MS,
   TAP_MAX_MS,
@@ -54,6 +58,7 @@ import { heldGunSlot, heldItem, type Inventory } from './inventory.js';
 import { damageDoor } from './doors.js';
 import { scareDucks } from './ducks.js';
 import { deployEmplacement } from './emplacement.js';
+import { callBackup } from './backup.js';
 import { sprayFlame } from './fire.js';
 import { placeMine } from './mines.js';
 
@@ -461,6 +466,46 @@ export function fireHeld(
     const at = inv.utilities.indexOf('pocketGunner');
     if (at >= 0) inv.utilities.splice(at, 1);
     inv.activeSlot = 0;
+    return true;
+  }
+
+  // The handset. Three calls in it, a minute between them, and the *first* one
+  // is the one worth having — it sends the van and the SWAT team in the back.
+  // The two after it get a patrol car and two officers with rifles, which is
+  // help, but it is not the same help, and spending the good call early is the
+  // decision the item exists to pose.
+  //
+  // Squeeze it before dispatch will talk to you again and all you get is
+  // noise, in the same jagged bubble a real reply comes back in — it is coming
+  // out of the same handset on your own hip. Without that, pressing the button
+  // during the minute does nothing whatsoever as far as the player can tell,
+  // which is the exact problem the reply bubble exists to fix.
+  if (held === 'radio') {
+    if (!ready(GRENADE_COOLDOWN_MS)) return false;
+    world.lastShotAt.set(id, now);
+
+    if (now < inv.radioReadyAt) {
+      world.speech.set(id, { text: RADIO_STATIC_LINE, until: now + RADIO_SPEECH_MS, radio: true });
+      return true;
+    }
+    if (inv.radioUses <= 0) return false;
+
+    // The van goes on the first call this radio has ever made, not on the
+    // holder's first — which is what makes a radio somebody else has already
+    // used worth less than one nobody has touched.
+    const kind = inv.radioUses >= RADIO_USES ? 'van' : 'car';
+    callBackup(world, shooter, now, kind);
+    inv.radioUses--;
+    inv.radioReadyAt = now + RADIO_COOLDOWN_MS;
+
+    // Out of calls: the set is dead weight and goes, the way a spent bundle
+    // clears its own slot.
+    if (inv.radioUses <= 0) {
+      const slotOf = inv.utilities.indexOf('radio');
+      if (slotOf >= 0) inv.utilities.splice(slotOf, 1);
+      inv.radioReadyAt = 0;
+      inv.activeSlot = 0;
+    }
     return true;
   }
 

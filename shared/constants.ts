@@ -1551,7 +1551,27 @@ export const RADIO_CALL_LINE = 'Requesting backup!';
 export const RADIO_REPLY_LINE = 'Sending available unit';
 export const RADIO_REPLY_DELAY_MS = 1100;
 export const RADIO_SPEECH_MS = 2600;
+/**
+ * The radio is three calls and then it is gone, and the *first* of those is
+ * the one worth having: it sends the van and the SWAT team in it. The second
+ * and third get a patrol car and two officers, which is help, but it is not
+ * the same help. Spending the good one early is the decision the item exists
+ * to pose.
+ */
+export const RADIO_USES = 3;
+export const RADIO_COOLDOWN_MS = 60000;
+/**
+ * Squeeze the handset before dispatch will talk to you again and all you get
+ * is noise. It comes back in the same jagged bubble a real reply does, because
+ * it is coming out of the same handset on your own hip — and without it,
+ * pressing the button during the minute's wait does nothing whatsoever as far
+ * as the player can tell, which is the exact problem the reply bubble was
+ * added to fix in the first place.
+ */
+export const RADIO_STATIC_LINE = 'ssshhhkk—';
+/** Four out of the van; two out of the car. */
 export const RADIO_BACKUP_COUNT = 4;
+export const RADIO_CAR_BACKUP_COUNT = 2;
 /** How far a grey officer will hear the radio and come in, while it is out. */
 export const RADIO_CALL_RANGE = 1500;
 export const RADIO_CALL_SCAN_MS = 700;
@@ -1559,19 +1579,19 @@ export const RADIO_CALL_SCAN_MS = 700;
 export const ESCORT_NEAR = 90;
 export const ESCORT_FAR = 170;
 
-/** The van itself: how fast, where it parks, and how it empties. */
-export const VAN_SPEED = 240;
-export const VAN_ARRIVE_DIST = 16;
+/** Whatever the radio sends: how fast it comes, where it stops, how it empties. */
+export const BACKUP_SPEED = 240;
+export const BACKUP_ARRIVE_DIST = 16;
 /**
- * How far the van starts off the map, and how far *in from the boundary* it
- * looks for clear ground to pull up on. Measuring the search from the entry
- * point rather than the boundary is what had it clamped flush against the
- * perimeter wall.
+ * How far it starts off the map, and how far *in from the boundary* it looks
+ * for clear ground to pull up on. Measuring the search from the entry point
+ * rather than the boundary is what had it clamped flush against the perimeter
+ * wall.
  */
-export const VAN_ENTRY_OFFSET = 200;
-export const VAN_PARK_MIN = 90;
-export const VAN_PARK_MAX = 700;
-export const VAN_DOOR_INTERVAL_MS = 420;
+export const BACKUP_ENTRY_OFFSET = 200;
+export const BACKUP_PARK_MIN = 90;
+export const BACKUP_PARK_MAX = 700;
+export const BACKUP_DOOR_INTERVAL_MS = 420;
 /**
  * Much bigger than the patrol car it replaces (46×22). It is an armoured box
  * with six people in the back, and at the old size the thing that turned up
@@ -1579,20 +1599,39 @@ export const VAN_DOOR_INTERVAL_MS = 420;
  */
 export const VAN_LENGTH = 82;
 export const VAN_WIDTH = 38;
+/** The patrol car the second and third radio calls send instead. */
+export const CAR_LENGTH = 46;
+export const CAR_WIDTH = 22;
 /**
- * How much room the van needs either side of the lane it drives in down, and
+ * How much room a vehicle needs either side of the lane it drives in down, and
  * how finely that lane is checked. It must not arrive *through* a building —
  * the old car was a point test against the nav grid, which a 38px-wide body
- * with a 20px shoulder either side of it walks straight past.
+ * with a 20px shoulder either side of it walks straight past. Sized off the
+ * van, which is the wider of the two, so one lane test serves both.
  */
-export const VAN_LANE_CLEARANCE = 30;
-export const VAN_LANE_STEP = 24;
+export const BACKUP_LANE_CLEARANCE = 30;
+export const BACKUP_LANE_STEP = 24;
 /**
  * Lanes to try either side of the one lined up with the caller, before giving
  * that edge up. One building across the caller's own line shouldn't rule out
  * a whole side of the map when the street beside it is wide open.
  */
-export const VAN_LANE_OFFSETS = [0, 150, -150, 300, -300, 460, -460, 620, -620];
+export const BACKUP_LANE_OFFSETS = [0, 150, -150, 300, -300, 460, -460, 620, -620];
+
+/**
+ * The van comes in hot and stops like it. It runs at `VAN_APPROACH_SPEED`,
+ * starts braking `VAN_BRAKE_DIST` out, and slews up to `VAN_SLEW_ANGLE` off
+ * the line it is travelling — the body turns while the momentum doesn't, which
+ * is the whole of what a handbrake stop looks like from above. The tyre marks
+ * are laid from the moment the brakes go on and stay there afterwards.
+ *
+ * Deliberately the van only. A two-officer patrol car turning up is a smaller
+ * event than a SWAT team arriving, and it should read as one.
+ */
+export const VAN_APPROACH_SPEED = 400;
+export const VAN_BRAKE_DIST = 190;
+export const VAN_BRAKE_SPEED_MIN = 70;
+export const VAN_SLEW_ANGLE = 0.42;
 
 /**
  * The crew: black gear, a riot shield each, and a semi-automatic rifle they
@@ -1607,6 +1646,17 @@ export const SWAT_SIGHT = 560;
 export const SWAT_COLOR = '#1c1f26';
 /** The helmet. Lighter than the gear, or the head vanishes into the body. */
 export const SWAT_HELMET_COLOR = '#4b5563';
+
+/**
+ * The two officers out of a patrol car. Ordinary grey uniforms — no wire flag,
+ * nothing to look at — but they brought bolt action rifles and they can use
+ * them: a fifth of the ambient officer's bloom and three times the cadence.
+ * They are still nothing like SWAT, which is the point of there being a
+ * difference between the call that sends a van and the two that don't.
+ */
+export const RIFLEMAN_BLOOM_RAD = 0.045;
+export const RIFLEMAN_SHOOT_INTERVAL_MS = 1150;
+export const RIFLEMAN_SIGHT = 620;
 
 // ---------------------------------------------------------------- zap mines
 /**

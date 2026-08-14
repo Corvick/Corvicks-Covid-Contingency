@@ -86,7 +86,7 @@ import {
   updateEmplacements,
 } from './emplacement.js';
 import { firesToWire, updateFires } from './fire.js';
-import { resolveVanCollisions, updateSwatVans, vansToWire } from './swat.js';
+import { resolveVehicleCollisions, updateBackup, vehiclesToWire } from './backup.js';
 import { minesToWire, updateMines } from './mines.js';
 import { doorPromptFor, processPlayerDoors } from './doorplayer.js';
 import {
@@ -713,14 +713,14 @@ function tick(): void {
     resolveEmplacementCollisions(world);
     // A parked squad car is solid to bodies, like the sandbags, and pushed out
     // of here rather than through the nav grid for the same reason.
-    resolveVanCollisions(world);
+    resolveVehicleCollisions(world);
 
     rebuildEntityGrid(world);
     updateEmplacements(world, now, dt);
     processInteractions(now);
     processShooting(world, now, frozen);
     updateAirSupport(world, now, dt);
-    updateSwatVans(world, now, dt);
+    updateBackup(world, now, dt);
     updateMines(world, now);
     updateDucks(world, now, dt);
     updateFires(world, now, dt);
@@ -807,7 +807,7 @@ function tick(): void {
       blasts: airBlasts,
       ducks: ducksToWire(world),
       emplacements: emplacementsToWire(world),
-    vans: vansToWire(world),
+    vehicles: vehiclesToWire(world),
     mines: minesToWire(world, now),
     towers: world.towers,
     zaps: world.zaps,

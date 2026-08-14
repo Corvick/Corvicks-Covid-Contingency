@@ -39,7 +39,7 @@ import type {
   BeaconState,
   FireState,
   MineState,
-  SwatVanState,
+  BackupVehicleState,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -66,7 +66,7 @@ import {
   drawBlasts,
   drawDucks,
   drawEmplacements,
-  drawSwatVans,
+  drawBackupVehicles,
   drawMines,
   drawZaps,
   drawBeaconTowers,
@@ -143,7 +143,7 @@ let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
-let vans: SwatVanState[] = [];
+let vehicles: BackupVehicleState[] = [];
 let mines: MineState[] = [];
 let towers: BeaconState[] = [];
 let zaps: Array<{ x: number; y: number; at: number }> = [];
@@ -262,7 +262,7 @@ const { send } = connect((msg) => {
     blasts = msg.blasts;
     ducks = msg.ducks;
     emplacements = msg.emplacements;
-    vans = msg.vans;
+    vehicles = msg.vehicles;
     mines = msg.mines;
     towers = msg.towers;
     zaps = msg.zaps;
@@ -1108,7 +1108,7 @@ function render() {
     // Under the entities, so the officer stands on his own emplacement rather
     // than behind it.
     // Under the bodies: officers pile out of it and stand in front of it.
-    drawSwatVans(ctx, vans, view, now);
+    drawBackupVehicles(ctx, vehicles, view, now);
     drawMines(ctx, mines, view, now);
     drawBeaconTowers(ctx, towers, view, now);
     drawEmplacements(ctx, emplacements, view);
@@ -1200,7 +1200,7 @@ function render() {
       } else {
         drawInteractPrompt(ctx, inventory, (me.x - view.x) * scale, (me.y - view.y) * scale);
       }
-      drawInventory(ctx, inventory, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+      drawInventory(ctx, inventory, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, now);
     }
     drawStamina(ctx, stamina, STAMINA_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, exhausted);
     // Aiming hard up or down runs the camera off a screen that is only 600
