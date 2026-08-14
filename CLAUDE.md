@@ -1441,25 +1441,83 @@ wrong fight, because you had it.
   number counting down reads as ammunition; the only question here is "can I
   press it yet", and a bar answers that without being read.
 
-**The van comes in hot and stops like it.** `VAN_APPROACH_SPEED` in,
-`VAN_BRAKE_DIST` out the brakes go on, and the body slews `VAN_SLEW_ANGLE` off
-the line it is still sliding down — the momentum carries straight on while the
-back end comes round, which is the whole of what a handbrake stop looks like
-from above. `heading` is the line of travel and never bends; `facing` is the
-body and is what goes on the wire. That split is what makes it read as a slide
-rather than as a turn. Tyre marks are laid from the moment the brakes go on
-(`skidX`/`skidY`) and stay there afterwards.
+**The van comes in hot and stops like it, and the stop is a curve.** Straight
+in at `VAN_APPROACH_SPEED`, then `VAN_BRAKE_DIST` out the brakes bite and it
+washes `VAN_DRIFT` sideways while the back end comes round, and stops there. A
+dead-straight approach with the body rotated at the end of it is not the shot
+— the vehicle has to *travel* sideways.
+
+Three things move at once and they are deliberately separate: how fast it is
+going, how far off the line it has slid, and which way the body points.
+`heading` is the approach line and never bends; the lateral offset is walked
+along it as a smoothstep; `facing` is `heading + VAN_SLEW_ANGLE` scaled by that
+same curve, and is what goes on the wire.
+
+- **The easing is not cosmetic.** The drawn angle is the travel line plus the
+  slew, so a curve still bending at the instant it stops would leave the van
+  resting at some other angle than it does now. Flattening the sideways speed
+  to nothing by the end is what keeps the final pose exactly as it was.
+- **The drift direction is chosen and checked at call time.** It comes to rest
+  offset from the spot `parkingSpot` validated, so the offset spot goes
+  through `bodyFits` too — either side will do, and it falls back to arriving
+  straight if neither fits.
+- **Tyre marks follow the curve, not a chord.** The client walks the same
+  smoothstep, so the rubber lies where the tyres were. `skidAngle` is on the
+  wire for this: the marks lie along the *travel* line, which by then is not
+  the body angle. Drawing them straight was fine while the path was and is
+  plainly wrong now — the rubber would leave the road and rejoin it.
+- **The tyres smoke while it slides**, thickest at the wheels and thinning back
+  down the marks, and keep smoking for `TYRE_SMOKE_LINGER_MS` after it stops.
+  Smoke that ends the instant the vehicle does reads as a switch being thrown.
+  Client-side and hashed off the puff index, so it costs the wire one boolean
+  and keeps no particle state but a single timestamp per skid.
 
 The **car does none of it**. Two officers turning up is a smaller event than a
 SWAT team arriving and should read as one.
 
-**Who gets out of where is not decoration.** The van empties out of the
-**back** — four SWAT, that is where the doors are — and then **one ordinary
-grey officer with ordinary bad aim gets out of the cab at the front**, because
-somebody was driving. `stepDown` holds the side it was given rather than using
-`findSpawnNear`, which scatters in a random direction and had the team spread
-around the whole vehicle with the driver arriving behind it. Measured: 4 out
-the back, 1 out the front.
+**The doors open, and they stay open.** The rear doors swing first and the team
+comes out of them; the cab door swings and the driver comes out of that. The
+door goes *before* the body — which is the right way round and also gives the
+swing something to happen during. An emptied van standing on a corner with its
+back doors hanging open is the whole story of what happened there, told to
+anybody who arrives later.
+
+**Who gets out of where is not decoration.** `stepDown` holds the side it was
+given rather than using `findSpawnNear`, which scatters in a random direction
+and had the team spread around the whole vehicle with the driver arriving
+behind it. Measured: 4 out the back, 1 out the front.
+
+#### A squad sweeps; it does not stand at your shoulder
+
+The crew a call sends do **not** escort the caller any more. Four rifles stood
+at your elbow are four rifles doing nothing; a squad walking the city is what
+you actually asked for when you picked the handset up.
+
+- **One leads and the rest keep station on him.** `squadSlot` 0 is the leader
+  and `sweeps`; the others take a slot bearing off his *back* — off his facing,
+  so the shape swings round with him at a corner instead of the squad crabbing
+  sideways — through the same `escortId` branch everything else uses.
+- **`SQUAD_SLACK` is what makes it loose.** Held only once they have drifted
+  well off station, because correcting to an exact spot is a squad that
+  marches. Measured, they settle 53-94px off the leader.
+- **The leader carries the pack and the vest.** A radio set drawn on his back
+  with an aerial off it, so you can tell which of four identical black figures
+  the other three are following, and `KEVLAR_POINTS` of real three-grab denial
+  — losing the leader is how a sweep falls apart.
+- **A squad that loses its leader promotes itself** rather than standing about
+  waiting for a body that is now a zombie somewhere.
+- **The sweep reads the danger field**, at `SQUAD_SWEEP_STANDOFF` — the same
+  trick and the same reason as `botPatrolTarget`: the field already knows
+  geodesically how far every cell is from the nearest zombie, so wanting to be
+  near it costs one lookup per sample rather than a search. Streets only; a
+  squad sweeping a city walks the roads.
+- **The two out of a patrol car are the same machinery**, one leading and one
+  in station, which is what keeps them near each other without a line of code
+  about pairs.
+- **The driver stays with the van** (`guardX`/`guardY`, `VAN_GUARD_RADIUS`).
+  Following a squad about is not a driver's job, and parked beside his own
+  vehicle he is a sentry and a landmark at once. He is still in
+  `world.dispatched`, so a passing radio holder can't rescan him off his post.
 
 **It stops at the map edge and the crew walk the rest.** A van threading a city
 to arrive at your shoulder is both a hard pathing problem and the wrong
@@ -1524,9 +1582,10 @@ there, which is most of the point of picking the handset up. Only SWAT and
 soldiers carry a wire flag — riflemen and the driver are grey like any other
 officer, and nothing about them needs drawing differently.
 
-**`world.dispatched` is what keeps an escort**, not `world.soldiers`. The van's
-driver is an ordinary grey officer by every other measure and would otherwise
-be rescanned off your shoulder the moment you put the handset away.
+**`world.dispatched` is what keeps a standing order**, not `world.soldiers`.
+Nobody in it has their `escortId` rescanned by `updateRadioCalls` — which is
+what stops the next person to pick up a handset nearby from pulling a squad
+off its sweep, or the driver off his van.
 
 **The bubble and the crackle back are not decoration.** The van enters off-map
 and is the best part of eight seconds away, so without them picking the radio
@@ -1541,14 +1600,12 @@ room for a proper bar across the roof with the halves alternating, grille
 flashers on the opposite beat, and a wash of colour on the ground — which is
 what stops it reading as a painted stripe.
 
-**Two kinds of escort, and the difference matters.** `escortId` on an NPC
-officer means "stick with this person". The crew a call dispatches keep theirs
-for good — `world.swat` and `world.soldiers` are both exempt from the rescan,
-exactly right for a unit sent to you. Grey officers already on the street only
-get one while the radio is genuinely in your hand, and lose it when you put it
-away. There are **three tiers of grey officer** and the whole difference is
-sight, bloom, cadence and gun: ambient (`NPC_OFFICER_*`), helicopter-dropped
-(`SOLDIER_*`, olive), and van crew (`SWAT_*`, black).
+**Two things use `escortId`, and the difference matters.** It means "stick with
+this person", and it does duty both for a grey officer who has heard a radio in
+somebody's hand — transient, and lost the moment they put it away — and for a
+squad member keeping station on their leader, which is permanent. Anyone in
+`world.dispatched` is exempt from the rescan, which is what keeps the second
+kind from being overwritten by the first.
 
 The escort branch sits **below** the officer's fighting and **above** its
 patrol. An escort that breaks off a firefight to close the last twenty pixels

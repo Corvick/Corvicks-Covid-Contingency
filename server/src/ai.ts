@@ -104,6 +104,13 @@ import {
   RIFLEMAN_SIGHT,
   RIFLEMAN_BLOOM_RAD,
   RIFLEMAN_SHOOT_INTERVAL_MS,
+  SQUAD_SPREAD,
+  SQUAD_SLACK,
+  SQUAD_SWEEP_SAMPLES,
+  SQUAD_SWEEP_MIN,
+  SQUAD_SWEEP_MAX,
+  SQUAD_SWEEP_STANDOFF,
+  VAN_GUARD_RADIUS,
   DANGER_REBUILD_MS,
   DANGER_MAX_DISTANCE,
   ESCAPE_SAMPLES,
@@ -2934,6 +2941,66 @@ function officerGrade(
   };
 }
 
+/**
+ * Where in the formation this one belongs, in world coordinates.
+ *
+ * Behind the leader and fanned out either side of his back, so the group moves
+ * as a wedge rather than a queue. Taken off the leader's *facing* rather than
+ * being a fixed world offset — that is what makes the shape swing round with
+ * him when he turns a corner instead of the squad crabbing sideways.
+ */
+function squadPost(lead: Entity, state: AiState): { x: number; y: number } {
+  if (state.squadSlot <= 0) return { x: lead.x, y: lead.y };
+  // Slots 1..n alternate left and right, widening as they go back.
+  const side = state.squadSlot % 2 === 1 ? -1 : 1;
+  const rank = Math.ceil(state.squadSlot / 2);
+  const bearing = lead.facing + Math.PI + side * (0.5 / rank);
+  const reach = SQUAD_SPREAD * (0.7 + rank * 0.35);
+  return { x: lead.x + Math.cos(bearing) * reach, y: lead.y + Math.sin(bearing) * reach };
+}
+
+/**
+ * Somewhere to sweep toward: near the trouble rather than at random.
+ *
+ * The danger field already knows, geodesically, how far every cell is from the
+ * nearest zombie, so wanting to be near it costs one lookup per sample instead
+ * of a search. Same trick `botPatrolTarget` uses, without the scope and
+ * tracker business that only a bot has — and it falls back to an ordinary
+ * wander when nothing anywhere is near anything, which is what a quiet city
+ * looks like from inside the field.
+ */
+function sweepTarget(world: World, e: Entity, state: AiState, now: number): void {
+  let best: { x: number; y: number } | null = null;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < SQUAD_SWEEP_SAMPLES; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const reach = SQUAD_SWEEP_MIN + Math.random() * (SQUAD_SWEEP_MAX - SQUAD_SWEEP_MIN);
+    const x = clamp(e.x + Math.cos(angle) * reach, 70, WORLD_WIDTH - 70);
+    const y = clamp(e.y + Math.sin(angle) * reach, 70, WORLD_HEIGHT - 70);
+    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+    // Streets, not front rooms. A squad sweeping a city walks the roads.
+    if (buildingIndexAt(world, x, y) >= 0) continue;
+
+    const danger = Math.min(world.danger.distanceAt(x, y), DANGER_MAX_DISTANCE);
+    let score = -Math.abs(danger - SQUAD_SWEEP_STANDOFF);
+    score += world.danger.opennessAt(x, y) * 30;
+    if (score > bestScore) {
+      bestScore = score;
+      best = { x, y };
+    }
+  }
+
+  if (!best) {
+    pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.6);
+    return;
+  }
+  state.wanderX = best.x;
+  state.wanderY = best.y;
+  state.path = null;
+  state.nextPathAt = 0;
+}
+
 function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
   const { sight, bloom, interval, gun } = officerGrade(world, e.id);
 
@@ -3000,21 +3067,61 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     return;
   }
 
-  // Somebody with a radio is calling them in. This sits *below* the fighting
-  // above it on purpose — an escort that breaks off a firefight to close the
-  // last twenty pixels to your shoulder is worse than useless — and above the
-  // patrol, so with nothing to shoot at they come to you rather than wander.
+  // Minding the van. The driver is not a fighting unit and following a squad
+  // about is not a driver's job — he stands by his own vehicle, which makes
+  // him a sentry and the corner a landmark at the same time. Above the patrol
+  // and below the fight, like every other standing order here.
+  if (state.guardX !== null && state.guardY !== null) {
+    const gap = Math.hypot(state.guardX - e.x, state.guardY - e.y);
+    if (gap > VAN_GUARD_RADIUS) {
+      const desired = widenCorners(
+        world,
+        e,
+        headingToward(world, e, state, state.guardX, state.guardY, now),
+      );
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
+    if (now >= state.nextLookAt) {
+      state.nextLookAt =
+        now + RALLY_LOOK_MIN_MS + Math.random() * (RALLY_LOOK_MAX_MS - RALLY_LOOK_MIN_MS);
+      state.lookHeading = Math.random() * Math.PI * 2;
+    }
+    state.heading = turnToward(state.heading, state.lookHeading, RALLY_LOOK_TURN_RATE * dt);
+    e.facing = state.heading;
+    return;
+  }
+
+  // Somebody with a radio is calling them in, or a squad leader is walking off
+  // and the rest are keeping station. This sits *below* the fighting above it
+  // on purpose — an escort that breaks off a firefight to close the last twenty
+  // pixels is worse than useless — and above the patrol, so with nothing to
+  // shoot at they stay together rather than each wandering off.
   if (state.escortId !== null) {
     const lead = world.entities.get(state.escortId);
     if (!lead || lead.type !== 'officer') {
       state.escortId = null;
+      // A squad that has lost its leader promotes itself rather than standing
+      // about waiting for a body that is now a zombie somewhere.
+      if (state.squadSlot > 0) {
+        state.squadSlot = 0;
+        state.sweeps = true;
+      }
     } else {
-      const gap = Math.hypot(lead.x - e.x, lead.y - e.y);
-      if (gap > ESCORT_NEAR) {
+      // Loose cohesion: a slot bearing off the leader's back rather than the
+      // leader's own feet, so four of them arrive as a group instead of
+      // stacking on one point and shoving each other off it.
+      const post = squadPost(lead, state);
+      const gap = Math.hypot(post.x - e.x, post.y - e.y);
+      // Held only once they have drifted well off station. Correcting to an
+      // exact spot is a squad that marches; the slack is what makes it read as
+      // people moving together.
+      const slack = state.squadSlot > 0 ? SQUAD_SLACK : ESCORT_NEAR;
+      if (gap > slack) {
         const desired = widenCorners(
           world,
           e,
-          headingToward(world, e, state, lead.x, lead.y, now),
+          headingToward(world, e, state, post.x, post.y, now),
         );
         // They hurry when they've fallen behind and stroll when they're close,
         // so a squad doesn't jog on the spot around whoever called them.
@@ -3033,10 +3140,13 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     }
   }
 
-  // Off duty they patrol rather than loiter.
+  // Off duty they patrol rather than loiter. A dispatched leader *sweeps*:
+  // same walk, but the destination is chosen toward the trouble rather than at
+  // random, because a squad that was sent for is a squad that came to look.
   if (now < state.pauseUntil) return;
   if (Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 24) {
-    pickWanderTarget(world, e, state, now);
+    if (state.sweeps) sweepTarget(world, e, state, now);
+    else pickWanderTarget(world, e, state, now);
     return;
   }
   if (turnAtWallAndRepick(world, e, state, now)) return;

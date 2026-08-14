@@ -62,6 +62,10 @@ import {
   CAR_WIDTH,
   VAN_WIDTH,
   RADIO_COOLDOWN_MS,
+  VAN_REAR_DOOR_ARC,
+  VAN_CAB_DOOR_ARC,
+  TYRE_SMOKE_PUFFS,
+  TYRE_SMOKE_LINGER_MS,
   ZAP_FLASH_MS,
   ZAP_MINE_RADIUS,
 } from '../../shared/constants.js';
@@ -734,6 +738,30 @@ export function drawEntity(
     ctx.globalAlpha = 1;
   }
 
+  // The one leading a sweep carries the set on his back. Drawn *behind* the
+  // body — a small pack squared off across the shoulders with a whip aerial
+  // standing off it — so that at a glance you can tell which of four identical
+  // black figures the other three are following.
+  if (e.squadLead) {
+    const backX = x - dirX * (radius * 0.72);
+    const backY = y - dirY * (radius * 0.72);
+    ctx.fillStyle = '#39424f';
+    ctx.strokeStyle = 'rgba(8, 11, 16, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.ellipse(backX, backY, radius * 0.52, radius * 0.72, facing, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // The aerial, angled back off the pack.
+    const tipA = facing + Math.PI - 0.5;
+    ctx.strokeStyle = 'rgba(203, 213, 225, 0.85)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(backX, backY);
+    ctx.lineTo(backX + Math.cos(tipA) * radius * 1.5, backY + Math.sin(tipA) * radius * 1.5);
+    ctx.stroke();
+  }
+
   // Kevlar reads as a grey band inside the body rather than a halo around it,
   // so it never competes with the white self-ring or the infected ring.
   if (e.armour) {
@@ -1212,6 +1240,83 @@ export function drawStamina(
  * something this size there is room to run it as a proper bar across the roof
  * with the two halves alternating, plus grille flashers at the nose.
  */
+/**
+ * When each skid was last seen still sliding, keyed by where it started.
+ *
+ * Purely a drawing clock: the smoke has to keep drifting and thinning for a
+ * moment *after* the van has stopped, and the server has no reason to carry
+ * a fading particle field on the wire for it. The skid's start point is a
+ * stable key per vehicle and exists for exactly as long as the marks do.
+ */
+const skidStopped = new Map<string, number>();
+
+/**
+ * Rubber burning off the tyres. Thickest at the wheels, thinning back down the
+ * marks, drifting off to the side as it rises — and it keeps going for
+ * `TYRE_SMOKE_LINGER_MS` after the van has come to rest, because smoke that
+ * stops the instant the vehicle does reads as a switch being thrown.
+ *
+ * Positions are hashed off the puff index rather than stored, so this is a
+ * pure function of the wire state and the clock, with nothing to keep alive
+ * between frames but one timestamp.
+ */
+function drawTyreSmoke(
+  ctx: CanvasRenderingContext2D,
+  v: BackupVehicleState,
+  ux: number,
+  uy: number,
+  nx: number,
+  ny: number,
+  along: number,
+  off: number,
+  now: number,
+): void {
+  const key = `${v.skidX},${v.skidY}`;
+  if (v.braking) skidStopped.set(key, now);
+  const stoppedAt = skidStopped.get(key);
+  if (stoppedAt === undefined) return;
+
+  const since = now - stoppedAt;
+  if (since > TYRE_SMOKE_LINGER_MS) {
+    skidStopped.delete(key);
+    return;
+  }
+  // Fades away once the sliding stops rather than being cut off.
+  const settling = 1 - since / TYRE_SMOKE_LINGER_MS;
+
+  ctx.save();
+  for (let i = 0; i < TYRE_SMOKE_PUFFS; i++) {
+    // Where along the marks this puff sits: 0 at the wheels, 1 back at the
+    // start. Laid out with a bias toward the wheels, which is where it is
+    // actually being made.
+    const seed = Math.sin(i * 12.9898) * 43758.5453;
+    const jitter = seed - Math.floor(seed);
+    const back = (i / TYRE_SMOKE_PUFFS) ** 1.6;
+    const t = 1 - back;
+
+    const ease = t * t * (3 - 2 * t);
+    const side = i % 2 === 0 ? -1 : 1;
+    const lift = back * 26 + jitter * 8;
+    const px =
+      v.skidX! + ux * along * t + nx * (off * ease + side * (VAN_WIDTH / 2 - 4) + lift * 0.35);
+    const py =
+      v.skidY! + uy * along * t + ny * (off * ease + side * (VAN_WIDTH / 2 - 4) + lift * 0.35);
+
+    // Older puffs are further back, bigger and fainter — a plume, not a line
+    // of identical dots.
+    const radius = 5 + back * 16 + jitter * 4;
+    const alpha = (1 - back) * 0.3 * settling;
+    if (alpha <= 0.01) continue;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#cbd5e1';
+    ctx.beginPath();
+    ctx.arc(px, py, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
 export function drawBackupVehicles(
   ctx: CanvasRenderingContext2D,
   vehicles: BackupVehicleState[],
@@ -1221,31 +1326,48 @@ export function drawBackupVehicles(
   // Tyre marks go down before any of the bodies, so a van parked over the end
   // of its own skid sits on top of it rather than under it.
   for (const v of vehicles) {
-    if (v.skidX === undefined || v.skidY === undefined) continue;
-    if (!visible(view, v.x, v.y, 400)) continue;
-    const dx = v.x - v.skidX;
-    const dy = v.y - v.skidY;
-    const len = Math.hypot(dx, dy);
-    if (len < 4) continue;
-    const ux = dx / len;
-    const uy = dy / len;
+    if (v.skidX === undefined || v.skidY === undefined || v.skidAngle === undefined) continue;
+    if (!visible(view, v.x, v.y, 500)) continue;
+
+    // The marks follow the *curve* the van actually took, which is a straight
+    // run along the braking line with a smoothstepped wash out to one side.
+    // Drawing them as a straight chord from the brake point to the van was
+    // fine while the path was straight and is plainly wrong now: the rubber
+    // would leave the road and rejoin it.
+    const ux = Math.cos(v.skidAngle);
+    const uy = Math.sin(v.skidAngle);
+    const nx = -uy;
+    const ny = ux;
+    // How far along, and how far off, the van has got.
+    const along = (v.x - v.skidX) * ux + (v.y - v.skidY) * uy;
+    const off = (v.x - v.skidX) * nx + (v.y - v.skidY) * ny;
+    if (along < 4) continue;
+
     ctx.save();
     ctx.strokeStyle = 'rgba(18, 20, 24, 0.5)';
     ctx.lineWidth = 5;
     ctx.lineCap = 'round';
-    // A pair, spaced across the line of travel — which is the line the van
-    // kept sliding down while its body came round, so the marks are straight
-    // even though the vehicle at the end of them is sideways.
+    ctx.lineJoin = 'round';
     for (const side of [-1, 1]) {
-      const ox = -uy * side * (VAN_WIDTH / 2 - 5);
-      const oy = ux * side * (VAN_WIDTH / 2 - 5);
+      const ox = nx * side * (VAN_WIDTH / 2 - 5);
+      const oy = ny * side * (VAN_WIDTH / 2 - 5);
       ctx.beginPath();
-      ctx.moveTo(v.skidX + ox, v.skidY + oy);
-      ctx.lineTo(v.x + ox, v.y + oy);
+      for (let i = 0; i <= 14; i++) {
+        const t = i / 14;
+        // The same smoothstep the server walks the van along, so the rubber
+        // lies exactly where the tyres were.
+        const ease = t * t * (3 - 2 * t);
+        const px = v.skidX + ux * along * t + nx * off * ease + ox;
+        const py = v.skidY + uy * along * t + ny * off * ease + oy;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
       ctx.stroke();
     }
     ctx.lineCap = 'butt';
     ctx.restore();
+
+    drawTyreSmoke(ctx, v, ux, uy, nx, ny, along, off, now);
   }
 
   for (const vehicle of vehicles) {
@@ -1376,15 +1498,56 @@ function drawSwatVan(
     ctx.fillStyle = 'rgba(226, 232, 240, 0.85)';
     ctx.fillRect(-L + 16, -1.5, 26, 3);
 
-    // Rear doors, at the tail — the end the crew step out of.
-    ctx.strokeStyle = '#0b0f16';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(-L + 5, -W + 5);
-    ctx.lineTo(-L + 5, W - 5);
-    ctx.moveTo(-L + 5, 0);
-    ctx.lineTo(-L + 1, 0);
-    ctx.stroke();
+    // Rear doors, at the tail — the end the crew step out of. Shut they are a
+    // seam; open they swing out and stay out, and an emptied van standing on a
+    // corner with its back doors hanging open is the whole story of what
+    // happened there, told to anybody who arrives later.
+    const rear = van.rearOpen ?? 0;
+    if (rear <= 0) {
+      ctx.strokeStyle = '#0b0f16';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-L + 5, -W + 5);
+      ctx.lineTo(-L + 5, W - 5);
+      ctx.moveTo(-L + 5, 0);
+      ctx.lineTo(-L + 1, 0);
+      ctx.stroke();
+    } else {
+      // The dark of the empty load bay behind them.
+      ctx.fillStyle = '#0a0d12';
+      ctx.fillRect(-L, -W + 4, 9, VAN_WIDTH - 8);
+      const leaf = VAN_WIDTH / 2 - 3;
+      for (const side of [-1, 1]) {
+        ctx.save();
+        // Hinged at the outer corner of the tail, swinging back and outward.
+        ctx.translate(-L + 2, side * (W - 3));
+        ctx.rotate(side * VAN_REAR_DOOR_ARC * rear);
+        ctx.fillStyle = '#2b3340';
+        ctx.strokeStyle = '#0b0f16';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.rect(-3, side < 0 ? 0 : -leaf, 5, leaf);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // The cab door, on the driver's side at the front.
+    const cab = van.cabOpen ?? 0;
+    if (cab > 0) {
+      ctx.save();
+      ctx.translate(L - 20, -W + 2);
+      ctx.rotate(-VAN_CAB_DOOR_ARC * cab);
+      ctx.fillStyle = '#2b3340';
+      ctx.strokeStyle = '#0b0f16';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.rect(0, -4, 17, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Windscreen and the two small armoured side ports.
     ctx.fillStyle = 'rgba(120, 150, 190, 0.5)';

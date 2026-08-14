@@ -313,6 +313,16 @@ export interface AiState {
    */
   doorWatch: number;
   doorWatchUntil: number;
+  /**
+   * Dispatched squads. `squadSlot` 0 leads and `sweeps`; the rest keep station
+   * on the leader through `escortId`, at a bearing derived from their slot so
+   * the four of them move as a group rather than stacking on one point.
+   */
+  squadSlot: number;
+  sweeps: boolean;
+  /** A post to stay near — the van's driver, minding the van. */
+  guardX: number | null;
+  guardY: number | null;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
   /**
@@ -590,6 +600,8 @@ export interface World {
   swat: Set<string>;
   /** Ids of the two out of a patrol car: grey, but with bolt action rifles. */
   riflemen: Set<string>;
+  /** Ids of whoever is leading a sweep: radio pack on the back, vest on. */
+  squadLeads: Set<string>;
   /**
    * Everyone a radio call sent, whatever grade. This is the one that keeps an
    * escort: the van driver is an ordinary grey officer by every other measure
@@ -769,6 +781,10 @@ export function newAiState(now: number, x: number, y: number): AiState {
     lockAlso: -1,
     doorWatch: -1,
     doorWatchUntil: 0,
+    squadSlot: -1,
+    sweeps: false,
+    guardX: null,
+    guardY: null,
     doorWaitUntil: 0,
     smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
     spreadsOut: Math.random() < ZOMBIE_SPREAD_SHARE,
@@ -1091,6 +1107,7 @@ export function createWorld(): World {
     soldiers: new Set(),
     swat: new Set(),
     riflemen: new Set(),
+    squadLeads: new Set(),
     dispatched: new Set(),
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
@@ -1161,6 +1178,7 @@ export function resetWorld(world: World): void {
   world.soldiers.clear();
   world.swat.clear();
   world.riflemen.clear();
+  world.squadLeads.clear();
   world.dispatched.clear();
   world.bots.clear();
   world.grapples.clear();
@@ -1593,6 +1611,7 @@ export function toWire(
   if (world.burning.has(e.id)) state.burning = true;
   if (world.soldiers.has(e.id)) state.soldier = true;
   if (world.swat.has(e.id)) state.swat = true;
+  if (world.squadLeads.has(e.id)) state.squadLead = true;
 
   const until = world.materializeUntil.get(e.id);
   if (until !== undefined) {

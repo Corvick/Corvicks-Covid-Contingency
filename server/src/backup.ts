@@ -2,6 +2,7 @@ import type { BackupVehicleState } from '../../shared/types.js';
 import {
   BACKUP_ARRIVE_DIST,
   BACKUP_DOOR_INTERVAL_MS,
+  BACKUP_DOOR_SWING_MS,
   BACKUP_ENTRY_OFFSET,
   BACKUP_LANE_CLEARANCE,
   BACKUP_LANE_OFFSETS,
@@ -13,6 +14,7 @@ import {
   CAR_LENGTH,
   CAR_WIDTH,
   ENTITY_RADIUS,
+  KEVLAR_POINTS,
   RADIO_BACKUP_COUNT,
   RADIO_CALL_LINE,
   RADIO_CAR_BACKUP_COUNT,
@@ -23,6 +25,7 @@ import {
   VAN_APPROACH_SPEED,
   VAN_BRAKE_DIST,
   VAN_BRAKE_SPEED_MIN,
+  VAN_DRIFT,
   VAN_LENGTH,
   VAN_SLEW_ANGLE,
   VAN_WIDTH,
@@ -73,10 +76,22 @@ export interface BackupVehicle {
   /** Where the brakes went on, so the tyre marks have a start. */
   skidX: number | null;
   skidY: number | null;
-  /** Who called it, so the crew knows whose shoulder to stand at. */
+  /**
+   * Which way it washes out as it stops, and how far. Picked at call time and
+   * checked then, so the spot it actually comes to rest on is one that has
+   * been through `bodyFits` like any other.
+   */
+  driftDir: number;
+  drift: number;
+  /** Who called it. The crew no longer escort them, but the van remembers. */
   callerId: string;
   dropped: number;
   nextDropAt: number;
+  /** How far the back doors and the cab door have swung, 0-1. */
+  rearOpen: number;
+  cabOpen: number;
+  /** The one who leads the squad away, once they are all out. */
+  leaderId: string | null;
 }
 
 let counter = 0;
@@ -321,6 +336,23 @@ export function callBackup(
   const { spot, entry } = parkingSpot(world, caller.x, caller.y);
   const heading = Math.atan2(spot.y - entry.y, spot.x - entry.x);
 
+  // Which way it washes out, decided here rather than while it is moving: the
+  // spot it comes to rest on is offset from the one that was checked, so it
+  // has to be checked too. Either side will do, so try both and only then give
+  // the drift up — a van that arrives dead straight is the old behaviour and
+  // is exactly what this is for.
+  let driftDir = Math.random() < 0.5 ? 1 : -1;
+  let drift = kind === 'van' ? VAN_DRIFT : 0;
+  if (drift > 0) {
+    const nx = -Math.sin(heading);
+    const ny = Math.cos(heading);
+    const rests = (dir: number): boolean =>
+      bodyFits(world, spot.x + nx * drift * dir, spot.y + ny * drift * dir, heading) &&
+      bodyFits(world, spot.x + nx * drift * dir * 0.5, spot.y + ny * drift * dir * 0.5, heading);
+    if (!rests(driftDir)) driftDir = -driftDir;
+    if (!rests(driftDir)) drift = 0;
+  }
+
   world.vehicles.set(`backup-${counter}`, {
     id: `backup-${counter++}`,
     kind,
@@ -333,9 +365,14 @@ export function callBackup(
     phase: 'inbound',
     skidX: null,
     skidY: null,
+    driftDir,
+    drift,
     callerId: caller.id,
     dropped: 0,
     nextDropAt: 0,
+    rearOpen: 0,
+    cabOpen: 0,
+    leaderId: null,
   });
 
   world.speech.set(caller.id, { text: RADIO_CALL_LINE, until: now + RADIO_SPEECH_MS });
@@ -413,9 +450,6 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
   const id = `backup-${counter++}`;
   world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
   const state = newAiState(now, spawn.x, spawn.y);
-  // Sent to a specific person, and they stay with them — unlike the grey
-  // officers already on the map, who only close in while the radio is out.
-  state.escortId = vehicle.callerId;
   world.ai.set(id, state);
   world.dispatched.add(id);
   world.materializeUntil.set(id, now + 400);
@@ -423,17 +457,48 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
   // The one out of the cab is the driver, and a driver is not a SWAT operator
   // — ordinary uniform, ordinary aim. Everyone out of the back is.
   const isDriver = vehicle.kind === 'van' && vehicle.dropped >= RADIO_BACKUP_COUNT;
+
+  // **The driver stays with the van.** He is not a fighting unit and following
+  // a squad about is not what a driver does; parked on the corner beside his
+  // own vehicle he is a sentry and a landmark at once.
+  if (isDriver) {
+    state.guardX = vehicle.x;
+    state.guardY = vehicle.y;
+    return;
+  }
+
+  // Everyone else is a sweep team. The first one out leads and the rest keep
+  // station on him — they do **not** escort whoever made the call. A squad
+  // standing at your shoulder is four rifles doing nothing; a squad walking
+  // the city is what you actually asked for when you picked the handset up.
+  if (vehicle.leaderId === null) {
+    vehicle.leaderId = id;
+    state.squadSlot = 0;
+    state.sweeps = true;
+  } else {
+    state.squadSlot = vehicle.dropped;
+    state.escortId = vehicle.leaderId;
+  }
+
   if (vehicle.kind === 'car') {
     world.riflemen.add(id);
     return;
   }
-  if (isDriver) return;
 
   world.swat.add(id);
   const inv = newInventory();
   inv.utilities.push('riotShield');
   inv.shield = SHIELD_POINTS;
   inv.shieldUp = true;
+  // The one leading carries the set that called this in and the vest to go
+  // with it. Kevlar is a real three-grab denial in `resolveGrapple`, not a
+  // decoration — losing the leader is how a sweep falls apart, so he is the
+  // one wearing it.
+  if (state.squadSlot === 0) {
+    inv.kevlar = KEVLAR_POINTS;
+    inv.utilities.push('kevlar');
+    world.squadLeads.add(id);
+  }
   world.inventories.set(id, inv);
 }
 
@@ -453,51 +518,113 @@ export function updateBackup(world: World, now: number, dt: number): void {
   }
 
   for (const vehicle of world.vehicles.values()) {
+    // Doors swing rather than snap, and they stay open afterwards — an emptied
+    // van standing there with its back doors hanging open is the whole story
+    // of what happened on that corner, told without anybody watching it.
+    const swing = (dt * 1000) / BACKUP_DOOR_SWING_MS;
+    if (vehicle.rearOpen > 0) vehicle.rearOpen = Math.min(1, vehicle.rearOpen + swing);
+    if (vehicle.cabOpen > 0) vehicle.cabOpen = Math.min(1, vehicle.cabOpen + swing);
+
     if (vehicle.phase === 'parked') {
       if (vehicle.dropped >= crewSize(vehicle.kind) || now < vehicle.nextDropAt) continue;
+      // The door goes first and the body follows, which is the right way round
+      // and also gives the swing something to happen during.
+      const driver = vehicle.kind === 'van' && vehicle.dropped >= RADIO_BACKUP_COUNT;
+      if (vehicle.kind === 'van') {
+        if (driver && vehicle.cabOpen === 0) {
+          vehicle.cabOpen = 0.001;
+          vehicle.nextDropAt = now + BACKUP_DOOR_SWING_MS;
+          continue;
+        }
+        if (!driver && vehicle.rearOpen === 0) {
+          vehicle.rearOpen = 0.001;
+          vehicle.nextDropAt = now + BACKUP_DOOR_SWING_MS;
+          continue;
+        }
+      }
       unload(world, vehicle, now);
       vehicle.dropped++;
       vehicle.nextDropAt = now + BACKUP_DOOR_INTERVAL_MS;
       continue;
     }
 
-    const dx = vehicle.targetX - vehicle.x;
-    const dy = vehicle.targetY - vehicle.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < BACKUP_ARRIVE_DIST) {
+    // Distance still to run *along the approach line*, which is the thing the
+    // whole stop is parameterised on. Measured along the line rather than
+    // straight to the target, because once it starts washing sideways the two
+    // are different and only the first one is monotonic.
+    const along =
+      (vehicle.targetX - vehicle.x) * Math.cos(vehicle.heading) +
+      (vehicle.targetY - vehicle.y) * Math.sin(vehicle.heading);
+
+    // A car simply drives up and stops. A two-officer patrol arriving is a
+    // smaller event than a SWAT team and should read as one.
+    if (vehicle.kind === 'car') {
+      if (along < BACKUP_ARRIVE_DIST) {
+        vehicle.phase = 'parked';
+        vehicle.nextDropAt = now + 500;
+        continue;
+      }
+      vehicle.x += Math.cos(vehicle.heading) * BACKUP_SPEED * dt;
+      vehicle.y += Math.sin(vehicle.heading) * BACKUP_SPEED * dt;
+      continue;
+    }
+
+    // A van comes in hot and stops like it: straight in, then the brakes go on
+    // `VAN_BRAKE_DIST` out and it washes sideways while the back end comes
+    // round, and stops there. Three things are moving at once and they are
+    // deliberately separate — how fast it is going, how far it has slid off
+    // the line, and which way the body is pointing.
+    if (along > VAN_BRAKE_DIST) {
+      vehicle.x += Math.cos(vehicle.heading) * VAN_APPROACH_SPEED * dt;
+      vehicle.y += Math.sin(vehicle.heading) * VAN_APPROACH_SPEED * dt;
+      continue;
+    }
+
+    if (vehicle.phase !== 'braking') {
+      vehicle.phase = 'braking';
+      vehicle.skidX = vehicle.x;
+      vehicle.skidY = vehicle.y;
+    }
+
+    if (along < BACKUP_ARRIVE_DIST) {
       vehicle.phase = 'parked';
+      vehicle.facing = vehicle.heading + VAN_SLEW_ANGLE * vehicle.driftDir;
       vehicle.nextDropAt = now + 500;
       continue;
     }
 
-    // A van comes in hot and stops like it. Past VAN_BRAKE_DIST the brakes go
-    // on, the speed falls away, and the body swings off the line it is still
-    // sliding down — the momentum carries straight on while the back end comes
-    // round, which is the whole of what a handbrake stop looks like from
-    // above. The car simply drives up and stops; a two-officer patrol arriving
-    // is a smaller event than a SWAT team and should read as one.
-    let speed = BACKUP_SPEED;
-    if (vehicle.kind === 'van') {
-      if (dist > VAN_BRAKE_DIST) {
-        speed = VAN_APPROACH_SPEED;
-      } else {
-        if (vehicle.phase !== 'braking') {
-          vehicle.phase = 'braking';
-          vehicle.skidX = vehicle.x;
-          vehicle.skidY = vehicle.y;
-        }
-        // Eased rather than linear: most of the speed goes early, so it lands
-        // on the spot rather than crawling the last stretch.
-        const t = Math.max(0, Math.min(1, dist / VAN_BRAKE_DIST));
-        speed = VAN_BRAKE_SPEED_MIN + (VAN_APPROACH_SPEED - VAN_BRAKE_SPEED_MIN) * (t * t);
-        vehicle.facing = vehicle.heading + VAN_SLEW_ANGLE * (1 - t);
-      }
-    }
+    // 0 at the moment the brakes bite, 1 at the stop.
+    const t = Math.max(0, Math.min(1, 1 - along / VAN_BRAKE_DIST));
+    // Eased so most of the speed goes early: it lands on the spot rather than
+    // crawling the last stretch.
+    const speed =
+      VAN_BRAKE_SPEED_MIN + (VAN_APPROACH_SPEED - VAN_BRAKE_SPEED_MIN) * (1 - t) * (1 - t);
 
-    // The line of travel never bends — that is what makes the slew read as a
-    // slide rather than as a turn.
-    vehicle.x += Math.cos(vehicle.heading) * speed * dt;
-    vehicle.y += Math.sin(vehicle.heading) * speed * dt;
+    // Smoothstep, so the sideways speed is nearly nothing by the time it
+    // stops. That is not only for smoothness: the drawn angle is the travel
+    // tangent plus the slew, and a curve still bending at the stop would leave
+    // it resting at some other angle than it does now.
+    const ease = t * t * (3 - 2 * t);
+
+    // Walk the centre line forward, then place the body that far off it. Doing
+    // it this way rather than integrating a turning velocity is what keeps the
+    // arrival exactly on the spot that was checked.
+    const nx = -Math.sin(vehicle.heading);
+    const ny = Math.cos(vehicle.heading);
+    const lineX = vehicle.x - nx * vehicle.drift * vehicle.driftDir * ease;
+    const lineY = vehicle.y - ny * vehicle.drift * vehicle.driftDir * ease;
+    const stepped = speed * dt;
+    const nextLineX = lineX + Math.cos(vehicle.heading) * stepped;
+    const nextLineY = lineY + Math.sin(vehicle.heading) * stepped;
+
+    const nextAlong = Math.max(0, along - stepped);
+    const nt = Math.max(0, Math.min(1, 1 - nextAlong / VAN_BRAKE_DIST));
+    const nextEase = nt * nt * (3 - 2 * nt);
+    vehicle.x = nextLineX + nx * vehicle.drift * vehicle.driftDir * nextEase;
+    vehicle.y = nextLineY + ny * vehicle.drift * vehicle.driftDir * nextEase;
+
+    // The body leads the slide by the slew, swung the way it is washing.
+    vehicle.facing = vehicle.heading + VAN_SLEW_ANGLE * vehicle.driftDir * nextEase;
   }
 }
 
@@ -533,7 +660,13 @@ export function vehiclesToWire(world: World): BackupVehicleState[] {
     if (v.skidX !== null && v.skidY !== null) {
       state.skidX = Math.round(v.skidX);
       state.skidY = Math.round(v.skidY);
+      // The tangent it was travelling when the brakes bit, which is the line
+      // the marks lie along — *not* the body angle, which has swung off it.
+      state.skidAngle = Math.round(v.heading * 100) / 100;
     }
+    if (v.phase === 'braking') state.braking = true;
+    if (v.rearOpen > 0) state.rearOpen = Math.round(v.rearOpen * 100) / 100;
+    if (v.cabOpen > 0) state.cabOpen = Math.round(v.cabOpen * 100) / 100;
     return state;
   });
 }

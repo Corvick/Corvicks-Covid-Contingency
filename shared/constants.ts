@@ -1589,9 +1589,19 @@ export const BACKUP_ARRIVE_DIST = 16;
  * wall.
  */
 export const BACKUP_ENTRY_OFFSET = 200;
-export const BACKUP_PARK_MIN = 90;
-export const BACKUP_PARK_MAX = 700;
+/**
+ * How far in it comes before looking for somewhere to stop. Raised from 90:
+ * the search takes the *first* clear spot, so a low floor had everything
+ * pulling up on the kerb the moment it was through the cordon, close enough to
+ * the perimeter that the arrival happened half off the edge of the screen.
+ */
+export const BACKUP_PARK_MIN = 240;
+export const BACKUP_PARK_MAX = 800;
 export const BACKUP_DOOR_INTERVAL_MS = 420;
+/** How long a door takes to swing open, and how far it swings. */
+export const BACKUP_DOOR_SWING_MS = 320;
+export const VAN_REAR_DOOR_ARC = 2.1;
+export const VAN_CAB_DOOR_ARC = 1.5;
 /**
  * Much bigger than the patrol car it replaces (46×22). It is an armoured box
  * with six people in the back, and at the old size the thing that turned up
@@ -1629,9 +1639,30 @@ export const BACKUP_LANE_OFFSETS = [0, 150, -150, 300, -300, 460, -460, 620, -62
  * event than a SWAT team arriving, and it should read as one.
  */
 export const VAN_APPROACH_SPEED = 400;
-export const VAN_BRAKE_DIST = 190;
+export const VAN_BRAKE_DIST = 210;
 export const VAN_BRAKE_SPEED_MIN = 70;
 export const VAN_SLEW_ANGLE = 0.42;
+/**
+ * And the stop is a *curve*, not a straight line with the body twisted at the
+ * end of it. Straight in, then the brakes go on and it washes `VAN_DRIFT`
+ * sideways while the back end comes round, and stops there — which is the
+ * whole of what the shot looks like in a film, and what a dead-straight
+ * approach with a rotated body conspicuously is not.
+ *
+ * The sideways offset is eased so its lateral speed is nearly zero by the end.
+ * That matters for more than smoothness: the drawn body angle is the travel
+ * tangent plus the slew, so a curve still bending at the moment it stops would
+ * leave the van resting at some other angle than the one it rests at now.
+ * Flattening it out is what keeps the final pose exactly as it was.
+ */
+export const VAN_DRIFT = 52;
+/**
+ * Rubber burning off the tyres while it slides. It keeps drifting and thinning
+ * for a moment after the van has stopped — smoke that ends the instant the
+ * vehicle does reads as a switch being thrown rather than as smoke.
+ */
+export const TYRE_SMOKE_PUFFS = 22;
+export const TYRE_SMOKE_LINGER_MS = 1600;
 
 /**
  * The crew: black gear, a riot shield each, and a semi-automatic rifle they
@@ -1657,6 +1688,30 @@ export const SWAT_HELMET_COLOR = '#4b5563';
 export const RIFLEMAN_BLOOM_RAD = 0.045;
 export const RIFLEMAN_SHOOT_INTERVAL_MS = 1150;
 export const RIFLEMAN_SIGHT = 620;
+
+/**
+ * A squad sent by radio does not stand at your shoulder — it sweeps.
+ *
+ * One of them leads and the rest keep station on it, loosely: a slot bearing
+ * off the leader's back at `SQUAD_SPREAD`, held only once they have drifted
+ * `SQUAD_SLACK` off it. Correcting to an exact spot is a squad that marches;
+ * the slack is the whole of what makes it read as people moving together
+ * rather than as a formation being drawn.
+ */
+export const SQUAD_SPREAD = 62;
+export const SQUAD_SLACK = 32;
+/** How many spots a sweeping leader considers, and how far off it looks. */
+export const SQUAD_SWEEP_SAMPLES = 12;
+export const SQUAD_SWEEP_MIN = 420;
+export const SQUAD_SWEEP_MAX = 1500;
+/**
+ * Where a sweep wants to be relative to the nearest zombie. The same figure
+ * `BOT_HUNT_STANDOFF` uses and for the same reason: at the edge of their own
+ * sight they hover where they can neither see nor be reached, and never fight.
+ */
+export const SQUAD_SWEEP_STANDOFF = 300;
+/** How far the driver strays from the van he is minding. */
+export const VAN_GUARD_RADIUS = 90;
 
 // ---------------------------------------------------------------- zap mines
 /**

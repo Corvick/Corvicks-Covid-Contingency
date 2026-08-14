@@ -24,6 +24,8 @@ export interface EntityState {
   soldier?: boolean;
   /** Out of a SWAT van: black gear, a riot shield, and a rifle to match. */
   swat?: boolean;
+  /** Leading a squad: the one with the radio pack on his back. */
+  squadLead?: boolean;
   /** Still fading into existence — client dithers it in. */
   materializing?: boolean;
   /** Speech bubble text, while one is active. */
@@ -149,8 +151,15 @@ export interface BackupVehicleState {
   y: number;
   facing: number;
   parked: boolean;
+  /** Where the brakes went on, and the tangent it was travelling at the time. */
   skidX?: number;
   skidY?: number;
+  skidAngle?: number;
+  /** Still sliding: the tyres are smoking. */
+  braking?: boolean;
+  /** How far the back doors and the cab door have swung, 0-1. */
+  rearOpen?: number;
+  cabOpen?: number;
 }
 
 /** What pressing or holding E would do to the door you're stood at. */
