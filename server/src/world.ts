@@ -55,6 +55,7 @@ import {
   ZOMBIE_SMART_SHARE,
   VAN_GUARD_RADIUS,
   UNSTICK_CHECK_MS,
+  TEST_BEACON_ON_A_BOT,
   ZOMBIE_SPREAD_SHARE,
   OFFICER_SEEK_CHANCE,
   BARRICADE_CHANCE,
@@ -1452,6 +1453,17 @@ function populate(world: World): void {
     world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
     world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
     world.bots.add(id);
+  }
+
+  // TESTING: one bot starts with the beacon so the whole sequence — pick a
+  // spot, helicopter, soldier, mast, shout — can be watched every round rather
+  // than only when a bot happens to walk to the duck pond. `spawnPickups`
+  // reads the same condition and leaves the bank one out, so this *moves* the
+  // city's beacon rather than adding a second.
+  if (TEST_BEACON_ON_A_BOT && world.bots.size > 0) {
+    const chosen = [...world.bots][Math.floor(Math.random() * world.bots.size)];
+    world.inventories.get(chosen)?.utilities.push('survivorBeacon');
+    console.log(`[server] TESTING: ${chosen} starts with the survivor beacon`);
   }
 
   // The outbreak walks in from one randomly chosen edge, spread along it.

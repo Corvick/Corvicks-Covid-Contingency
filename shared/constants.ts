@@ -1512,6 +1512,22 @@ export const SHIELD_BASH_STAMINA = 24;
 /** TESTING: scatter one of every item around player one's start point. */
 export const TEST_DROP_ALL_ITEMS = true;
 export const TEST_DROP_RADIUS = 90;
+/**
+ * TESTING: hand the survivor beacon to a random bot officer at spawn, and
+ * leave none on the pond bank.
+ *
+ * The whole beacon sequence — a spot picked off the map, a helicopter, a
+ * soldier walking it in, the mast, the shout — needs a bot to actually *have*
+ * one, and in a real round that means a bot walking to the duck pond first.
+ * This skips the walk so the rest can be watched every round instead of
+ * occasionally.
+ *
+ * It moves the beacon rather than adding one: the pond placement is skipped, so
+ * there is still exactly one in the city. Falls back to the pond when there are
+ * no bots at all, or a round of nothing but human players would have no beacon
+ * anywhere.
+ */
+export const TEST_BEACON_ON_A_BOT = true;
 
 // ---------------------------------------------------------------- air support
 export const GRENADE_THROW_RANGE = 400;
@@ -1814,6 +1830,17 @@ export const BOT_BEACON_SHOUT_CHECK_MS = 2500;
 export const BOT_BEACON_SHOUT_MIN = 6;
 /** How many spots a bot considers before calling the beacon in. */
 export const BOT_BEACON_SAMPLES = 40;
+/**
+ * Clear of the dead is a *floor* rather than something to maximise.
+ *
+ * Scored as "furthest from any zombie" the beacon lands in whichever corner of
+ * the map is emptiest — which is also the corner with nobody in it and the
+ * longest walk from anywhere, so nobody arrives alive. Past this floor the spot
+ * with the most people near it wins, less a mild pull toward the bot so the
+ * carrier is not sent across the whole city on foot.
+ */
+export const BOT_BEACON_MIN_CLEARANCE = 420;
+export const BOT_BEACON_WALK_WEIGHT = 0.01;
 /** The map that opens on a click: how big, and how far in from the corner. */
 export const MINIMAP_MAX_W = 520;
 export const MINIMAP_MARGIN = 28;

@@ -118,6 +118,8 @@ import {
   BEACON_SHOUT_MS,
   BEACON_GUARD_RADIUS,
   BOT_BEACON_SAMPLES,
+  BOT_BEACON_MIN_CLEARANCE,
+  BOT_BEACON_WALK_WEIGHT,
   BOT_BEACON_SHOUT_CHECK_MS,
   BOT_BEACON_SHOUT_MIN,
   BEACON_MUSTER_RADIUS,
@@ -4239,10 +4241,20 @@ function beaconTick(world: World, e: Entity, inv: Inventory, now: number): boole
     if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
     // Out in the open. A muster point in somebody's front room holds nobody.
     if (buildingIndexAt(world, x, y) >= 0) continue;
-    // Far from the dead, and near enough to be worth walking to rather than
-    // out in a corner of the map nobody will ever cross.
-    const danger = Math.min(world.danger.distanceAt(x, y), DANGER_MAX_DISTANCE);
-    const score = danger - Math.hypot(x - e.x, y - e.y) * 0.25;
+    // Clear of the dead is a *floor*, not something to maximise. Scored as
+    // "as far from the zombies as possible" it lands in whichever corner of the
+    // map is emptiest, which is also the corner with nobody in it and the
+    // longest walk from anywhere — a muster point nobody reaches alive.
+    if (world.danger.distanceAt(x, y) < BOT_BEACON_MIN_CLEARANCE) continue;
+
+    // Among the spots that are safe enough, take the one with the most people
+    // near it. Somewhere to gather has to be where the crowd already is.
+    let nearby = 0;
+    for (const other of world.entityGrid.queryCircle(x, y, RALLY_RADIUS, new Set<Entity>())) {
+      if (other.type !== 'human') continue;
+      if (Math.hypot(other.x - x, other.y - y) <= RALLY_RADIUS) nearby++;
+    }
+    const score = nearby - Math.hypot(x - e.x, y - e.y) * BOT_BEACON_WALK_WEIGHT;
     if (score > bestScore) {
       bestScore = score;
       best = { x, y };
@@ -4300,10 +4312,16 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     senseThreats(world, e, state, now, sight, true);
   }
 
-  // Sending people to the mast. Above everything that returns, because it is a
-  // shout rather than an errand — a bot does not stop fighting, stop running or
-  // stop looting to give an order, and it should still be able to give one
-  // while doing any of the three.
+  // Calling the beacon in, and then sending people to it. Both are decisions
+  // made from wherever the bot is standing rather than errands, so both sit
+  // above everything that returns — a bot does not stop fighting, running or
+  // looting to pick a spot off a map or to give an order.
+  //
+  // Deliberately *not* held back until something is in sight, the way the
+  // radio is. Backup answers a fight that is happening; a muster point is
+  // somewhere to have sent people *before* one is, and a beacon called at the
+  // two-minute mark has missed most of the round it was meant to change.
+  beaconTick(world, e, inv, now);
   beaconShoutTick(world, e, state, now);
 
   // Clicking on an empty chamber is checked every tick, not only when there's
@@ -4371,10 +4389,6 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Backup takes seconds to arrive, so the moment to ask for it is the
     // moment something is seen rather than the moment things are going badly.
     if (radioTick(world, e, inv, now)) return;
-    // Same reasoning for the beacon, and it does not even cost the tick: the
-    // spot is picked off a map rather than walked to, so calling it in is a
-    // decision made from wherever the bot happens to be standing.
-    beaconTick(world, e, inv, now);
 
     // Judged on the *nearest* zombie in sight, not the one being shot at —
     // those are often different, and a bot trading fire with something across

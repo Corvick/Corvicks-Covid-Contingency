@@ -1350,6 +1350,18 @@ In `shared/constants.ts`:
   that is not about loot.
 - `PLAYER_ONE_SPAWN_AT_CENTER = true` — player one spawns mid-map, not on the outbreak
 - `PLAYER_ONE_SHOT_KILL = false` — already off; set true to one-shot zombies
+- `TEST_BEACON_ON_A_BOT = true` — a random bot officer starts with the survivor
+  beacon, and **none is placed on the pond bank**. It *moves* the city's one
+  beacon rather than adding a second, and falls back to the bank when there are
+  no bots at all, so a round of nothing but human players still has one. It
+  exists because the whole sequence — spot picked off the map, helicopter,
+  soldier walking it in, mast, shout — otherwise waits on a bot happening to
+  walk to the duck pond, which is most of a round. With it on: called at 0s and
+  standing inside 4-58s, every round.
+  Note this leaves *two* handsets in play while `TEST_DROP_ALL_ITEMS` is also
+  on, since the debug heap walks the whole registry — harmless, because
+  `requestBeacon` refuses a second call whoever makes it, and useful, since it
+  is how you get one in your own hands to watch the map.
 
 ## Known open issue
 
@@ -1687,12 +1699,22 @@ the game for whether any of this is working.
   (`BEACON_GUARD_RADIUS`, through the same `guardX`/`guardY` the van's driver
   uses, with `guardRadius` now carried per-post since a driver stands at his
   door and a beacon guard has a muster to cover).
-- **Bots call it in the same way and from anywhere.** `beaconTick` scores spots
-  on the danger field — the *reverse* of `botPatrolTarget`, which scores toward
-  trouble; a muster point wants the far end of that — outdoors and reachable.
-  It costs a bot exactly what it costs a player, which is nothing but the
-  choice, because the spot is picked off a map rather than walked to. Measured:
-  called at 14-97s.
+- **Bots call it in the same way and from anywhere**, and *early*. `beaconTick`
+  costs a bot exactly what it costs a player — nothing but the choice, since
+  the spot is picked off a map rather than walked to — so it sits inline above
+  every branch that returns rather than waiting on a threat the way the radio
+  does. Backup answers a fight that is happening; a muster point is somewhere
+  to have sent people *before* one is, and a beacon called at the two-minute
+  mark has missed most of the round it was meant to change. Measured: held
+  back until something was in sight it went up at 48-136s; called inline, 0s.
+- **Clear of the dead is a floor, not a thing to maximise.** Scored as
+  "furthest from any zombie" — the obvious reading, and the reverse of
+  `botPatrolTarget` — the beacon lands in whichever corner of the map is
+  emptiest, which is also the corner with nobody in it and the longest walk
+  from anywhere. Measured that way, 0-1 people at the mast. Past
+  `BOT_BEACON_MIN_CLEARANCE` it takes the spot with the *most people near it*
+  instead, less a mild pull toward the bot so the carrier is not sent across
+  the whole city on foot.
 - **And bots give the order, which is the half that fills it.** A mast nobody
   is sent to is scenery. `beaconShoutTick` works the Q wheel's "GO TO THE
   BEACON!" on exactly the player's terms — a mast inside `BEACON_CALL_RADIUS`,

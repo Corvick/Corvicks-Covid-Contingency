@@ -33,6 +33,7 @@ import {
   POND_LOOT_BAND,
   BEACON_MUSTER_RADIUS,
   BEACON_ONE_PER_CITY,
+  TEST_BEACON_ON_A_BOT,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
@@ -266,7 +267,12 @@ export function spawnPickups(world: World): void {
   // this is the only survivor beacon there will ever be.
   const pond = world.map.pond;
   const bankTables: Array<ItemId[]> = [rarestOf('gun'), rarestOf('utility')];
-  if (BEACON_ONE_PER_CITY) bankTables.push(['survivorBeacon']);
+  // TESTING: `populate` has already handed it to a bot, so leaving one here as
+  // well would put two in a city that is meant to have exactly one. Same
+  // condition on both sides, and both fall back to the bank when there are no
+  // bots to give it to.
+  const beaconOnABot = TEST_BEACON_ON_A_BOT && world.bots.size > 0;
+  if (BEACON_ONE_PER_CITY && !beaconOnABot) bankTables.push(['survivorBeacon']);
   for (const table of bankTables) {
     const item = table[Math.floor(Math.random() * table.length)];
     for (let attempt = 0; attempt < 40; attempt++) {
