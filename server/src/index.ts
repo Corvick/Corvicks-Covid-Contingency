@@ -20,7 +20,7 @@ import {
   dropDebugKit,
 } from './inventory.js';
 import { ITEMS } from '../../shared/items.js';
-import { grenadesToWire, helicoptersToWire, smokesToWire, updateAirSupport } from './heli.js';
+import { grenadesToWire, helicoptersToWire, requestBeacon, smokesToWire, updateAirSupport } from './heli.js';
 import {
   TICK_RATE,
   PLAYER_SPEED,
@@ -53,6 +53,7 @@ import {
   BEACON_SHOUT,
   BEACON_SHOUT_MS,
   BEACON_TOO_FAR_LINE,
+  BEACON_REFUSED_LINE,
   BEACON_CALL_RADIUS,
   BOOTS_SPEED_MUL,
   BOOTS_STAMINA_MUL,
@@ -339,6 +340,23 @@ wss.on('connection', (socket) => {
           console.log(`[server] ${id} sent ${moved} civilians to the beacon`);
         } else {
           world.speech.set(id, { text: RALLY_NO_CHARGE_LINE, until: now + RALLY_NO_CHARGE_MS });
+        }
+      } else if (msg.type === 'beaconPlace') {
+        // A spot picked off the map rather than clicked in the world, so
+        // nothing about it has been validated by having walked there.
+        // `requestBeacon` refuses a second one and refuses ground nobody could
+        // stand on; the wait for the flight is the cost of the decision.
+        const officer = world.entities.get(id);
+        const inv = world.inventories.get(id);
+        const now = Date.now();
+        if (!officer || officer.type !== 'officer' || !inv) {
+          // Not somebody holding a handset.
+        } else if (!inv.utilities.includes('survivorBeacon')) {
+          // They put it down between opening the map and clicking it.
+        } else if (!requestBeacon(world, msg.x, msg.y, now)) {
+          world.speech.set(id, { text: BEACON_REFUSED_LINE, until: now + RALLY_NO_CHARGE_MS });
+        } else {
+          console.log(`[server] ${id} called the beacon in at ${msg.x | 0},${msg.y | 0}`);
         }
       } else if (msg.type === 'spectate') {
         // Normally a fresh game to watch; `restart: false` drops into the one

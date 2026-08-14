@@ -439,7 +439,12 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     label: 'Survivor Beacon',
     short: 'BCON',
     color: '#facc15',
-    rarity: 2,
+    // Out of the loot table by construction, like the launcher and the smoke.
+    // There is exactly one in the city and it is always on the bank of the
+    // duck pond — see `BEACON_ONE_PER_CITY`. Rarity 0 is also what keeps it out
+    // of `rarestOf` and out of the every-utility floor, both of which filter on
+    // rarity > 0, so nothing else can quietly place a second one.
+    rarity: 0,
   },
   thermalGoggles: {
     id: 'thermalGoggles',

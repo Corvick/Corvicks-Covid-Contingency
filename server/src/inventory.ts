@@ -31,6 +31,8 @@ import {
   PARK_LOOT_PATH_GAP,
   POND_LOOT_GAP,
   POND_LOOT_BAND,
+  BEACON_MUSTER_RADIUS,
+  BEACON_ONE_PER_CITY,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
@@ -257,8 +259,15 @@ export function spawnPickups(world: World): void {
   // to do in it — ornamental water, a flock of ducks, and no reason to walk
   // over. Placed independently rather than side by side, so finding one is not
   // finding both and you have to work your way round the water for the other.
+  //
+  // The **beacon handset** goes on the same bank, and is a third placement
+  // rather than one of the two — it does not take the gun's spot or the
+  // utility's. It is rarity 0, so nothing else in the city can place one and
+  // this is the only survivor beacon there will ever be.
   const pond = world.map.pond;
-  for (const table of [rarestOf('gun'), rarestOf('utility')]) {
+  const bankTables: Array<ItemId[]> = [rarestOf('gun'), rarestOf('utility')];
+  if (BEACON_ONE_PER_CITY) bankTables.push(['survivorBeacon']);
+  for (const table of bankTables) {
     const item = table[Math.floor(Math.random() * table.length)];
     for (let attempt = 0; attempt < 40; attempt++) {
       // A bearing off the pond's centre, then out past the water's edge at
@@ -674,6 +683,31 @@ function trackBearing(world: World, inv: Inventory, x: number, y: number): numbe
   return nearestZombieBearing(world, x, y)?.bearing ?? null;
 }
 
+/**
+ * The state of the one beacon, for whoever is carrying the handset.
+ *
+ * Null without one in the bag, which is what makes dropping it cost you the
+ * map: the answer never leaves the server, exactly as `selfInfected` doesn't
+ * without a cure gun in hand.
+ *
+ * `muster` is a *count*, never positions. The map deliberately shows no NPC
+ * anywhere on it — the point of the readout is "is this working", not "where
+ * is everyone".
+ */
+function beaconWire(world: World, inv: Inventory): InventoryState['beacon'] {
+  if (!inv.utilities.includes('survivorBeacon')) return null;
+  const b = world.beacon;
+  if (!b) return { placed: false, pending: false, muster: 0, x: 0, y: 0 };
+  let muster = 0;
+  if (b.placed) {
+    for (const e of world.entities.values()) {
+      if (e.type !== 'human' && e.type !== 'officer') continue;
+      if (Math.hypot(e.x - b.x, e.y - b.y) <= BEACON_MUSTER_RADIUS) muster++;
+    }
+  }
+  return { placed: b.placed, pending: !b.placed, muster, x: Math.round(b.x), y: Math.round(b.y) };
+}
+
 export function toWireInventory(
   world: World,
   id: string,
@@ -704,6 +738,7 @@ export function toWireInventory(
     deployWanted: world.deployWanted.has(id),
     chargeProgress: chargeProgress(world, id, inv, now),
     trackBearing: trackBearing(world, inv, x, y),
+    beacon: beaconWire(world, inv),
     // Only the cure gun tells you about yourself. Without one in hand the
     // flag never reaches the client at all, so there is nothing to read off
     // the wire either.

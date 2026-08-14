@@ -1641,14 +1641,76 @@ is nothing to shoot at, and the fight branch puts a gun back in its hands the
 moment `senseThreats` finds something. Read on re-pick, never per tick —
 `nearestZombieBearing` walks every entity.
 
-**Three of them are placeables, and they all go down where you stand.**
-`zapMine` arms after `ZAP_ARM_MS` so you can step off your own, then drops
-whatever crosses it for a full minute — the stun is enormous because a mine is
-a one-shot you had to carry, place and walk away from. `survivorBeacon` plants
-a mast and frees its slot; the order pointing people at it lives on the Q wheel
-afterwards, costs a rally charge like any other command, and can be repeated
-from anywhere in earshot — the mast is a *place* rather than a spot you
-clicked, which is what makes it worth carrying.
+**`zapMine` goes down where you stand.** It arms after `ZAP_ARM_MS` so you can
+step off your own, then drops whatever crosses it for a full minute — the stun
+is enormous because a mine is a one-shot you had to carry, place and walk away
+from.
+
+### The survivor beacon is a handset, not a mast
+
+It is the one utility that is never consumed and never placed where you are
+standing. Left-click with it in hand opens a **map of the city** and you pick
+the spot; a helicopter brings one soldier in, he walks there, puts the mast up
+and stays to hold it. Afterwards the same click opens the same map to tell you
+**how many people have actually gathered at it**, which is the only readout in
+the game for whether any of this is working.
+
+- **One per city, always on the bank of the duck pond.** `rarity: 0` keeps it
+  out of the loot tables by construction, and out of `rarestOf` and the
+  every-utility floor as well, since both filter on rarity > 0 — so nothing can
+  quietly place a second. It is a *third* placement on the bank and does not
+  take the rare gun's spot or the rare utility's. The pond grew to match
+  (`POND_MIN_RADIUS`/`MAX` 110/190 → 135/225): it is somewhere people are sent
+  now, so it has to read as a place and have bank enough to stand a crowd on.
+- **The map shows no NPC anywhere on it, by construction.** It is drawn from
+  the `map` the client already had at `welcome` — walls, footprints, the park,
+  the pond — plus your own position and the mast. Nothing about where anybody
+  is comes down the wire for it, so it cannot become a wallhack later however
+  it is extended. The muster is a **count**, never dots.
+- **Dropping it costs you the map, not the beacon.** `inventory.beacon` is null
+  without one in the bag, exactly as `selfInfected` is without a cure gun, so
+  the answer never leaves the server. The mast stays standing and the Q wheel
+  order keeps working — you have given away the ability to *look*.
+- **The Q wheel is gated with no code in the wheel.** `world.towers` is only
+  written when the soldier actually plants, and `beaconInEarshot` already tests
+  that list, so "GO TO THE BEACON!" simply is not offered while the team is
+  still inbound. Measured: 0 towers before planting in every run.
+- **The wait is the cost of the decision.** `requestBeacon` refuses a second
+  call and refuses ground nobody could stand on; everything else about it is
+  the flight and the walk. Measured over four cities with a live outbreak:
+  planted at 6-52s, 36-171px off the clicked spot.
+- **A carrier lost on the way hands the call back.** There is one beacon in the
+  city, so a soldier caught between the drop and the mast going up would
+  otherwise take it out of the round permanently, with nothing on screen to
+  explain why. `checkBeaconCarrier` clears the request. Once the mast is *up*
+  it stops caring — the beacon is a place from then on and he is just its guard
+  (`BEACON_GUARD_RADIUS`, through the same `guardX`/`guardY` the van's driver
+  uses, with `guardRadius` now carried per-post since a driver stands at his
+  door and a beacon guard has a muster to cover).
+- **Bots call it in the same way and from anywhere.** `beaconTick` scores spots
+  on the danger field — the *reverse* of `botPatrolTarget`, which scores toward
+  trouble; a muster point wants the far end of that — outdoors and reachable.
+  It costs a bot exactly what it costs a player, which is nothing but the
+  choice, because the spot is picked off a map rather than walked to. Measured:
+  called at 17-75s.
+
+Two bugs came out of building it, and the first is not about beacons at all:
+
+- **Every freshly spawned entity was declared stuck on its first tick.**
+  `lastUnstickCheck` started at 0, so the first `unstickTick` always fired,
+  always measured zero progress — the state was made this tick and had not
+  moved — and committed `UNSTICK_COMMIT_MS` of blind breakout before the entity
+  had taken a step. It is invisible on anything that spawns with nowhere
+  particular to be, and fatal to anything that spawns *with an errand*: the
+  carrier was put down 80px from his spot and walked steadily away from it,
+  because the breakout owns the tick and knows nothing about the goal. Fixed at
+  source, in `newAiState`.
+- **"There" was never a pixel.** At `BEACON_PLANT_REACH` 34 he would close to
+  sixty-odd pixels, fail to shave the last of it off against a kerb, get shoved
+  back out by `unstickTick`, and come round again — forever. 80 now, and
+  `BEACON_PLANT_GIVE_UP_MS` puts the mast up where he stands if he still cannot
+  get there. Better a mast in the wrong place, which you can see on the map,
+  than the round's only muster point never existing.
 
 **The wheel's hit test has to be told how many options are on screen.** It read
 a fixed count off a module-level `WHEEL_OPTIONS` while `drawWheel` used the

@@ -18,6 +18,8 @@ import {
   BLAST_DOOR_DAMAGE_MIN,
   BLAST_DOOR_DAMAGE_MAX,
   GRENADE_BOUNCE,
+  BEACON_INBOUND_LINE,
+  BEACON_SHOUT_MS,
 } from '../../shared/constants.js';
 import {
   findSpawnNear,
@@ -72,6 +74,13 @@ export interface Helicopter {
   nextDropAt: number;
   /** When the exit run began, or 0 while still inbound/hovering. */
   leftAt: number;
+  /** How many it has aboard. Smoke brings a squad; the beacon brings one man. */
+  carries: number;
+  /**
+   * Where the beacon was called for, when this is the beacon flight. The one
+   * soldier aboard walks there, puts the mast up and holds it.
+   */
+  beaconFor?: { x: number; y: number };
 }
 
 let counter = 0;
@@ -157,39 +166,97 @@ function edgePointFor(x: number, y: number): { x: number; y: number } {
   return { x: -260, y };
 }
 
-function callHelicopter(world: World, smoke: Smoke, now: number): void {
-  const entry = edgePointFor(smoke.x, smoke.y);
+/**
+ * Fly one in to a spot. `carries` is how many rope down when it gets there;
+ * `beaconFor` marks the flight that brings the beacon and its one soldier.
+ */
+function flyTo(
+  world: World,
+  x: number,
+  y: number,
+  now: number,
+  carries: number,
+  beaconFor?: { x: number; y: number },
+): void {
+  const entry = edgePointFor(x, y);
 
   // It flies through rather than turning around: the exit continues along the
   // same bearing it arrived on, out the far side of the map.
-  const dx = smoke.x - entry.x;
-  const dy = smoke.y - entry.y;
+  const dx = x - entry.x;
+  const dy = y - entry.y;
   const len = Math.hypot(dx, dy) || 1;
   const run = WORLD_WIDTH + WORLD_HEIGHT;
-  const exit = { x: smoke.x + (dx / len) * run, y: smoke.y + (dy / len) * run };
+  const exit = { x: x + (dx / len) * run, y: y + (dy / len) * run };
   world.helicopters.set(nextId('heli'), {
     id: nextId('h'),
     x: entry.x,
     y: entry.y,
-    targetX: smoke.x,
-    targetY: smoke.y,
+    targetX: x,
+    targetY: y,
     exitX: exit.x,
     exitY: exit.y,
-    facing: Math.atan2(smoke.y - entry.y, smoke.x - entry.x),
+    facing: Math.atan2(y - entry.y, x - entry.x),
     phase: 'inbound',
     spawnedAt: now,
     hoverUntil: 0,
     dropped: 0,
     nextDropAt: 0,
     leftAt: 0,
+    carries,
+    beaconFor,
   });
+}
+
+function callHelicopter(world: World, smoke: Smoke, now: number): void {
+  flyTo(world, smoke.x, smoke.y, now, HELI_SOLDIERS);
+}
+
+/**
+ * The beacon flight: one soldier, put down as near the designated spot as the
+ * pilot can manage, who then walks the rest and plants the mast himself.
+ *
+ * Deliberately a *drop* rather than the mast simply appearing where it was
+ * asked for. The wait is what makes choosing the spot a decision — and a
+ * soldier who has to walk there can be met on the way.
+ */
+export function callBeaconDrop(world: World, x: number, y: number, now: number): void {
+  flyTo(world, x, y, now, 1, { x, y });
+}
+
+/**
+ * Somebody has picked a spot off the map. Called by a player's `beaconPlace`
+ * and by a bot's own choice alike, so neither can get a second beacon and both
+ * have to wait out the same flight.
+ *
+ * Returns false when the call is refused, which is either "there is already
+ * one" or "nothing can stand there".
+ */
+export function requestBeacon(world: World, x: number, y: number, now: number): boolean {
+  if (world.beacon) return false; // one to a city, called or standing
+  // Somewhere a soldier could actually get to and stand on. A spot picked off
+  // a map has had none of the checks clicking the world would have had.
+  if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) return false;
+  world.beacon = { x, y, carrierId: null, placed: false };
+  callBeaconDrop(world, x, y, now);
+  return true;
 }
 
 function dropSoldier(world: World, heli: Helicopter, now: number): void {
   const spawn = findSpawnNear(world, heli.x, heli.y, ENTITY_RADIUS.officer, 60);
   const id = `soldier-${counter++}`;
   world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
-  world.ai.set(id, newAiState(now, spawn.x, spawn.y));
+  const state = newAiState(now, spawn.x, spawn.y);
+  if (heli.beaconFor) {
+    state.beaconX = heli.beaconFor.x;
+    state.beaconY = heli.beaconFor.y;
+    if (world.beacon) world.beacon.carrierId = id;
+    world.speech.set(id, { text: BEACON_INBOUND_LINE, until: now + BEACON_SHOUT_MS });
+    // He has an errand and then a post. `dispatched` is what stops a passing
+    // radio holder rescanning him onto an escort and walking the beacon off.
+    // Only him: an ordinary smoke drop has no orders to protect.
+    world.dispatched.add(id);
+  }
+  world.ai.set(id, state);
   world.soldiers.add(id);
   // Rope down rather than pop in.
   world.materializeUntil.set(id, now + 600);
@@ -230,7 +297,28 @@ function detonate(world: World, x: number, y: number, now: number): void {
   }
 }
 
+/**
+ * The beacon team can be lost on the way in, and if it is, the call has to come
+ * back.
+ *
+ * There is one beacon in the city and `requestBeacon` refuses a second, so a
+ * carrier who is caught between the drop and the mast going up would otherwise
+ * take the only survivor beacon in the round out of the game with him — a dead
+ * end nobody could see the cause of. Clearing the request hands the call back
+ * to whoever is holding the handset. Once the mast is *up* this stops caring:
+ * the beacon is a place from then on, and the man who planted it is just its
+ * guard.
+ */
+function checkBeaconCarrier(world: World): void {
+  const b = world.beacon;
+  if (!b || b.placed || b.carrierId === null) return;
+  const carrier = world.entities.get(b.carrierId);
+  if (carrier && carrier.type === 'officer') return;
+  world.beacon = null;
+}
+
 export function updateAirSupport(world: World, now: number, dt: number): void {
+  checkBeaconCarrier(world);
   // ---- grenades in flight
   for (const [key, g] of world.grenades) {
     if (now - g.thrownAt < GRENADE_FLIGHT_MS) {
@@ -272,12 +360,12 @@ export function updateAirSupport(world: World, now: number, dt: number): void {
     const dist = Math.hypot(dx, dy);
 
     if (h.phase === 'hovering') {
-      if (h.dropped < HELI_SOLDIERS && now >= h.nextDropAt) {
+      if (h.dropped < h.carries && now >= h.nextDropAt) {
         dropSoldier(world, h, now);
         h.dropped++;
         h.nextDropAt = now + HELI_DROP_INTERVAL_MS;
       }
-      if (now >= h.hoverUntil && h.dropped >= HELI_SOLDIERS) {
+      if (now >= h.hoverUntil && h.dropped >= h.carries) {
         h.phase = 'leaving';
         h.leftAt = now;
       }

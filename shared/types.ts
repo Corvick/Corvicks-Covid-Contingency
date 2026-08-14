@@ -453,6 +453,23 @@ export interface InventoryState {
   /** Bearing to the nearest zombie while the tracker is out, else null. */
   trackBearing: number | null;
   /**
+   * The beacon handset, or null without one in the bag.
+   *
+   * `placed` is a mast actually standing — not one that has merely been asked
+   * for, since the whole point of the wait is that the soldier has to get
+   * there. `muster` is how many are gathered at it, which is the only readout
+   * in the game for whether any of this worked, and it is a *count* rather
+   * than positions: the map deliberately shows no NPC anywhere on it.
+   */
+  beacon: {
+    placed: boolean;
+    /** Called in, soldier on his way, nothing standing yet. */
+    pending: boolean;
+    muster: number;
+    x: number;
+    y: number;
+  } | null;
+  /**
    * Whether *you* are incubating. Null unless a cure gun is in hand — the
    * server simply never sends it otherwise, so there is nothing to read.
    */
@@ -479,6 +496,12 @@ export type ClientMessage =
       rightDown: boolean;
     }
   | { type: 'ability'; ability: AbilityId; x: number; y: number }
+  /**
+   * Where on the map the beacon should go. Deliberately its own message rather
+   * than an `AbilityId`: it is not on the Q wheel, it costs no rally charge,
+   * and it is picked off a map rather than by clicking the world.
+   */
+  | { type: 'beaconPlace'; x: number; y: number }
   | { type: 'selectSlot'; slot: number }
   /**
    * Watch instead of play. `restart: false` joins the round already in

@@ -53,6 +53,8 @@ import {
   DOOR_OPENS_FOR_STRANGERS_CHANCE,
   DOOR_SLAM_CHANCE,
   ZOMBIE_SMART_SHARE,
+  VAN_GUARD_RADIUS,
+  UNSTICK_CHECK_MS,
   ZOMBIE_SPREAD_SHARE,
   OFFICER_SEEK_CHANCE,
   BARRICADE_CHANCE,
@@ -320,9 +322,29 @@ export interface AiState {
    */
   squadSlot: number;
   sweeps: boolean;
-  /** A post to stay near — the van's driver, minding the van. */
+  /**
+   * A post to stay near — the van's driver minding the van, or the soldier
+   * who put the beacon up holding it. How much ground goes with the post,
+   * since a driver stands at his door and a beacon guard has a muster to
+   * cover.
+   */
   guardX: number | null;
   guardY: number | null;
+  guardRadius: number;
+  /**
+   * Carrying the survivor beacon to where it was called for.
+   *
+   * A separate destination from `guardX`/`guardY` on purpose: he walks to this
+   * one, and only once the mast is *up* does it become the post he holds. Both
+   * at once and he would settle for standing near the spot rather than
+   * reaching it.
+   */
+  beaconX: number | null;
+  beaconY: number | null;
+  /** When the mast goes up, or 0 while he is still on his way. */
+  beaconPlantAt: number;
+  /** When he set out, so a trip he cannot finish can be given up on. */
+  beaconSetOutAt: number;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
   /**
@@ -553,8 +575,27 @@ export interface World {
   bots: Set<string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
-  /** Survivor beacons standing in the city. Placed, then pointed at. */
+  /**
+   * Survivor beacons standing in the city. Placed, then pointed at.
+   *
+   * A mast only ever appears here once a soldier has actually got to the spot
+   * and put it up — which is what gates the Q wheel's "go to the beacon" with
+   * no code in the wheel at all, since the option already tests this list.
+   */
   towers: Array<{ x: number; y: number }>;
+  /**
+   * The one beacon call, from the moment it is made. Null until somebody picks
+   * a spot off the map. `placed` is the mast standing, as against the soldier
+   * still walking to it, and the two are deliberately separate — the wait is
+   * the cost of the thing.
+   */
+  beacon: {
+    x: number;
+    y: number;
+    /** The soldier bringing it, while he is alive to bring it. */
+    carrierId: string | null;
+    placed: boolean;
+  } | null;
   /** Zap mines waiting on the ground, and the crackle when one goes. */
   mines: Map<string, Mine>;
   zaps: Array<{ x: number; y: number; at: number }>;
@@ -704,7 +745,14 @@ export function newAiState(now: number, x: number, y: number): AiState {
     fleeUntil: 0,
     unstickUntil: 0,
     unstickHeading: 0,
-    lastUnstickCheck: 0,
+    // One full interval of grace. At 0 the very first tick of a fresh state
+    // always reports zero progress — it has not had a chance to move yet — so
+    // `unstickTick` declared every newly spawned entity stuck and committed it
+    // to `UNSTICK_COMMIT_MS` of blind breakout before it had taken a step. It
+    // shows up worst on anything spawned *with somewhere to be*: the beacon
+    // carrier was dropped 80px from his spot and walked steadily away from it,
+    // because the breakout owns the tick and knows nothing about the goal.
+    lastUnstickCheck: now + UNSTICK_CHECK_MS,
     unstickX: x,
     unstickY: y,
     slowMul: ZOMBIE_POST_GRAPPLE_SLOW,
@@ -785,6 +833,11 @@ export function newAiState(now: number, x: number, y: number): AiState {
     sweeps: false,
     guardX: null,
     guardY: null,
+    guardRadius: VAN_GUARD_RADIUS,
+    beaconX: null,
+    beaconY: null,
+    beaconPlantAt: 0,
+    beaconSetOutAt: 0,
     doorWaitUntil: 0,
     smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
     spreadsOut: Math.random() < ZOMBIE_SPREAD_SHARE,
@@ -1112,6 +1165,7 @@ export function createWorld(): World {
     bots: new Set(),
     botOfficerCount: BOT_OFFICER_COUNT,
     towers: [],
+    beacon: null,
     mines: new Map(),
     zaps: [],
     stunned: new Map(),
@@ -1196,6 +1250,7 @@ export function resetWorld(world: World): void {
   world.bashUntil.clear();
   world.vehicles.clear();
   world.towers.length = 0;
+  world.beacon = null;
   world.mines.clear();
   world.zaps.length = 0;
   world.stunned.clear();

@@ -70,6 +70,8 @@ import {
   drawMines,
   drawZaps,
   drawBeaconTowers,
+  drawMinimap,
+  minimapFrame,
   drawFires,
   drawBurning,
   drawPond,
@@ -153,6 +155,12 @@ let speech: SpeechState[] = [];
 const wheel = newWheelState();
 /** Ability picked from the wheel and waiting for the player to click a spot. */
 let armedAbility: AbilityId | null = null;
+/**
+ * The beacon map, open. Only ever while the handset is the item in hand, which
+ * is what makes putting it down cost you the ability to look — the server
+ * stops sending `inventory.beacon` at all without one in the bag.
+ */
+let minimapOpen = false;
 
 // Frame timing for the perf readout. Smoothed so the number is readable.
 let fps = 0;
@@ -373,6 +381,38 @@ canvas.addEventListener(
   'mousedown',
   (e) => {
     if (e.button !== 0) return;
+
+    // The beacon map. Open it with the handset in hand; while it is up, a click
+    // either designates the spot (the first time) or simply closes it (every
+    // time after, when it is a readout rather than a decision).
+    if (minimapOpen) {
+      e.stopImmediatePropagation();
+      const beacon = inventory?.beacon ?? null;
+      if (beacon && !beacon.placed && !beacon.pending) {
+        const frame = minimapFrame(canvas.width, canvas.height);
+        const inside =
+          input.mouseX >= frame.x &&
+          input.mouseX <= frame.x + frame.w &&
+          input.mouseY >= frame.y &&
+          input.mouseY <= frame.y + frame.h;
+        if (inside) {
+          send({
+            type: 'beaconPlace',
+            x: (input.mouseX - frame.x) / frame.scale,
+            y: (input.mouseY - frame.y) / frame.scale,
+          });
+        }
+      }
+      minimapOpen = false;
+      return;
+    }
+    if (heldItemId() === 'survivorBeacon' && !wheel.open && !armedAbility) {
+      e.stopImmediatePropagation();
+      minimapOpen = true;
+      // The click that opened it must not also be a trigger pull held down.
+      input.shooting = false;
+      return;
+    }
 
     if (wheel.open) {
       e.stopImmediatePropagation();
@@ -819,7 +859,7 @@ function sendInputLoop() {
     aimX: crosshair.x,
     aimY: crosshair.y,
     // Neither the wheel nor an armed order should empty your magazine.
-    shooting: input.shooting && !spectating && !wheel.open && !armedAbility,
+    shooting: input.shooting && !spectating && !wheel.open && !armedAbility && !minimapOpen,
     sprint: input.sprint,
     interact: input.interact && !spectating,
     rightDown: input.rightDown && !spectating,
@@ -1208,6 +1248,22 @@ function render() {
     // frame — which is the very thing the scope is for — he goes off the edge
     // and this marks where. Over the slot bar, not under it.
     if (me) drawSelfMarker(ctx, me.x - view.x, me.y - view.y, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    // The beacon map goes over the HUD — it is a thing you stop and read, and
+    // it closes itself the moment the handset leaves your hand.
+    if (minimapOpen && map) {
+      if (heldItemId() !== 'survivorBeacon') minimapOpen = false;
+      else {
+        drawMinimap(
+          ctx,
+          map,
+          minimapFrame(VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
+          me ? { x: me.x, y: me.y } : null,
+          inventory?.beacon ?? null,
+          VIEWPORT_WIDTH,
+          VIEWPORT_HEIGHT,
+        );
+      }
+    }
     if (wheel.open) {
       wheel.hover = hitTest(wheel, input.mouseX, input.mouseY, wheelOptions(following, beaconInEarshot()).length);
       drawWheel(

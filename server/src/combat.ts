@@ -509,17 +509,16 @@ export function fireHeld(
     return true;
   }
 
-  // A mast goes down where you stand and stays there. The order that points
-  // people at it comes off the Q wheel afterwards, so this only plants it.
-  if (held === 'survivorBeacon') {
-    if (!ready(GRENADE_COOLDOWN_MS)) return false;
-    world.lastShotAt.set(id, now);
-    world.towers.push({ x: shooter.x, y: shooter.y });
-    const slotOf = inv.utilities.indexOf('survivorBeacon');
-    if (slotOf >= 0) inv.utilities.splice(slotOf, 1);
-    inv.activeSlot = 0;
-    return true;
-  }
+  // The beacon is not fired and not planted where you stand. Left-click opens
+  // a map of the city and the spot is picked off that, which arrives as its own
+  // `beaconPlace` message — see `requestBeacon`. Nothing happens here, and the
+  // item is never consumed: afterwards the same click opens the same map to
+  // show how many have actually gathered at it.
+  //
+  // It is still caught here rather than falling through to `isGun`, because a
+  // bot pulls this trigger through the same path a player does and must not be
+  // left doing nothing at all with one in its hands.
+  if (held === 'survivorBeacon') return false;
 
   // A mine goes down where you stand, arms after a beat, and is left behind.
   if (held === 'zapMine') {

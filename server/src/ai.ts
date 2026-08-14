@@ -111,6 +111,13 @@ import {
   SQUAD_SWEEP_MAX,
   SQUAD_SWEEP_STANDOFF,
   VAN_GUARD_RADIUS,
+  BEACON_PLANT_REACH,
+  BEACON_PLANT_GIVE_UP_MS,
+  BEACON_PLANT_MS,
+  BEACON_PLANTED_LINE,
+  BEACON_SHOUT_MS,
+  BEACON_GUARD_RADIUS,
+  BOT_BEACON_SAMPLES,
   DANGER_REBUILD_MS,
   DANGER_MAX_DISTANCE,
   ESCAPE_SAMPLES,
@@ -326,6 +333,7 @@ import {
   type World,
 } from './world.js';
 import { fire, fireHeld } from './combat.js';
+import { requestBeacon } from './heli.js';
 
 function getAi(world: World, e: Entity, now: number): AiState {
   let state = world.ai.get(e.id);
@@ -3067,13 +3075,61 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     return;
   }
 
-  // Minding the van. The driver is not a fighting unit and following a squad
-  // about is not a driver's job — he stands by his own vehicle, which makes
-  // him a sentry and the corner a landmark at the same time. Above the patrol
-  // and below the fight, like every other standing order here.
+  // Carrying the beacon to where it was called for. Above the guard branch
+  // below — he has a mast on his back and somewhere to be — and below the
+  // fighting above, since walking into a pack with it is how the whole plan
+  // ends up lying in the street.
+  if (state.beaconX !== null && state.beaconY !== null) {
+    // Started walking on the first tick he has the errand, so the give-up
+    // below measures the whole trip rather than the last approach.
+    if (state.beaconSetOutAt === 0) state.beaconSetOutAt = now;
+    const gap = Math.hypot(state.beaconX - e.x, state.beaconY - e.y);
+    const gaveUp = now - state.beaconSetOutAt > BEACON_PLANT_GIVE_UP_MS;
+    if (gap > BEACON_PLANT_REACH && !gaveUp) {
+      state.beaconPlantAt = 0; // knocked off it: the mast goes up from the start
+      if (unstickTick(world, e, state, now, dt, HUMAN_WALK_SPEED * 1.15)) return;
+      const desired = avoidBushes(
+        world,
+        e,
+        widenCorners(world, e, headingToward(world, e, state, state.beaconX, state.beaconY, now)),
+      );
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
+
+    // Stood on the spot. Getting it up takes a moment, and being dragged off
+    // mid-way starts it again rather than banking the progress.
+    if (state.beaconPlantAt === 0) state.beaconPlantAt = now + BEACON_PLANT_MS;
+    if (now < state.beaconPlantAt) {
+      e.facing = state.heading;
+      return;
+    }
+
+    world.towers.push({ x: e.x, y: e.y });
+    if (world.beacon) {
+      world.beacon.placed = true;
+      world.beacon.x = e.x;
+      world.beacon.y = e.y;
+    }
+    world.speech.set(e.id, { text: BEACON_PLANTED_LINE, until: now + BEACON_SHOUT_MS });
+    // The errand is over and the post begins: he holds the mast from here,
+    // through the guard branch immediately below, which is why this clears
+    // itself rather than staying set.
+    state.beaconX = null;
+    state.beaconY = null;
+    state.guardX = e.x;
+    state.guardY = e.y;
+    state.guardRadius = BEACON_GUARD_RADIUS;
+    return;
+  }
+
+  // Minding the van, or holding the beacon he just put up. Neither is a
+  // fighting unit's errand — they stand by the thing, which makes them a
+  // sentry and the corner a landmark at the same time. Above the patrol and
+  // below the fight, like every other standing order here.
   if (state.guardX !== null && state.guardY !== null) {
     const gap = Math.hypot(state.guardX - e.x, state.guardY - e.y);
-    if (gap > VAN_GUARD_RADIUS) {
+    if (gap > state.guardRadius) {
       const desired = widenCorners(
         world,
         e,
@@ -4092,6 +4148,46 @@ function radioTick(world: World, e: Entity, inv: Inventory, now: number): boolea
 }
 
 /**
+ * A bot picking a spot for the beacon.
+ *
+ * The handset is the one thing in the bag that can be used from anywhere — the
+ * spot is picked off a map, not walked to — so a bot calls it in exactly as a
+ * player does, without going near the place. What it costs a bot is the same
+ * thing it costs a player: nothing but the choice.
+ *
+ * The spot is chosen off the danger field, which is the honest tool for it:
+ * somewhere geodesically *far* from the nearest zombie, outdoors so there is
+ * room to gather, and reachable. It is the reverse of `botPatrolTarget`, which
+ * scores toward trouble — a muster point wants the other end of that.
+ *
+ * Called once and then never again, since `requestBeacon` refuses a second.
+ */
+function beaconTick(world: World, e: Entity, inv: Inventory, now: number): boolean {
+  if (world.beacon) return false; // already called in, by anyone
+  if (!inv.utilities.includes('survivorBeacon')) return false;
+
+  let best: { x: number; y: number } | null = null;
+  let bestScore = -Infinity;
+  for (let i = 0; i < BOT_BEACON_SAMPLES; i++) {
+    const x = 90 + Math.random() * (WORLD_WIDTH - 180);
+    const y = 90 + Math.random() * (WORLD_HEIGHT - 180);
+    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+    // Out in the open. A muster point in somebody's front room holds nobody.
+    if (buildingIndexAt(world, x, y) >= 0) continue;
+    // Far from the dead, and near enough to be worth walking to rather than
+    // out in a corner of the map nobody will ever cross.
+    const danger = Math.min(world.danger.distanceAt(x, y), DANGER_MAX_DISTANCE);
+    const score = danger - Math.hypot(x - e.x, y - e.y) * 0.25;
+    if (score > bestScore) {
+      bestScore = score;
+      best = { x, y };
+    }
+  }
+  if (!best) return false;
+  return requestBeacon(world, best.x, best.y, now);
+}
+
+/**
  * Sprint reserve: spent while bolting, refilled while doing anything else.
  *
  * Boots are read here because nothing else was reading them. They are applied
@@ -4204,6 +4300,10 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Backup takes seconds to arrive, so the moment to ask for it is the
     // moment something is seen rather than the moment things are going badly.
     if (radioTick(world, e, inv, now)) return;
+    // Same reasoning for the beacon, and it does not even cost the tick: the
+    // spot is picked off a map rather than walked to, so calling it in is a
+    // decision made from wherever the bot happens to be standing.
+    beaconTick(world, e, inv, now);
 
     // Judged on the *nearest* zombie in sight, not the one being shot at —
     // those are often different, and a bot trading fire with something across

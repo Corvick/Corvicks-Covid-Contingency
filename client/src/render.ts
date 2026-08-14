@@ -68,6 +68,11 @@ import {
   TYRE_SMOKE_LINGER_MS,
   ZAP_FLASH_MS,
   ZAP_MINE_RADIUS,
+  WORLD_WIDTH,
+  WORLD_HEIGHT,
+  MINIMAP_MAX_W,
+  MINIMAP_MARGIN,
+  BEACON_MUSTER_RADIUS,
 } from '../../shared/constants.js';
 
 export interface Viewport {
@@ -1620,6 +1625,138 @@ export function drawMines(
  * A survivor beacon: a little mast with a pulsing ring, so it reads at a
  * glance from across a street as somewhere to head for.
  */
+/**
+ * Where the beacon map sits on screen, and how world coordinates map onto it.
+ *
+ * Shared by the drawing and the click handling so the two cannot disagree
+ * about which pixel is which street — a map you can misclick by a block is
+ * worse than no map.
+ */
+export interface MinimapFrame {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  scale: number;
+}
+
+export function minimapFrame(vw: number, vh: number): MinimapFrame {
+  const scale = Math.min(
+    MINIMAP_MAX_W / WORLD_WIDTH,
+    (vh - MINIMAP_MARGIN * 2 - 46) / WORLD_HEIGHT,
+  );
+  const w = WORLD_WIDTH * scale;
+  const h = WORLD_HEIGHT * scale;
+  return { x: (vw - w) / 2, y: (vh - h) / 2 + 12, w, h, scale };
+}
+
+/**
+ * The city as a map, for placing the beacon and then for reading how many have
+ * made it there.
+ *
+ * **There is not a single NPC on it, and that is the whole design.** It draws
+ * the map the client already has — walls, buildings, the park, the pond — plus
+ * your own position and the beacon. Nothing about where anybody is comes down
+ * the wire for this, so it cannot become a wallhack no matter what is done to
+ * it later. The muster is a *number*, not dots.
+ */
+export function drawMinimap(
+  ctx: CanvasRenderingContext2D,
+  map: MapData,
+  frame: MinimapFrame,
+  self: { x: number; y: number } | null,
+  beacon: InventoryState['beacon'],
+  vw: number,
+  vh: number,
+): void {
+  ctx.save();
+  // Everything behind it goes quiet: this is a thing you stop to read.
+  ctx.fillStyle = 'rgba(12, 11, 10, 0.72)';
+  ctx.fillRect(0, 0, vw, vh);
+
+  const { x, y, w, h, scale } = frame;
+  const wx = (v: number) => x + v * scale;
+  const wy = (v: number) => y + v * scale;
+
+  ctx.fillStyle = '#26241f';
+  ctx.fillRect(x, y, w, h);
+
+  // The park and the pond first, as ground.
+  ctx.fillStyle = '#2f3a26';
+  ctx.fillRect(wx(map.park.x), wy(map.park.y), map.park.w * scale, map.park.h * scale);
+
+  ctx.fillStyle = '#1f3550';
+  ctx.beginPath();
+  for (let i = 0; i <= 48; i++) {
+    const a = (i / 48) * Math.PI * 2;
+    const r = pondRadiusAt(map.pond, a) * scale;
+    const px = wx(map.pond.x) + Math.cos(a) * r;
+    const py = wy(map.pond.y) + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  // Buildings as their real footprints, so the streets between them read.
+  ctx.fillStyle = '#4a4640';
+  for (const b of map.buildings) {
+    for (const r of b.rects) ctx.fillRect(wx(r.x), wy(r.y), r.w * scale, r.h * scale);
+  }
+
+  ctx.strokeStyle = '#6b6558';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+
+  // You, so the map can be read against where you are standing.
+  if (self) {
+    ctx.fillStyle = '#3b82f6';
+    ctx.beginPath();
+    ctx.arc(wx(self.x), wy(self.y), 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const title = !beacon
+    ? ''
+    : beacon.placed
+      ? `${beacon.muster} AT THE BEACON`
+      : beacon.pending
+        ? 'BEACON TEAM INBOUND'
+        : 'CLICK TO CALL THE BEACON IN';
+  ctx.fillStyle = '#e8e4dc';
+  ctx.font = 'bold 13px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(title, x + w / 2, y - 12);
+
+  if (beacon && (beacon.placed || beacon.pending)) {
+    const bx = wx(beacon.x);
+    const by = wy(beacon.y);
+    ctx.strokeStyle = beacon.placed ? '#facc15' : '#a1a1aa';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bx, by, 7, 0, Math.PI * 2);
+    ctx.stroke();
+    if (beacon.placed) {
+      // The ring people are counted inside, so the number has a shape.
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.arc(bx, by, BEACON_MUSTER_RADIUS * scale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#9a948a';
+  ctx.fillText(
+    beacon && !beacon.placed && !beacon.pending ? 'right-click to cancel' : 'click to close',
+    x + w / 2,
+    y + h + 18,
+  );
+  ctx.restore();
+}
+
 export function drawBeaconTowers(
   ctx: CanvasRenderingContext2D,
   towers: BeaconState[],

@@ -340,9 +340,15 @@ export const BLAST_MS = 520;
 export const BLAST_DOOR_DAMAGE_MAX = 2000;
 export const BLAST_DOOR_DAMAGE_MIN = 800;
 
-/** The pond, its lily pads, and the flock that lives on it. */
-export const POND_MIN_RADIUS = 110;
-export const POND_MAX_RADIUS = 190;
+/**
+ * The pond, its lily pads, and the flock that lives on it.
+ *
+ * Grown from 110/190. It is a landmark people are now sent *to* — the one
+ * beacon in the city lies on its bank — so it has to read as somewhere rather
+ * than as a puddle, and there has to be bank enough to stand a crowd on.
+ */
+export const POND_MIN_RADIUS = 135;
+export const POND_MAX_RADIUS = 225;
 export const DUCK_COUNT_MIN = 4;
 export const DUCK_COUNT_MAX = 9;
 export const DUCK_PADDLE_SPEED = 14;
@@ -1749,6 +1755,60 @@ export const BEACON_CALL_RADIUS = 900;
 /** Shouted when the mast is too far off to be pointed at. */
 export const BEACON_TOO_FAR_LINE = 'Too far from the beacon to call it!';
 export const BEACON_ARRIVE_DIST = 60;
+
+/**
+ * The beacon is a *handset*, not a mast you drop.
+ *
+ * Left-click with it in hand opens a map of the city and you pick the spot.
+ * A helicopter then brings one soldier in who walks to that spot, plants the
+ * mast, and stays to hold it. The item is never consumed: afterwards the same
+ * click opens the same map to tell you how many people have actually made it
+ * there, which is the only readout in the game for whether the plan worked.
+ * Drop it and the mast stays and the order still works — you have simply given
+ * away the ability to look.
+ *
+ * There is exactly one in the city and it is always on the bank of the duck
+ * pond. That is the whole of its scarcity, and it is what makes the pond the
+ * place everyone ends up.
+ */
+export const BEACON_ONE_PER_CITY = true;
+/** Radius counted as "at the beacon" for the readout on the map. */
+export const BEACON_MUSTER_RADIUS = 240;
+/** How long the soldier takes to get the mast up once he is stood on the spot. */
+export const BEACON_PLANT_MS = 2200;
+/**
+ * How near the designated spot counts as being on it.
+ *
+ * Generous on purpose. At 34 he would close to sixty-odd pixels, fail to shave
+ * off the last of it against a kerb or a corner, and `unstickTick` — which owns
+ * the tick when it fires and knows nothing about the goal — would shove him
+ * back out and he would try again, forever. A mast is a metre wide and the spot
+ * was picked off a map at a hundredth scale; "there" was never a pixel.
+ */
+export const BEACON_PLANT_REACH = 80;
+/**
+ * And if he still cannot get there, he puts it up where he stands.
+ *
+ * There is one beacon in the city. A spot that passed `requestBeacon`'s checks
+ * but that no body can actually walk to — across a kerb, inside a footprint the
+ * nav grid calls open — must not cost the round its only muster point. Better a
+ * mast in the wrong place, which you can see on the map, than a soldier pacing
+ * a wall for the rest of the game.
+ */
+export const BEACON_PLANT_GIVE_UP_MS = 45000;
+/** He holds this much ground around it once it is up. */
+export const BEACON_GUARD_RADIUS = 190;
+/** Said on the way in, and once it is standing. */
+export const BEACON_INBOUND_LINE = 'Beacon team inbound — hold on!';
+export const BEACON_PLANTED_LINE = 'Beacon is up! Get to it!';
+/** Shouted when the spot picked off the map is one nobody could stand on. */
+export const BEACON_REFUSED_LINE = "Can't drop it there!";
+
+/** How many spots a bot considers before calling the beacon in. */
+export const BOT_BEACON_SAMPLES = 40;
+/** The map that opens on a click: how big, and how far in from the corner. */
+export const MINIMAP_MAX_W = 520;
+export const MINIMAP_MARGIN = 28;
 
 // ---------------------------------------------------------------- HUD
 /** Once this few humans remain, point the way to each of them. */
