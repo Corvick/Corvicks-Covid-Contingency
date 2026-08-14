@@ -436,6 +436,13 @@ export const LOBBY_DOG_SLOTS = 2;
 /** Fallback when a round starts without a lobby behind it. */
 export const BOT_OFFICER_COUNT = 4;
 export const BOT_LOOT_RANGE = 1400;
+/**
+ * How much room a bot wants around a pickup — and around the halfway point on
+ * the way to it — before it is worth stopping to take. Shopping means standing
+ * still in somebody's front room, and a bot will cross most of the city for a
+ * gun; without a floor it does that through whatever is in between.
+ */
+export const BOT_LOOT_MIN_CLEARANCE = 240;
 export const BOT_LOOT_SCAN_MS = 900;
 /**
  * How keen a bot is on a duplicate gun, which `collect` strips for its rounds
@@ -818,6 +825,16 @@ export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER * 0.85;
  * that breaks off at the first sight of one is an officer that never fights,
  * and there is a whole kiting band above this where it gives ground *while*
  * shooting rather than turning its back.
+ *
+ * There is deliberately **no scaling of it with the size of the pack**, and no
+ * "I am surrounded, get out" state above it either. Both were built and both
+ * were measured over ten paired seeds, and the result is worth keeping written
+ * down: bots alive **23/40 → 22/40**, grabs 66 → 72, and the median city
+ * finished with **263 zombies rather than 229** — worse containment in eight of
+ * the ten. Breaking off earlier does not save a bot, because what kills one is
+ * the state of the city forty seconds later, and four officers who stop
+ * fighting are what puts the city in that state. See "Fighting is how a bot
+ * survives" in CLAUDE.md.
  */
 export const BOT_BOLT_DIST = 120;
 /**
@@ -825,6 +842,30 @@ export const BOT_BOLT_DIST = 120;
  * a bot flickering between standing and bolting on the edge of the threshold.
  */
 export const BOT_SAFE_DIST = 330;
+/**
+ * How long a bot stays rattled after being grabbed.
+ *
+ * Officers run for OFFICER_FLEE_MS (20s) after a grab, which is a grey
+ * officer's answer and was killing bots outright: twenty seconds of blind
+ * running at HUMAN_FLEE_SPEED — *slower than a zombie* — beginning at the one
+ * moment that makes the next grab likelier to turn them
+ * (INSTANT_INFECT_PER_PRIOR_GRAPPLE). A bot breaks contact properly instead:
+ * sprinting, goal-directed, and only until it is actually clear.
+ */
+export const BOT_SHAKEN_MS = 3500;
+/**
+ * Sprint is two seconds of running and ten of getting it back, so it is spent
+ * on the thing it buys — breaking contact with what is actually on top of you.
+ * Further out than this a bot jogs, which already outpaces a zombie (115
+ * against 102) and leaves the reserve full for when the gap closes. Before
+ * this a bolt burned the whole reserve in its first two seconds and then spent
+ * a quarter of its ticks winded, at walking pace, with the pack still coming.
+ */
+export const BOT_SPRINT_TRIGGER = 220;
+/** How far a bot probes when picking a bearing to give ground along. */
+export const BOT_GIVE_GROUND_PROBE = 130;
+/** How hard it prefers "directly away" over "roomiest" while doing it. */
+export const BOT_GIVE_GROUND_BIAS = 110;
 /**
  * Backing off with the gun still up. Slower than a walk on purpose — you do
  * not get to retreat at full pace *and* keep shooting, and at three quarters a
@@ -872,6 +913,29 @@ export const BOT_DEPLOY_MIN_DIST = 260;
  */
 export const BOT_BUSH_CLEARANCE = 34;
 export const BOT_BUSH_PUSH = 0.7;
+
+/**
+ * A shut door is a room you cannot see into, and walking through one is how a
+ * bot meets a pack at arm's length with no room to give.
+ *
+ * So it listens at the handle first. This is deliberately a *short radius
+ * around the slab* rather than a look at who is in the room beyond:
+ * `rooms.zombiesIn` is exact and omniscient, and would have a bot know about
+ * something at the far end of a landmark it has never set foot in. What it
+ * hears is only what is right behind the door.
+ */
+export const BOT_DOOR_LISTEN_RANGE = 140;
+/** How far back off the threshold it gets before covering the door. */
+export const BOT_DOOR_STANDOFF = 130;
+/**
+ * And how long it holds there. A doorway is the one place a bot can meet a
+ * pack one at a time, so it is worth waiting to be come at — but not for long:
+ * whatever it heard may never open the door, and standing at a handle is not a
+ * plan.
+ */
+export const BOT_DOOR_WATCH_MS = 2600;
+/** Then leave that door alone. Long enough to have gone somewhere else. */
+export const BOT_DOOR_SNUB_MS = 15000;
 
 /** Don't pop a second smoke the instant the first one lands. */
 export const BOT_SMOKE_COOLDOWN_MS = 9000;

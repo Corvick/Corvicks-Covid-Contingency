@@ -307,6 +307,12 @@ export interface AiState {
   nextSlamCheck: number;
   /** Another door this person is off to bolt as well, or -1. */
   lockAlso: number;
+  /**
+   * Bots only: a shut door something was heard behind, which is being covered
+   * rather than opened, and how long that patience lasts.
+   */
+  doorWatch: number;
+  doorWatchUntil: number;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
   /**
@@ -743,6 +749,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     doorSlam: -1,
     nextSlamCheck: 0,
     lockAlso: -1,
+    doorWatch: -1,
+    doorWatchUntil: 0,
     doorWaitUntil: 0,
     smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
     spreadsOut: Math.random() < ZOMBIE_SPREAD_SHARE,

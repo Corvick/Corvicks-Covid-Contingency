@@ -1045,6 +1045,114 @@ races with zombies. A bot is meant to win them.
   shopping, one bot going from three guns and a radio to four guns and eight
   utilities on the same seed.
 
+#### Fighting is how a bot survives
+
+**This is the finding, and it is worth not re-litigating.** The obvious way to
+make bot officers last longer is to have them break off sooner — a bolt
+distance that grows with the size of the pack, and an outright rout when
+surrounded. Both were built and both were measured, ten paired seeds at 180s
+with the old behaviour gated back in and the runs alternated in one shell loop:
+bots alive **23/40 → 22/40**, grabs 66 → 72, and the median city finished with
+**263 zombies rather than 229**, worse in eight of the ten.
+
+Four officers are most of what holds the outbreak down. Stop them fighting and
+the city is lost, and a bot in a lost city dies anyway — a little later, having
+contributed nothing. What kills a bot is not the zombie in front of it now, it
+is the state of the street in forty seconds' time.
+
+So none of the changes below make a bot fight less. They fix the mechanics of
+not dying and leave the decision to engage exactly where it was. Measured over
+**twenty paired seeds**, 180s each, alternated in one shell loop:
+
+| | bots alive | bots bitten | grabs | zombies (median) | survivors (median) |
+|---|---|---|---|---|---|
+| before | 44/80 | 41 | 169 | 211 | 245 |
+| after | **56/80** | **26** | **111** | 216 | 231 |
+
+Better in 9 seeds, worse in 3, level in 8, and rounds where all four came
+through clean went 2 → 5. **Grabs are the clean signal** — a third fewer hands
+laid on them, which is the mechanism rather than the outcome. The city figures
+are a wash either way, which is the point: this buys bot survival without
+costing the outbreak, where breaking off sooner bought nothing and cost plenty.
+
+- **Twenty seconds of blind running was killing them.** A grabbed officer gets
+  `fleeUntil`, and a bot ran the grey officer's version of it: `OFFICER_FLEE_MS`
+  (20s) on a raw bearing away from where the threat was, at `HUMAN_FLEE_SPEED`
+  — **slower than a zombie** — with no pathing, no unstick and no shooting. It
+  could not outrun the thing that had just let go of it, walked into the first
+  wall behind it, and every grab it survived made the next one likelier to turn
+  it outright (`INSTANT_INFECT_PER_PRIOR_GRAPPLE`). It is goal-directed now,
+  like every other flight here — `escapeDestination`, `unstickTick`, sprinting,
+  and the `ESCAPE_BOOST_MS` burst it was being handed and never spending — and
+  it **ends when the bot is actually clear** rather than at the end of a clock.
+  `BOT_SHAKEN_MS` (3.5s) is only the ceiling.
+- **Sprint is a reserve, not a speed.** Two seconds of it (`STAMINA_DRAIN_PER_SEC`
+  46) and eleven of walking to earn it back, and a bolt spent the lot in its
+  first two seconds — measured, **27% of all bolting ticks were spent winded**,
+  at walking pace, with the pack still coming. Inside `BOT_SPRINT_TRIGGER` it
+  sprints; beyond it a bot jogs, which already outpaces a zombie (115 against
+  102), so the reserve is there for the moment something is actually on it.
+- **Combat boots did nothing at all for a bot.** `BOOTS_SPEED_MUL` and
+  `BOOTS_STAMINA_MUL` are applied to a *player* in `updatePlayers`, and a bot's
+  legs never went through that — so a bot that crossed the city for a pair got
+  neither the pace nor the cheaper drain and was carrying a slot of nothing.
+  `botStaminaTick` and `botWalkSpeed` read them now, which is also what takes
+  its sprint from two seconds to three and a half, and they are scored to match.
+- **Giving ground is scored against every zombie it knows about.** Kiting
+  stepped on `atan2(-dy, -dx)` — directly away from the one being shot at, which
+  is how you back into the second one or into the wall behind you.
+  `giveGroundHeading` samples like `safestHeading` does, requires
+  `nav.lineClear`, and keeps a strong pull toward "away" so it still reads as
+  giving ground rather than wandering off sideways.
+- **Nothing on the floor is worth walking into a crowd for.** `lootWanted` had
+  no idea where the zombies were, and `BOT_LOOT_RANGE` is 1400 — so a bot would
+  cross most of an overrun city for a marginally better rifle and be eaten in
+  the front room it was lying in. Measured before this: bots bitten indoors with
+  **35 and 61** zombies in sight. `BOT_LOOT_MIN_CLEARANCE` is read off the
+  danger field at the pickup *and* at the halfway point, the same way
+  `escapeDestination` reads it and for the same reason — the thing may be
+  somewhere perfectly safe on the far side of a horde. A floor, not a
+  preference.
+- **The vest and the shield are the only things that stop an infection.**
+  Kevlar was scored 30 — below a smoke grenade — and the riot shield was in
+  `BOT_IGNORES` on the grounds that a bot cannot work right-click. That was the
+  wrong reason: **the shield is worn**. It goes up when it is picked up and
+  turns a grab away from the front arc while the bot gets on with its guns;
+  bashing and slinging are the parts a bot can't do and neither is why you
+  carry one. Both are utility slots, so neither costs a gun. `collect` refuses
+  the shield alongside the heavy MG, so `lootWanted` now declines to walk to
+  either while holding the other rather than making the trip to be turned away.
+
+#### An officer listens before it opens a door
+
+A shut door is a room you cannot see into, and walking through one is how a bot
+meets a pack at arm's length with no room to give. So `doorTick` asks
+`heardBehindDoor` first, and if something is there the bot doesn't go in: it
+backs off `BOT_DOOR_STANDOFF` and covers the door (`doorWatchTick`), which is
+the one place it can meet a pack one at a time. After `BOT_DOOR_WATCH_MS` it
+gives the door up, snubs it for `BOT_DOOR_SNUB_MS`, drops whatever loot it was
+walking to and picks somewhere else to be — whatever is in there may never open
+the door, and standing at a handle is not a plan. Bolting or shaken, it skips
+the standing-around part and just reroutes.
+
+- **It is an ear at the handle, not a look through the wall.** A short radius
+  around the slab, counting only zombies on the face the bot is *not* standing
+  on. `world.rooms.zombiesIn` was the tempting version and is the wrong one:
+  exact, omniscient, and it would have a bot know about something at the far
+  end of a landmark it has never been inside.
+- **Civilians get none of it.** Hearing something behind a door and going in
+  anyway is most of what makes them civilians.
+- **It is rare in a live city, like room-to-room barricading.** Over ten 180s
+  rounds, four bots reached the listening point **140 times and heard something
+  on 0 of them**; another batch turned up 1-3. Most doors have nothing behind
+  them, so this is a handful of moments a round at best.
+- **Which is why it is verified with a rig rather than by watching.** Stand a
+  bot in front of a shut door with a zombie right behind it, thirty times:
+  before, it walked in **13/30**; after, **2/29**. The control — the same door
+  with an empty room behind it — is untouched at 14/30 and 13/30, so it is not
+  refusing doors, it is refusing *that* door. It set a watch and covered the
+  slab in 8 of the 29.
+
 #### A charge rifle is how a bot sees the infected
 
 `chargeInfectedTick`. It is the one gun in the city that can shoot somebody

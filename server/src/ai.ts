@@ -148,12 +148,21 @@ import {
   BOT_LOOT_RANGE,
   BOT_LOOT_SCAN_MS,
   BOT_LOOT_SNUB_MS,
+  BOT_LOOT_MIN_CLEARANCE,
   BOT_SWAP_MARGIN,
   BOT_REFILL_APPETITE,
   BOT_WALK_SPEED,
   BOT_SPRINT_SPEED,
   BOT_BOLT_DIST,
   BOT_SAFE_DIST,
+  BOT_SHAKEN_MS,
+  BOT_SPRINT_TRIGGER,
+  BOT_GIVE_GROUND_PROBE,
+  BOT_GIVE_GROUND_BIAS,
+  BOT_DOOR_LISTEN_RANGE,
+  BOT_DOOR_STANDOFF,
+  BOT_DOOR_WATCH_MS,
+  BOT_DOOR_SNUB_MS,
   BOT_KITE_SPEED_MUL,
   BOT_HUNT_STANDOFF,
   BOT_SCOPE_SIGHT,
@@ -167,6 +176,8 @@ import {
   STAMINA_REGEN_PER_SEC,
   STAMINA_SPRINT_FLOOR,
   STAMINA_RECOVERY_THRESHOLD,
+  BOOTS_SPEED_MUL,
+  BOOTS_STAMINA_MUL,
   GUN_SLOTS,
   DOOR_CLAIM_GRACE_MS,
   WALL_TURN_PROBE,
@@ -1964,6 +1975,24 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     return state.begDoor === ahead;
   }
 
+  // An officer listens before it pushes a door open. A room you cannot see
+  // into is where a bot meets a pack at arm's length with nowhere to give
+  // ground to, and opening the door is the one thing it can't take back.
+  // Civilians get none of this — hearing it and going in anyway is most of
+  // what makes them civilians.
+  if (world.bots.has(e.id) && heardBehindDoor(world, e, ahead)) {
+    state.doorIgnore = ahead;
+    state.doorIgnoreUntil = now + BOT_DOOR_SNUB_MS;
+    // Running for it, and this door is not the way. Standing to cover it is
+    // for a bot with the time to; one already breaking contact just goes
+    // somewhere else, and the snub above is what keeps it from trying again.
+    if (!state.bolting && now >= state.fleeUntil) {
+      state.doorWatch = ahead;
+      state.doorWatchUntil = now + BOT_DOOR_WATCH_MS;
+    }
+    return false;
+  }
+
   beginDoorWork(world, e, state, ahead, 'open', now);
   // Nothing to wait for: swing it and carry on walking in the same step, which
   // is what "instantly" has to mean or the bot still pauses for a tick at every
@@ -2972,12 +3001,14 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
  * rather than for one pellet's damage.
  */
 /**
- * Loot a bot officer walks straight past. The shield does nothing for one — a
- * bot crossing two blocks for it is a bot not holding a gun. It scored zero
- * already; this says so out loud, so giving it a damage figure later doesn't
- * quietly send every bot after one.
+ * Loot a bot officer walks straight past. Empty as it stands — the riot shield
+ * used to be in here on the grounds that a bot can't work right-click, and
+ * that was the wrong reason: the shield is **worn**. It goes up the moment it
+ * is picked up and turns a grab away from the front arc while the bot gets on
+ * with its guns, without anybody ever pressing anything. Bashing and slinging
+ * are the parts a bot can't do, and neither is why you carry one.
  */
-const BOT_IGNORES = new Set<ItemId>(['riotShield']);
+const BOT_IGNORES = new Set<ItemId>([]);
 
 function gunWorth(item: ItemId | null): number {
   if (!item) return 0;
@@ -3338,6 +3369,19 @@ function lootWanted(
     if (dist > range) continue;
     if (!world.nav.isReachable(p.x, p.y)) continue;
 
+    // Nothing lying on a floor is worth walking into a crowd for, and until
+    // this went in a bot would cross 1400px of overrun city for a marginally
+    // better rifle and be eaten in the front room it was lying in. Measured
+    // before it: bots bitten indoors with **35 and 61** zombies in sight.
+    //
+    // Read the same way `escapeDestination` reads it — geodesically, so cover
+    // between here and there counts, and at the midpoint as well as at the far
+    // end, because the thing may be somewhere perfectly safe on the other side
+    // of a horde. A floor rather than a penalty: this is not a preference.
+    const clearThere = world.danger.distanceAt(p.x, p.y);
+    const clearHalf = world.danger.distanceAt((e.x + p.x) / 2, (e.y + p.y) / 2);
+    if (Math.min(clearThere, clearHalf) < BOT_LOOT_MIN_CLEARANCE) continue;
+
     let want = 0;
     if (p.item === 'cureGun') {
       // Scored by hand, and this is why they never had one: it is `kind: gun`
@@ -3351,6 +3395,10 @@ function lootWanted(
       // Somebody else's empty gun is a decoration. Walking to one and finding
       // it dry is exactly what the grey marker exists to prevent.
       if (p.ammo === 0) continue;
+      // Both want right-click, so `collect` refuses whichever comes second.
+      // A shield already up is worth more to a bot than a bipod it has to
+      // stand still behind, so the shield keeps the slot.
+      if (inv.shield > 0 && ITEMS[p.item]?.deployable === true) continue;
       // A pistol is the other hand, and there is only one other hand.
       if (p.item === 'pistol' && inv.dual) continue;
 
@@ -3372,7 +3420,18 @@ function lootWanted(
         else if (worth - spare.worth >= BOT_SWAP_MARGIN) want = worth - spare.worth;
       }
     } else if (p.item === 'kevlar' && inv.kevlar <= 0 && utilityRoom) {
-      want = 30;
+      // The two items in the city that stop an infection outright are the vest
+      // and the shield, and both were scored as afterthoughts — a vest is three
+      // grabs a bot simply walks away from, plus the breather after each one.
+      // Nothing else in a utility slot is worth as much to something that is
+      // supposed to still be standing at the end.
+      want = 72;
+    } else if (p.item === 'riotShield' && inv.shield <= 0 && utilityRoom) {
+      // Worn, so carrying it is using it. Not while there is a bipod in the
+      // bag: `collect` refuses the second of the two, and a bot that walks
+      // across the city to be turned away has wasted the walk.
+      const bipod = inv.guns.some((g) => g !== null && ITEMS[g.item]?.deployable === true);
+      if (!bipod) want = 66;
     } else if (p.item === 'smokeGrenade' && utilityRoom && !inv.utilities.includes('smokeGrenade')) {
       // Smoke is a helicopter and half a squad of soldiers. Bots never used it
       // for the dull reason that nothing here wanted one, so they walked past.
@@ -3404,7 +3463,11 @@ function lootWanted(
       // it, so without this a bot with nothing in sight is walking at random.
       want = 50;
     } else if (p.item === 'combatBoots' && utilityRoom && !inv.utilities.includes('combatBoots')) {
-      want = 40;
+      // Worth more than they look, and they were worth precisely nothing until
+      // `botStaminaTick` started reading them: quicker on the legs *and* two
+      // thirds of the drain, which is the difference between two seconds of
+      // sprint and three and a half. A bot lives or dies on that reserve.
+      want = 58;
     } else if (p.item === 'ammoBox' && canTakeRounds) {
       // Boxes top up the total now rather than only refilling a magazine, so
       // one is worth having whether or not anything has actually run dry —
@@ -3641,16 +3704,181 @@ function gunnerTick(
   return true;
 }
 
-/** Sprint reserve: spent while bolting, refilled while doing anything else. */
-function botStaminaTick(state: AiState, sprinting: boolean, dt: number): number {
+/**
+ * How near the closest thing it is aware of is. `threatPoints` is already
+ * line-of-sight filtered and refreshed on the perception tick, so this is a
+ * walk of a short list rather than another spatial query — and it takes in
+ * whatever the goggles felt through a wall as well as what was seen.
+ */
+function nearestThreat(e: Entity, state: AiState): number {
+  let closest = Infinity;
+  for (const p of state.threatPoints) {
+    const d = Math.hypot(p.x - e.x, p.y - e.y);
+    if (d < closest) closest = d;
+  }
+  return closest;
+}
+
+/**
+ * A bearing to back off along that accounts for every zombie in sight, not
+ * only the one being shot at.
+ *
+ * Stepping straight away from the target is how a bot backs into the second
+ * one, or into the wall behind it — and it is doing this at precisely the
+ * moment something has closed on it. Same shape as `safestHeading`, with a
+ * strong pull toward "directly away" so it still reads as giving ground rather
+ * than wandering off sideways.
+ */
+function giveGroundHeading(world: World, e: Entity, state: AiState, away: number): number {
+  let bestAngle = away;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < FLEE_DIRECTIONS; i++) {
+    const angle = (i / FLEE_DIRECTIONS) * Math.PI * 2;
+    const px = e.x + Math.cos(angle) * BOT_GIVE_GROUND_PROBE;
+    const py = e.y + Math.sin(angle) * BOT_GIVE_GROUND_PROBE;
+    if (world.nav.isBlocked(px, py) || !world.nav.lineClear(e.x, e.y, px, py)) continue;
+
+    let clearance = Infinity;
+    for (const p of state.threatPoints) {
+      const d = Math.hypot(px - p.x, py - p.y);
+      if (d < clearance) clearance = d;
+    }
+    if (clearance === Infinity) clearance = 400;
+
+    let score = Math.min(clearance, 400);
+    score += Math.cos(angle - away) * BOT_GIVE_GROUND_BIAS;
+
+    const edgeGap = Math.min(px, py, WORLD_WIDTH - px, WORLD_HEIGHT - py);
+    if (edgeGap < BOUNDARY_AVOID_DIST) score -= (BOUNDARY_AVOID_DIST - edgeGap) * 2.4;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestAngle = angle;
+    }
+  }
+  // Every direction blocked: back straight off and let collision sort it out.
+  return bestScore === -Infinity ? away : bestAngle;
+}
+
+/**
+ * Something moving on the far side of a shut door, close enough to hear
+ * through it.
+ *
+ * Deliberately a short radius around the slab rather than a look at who is in
+ * the room beyond — `rooms.zombiesIn` is exact and omniscient and would have a
+ * bot know about something at the far end of a landmark it has never been
+ * inside. This is an officer with an ear at the handle: what is right behind
+ * the door, on the face it is not standing on.
+ */
+function heardBehindDoor(world: World, e: Entity, index: number): boolean {
+  const spec = world.map.doors[index];
+  const mySide = doorSide(world, index, e.x, e.y);
+  const near = world.entityGrid.queryCircle(
+    spec.x,
+    spec.y,
+    BOT_DOOR_LISTEN_RANGE,
+    new Set<Entity>(),
+  );
+  for (const other of near) {
+    if (other.type !== 'zombie') continue;
+    if (Math.hypot(other.x - spec.x, other.y - spec.y) > BOT_DOOR_LISTEN_RANGE) continue;
+    if (doorSide(world, index, other.x, other.y) === mySide) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Heard something behind a door and did not go in. Back off the threshold,
+ * keep the gun on it, and let whatever it is come out — a doorway is the one
+ * place a bot can meet a pack one at a time.
+ *
+ * Gives it up after BOT_DOOR_WATCH_MS: whatever is in there may never open the
+ * door, and standing at a handle is not a plan. Returns true when it has taken
+ * the tick over. Anything actually in view is handled well above this, so by
+ * the time it runs there is nothing to shoot at yet.
+ */
+function doorWatchTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  now: number,
+  dt: number,
+): boolean {
+  if (state.doorWatch < 0) return false;
+
+  const index = state.doorWatch;
+  const door = world.doors[index];
+  const spec = world.map.doors[index];
+  // Open, off its hinges, or waited out: back to whatever it was doing, and
+  // not to the thing on the other side of that door.
+  if (!door || door.broken || door.open || now >= state.doorWatchUntil) {
+    state.doorWatch = -1;
+    if (state.lootId !== null) {
+      state.lootSnub.set(state.lootId, now + BOT_LOOT_SNUB_MS);
+      state.lootId = null;
+      state.lootItem = null;
+    }
+    state.nextLootScanAt = now;
+    botPatrolTarget(world, e, state, now);
+    return false;
+  }
+
+  const aim = Math.atan2(spec.y - e.y, spec.x - e.x);
+  state.heading = turnToward(state.heading, aim, BOT_TURN_RATE * dt);
+  e.facing = state.heading;
+
+  // Off the threshold, facing it the whole way back.
+  if (Math.hypot(spec.x - e.x, spec.y - e.y) < BOT_DOOR_STANDOFF) {
+    const back = aim + Math.PI;
+    const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv) * BOT_KITE_SPEED_MUL);
+    const stepX = Math.cos(back) * speed * dt;
+    const stepY = Math.sin(back) * speed * dt;
+    if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
+      e.x += stepX;
+      e.y += stepY;
+    } else if (!world.nav.isBlocked(e.x + stepX, e.y)) {
+      e.x += stepX;
+    } else if (!world.nav.isBlocked(e.x, e.y + stepY)) {
+      e.y += stepY;
+    }
+  }
+  return true;
+}
+
+/**
+ * Sprint reserve: spent while bolting, refilled while doing anything else.
+ *
+ * Boots are read here because nothing else was reading them. They are applied
+ * to a *player* in `updatePlayers`, and a bot's legs never went through that —
+ * so a bot that crossed the city for a pair of combat boots got neither the
+ * pace nor the cheaper stamina out of them, and was carrying a utility slot of
+ * nothing. Worn, not held, exactly as they are for a player.
+ */
+function botStaminaTick(
+  state: AiState,
+  sprinting: boolean,
+  dt: number,
+  inv?: Inventory,
+): number {
+  const booted = inv !== undefined && inv.utilities.includes('combatBoots');
   if (sprinting && !state.botWinded) {
-    state.botStamina = Math.max(0, state.botStamina - STAMINA_DRAIN_PER_SEC * dt);
+    const drain = STAMINA_DRAIN_PER_SEC * (booted ? BOOTS_STAMINA_MUL : 1);
+    state.botStamina = Math.max(0, state.botStamina - drain * dt);
     if (state.botStamina <= STAMINA_SPRINT_FLOOR) state.botWinded = true;
   } else {
     state.botStamina = Math.min(STAMINA_MAX, state.botStamina + STAMINA_REGEN_PER_SEC * dt);
     if (state.botWinded && state.botStamina >= STAMINA_RECOVERY_THRESHOLD) state.botWinded = false;
   }
-  return sprinting && !state.botWinded ? BOT_SPRINT_SPEED : BOT_WALK_SPEED;
+  const base = sprinting && !state.botWinded ? BOT_SPRINT_SPEED : BOT_WALK_SPEED;
+  return base * (booted ? BOOTS_SPEED_MUL : 1);
+}
+
+/** A bot's ordinary pace, boots included. */
+function botWalkSpeed(inv: Inventory): number {
+  return BOT_WALK_SPEED * (inv.utilities.includes('combatBoots') ? BOOTS_SPEED_MUL : 1);
 }
 
 function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
@@ -3675,10 +3903,35 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   if (inHand && inHand.ammo <= 0) inv.activeSlot = bestGun(inv).slot;
 
   // Shaken after being grabbed: get clear before thinking about anything else.
+  //
+  // This is the most dangerous moment a bot has — every grab it has already
+  // survived makes the next one likelier to turn it outright
+  // (INSTANT_INFECT_PER_PRIOR_GRAPPLE) — and it used to be the stupidest code
+  // it ran: OFFICER_FLEE_MS of blind running on a raw bearing away from where
+  // the threat was, at HUMAN_FLEE_SPEED, which is *slower than a zombie*. It
+  // could not outrun the thing that had just let go of it, and walked into the
+  // first wall behind it while trying. It breaks contact properly now:
+  // goal-directed like every other flight here, sprinting, with the escape
+  // burst it was already being handed and never spending, and it stops the
+  // moment it is genuinely clear rather than at the end of a fixed clock.
   if (now < state.fleeUntil) {
-    const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
-    step(world, e, state, away, HUMAN_FLEE_SPEED, HUMAN_TURN_RATE, dt, now);
-    return;
+    if (nearestThreat(e, state) > BOT_SAFE_DIST) {
+      state.fleeUntil = 0;
+    } else {
+      const boostUntil = world.speedBoosts.get(e.id);
+      const boosted = boostUntil !== undefined && now < boostUntil;
+      if (boostUntil !== undefined && !boosted) world.speedBoosts.delete(e.id);
+      const speed =
+        botStaminaTick(state, true, dt, inv) * (boosted ? ESCAPE_SPEED_MULTIPLIER : 1);
+
+      if (unstickTick(world, e, state, now, dt, speed)) return;
+      const to = escapeDestination(world, e, state, now);
+      const desired = to
+        ? headingToward(world, e, state, to.x, to.y, now)
+        : safestHeading(world, e, state);
+      step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
   }
 
   // Loot lives indoors, so a bot that can't work a door never finds a gun.
@@ -3711,11 +3964,7 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // the street shouldn't ignore the one at its elbow. threatPoints is
     // already line-of-sight filtered and refreshed on the perception tick, so
     // this costs a walk of a short list rather than another query.
-    let closest = dist;
-    for (const p of state.threatPoints) {
-      const d = Math.hypot(p.x - e.x, p.y - e.y);
-      if (d < closest) closest = d;
-    }
+    const closest = Math.min(dist, nearestThreat(e, state));
 
     // Latched with a wide band: too close and they turn and run, and they keep
     // running until they are properly clear rather than the instant they are
@@ -3726,11 +3975,25 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // `closest` never grows and it can never satisfy BOT_SAFE_DIST. It would
     // jog away from something faster than it, not firing, for the rest of the
     // round. Out of sprint means turn round and make the fight expensive.
+    //
+    // **Breaking off sooner was tried, and it is the wrong answer** — see
+    // "Fighting is how a bot survives" in CLAUDE.md. Both a bolt distance that
+    // grew with the size of the pack and an outright rout when surrounded were
+    // measured over ten paired seeds, and neither bought a single extra bot:
+    // 23/40 alive against 22/40, while the median city finished with 263
+    // zombies in it rather than 229. Four officers who stop fighting are four
+    // officers who lose the city, and then die in it anyway.
     if (closest < BOT_BOLT_DIST) state.bolting = true;
     else if (closest > BOT_SAFE_DIST || state.botWinded) state.bolting = false;
 
     if (state.bolting) {
-      const speed = botStaminaTick(state, true, dt);
+      // Sprint is two seconds, and ten more to earn it back. Spend it on what
+      // it buys — breaking contact with whatever is actually on us — and jog
+      // the rest of the time, which already outpaces a zombie. Burning the
+      // reserve the instant a bolt starts is what had a quarter of every bolt
+      // spent winded and walking with the pack still coming.
+      const sprinting = closest < BOT_SPRINT_TRIGGER;
+      const speed = botStaminaTick(state, sprinting, dt, inv);
       // Goal-directed, like every other flight in this game. A raw bearing
       // away from the threat parks them on the first wall behind them.
       if (unstickTick(world, e, state, now, dt, speed)) return;
@@ -3752,7 +4015,7 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     if (closest > BOT_SAFE_DIST && chargeInfectedTick(world, e, state, inv, now, dt)) return;
 
     // Standing and fighting: face it, hold the best gun, and open up.
-    botStaminaTick(state, false, dt);
+    botStaminaTick(state, false, dt, inv);
     // A curable human nearby is worth the cure gun over anything else.
     if (!cureTick(world, e, state, inv, now, dt)) {
       const want = longestGun(inv);
@@ -3800,9 +4063,13 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // Giving ground here is *kiting*, not fleeing: the shot above has
       // already gone off this tick and the bot is still facing the thing.
       // Running away is the branch further up, and it only starts inside
-      // BOT_BOLT_DIST.
-      const bearing = state.botClosing ? aim : Math.atan2(-dy, -dx);
-      const speed = speedAt(world, e.x, e.y, BOT_WALK_SPEED * BOT_KITE_SPEED_MUL);
+      // BOT_BOLT_DIST. Backing off is scored against every zombie it knows of
+      // rather than taken straight from the one it is shooting — the bearing
+      // directly away from your target is how you walk into the second one.
+      const bearing = state.botClosing
+        ? aim
+        : giveGroundHeading(world, e, state, Math.atan2(-dy, -dx));
+      const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv) * BOT_KITE_SPEED_MUL);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
       // Slide along whichever axis is open rather than stopping dead.
@@ -3824,9 +4091,20 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   if (cureTick(world, e, state, inv, now, dt)) return;
   if (chargeInfectedTick(world, e, state, inv, now, dt)) return;
 
-  // Nothing in sight: stop running and get the wind back.
-  state.bolting = false;
-  botStaminaTick(state, false, dt);
+  // Heard something behind a door on the way in and stayed out of the room.
+  // Below the fight, deliberately: anything that has come through the door is
+  // in view by now and gets shot at instead of watched.
+  if (doorWatchTick(world, e, state, inv, now, dt)) return;
+
+  // Nothing in sight: stop running and get the wind back — and pick somewhere
+  // new to be while doing it. The patrol target it set out for was chosen
+  // before any of this happened, and walking back to it walks straight back
+  // into whatever it just ran from.
+  if (state.bolting) {
+    state.bolting = false;
+    botPatrolTarget(world, e, state, now);
+  }
+  botStaminaTick(state, false, dt, inv);
 
   // Nothing to shoot: go shopping. Re-checked on a cadence rather than every
   // tick, since it sweeps the loot list.
@@ -3889,9 +4167,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
         return;
       }
       // Scraping along something on the way to it counts as not getting there.
-      if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
+      if (unstickTick(world, e, state, now, dt, botWalkSpeed(inv))) return;
       const desired = avoidBushes(world, e, headingToward(world, e, state, target.x, target.y, now));
-      step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
+      step(world, e, state, desired, botWalkSpeed(inv), HUMAN_TURN_RATE, dt, now);
       return;
     }
   }
@@ -3909,13 +4187,13 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     botPatrolTarget(world, e, state, now);
     if (arrived) return;
   }
-  if (unstickTick(world, e, state, now, dt, BOT_WALK_SPEED)) return;
+  if (unstickTick(world, e, state, now, dt, botWalkSpeed(inv))) return;
   const desired = avoidBushes(
     world,
     e,
     widenCorners(world, e, headingToward(world, e, state, state.wanderX, state.wanderY, now)),
   );
-  step(world, e, state, desired, BOT_WALK_SPEED, HUMAN_TURN_RATE, dt, now);
+  step(world, e, state, desired, botWalkSpeed(inv), HUMAN_TURN_RATE, dt, now);
 }
 
 // ---------------------------------------------------------------- zombies
@@ -4656,9 +4934,16 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   }
 
   // An NPC officer who gets grabbed loses their nerve and runs for a while.
+  //
+  // A bot gets a fraction of that. Twenty seconds is a grey officer's answer
+  // and it reads fine on one, because a grey officer is scenery; on a bot —
+  // which is standing in a player's slot and is meant to still be alive at the
+  // end — it was a third of a minute of not fighting, not looting and not
+  // pathing, straight after the event that makes the next grab worse. What
+  // ends the bot's version is being clear, not the clock. See BOT_SHAKEN_MS.
   if (target.type === 'officer' && !world.playerIds.has(target.id)) {
     const st = world.ai.get(target.id);
-    if (st) st.fleeUntil = now + OFFICER_FLEE_MS;
+    if (st) st.fleeUntil = now + (world.bots.has(target.id) ? BOT_SHAKEN_MS : OFFICER_FLEE_MS);
   }
 
   const extra = session.zombieIds.size - 1;
