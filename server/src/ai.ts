@@ -118,6 +118,11 @@ import {
   BEACON_SHOUT_MS,
   BEACON_GUARD_RADIUS,
   BOT_BEACON_SAMPLES,
+  BOT_BEACON_SHOUT_CHECK_MS,
+  BOT_BEACON_SHOUT_MIN,
+  BEACON_MUSTER_RADIUS,
+  BEACON_CALL_RADIUS,
+  BEACON_SHOUT,
   DANGER_REBUILD_MS,
   DANGER_MAX_DISTANCE,
   ESCAPE_SAMPLES,
@@ -4148,6 +4153,66 @@ function radioTick(world: World, e: Entity, inv: Inventory, now: number): boolea
 }
 
 /**
+ * The Q wheel's "GO TO THE BEACON!", worked by a bot.
+ *
+ * The same order a player gives and on the same terms: a mast standing within
+ * `BEACON_CALL_RADIUS`, a rally charge, and the charge is spent. What a bot has
+ * to supply that a player supplies by eye is the *judgement* — there is one
+ * charge to start with, and shouting it at an empty street throws away the only
+ * thing that turns a mast into a muster.
+ *
+ * So it counts who would actually go: civilians in earshot who are not already
+ * on their way there and are not already stood at it. Below
+ * `BOT_BEACON_SHOUT_MIN` it holds on to the charge.
+ *
+ * Costs nothing but the charge and does not take the tick — shouting is not
+ * something you stop fighting to do — so it is called inline rather than as
+ * one of the `return`ing branches.
+ */
+function beaconShoutTick(world: World, e: Entity, state: AiState, now: number): void {
+  if (now < state.nextBeaconShoutAt) return;
+  state.nextBeaconShoutAt = now + BOT_BEACON_SHOUT_CHECK_MS;
+  if (world.towers.length === 0) return;
+  if ((world.rallyCharges.get(e.id) ?? 0) <= 0) return;
+
+  let tower: { x: number; y: number } | null = null;
+  let best = BEACON_CALL_RADIUS;
+  for (const t of world.towers) {
+    const d = Math.hypot(t.x - e.x, t.y - e.y);
+    if (d < best) {
+      best = d;
+      tower = t;
+    }
+  }
+  if (!tower) return;
+
+  // Worth a charge? Only people who would actually move because of it: not the
+  // ones already walking there, and not the ones already stood at the mast.
+  let worth = 0;
+  for (const other of world.entityGrid.queryCircle(e.x, e.y, RALLY_RADIUS, new Set<Entity>())) {
+    if (other.type !== 'human') continue;
+    if (Math.hypot(other.x - e.x, other.y - e.y) > RALLY_RADIUS) continue;
+    if (Math.hypot(other.x - tower.x, other.y - tower.y) <= BEACON_MUSTER_RADIUS) continue;
+    const st = world.ai.get(other.id);
+    if (
+      st &&
+      st.mode === 'rallied' &&
+      st.rallyX !== null &&
+      st.rallyY !== null &&
+      Math.hypot(st.rallyX - tower.x, st.rallyY - tower.y) < 40
+    ) {
+      continue;
+    }
+    worth++;
+  }
+  if (worth < BOT_BEACON_SHOUT_MIN) return;
+
+  world.rallyCharges.set(e.id, (world.rallyCharges.get(e.id) ?? 0) - 1);
+  world.speech.set(e.id, { text: BEACON_SHOUT, until: now + BEACON_SHOUT_MS });
+  rallyHumans(world, e.x, e.y, tower.x, tower.y);
+}
+
+/**
  * A bot picking a spot for the beacon.
  *
  * The handset is the one thing in the bag that can be used from anywhere — the
@@ -4234,6 +4299,12 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     const sight = botScoped(world, e) ? BOT_SCOPE_SIGHT : NPC_OFFICER_SIGHT;
     senseThreats(world, e, state, now, sight, true);
   }
+
+  // Sending people to the mast. Above everything that returns, because it is a
+  // shout rather than an errand — a bot does not stop fighting, stop running or
+  // stop looting to give an order, and it should still be able to give one
+  // while doing any of the three.
+  beaconShoutTick(world, e, state, now);
 
   // Clicking on an empty chamber is checked every tick, not only when there's
   // something to shoot at — walking around holding a gun you can't fire is how

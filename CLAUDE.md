@@ -1692,7 +1692,26 @@ the game for whether any of this is working.
   trouble; a muster point wants the far end of that — outdoors and reachable.
   It costs a bot exactly what it costs a player, which is nothing but the
   choice, because the spot is picked off a map rather than walked to. Measured:
-  called at 17-75s.
+  called at 14-97s.
+- **And bots give the order, which is the half that fills it.** A mast nobody
+  is sent to is scenery. `beaconShoutTick` works the Q wheel's "GO TO THE
+  BEACON!" on exactly the player's terms — a mast inside `BEACON_CALL_RADIUS`,
+  a rally charge, and the charge is spent.
+  - **Bots had no rally charges at all**, so every order costing one was
+    refused before it was considered; `beaconShoutTick` could never have fired
+    however good its judgement was. A bot stands in a player's slot, so it now
+    starts with what that slot starts with — rally *and* follow.
+  - **The judgement is what a player supplies by eye.** One charge, and
+    shouting it down an empty street throws away the only thing that turns a
+    mast into a muster. It counts who would actually *move* — in earshot, not
+    already walking there, not already stood at it — and holds the charge below
+    `BOT_BEACON_SHOUT_MIN`.
+  - **It is a shout, not an errand**, so it is called inline above every
+    branch that returns rather than as one of them. Nobody stops fighting,
+    running or looting to give an order.
+  - Measured over three 2-minute runs: 1-2 shouts, **27/60/36** civilians sent,
+    and 8-27 stood at the mast at the end where a mast with no order behind it
+    drew 0.
 
 Two bugs came out of building it, and the first is not about beacons at all:
 

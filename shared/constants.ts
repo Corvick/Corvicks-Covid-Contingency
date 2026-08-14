@@ -1804,6 +1804,14 @@ export const BEACON_PLANTED_LINE = 'Beacon is up! Get to it!';
 /** Shouted when the spot picked off the map is one nobody could stand on. */
 export const BEACON_REFUSED_LINE = "Can't drop it there!";
 
+/**
+ * A bot giving the beacon order. How often it bothers to look, and how many
+ * people have to be in earshot and not already going to make it worth the one
+ * rally charge it has — shouting at an empty street throws away the only thing
+ * that turns a mast into a muster.
+ */
+export const BOT_BEACON_SHOUT_CHECK_MS = 2500;
+export const BOT_BEACON_SHOUT_MIN = 6;
 /** How many spots a bot considers before calling the beacon in. */
 export const BOT_BEACON_SAMPLES = 40;
 /** The map that opens on a click: how big, and how far in from the corner. */

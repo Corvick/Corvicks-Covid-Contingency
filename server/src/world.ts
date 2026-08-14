@@ -345,6 +345,11 @@ export interface AiState {
   beaconPlantAt: number;
   /** When he set out, so a trip he cannot finish can be given up on. */
   beaconSetOutAt: number;
+  /**
+   * Next time a bot officer bothers to weigh up shouting people to the mast.
+   * On an interval because the check walks the crowd in earshot.
+   */
+  nextBeaconShoutAt: number;
   /** How long they will hold a close waiting for a doorway to clear. */
   doorWaitUntil: number;
   /**
@@ -838,6 +843,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     beaconY: null,
     beaconPlantAt: 0,
     beaconSetOutAt: 0,
+    nextBeaconShoutAt: 0,
     doorWaitUntil: 0,
     smartZombie: Math.random() < ZOMBIE_SMART_SHARE,
     spreadsOut: Math.random() < ZOMBIE_SPREAD_SHARE,
@@ -1439,6 +1445,12 @@ function populate(world: World): void {
     world.ai.set(id, state);
     world.inventories.set(id, newInventory());
     world.stamina.set(id, STAMINA_MAX);
+    // A bot stands in a player's slot, so it starts with what a player's slot
+    // starts with. It had neither before, which meant every order that costs a
+    // charge was refused before it was considered — `beaconShoutTick` could
+    // never have fired once however good its judgement was.
+    world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
+    world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
     world.bots.add(id);
   }
 
