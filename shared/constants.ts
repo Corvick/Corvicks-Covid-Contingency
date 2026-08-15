@@ -1527,7 +1527,7 @@ export const TEST_DROP_RADIUS = 90;
  * no bots at all, or a round of nothing but human players would have no beacon
  * anywhere.
  */
-export const TEST_BEACON_ON_A_BOT = true;
+export const TEST_BEACON_ON_A_BOT = false;
 
 // ---------------------------------------------------------------- air support
 export const GRENADE_THROW_RANGE = 400;

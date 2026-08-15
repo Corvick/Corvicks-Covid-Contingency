@@ -18,6 +18,12 @@ export function wheelOptions(following: boolean, hasBeacon = false): WheelOption
   ];
   // Only offered once a mast is actually standing — an order with nowhere to
   // send anybody is worse than no order.
+  //
+  // `hasBeacon` is "one exists *anywhere*", not "one is close enough to shout
+  // at". Being too far is what greys the option out (`abilityUsable`), and the
+  // two must not be the same test: called in across the city, the beacon
+  // otherwise dropped off the wheel altogether and there was no way to tell it
+  // from never having called one at all.
   if (hasBeacon) out.push({ id: 'beacon', label: 'GO TO THE BEACON!' });
   return out;
 }

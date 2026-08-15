@@ -1350,18 +1350,16 @@ In `shared/constants.ts`:
   that is not about loot.
 - `PLAYER_ONE_SPAWN_AT_CENTER = true` — player one spawns mid-map, not on the outbreak
 - `PLAYER_ONE_SHOT_KILL = false` — already off; set true to one-shot zombies
-- `TEST_BEACON_ON_A_BOT = true` — a random bot officer starts with the survivor
-  beacon, and **none is placed on the pond bank**. It *moves* the city's one
-  beacon rather than adding a second, and falls back to the bank when there are
-  no bots at all, so a round of nothing but human players still has one. It
-  exists because the whole sequence — spot picked off the map, helicopter,
-  soldier walking it in, mast, shout — otherwise waits on a bot happening to
-  walk to the duck pond, which is most of a round. With it on: called at 0s and
-  standing inside 4-58s, every round.
-  Note this leaves *two* handsets in play while `TEST_DROP_ALL_ITEMS` is also
-  on, since the debug heap walks the whole registry — harmless, because
-  `requestBeacon` refuses a second call whoever makes it, and useful, since it
-  is how you get one in your own hands to watch the map.
+- `TEST_BEACON_ON_A_BOT = false` — **turned off, and worth knowing why.** With
+  it on, a bot started with the city's one beacon and called it in at 0s. That
+  is fine for watching the sequence and fatal for playing it: `requestBeacon`
+  refuses a second call *whoever* makes it, so the player's own handset out of
+  the debug heap opened the map, offered a spot, and was refused every single
+  time. It reads exactly as "the beacon works for bots and not for me".
+  Turn it back on to watch the whole sequence — spot, helicopter, soldier,
+  mast, shout — without waiting on a bot walking to the duck pond, and turn it
+  off again to play. It *moves* the city's one beacon rather than adding a
+  second, and falls back to the bank when there are no bots at all.
 
 ## Known open issue
 
@@ -1684,9 +1682,17 @@ the game for whether any of this is working.
   the answer never leaves the server. The mast stays standing and the Q wheel
   order keeps working — you have given away the ability to *look*.
 - **The Q wheel is gated with no code in the wheel.** `world.towers` is only
-  written when the soldier actually plants, and `beaconInEarshot` already tests
-  that list, so "GO TO THE BEACON!" simply is not offered while the team is
-  still inbound. Measured: 0 towers before planting in every run.
+  written when the soldier actually plants, so "GO TO THE BEACON!" simply is
+  not offered while the team is still inbound. Measured: 0 towers before
+  planting in every run.
+- **"Is there a mast" and "can I shout at it" are two different questions**, and
+  running both off `beaconInEarshot` was a bug you could only find by playing.
+  `beaconExists` decides whether the order is *on the wheel*; `abilityUsable`
+  greys it out and flashes it red when you are further off than
+  `BEACON_CALL_RADIUS`. Gated on earshot alone, a beacon called in across the
+  city — which is the whole point of picking the spot off a map — dropped off
+  the wheel entirely, and there was nothing to tell "nowhere to send anybody"
+  from "too far away to be heard".
 - **The wait is the cost of the decision.** `requestBeacon` refuses a second
   call and refuses ground nobody could stand on; everything else about it is
   the flight and the walk. Measured over four cities with a live outbreak:

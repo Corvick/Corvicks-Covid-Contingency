@@ -185,6 +185,20 @@ function beaconInEarshot(): boolean {
   return towers.some((t) => Math.hypot(t.x - me.x, t.y - me.y) <= BEACON_CALL_RADIUS);
 }
 
+/**
+ * Is there a mast standing anywhere at all?
+ *
+ * This is what decides whether the order is *on the wheel*, and it is a
+ * different question from `beaconInEarshot`, which decides whether it can be
+ * used from here. Conflating the two is what made a beacon you had called in
+ * across the city look like no beacon at all: the option vanished entirely
+ * rather than greying out, so the wheel gave you no way of telling "there is
+ * nothing to send anybody to" from "you are too far away to shout".
+ */
+function beaconExists(): boolean {
+  return towers.length > 0;
+}
+
 function abilityUsable(id: AbilityId): boolean {
   if (id === "rally") return rallyCharges > 0;
   if (id === "follow") return followCharges > 0;
@@ -416,7 +430,7 @@ canvas.addEventListener(
 
     if (wheel.open) {
       e.stopImmediatePropagation();
-      const options = wheelOptions(following, beaconInEarshot());
+      const options = wheelOptions(following, beaconExists());
       const index = hitTest(wheel, input.mouseX, input.mouseY, options.length);
       if (index < 0) return;
 
@@ -1265,11 +1279,11 @@ function render() {
       }
     }
     if (wheel.open) {
-      wheel.hover = hitTest(wheel, input.mouseX, input.mouseY, wheelOptions(following, beaconInEarshot()).length);
+      wheel.hover = hitTest(wheel, input.mouseX, input.mouseY, wheelOptions(following, beaconExists()).length);
       drawWheel(
         ctx,
         wheel,
-        wheelOptions(following, beaconInEarshot()),
+        wheelOptions(following, beaconExists()),
         (o) => abilityUsable(o.id),
         (o) =>
           o.id === "rally" || o.id === "beacon"
