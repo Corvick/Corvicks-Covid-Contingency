@@ -127,7 +127,6 @@ import {
   BOT_BEACON_SAFER_BY,
   BOT_BEACON_ROUTE_CLEARANCE,
   BEACON_MUSTER_RADIUS,
-  BEACON_CALL_RADIUS,
   BEACON_SHOUT,
   DANGER_REBUILD_MS,
   DANGER_MAX_DISTANCE,
@@ -4176,9 +4175,13 @@ function radioTick(world: World, e: Entity, inv: Inventory, now: number): boolea
 /**
  * The Q wheel's "GO TO THE BEACON!", worked by a bot.
  *
- * The same order a player gives and on the same terms: a mast standing within
- * `BEACON_CALL_RADIUS`, a rally charge, and the charge is spent. What a bot has
- * to supply that a player supplies by eye is the *judgement* — there is one
+ * The same order a player gives and on the same terms: a mast standing
+ * anywhere in the city and a rally charge, which is spent. There is no range
+ * on it for either of them — the order is given to the people around the
+ * shouter and points them at a fixed place everybody knows about.
+ *
+ * What a bot has to supply that a player supplies by eye is the *judgement* —
+ * there is one
  * charge to start with, and shouting it at an empty street throws away the only
  * thing that turns a mast into a muster.
  *
@@ -4201,7 +4204,7 @@ function beaconShoutTick(world: World, e: Entity, state: AiState, now: number): 
   if (isInGrapple(world, e.id)) return;
 
   let tower: { x: number; y: number } | null = null;
-  let best = BEACON_CALL_RADIUS;
+  let best = Infinity;
   for (const t of world.towers) {
     const d = Math.hypot(t.x - e.x, t.y - e.y);
     if (d < best) {

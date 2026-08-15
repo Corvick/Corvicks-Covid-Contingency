@@ -1666,6 +1666,8 @@ export function drawMinimap(
   frame: MinimapFrame,
   self: { x: number; y: number } | null,
   beacon: InventoryState['beacon'],
+  /** A spot clicked once and not yet committed, in world coordinates. */
+  pick: { x: number; y: number } | null,
   vw: number,
   vh: number,
 ): void {
@@ -1722,22 +1724,42 @@ export function drawMinimap(
       ? `${beacon.muster} AT THE BEACON`
       : beacon.pending
         ? 'BEACON TEAM INBOUND'
-        : 'CLICK TO CALL THE BEACON IN';
+        : pick
+          ? 'CLICK AGAIN TO CONFIRM'
+          : 'CLICK TO CALL THE BEACON IN';
   ctx.fillStyle = '#e8e4dc';
   ctx.font = 'bold 13px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(title, x + w / 2, y - 12);
 
-  if (beacon && (beacon.placed || beacon.pending)) {
-    const bx = wx(beacon.x);
-    const by = wy(beacon.y);
-    ctx.strokeStyle = beacon.placed ? '#facc15' : '#a1a1aa';
+  // The marker, and its colour is the whole state of the thing:
+  //
+  //   grey   — a spot you have clicked once and not committed to
+  //   yellow — called in, the team is on its way
+  //   green  — the mast is up
+  //
+  // One shape all the way through, changing colour, so it reads as the same
+  // marker progressing rather than as three different things.
+  const marker = beacon?.placed
+    ? { x: beacon.x, y: beacon.y, color: '#22c55e' }
+    : beacon?.pending
+      ? { x: beacon.x, y: beacon.y, color: '#facc15' }
+      : pick
+        ? { x: pick.x, y: pick.y, color: '#a1a1aa' }
+        : null;
+
+  if (marker) {
+    const bx = wx(marker.x);
+    const by = wy(marker.y);
+    ctx.strokeStyle = marker.color;
     ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(bx, by, 7, 0, Math.PI * 2);
-    ctx.stroke();
-    if (beacon.placed) {
+    ctx.strokeRect(bx - 6, by - 6, 12, 12);
+    // A dot in the middle, so a small square still has a definite centre at
+    // the scale the whole city is drawn at.
+    ctx.fillStyle = marker.color;
+    ctx.fillRect(bx - 1.5, by - 1.5, 3, 3);
+    if (beacon?.placed) {
       // The ring people are counted inside, so the number has a shape.
       ctx.globalAlpha = 0.35;
       ctx.beginPath();
@@ -1749,11 +1771,13 @@ export function drawMinimap(
 
   ctx.font = '11px monospace';
   ctx.fillStyle = '#9a948a';
-  ctx.fillText(
-    beacon && !beacon.placed && !beacon.pending ? 'right-click to cancel' : 'click to close',
-    x + w / 2,
-    y + h + 18,
-  );
+  const hint =
+    !beacon || beacon.placed || beacon.pending
+      ? 'click to close'
+      : pick
+        ? 'click again to lock it in · right-click to take it back'
+        : 'click the map to mark a spot · right-click to close';
+  ctx.fillText(hint, x + w / 2, y + h + 18);
   ctx.restore();
 }
 

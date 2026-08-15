@@ -1766,10 +1766,18 @@ export const THERMAL_RANGE = 520;
  */
 export const BEACON_SHOUT = 'Go to the survivor beacon!';
 export const BEACON_SHOUT_MS = 3400;
-/** How far the call carries, and how close counts as arrived. */
-export const BEACON_CALL_RADIUS = 900;
-/** Shouted when the mast is too far off to be pointed at. */
-export const BEACON_TOO_FAR_LINE = 'Too far from the beacon to call it!';
+/**
+ * There is deliberately **no range on the order at all** — no
+ * `BEACON_CALL_RADIUS`, and nothing that can refuse it for being too far off.
+ *
+ * The mast is a fixed place on the map that everybody in the city knows about
+ * once it is up, and the order is "go *there*", given to the people standing
+ * around **you**. `rallyHumans` reads the shouter's own position for who hears
+ * it and the mast's for where they go, so the distance between the two was
+ * never the question: gating on it meant an officer who found a dozen
+ * survivors across the city could not send them anywhere, which is the exact
+ * job the beacon exists to do.
+ */
 export const BEACON_ARRIVE_DIST = 60;
 
 /**

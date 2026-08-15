@@ -1685,14 +1685,25 @@ the game for whether any of this is working.
   written when the soldier actually plants, so "GO TO THE BEACON!" simply is
   not offered while the team is still inbound. Measured: 0 towers before
   planting in every run.
-- **"Is there a mast" and "can I shout at it" are two different questions**, and
-  running both off `beaconInEarshot` was a bug you could only find by playing.
-  `beaconExists` decides whether the order is *on the wheel*; `abilityUsable`
-  greys it out and flashes it red when you are further off than
-  `BEACON_CALL_RADIUS`. Gated on earshot alone, a beacon called in across the
-  city — which is the whole point of picking the spot off a map — dropped off
-  the wheel entirely, and there was nothing to tell "nowhere to send anybody"
-  from "too far away to be heard".
+- **The order has no range, and that is deliberate.** There is no
+  `BEACON_CALL_RADIUS` and nothing that can refuse it for being too far off.
+  `rallyHumans` reads the *shouter's* position for who hears it and the mast's
+  for where they go, so the distance between the two was never the question.
+  Gated on it, an officer who found a dozen survivors across the city could not
+  send them anywhere — which is precisely the job the beacon exists to do, and
+  it shouted "too far from the beacon to call it" while refusing. The wheel
+  offers the order whenever a mast is standing (`beaconExists`), full stop.
+- **Placing it takes two clicks, and the colour is the state.** One click puts
+  a **grey** square down, a second locks it in, and right-click takes it back.
+  Once called it goes **yellow** while the team is inbound, and **green** when
+  the mast is up — one shape changing colour, so it reads as the same marker
+  progressing rather than three different things. It is worth the extra click:
+  there is one beacon per city and `requestBeacon` refuses a second, so a
+  mis-click is a whole round's worth of mistake and nothing can undo it.
+  `beaconPick` is purely client-side until the second click; `closeMinimap` is
+  the only way out, so a marker can never outlive the map that owns it. Right
+  click is also suppressed from the input payload while the map is up, or
+  taking a marker back would plant a bipod out in the world behind it.
 - **The wait is the cost of the decision.** `requestBeacon` refuses a second
   call and refuses ground nobody could stand on; everything else about it is
   the flight and the walk. Measured over four cities with a live outbreak:
@@ -1723,8 +1734,8 @@ the game for whether any of this is working.
   the whole city on foot.
 - **And bots give the order, which is the half that fills it.** A mast nobody
   is sent to is scenery. `beaconShoutTick` works the Q wheel's "GO TO THE
-  BEACON!" on exactly the player's terms — a mast inside `BEACON_CALL_RADIUS`,
-  a rally charge, and the charge is spent.
+  BEACON!" on exactly the player's terms — a mast standing anywhere in the city
+  and a rally charge, which is spent. No range for either of them.
   - **Bots had no rally charges at all**, so every order costing one was
     refused before it was considered; `beaconShoutTick` could never have fired
     however good its judgement was. A bot stands in a player's slot, so it now
@@ -1834,13 +1845,16 @@ job has to come up often enough to be worth learning, and at rarity 1 most
 rounds never presented it. A bot carrying one can also *see* who is infected —
 see **A charge rifle is how a bot sees the infected** under Bot officers.
 
-**"Go to the beacon" needs a mast in earshot, and now says so.** The wheel
-offered the order whenever a mast existed *anywhere* while the server wants one
-within `BEACON_CALL_RADIUS`, so out in the city you could pick it, watch
-nothing happen, and not even be charged for it. `beaconInEarshot` gates the
-option client-side and the server shouts `BEACON_TOO_FAR_LINE` rather than
-dropping the message. In range it always worked: measured, 31 civilians sent at
-once.
+**"Go to the beacon" has no range on it at all.** It went through two wrong
+answers first, and both are worth not repeating: gated on a mast existing
+*anywhere* the server still refused it beyond `BEACON_CALL_RADIUS`, so the
+order silently did nothing; gated on earshot, the option vanished off the wheel
+whenever you were not stood next to the mast, which is indistinguishable from
+never having called one. Both were solving a problem that should not exist —
+you shout at the people around **you** and point them at a fixed place the
+whole city knows about, so the distance to it is not a question anybody needs
+to ask. `BEACON_CALL_RADIUS` and `BEACON_TOO_FAR_LINE` are gone. Measured, 31
+civilians sent at once.
 
 **The cure gun is the only thing that tells you about yourself.** `selfInfected`
 is null on the wire unless one is in hand, so the answer isn't merely hidden by

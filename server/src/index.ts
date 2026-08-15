@@ -52,9 +52,7 @@ import {
   THERMAL_RANGE,
   BEACON_SHOUT,
   BEACON_SHOUT_MS,
-  BEACON_TOO_FAR_LINE,
   BEACON_REFUSED_LINE,
-  BEACON_CALL_RADIUS,
   BOOTS_SPEED_MUL,
   BOOTS_STAMINA_MUL,
   GUNSLING_SLOTS,
@@ -328,11 +326,9 @@ wss.on('connection', (socket) => {
         if (!officer || officer.type !== 'officer') {
           // Not somebody who can shout.
         } else if (!tower) {
-          // A mast exists somewhere, or the wheel would not have offered this,
-          // but it is out of earshot. Say so — dropping the order silently is
-          // indistinguishable from the command being broken, which is exactly
-          // how it was reported.
-          world.speech.set(id, { text: BEACON_TOO_FAR_LINE, until: now + RALLY_NO_CHARGE_MS });
+          // Nothing standing anywhere in the city, so there is nowhere to send
+          // anybody. The wheel does not offer the order at all in that case —
+          // this is only the server refusing to trust the client about it.
         } else if ((world.rallyCharges.get(id) ?? 0) > 0) {
           world.rallyCharges.set(id, (world.rallyCharges.get(id) ?? 0) - 1);
           world.speech.set(id, { text: BEACON_SHOUT, until: now + BEACON_SHOUT_MS });
@@ -564,11 +560,18 @@ function sightRadiusFor(viewer: Entity): number {
   return PLAYER_SIGHT_RADIUS;
 }
 
-/** The mast this officer would be pointing at: the nearest one in earshot. */
+/**
+ * The mast this officer is pointing at: the nearest one, at any distance.
+ *
+ * No range test. The order is "go to the beacon", shouted at the people around
+ * the officer — how far the officer is from the mast has nothing to do with
+ * whether they can point at it, and capping it meant finding survivors out in
+ * the city and having no way to send them anywhere.
+ */
 function nearestTower(officer: Entity | undefined): { x: number; y: number } | null {
   if (!officer) return null;
   let best: { x: number; y: number } | null = null;
-  let bestDist = BEACON_CALL_RADIUS;
+  let bestDist = Infinity;
   for (const t of world.towers) {
     const d = Math.hypot(t.x - officer.x, t.y - officer.y);
     if (d < bestDist) {

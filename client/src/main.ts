@@ -20,7 +20,6 @@ import {
   CAMERA_PAN_X,
   CAMERA_PAN_Y,
   SCOPE_EASE_MS,
-  BEACON_CALL_RADIUS,
 } from '../../shared/constants.js';
 import type {
   DoorPrompt,
@@ -161,6 +160,22 @@ let armedAbility: AbilityId | null = null;
  * stops sending `inventory.beacon` at all without one in the bag.
  */
 let minimapOpen = false;
+/**
+ * A spot picked on the map but not yet committed — drawn grey, and purely
+ * client-side until the second click sends it.
+ *
+ * Calling the beacon in is the one decision in the game that cannot be taken
+ * back: there is one per city and `requestBeacon` refuses a second. Landing it
+ * on a mis-click is a whole round's worth of mistake, so it takes two — one to
+ * put the marker down, one to mean it — and a right-click to change your mind.
+ */
+let beaconPick: { x: number; y: number } | null = null;
+
+/** Shut the map, and drop any marker with it — a pick has no life outside it. */
+function closeMinimap(): void {
+  minimapOpen = false;
+  beaconPick = null;
+}
 
 // Frame timing for the perf readout. Smoothed so the number is readable.
 let fps = 0;
@@ -170,40 +185,26 @@ let worstResetAt = 0;
 
 const input = trackInput(canvas);
 
-/** Whether the wheel should offer an ability, or grey it out and refuse it. */
-/**
- * Is a survivor mast close enough to shout about?
- *
- * The wheel used to offer the order whenever a mast existed *anywhere*, while
- * the server requires one within BEACON_CALL_RADIUS — so out in the city you
- * could pick it, watch nothing happen, and not even be charged for it. Now the
- * option greys out and flashes red instead of lying about what it will do.
- */
-function beaconInEarshot(): boolean {
-  const me = self();
-  if (!me) return false;
-  return towers.some((t) => Math.hypot(t.x - me.x, t.y - me.y) <= BEACON_CALL_RADIUS);
-}
-
 /**
  * Is there a mast standing anywhere at all?
  *
- * This is what decides whether the order is *on the wheel*, and it is a
- * different question from `beaconInEarshot`, which decides whether it can be
- * used from here. Conflating the two is what made a beacon you had called in
- * across the city look like no beacon at all: the option vanished entirely
- * rather than greying out, so the wheel gave you no way of telling "there is
- * nothing to send anybody to" from "you are too far away to shout".
+ * The *only* question the wheel asks about the beacon. There is deliberately
+ * no second test for being close enough to it: the order is given to the
+ * people around you and points them at a fixed place the whole city knows
+ * about, so how far away the mast is has nothing to do with whether you can
+ * shout. Gating on that distance meant finding survivors out in the city and
+ * having no way to send them anywhere — the one job the beacon exists for.
  */
 function beaconExists(): boolean {
   return towers.length > 0;
 }
 
+/** Whether the wheel should offer an ability, or grey it out and refuse it. */
 function abilityUsable(id: AbilityId): boolean {
   if (id === "rally") return rallyCharges > 0;
   if (id === "follow") return followCharges > 0;
   // The beacon shout is a command like any other, and costs the same charge.
-  if (id === "beacon") return rallyCharges > 0 && beaconInEarshot();
+  if (id === "beacon") return rallyCharges > 0;
   return true; // releasing people you already have costs nothing
 }
 
@@ -337,6 +338,7 @@ function standDown(): void {
   pausePanel.classList.add('hidden');
   wheel.open = false;
   armedAbility = null;
+  closeMinimap();
   input.rightDown = false;
   input.shooting = false;
   input.slotPressed = -1;
@@ -396,28 +398,44 @@ canvas.addEventListener(
   (e) => {
     if (e.button !== 0) return;
 
-    // The beacon map. Open it with the handset in hand; while it is up, a click
-    // either designates the spot (the first time) or simply closes it (every
-    // time after, when it is a readout rather than a decision).
+    // The beacon map. Open it with the handset in hand; while it is up, the
+    // first click puts a grey marker down and the second commits it. Once one
+    // has been called the map is a readout rather than a decision, and a click
+    // just closes it.
     if (minimapOpen) {
       e.stopImmediatePropagation();
       const beacon = inventory?.beacon ?? null;
-      if (beacon && !beacon.placed && !beacon.pending) {
-        const frame = minimapFrame(canvas.width, canvas.height);
-        const inside =
-          input.mouseX >= frame.x &&
-          input.mouseX <= frame.x + frame.w &&
-          input.mouseY >= frame.y &&
-          input.mouseY <= frame.y + frame.h;
-        if (inside) {
-          send({
-            type: 'beaconPlace',
-            x: (input.mouseX - frame.x) / frame.scale,
-            y: (input.mouseY - frame.y) / frame.scale,
-          });
-        }
+      if (!beacon || beacon.placed || beacon.pending) {
+        closeMinimap();
+        return;
       }
-      minimapOpen = false;
+
+      const frame = minimapFrame(canvas.width, canvas.height);
+      const inside =
+        input.mouseX >= frame.x &&
+        input.mouseX <= frame.x + frame.w &&
+        input.mouseY >= frame.y &&
+        input.mouseY <= frame.y + frame.h;
+
+      // Second click: that is the spot, whatever the cursor is over now. The
+      // marker is what is being confirmed, not wherever the mouse has drifted
+      // to — moving it is what right-click and a fresh click are for.
+      if (beaconPick) {
+        send({ type: 'beaconPlace', x: beaconPick.x, y: beaconPick.y });
+        closeMinimap();
+        return;
+      }
+
+      // First click: put the marker down and leave the map up. A click outside
+      // the frame with nothing marked closes it, which is the ordinary way out.
+      if (inside) {
+        beaconPick = {
+          x: (input.mouseX - frame.x) / frame.scale,
+          y: (input.mouseY - frame.y) / frame.scale,
+        };
+      } else {
+        closeMinimap();
+      }
       return;
     }
     if (heldItemId() === 'survivorBeacon' && !wheel.open && !armedAbility) {
@@ -468,8 +486,15 @@ canvas.addEventListener(
   true,
 );
 
-// Right-click cancels an armed order instead of firing it off somewhere.
+// Right-click cancels an armed order instead of firing it off somewhere, and
+// on the beacon map it takes back a marker you have put down but not committed.
+// With nothing marked it is the way out of the map.
 canvas.addEventListener('contextmenu', () => {
+  if (minimapOpen) {
+    if (beaconPick) beaconPick = null;
+    else closeMinimap();
+    return;
+  }
   armedAbility = null;
 });
 
@@ -876,7 +901,9 @@ function sendInputLoop() {
     shooting: input.shooting && !spectating && !wheel.open && !armedAbility && !minimapOpen,
     sprint: input.sprint,
     interact: input.interact && !spectating,
-    rightDown: input.rightDown && !spectating,
+    // Right-click on the map takes a marker back; it must not also plant a
+    // bipod or throw a shield bash out in the world behind it.
+    rightDown: input.rightDown && !spectating && !minimapOpen,
   });
   setTimeout(sendInputLoop, 1000 / 30);
 }
@@ -1265,7 +1292,7 @@ function render() {
     // The beacon map goes over the HUD — it is a thing you stop and read, and
     // it closes itself the moment the handset leaves your hand.
     if (minimapOpen && map) {
-      if (heldItemId() !== 'survivorBeacon') minimapOpen = false;
+      if (heldItemId() !== 'survivorBeacon') closeMinimap();
       else {
         drawMinimap(
           ctx,
@@ -1273,6 +1300,7 @@ function render() {
           minimapFrame(VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
           me ? { x: me.x, y: me.y } : null,
           inventory?.beacon ?? null,
+          beaconPick,
           VIEWPORT_WIDTH,
           VIEWPORT_HEIGHT,
         );
