@@ -1730,10 +1730,32 @@ the game for whether any of this is working.
     `BOT_BEACON_SHOUT_MIN`.
   - **It is a shout, not an errand**, so it is called inline above every
     branch that returns rather than as one of them. Nobody stops fighting,
-    running or looting to give an order.
+    running or looting to give an order — the one exception is being *grabbed*,
+    which is not a thing you give orders through.
+  - **The mast has to be meaningfully safer than where the crowd is**
+    (`BOT_BEACON_SAFER_BY`) and **the way there has to be survivable**
+    (`BOT_BEACON_ROUTE_CLEARANCE`, read at the midpoint the way
+    `escapeDestination` reads one). Sending people somewhere no safer spends
+    the charge and moves the problem; somewhere worse is the charge doing harm.
+  - **How picky it is depends on how many charges it has.** The last one has to
+    count, so it waits for a real crowd; with several in hand a handful of
+    people is worth moving now rather than hoarding an order for a better
+    moment that may not come.
   - Measured over three 2-minute runs: 1-2 shouts, **27/60/36** civilians sent,
     and 8-27 stood at the mast at the end where a mast with no order behind it
     drew 0.
+- **Which made the lozenge matter, and bots had no branch for it at all.** It
+  is the only renewable source of rally charges, and it is *consumed* on pickup
+  — `applyUtility` returns `used` — so it costs no slot and there is no reason
+  ever to refuse one. Without it the orders that cost a charge were something a
+  bot could do exactly once a round.
+  - **It is scored alongside the sling and the pack rather than alongside
+    boots**, because it shares the thing that makes those worth stopping for:
+    it is free. At 44 it lost to every gun inside `BOT_LOOT_RANGE` and measured
+    **0 taken** across four cities that had 2-4 lying in them. At 62 — and 80
+    with a mast standing and nothing left to shout with — the whole chain
+    moves: lozenges taken 0/0/0/0 → **2/0/3/1**, peak charges 1 → 3, and at the
+    mast **3-7 → 6-45**.
 
 Two bugs came out of building it, and the first is not about beacons at all:
 

@@ -122,6 +122,10 @@ import {
   BOT_BEACON_WALK_WEIGHT,
   BOT_BEACON_SHOUT_CHECK_MS,
   BOT_BEACON_SHOUT_MIN,
+  BOT_BEACON_SHOUT_PER_CHARGE,
+  BOT_BEACON_SHOUT_FLOOR,
+  BOT_BEACON_SAFER_BY,
+  BOT_BEACON_ROUTE_CLEARANCE,
   BEACON_MUSTER_RADIUS,
   BEACON_CALL_RADIUS,
   BEACON_SHOUT,
@@ -3681,6 +3685,21 @@ function lootWanted(
       want = 75;
     } else if (p.item === 'backpack' && !inv.pack) {
       want = 70;
+    } else if (p.item === 'lozenge') {
+      // The only renewable source of rally charges there is, and it is
+      // *consumed* on pickup rather than carried — `applyUtility` returns
+      // 'used' — so it costs no slot and there is no reason ever to refuse
+      // one. Bots had no branch for it at all, which meant the orders that
+      // cost a charge were a thing they could do exactly once a round.
+      //
+      // Worth much more with a mast standing and nothing left to shout with:
+      // that is the difference between an order and a wasted walk.
+      // Scored alongside the sling and the pack (75/70) rather than alongside
+      // boots, because it shares the thing that makes those worth stopping
+      // for: it is free. At 44 it lost to every gun in `BOT_LOOT_RANGE` and
+      // measured **0 taken** over four cities that had 2-4 lying in them.
+      const dry = (world.rallyCharges.get(e.id) ?? 0) <= 0;
+      want = world.towers.length > 0 && dry ? 80 : 62;
     } else if (p.item === 'zombieTracker' && utilityRoom && !inv.utilities.includes('zombieTracker')) {
       // A compass to the outbreak. Worth a slot for the same reason it is worth
       // one to a player: the danger field only reaches as far as a bot samples
@@ -4175,7 +4194,11 @@ function beaconShoutTick(world: World, e: Entity, state: AiState, now: number): 
   if (now < state.nextBeaconShoutAt) return;
   state.nextBeaconShoutAt = now + BOT_BEACON_SHOUT_CHECK_MS;
   if (world.towers.length === 0) return;
-  if ((world.rallyCharges.get(e.id) ?? 0) <= 0) return;
+  const charges = world.rallyCharges.get(e.id) ?? 0;
+  if (charges <= 0) return;
+  // Something has hold of it. Everything else here it can do while fighting or
+  // running — an order is a shout — but not while it is being dragged down.
+  if (isInGrapple(world, e.id)) return;
 
   let tower: { x: number; y: number } | null = null;
   let best = BEACON_CALL_RADIUS;
@@ -4187,6 +4210,22 @@ function beaconShoutTick(world: World, e: Entity, state: AiState, now: number): 
     }
   }
   if (!tower) return;
+
+  // **Is the mast actually better than here?** Sending a crowd somewhere no
+  // safer than where they already are spends the charge and moves the problem;
+  // sending them somewhere worse is the charge actively doing harm. The margin
+  // stops it firing on a coin-toss difference.
+  const hereSafety = world.danger.distanceAt(e.x, e.y);
+  const thereSafety = world.danger.distanceAt(tower.x, tower.y);
+  if (thereSafety < hereSafety + BOT_BEACON_SAFER_BY) return;
+
+  // **And can they get there?** Scored at the midpoint as well as the end, the
+  // same way `escapeDestination` and `BOT_LOOT_MIN_CLEARANCE` are and for the
+  // same reason: somewhere lovely on the far side of a horde is not somewhere
+  // to send four dozen civilians walking.
+  const midX = (e.x + tower.x) / 2;
+  const midY = (e.y + tower.y) / 2;
+  if (world.danger.distanceAt(midX, midY) < BOT_BEACON_ROUTE_CLEARANCE) return;
 
   // Worth a charge? Only people who would actually move because of it: not the
   // ones already walking there, and not the ones already stood at the mast.
@@ -4207,9 +4246,18 @@ function beaconShoutTick(world: World, e: Entity, state: AiState, now: number): 
     }
     worth++;
   }
-  if (worth < BOT_BEACON_SHOUT_MIN) return;
+  // **How picky to be depends on how many charges are left.** The last one is
+  // the one that has to count, so it waits for a real crowd; with several in
+  // hand, a handful of people is worth moving now rather than hoarding an
+  // order for a better moment that may not come. `RALLY_STARTING_CHARGES` is 1,
+  // so this only loosens once a bot has found lozenges.
+  const need = Math.max(
+    BOT_BEACON_SHOUT_FLOOR,
+    BOT_BEACON_SHOUT_MIN - (charges - 1) * BOT_BEACON_SHOUT_PER_CHARGE,
+  );
+  if (worth < need) return;
 
-  world.rallyCharges.set(e.id, (world.rallyCharges.get(e.id) ?? 0) - 1);
+  world.rallyCharges.set(e.id, charges - 1);
   world.speech.set(e.id, { text: BEACON_SHOUT, until: now + BEACON_SHOUT_MS });
   rallyHumans(world, e.x, e.y, tower.x, tower.y);
 }

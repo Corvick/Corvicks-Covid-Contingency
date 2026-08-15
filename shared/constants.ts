@@ -1828,6 +1828,26 @@ export const BEACON_REFUSED_LINE = "Can't drop it there!";
  */
 export const BOT_BEACON_SHOUT_CHECK_MS = 2500;
 export const BOT_BEACON_SHOUT_MIN = 6;
+/**
+ * How much pickier the *last* charge makes it, and the floor it never goes
+ * below. With several in hand a handful of people is worth moving now; down to
+ * one, it waits for a crowd worth spending it on. `RALLY_STARTING_CHARGES` is
+ * 1, so this only ever loosens a bot that has gone and found lozenges.
+ */
+export const BOT_BEACON_SHOUT_PER_CHARGE = 2;
+export const BOT_BEACON_SHOUT_FLOOR = 2;
+/**
+ * The mast has to be meaningfully safer than where the crowd is standing, and
+ * the way there has to be survivable.
+ *
+ * Sending people somewhere no safer than where they already are spends the
+ * charge and moves the problem; somewhere worse is the charge doing harm. The
+ * route is read at the midpoint for the same reason `escapeDestination` reads
+ * one — somewhere lovely on the far side of a horde is not somewhere to send
+ * four dozen civilians walking.
+ */
+export const BOT_BEACON_SAFER_BY = 120;
+export const BOT_BEACON_ROUTE_CLEARANCE = 200;
 /** How many spots a bot considers before calling the beacon in. */
 export const BOT_BEACON_SAMPLES = 40;
 /**
