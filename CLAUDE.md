@@ -220,6 +220,46 @@ spent stuck in one empty room: median **17-20s → 8-12s**, p90 **65-76s →
 *more* zombies alive, because they find people. It is a harder game now:
 survivors at 180s fell from 187-263 to 80-176.
 
+### Word of a chase travels exactly one hop
+
+A zombie that can see somebody chasing prey — but cannot see the prey itself —
+goes where the chaser is going. A zombie that can only see *that* one carries
+on wandering. `followTheChase`, off the back of `senseTarget`.
+
+**The one-hop limit is the whole design, and it costs nothing to enforce.** A
+zombie that has actually seen prey has `targetId` set; one that is only
+following a chaser has nothing but the borrowed memory. The candidate test is
+`targetId !== null`, so a follower cannot itself be followed — the rule falls
+out of the existing state with no flag, no depth counter and no bookkeeping.
+Left to propagate freely it would zip the whole map together the instant one
+zombie spotted anybody, which is both the wrong behaviour and, at three hundred
+zombies, an enormous one.
+
+- **What is borrowed is where the *prey* is**, not where the chaser is. They
+  make for the same place he is making for rather than queueing up behind him.
+- **It goes into `lastSeen`**, so the existing "make for where it was" branch
+  does the moving and `ZOMBIE_LAST_SEEN_MS` expires it. Nothing else in the
+  zombie AI needed a line about this at all.
+- **Only for a zombie with nothing of its own** — no target, and no live memory
+  of one. Somebody already making for a spot they saw a person at is not
+  somebody to pull off it.
+- **Found in the loop that was already walking that list.** `senseTarget`
+  queries the neighbours anyway, so spotting the nearest chaser is free; the
+  only new cost is a single line-of-sight ray, and only for the nearest
+  candidate, and only for a zombie with nothing to chase. Seeing *him* is the
+  premise, and that ray is why this cannot see round corners.
+
+Measured with a staged chain — a human, then A at 231px, B at 462, C at 693,
+everything pinned so the geometry holds: B has somewhere to go on **235/240**
+ticks and C on **0/240**. With the behaviour gated off, B is 0/240 too. Live,
+over two paired 150s runs: tick median **2.87→3.04ms** and **3.18→3.41ms**,
+with slightly more zombies alive at the end (135→149, 239→253) — the horde is a
+little better at finding people, which is the point.
+
+*Pinning the chain is what makes that test mean anything.* Left free, B drifts
+a few pixels toward the human, comes inside `ZOMBIE_SIGHT_RADIUS` and sees them
+directly — which looks exactly like the feature working and is not.
+
 ### Some of them fan out; a horde is not a conga line
 
 `senseTarget` scored on distance alone, so twenty zombies stood roughly

@@ -4876,8 +4876,25 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
 
   let best: Entity | null = null;
   let bestScore = Infinity;
+  // The nearest zombie that can see prey itself, for the case where we cannot.
+  let chaser: Entity | null = null;
+  let chaserDist = Infinity;
 
   for (const other of nearby) {
+    if (other.type === 'zombie') {
+      // **Somebody else has seen something.** Picked up in the loop that is
+      // already walking this list rather than in a query of its own — the same
+      // trick `targetClaims` uses, and for the same reason at three hundred
+      // zombies.
+      if (other.id === e.id) continue;
+      const theirs = world.ai.get(other.id);
+      if (!theirs || theirs.targetId === null) continue;
+      const d = Math.hypot(other.x - e.x, other.y - e.y);
+      if (d > ZOMBIE_SIGHT_RADIUS || d >= chaserDist) continue;
+      chaserDist = d;
+      chaser = other;
+      continue;
+    }
     if (other.type !== 'human' && other.type !== 'officer') continue;
     const dist = Math.hypot(other.x - e.x, other.y - e.y);
     if (dist > ZOMBIE_SIGHT_RADIUS) continue;
@@ -4912,9 +4929,57 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
     state.lastSeenX = best.x;
     state.lastSeenY = best.y;
     state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
-  } else {
-    state.targetId = null;
+    return;
   }
+
+  state.targetId = null;
+  followTheChase(world, e, state, chaser, now);
+}
+
+/**
+ * Nothing in sight, but one of them is plainly onto something: go and see.
+ *
+ * **It stops after one hop, and that costs nothing to enforce.** A zombie that
+ * has actually *seen* prey has `targetId` set; one that is only following a
+ * chaser has nothing but the borrowed memory below. The candidate test is
+ * `targetId !== null`, so a follower cannot be followed and the whole map does
+ * not zip together the moment one zombie spots somebody. That was the thing to
+ * get right: a chain that propagates freely is both the wrong behaviour and,
+ * at three hundred zombies, an enormous one.
+ *
+ * What is borrowed is *where the prey is*, not the chaser's own position —
+ * they head for the same place he is heading rather than queueing up behind
+ * him. It goes into `lastSeen`, so the existing "make for where it was" branch
+ * moves them, `ZOMBIE_LAST_SEEN_MS` expires it, and nothing else needed a line
+ * about this at all.
+ *
+ * Only for a zombie with nothing of its own: no target, and no live memory of
+ * one. Someone already making for a spot they saw somebody at is not somebody
+ * to pull off it.
+ */
+function followTheChase(
+  world: World,
+  e: Entity,
+  state: AiState,
+  chaser: Entity | null,
+  now: number,
+): void {
+  if (!chaser) return;
+  if (state.lastSeenX !== null && state.lastSeenY !== null && now < state.lastSeenUntil) return;
+
+  const theirs = world.ai.get(chaser.id);
+  const prey = theirs?.targetId ? world.entities.get(theirs.targetId) : undefined;
+  if (!prey || prey.type === 'zombie') return;
+
+  // One ray, and only for the nearest candidate — seeing *him* is the whole
+  // premise, and the check is why this cannot see round corners.
+  if (!hasLineOfSight(world, e.x, e.y, chaser.x, chaser.y)) return;
+
+  state.lastSeenX = prey.x;
+  state.lastSeenY = prey.y;
+  state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
+  state.path = null;
+  state.nextPathAt = 0;
 }
 
 /**
