@@ -439,14 +439,27 @@ Reserved ground like any other landmark, but with two rules of its own.
   It is drawn under everything as ground, one stroked polyline with a wider
   faint pass beneath for the soft edge.
 
+### A grab is about two seconds
+
+`GRAPPLE_MIN_MS` 1s to `GRAPPLE_MAX_MS` 3s, rolled as the **average of two
+randoms** rather than one. That makes it triangular: mode and mean both land on
+2.0s and both ends are rare, where a flat roll over the same range gives the
+same average while making a 1s scuffle and a 3s pin equally likely. A grab
+wants a typical length you can learn. Sampled over 200k rolls: mean 2001ms,
+median 2002ms, p10 1448, p90 2554, **3%** over 2.75s and nothing over 3s.
+
+A vest is the exception and stays at `KEVLAR_GRAPPLE_MS` — half a second of
+scuffle it loses, which is the point of wearing one.
+
 ### A joining zombie does not reset the grapple clock
 
 `endsAt` is set **only inside `if (!session)`** in `updateZombie` — creating the
 session. Everything after that is `session.zombieIds.add(e.id)`, so a second or
 third zombie piling on inherits the deadline the first one set and cannot push
-it back. Measured with a staged pile: the deadline was +1805ms when the first
-grabbed and +1805ms after a second joined, moved by **0ms**, and it resolved at
-+1833ms — one tick past, which is the 30Hz granularity.
+it back. Measured with a staged pile, on the older 1.0-2.2s window: the
+deadline was +1805ms when the first grabbed and +1805ms after a second joined,
+moved by **0ms**, and it resolved at +1833ms — one tick past, which is the 30Hz
+granularity.
 
 What *can* look like a reset is a fresh grab: `resolveGrapple` deletes the
 session, and a zombie still stood on you starts a new one with a new deadline

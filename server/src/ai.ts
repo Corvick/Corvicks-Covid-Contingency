@@ -5467,11 +5467,15 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
         // A vest turns a grab into a brief scuffle it loses.
         const vest = world.inventories.get(target.id);
         const armoured = vest !== undefined && vest.kevlar > 0;
+        // Two randoms averaged rather than one: a triangular roll, so a grab
+        // is about two seconds nearly every time and the 1s and 3s ends are
+        // rare. See GRAPPLE_MIN_MS.
+        const roll = (Math.random() + Math.random()) / 2;
         session = {
           zombieIds: new Set(),
           endsAt: armoured
             ? now + KEVLAR_GRAPPLE_MS
-            : now + GRAPPLE_MIN_MS + Math.random() * (GRAPPLE_MAX_MS - GRAPPLE_MIN_MS),
+            : now + GRAPPLE_MIN_MS + roll * (GRAPPLE_MAX_MS - GRAPPLE_MIN_MS),
         };
         world.grapples.set(target.id, session);
       }

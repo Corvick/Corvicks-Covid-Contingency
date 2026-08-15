@@ -575,8 +575,18 @@ export const ENTITY_MAX_HEALTH: Record<EntityType, number> = {
 };
 
 // ---------------------------------------------------------------- infection
+/**
+ * How long one grab lasts: 1s at the shortest, 3s at the very longest, and
+ * **about two seconds nearly every time**.
+ *
+ * The roll is the average of two randoms rather than one, which makes it
+ * triangular — mode and mean both land on 2.0s and the ends are rare. A flat
+ * roll across the same range would give the same average while making a 1s
+ * scuffle and a 3s pin equally common, and the whole point of the figure is
+ * that a grab has a *typical* length you can learn.
+ */
 export const GRAPPLE_MIN_MS = 1000;
-export const GRAPPLE_MAX_MS = 2200;
+export const GRAPPLE_MAX_MS = 3000;
 /** Once a victim has this many attackers, other zombies go find their own. */
 export const MAX_GRAPPLERS = 3;
 /**
