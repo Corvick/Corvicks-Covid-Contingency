@@ -1608,6 +1608,40 @@ you actually asked for when you picked the handset up.
   and the outer pair are genuinely *ahead* of him. A wedge behind put every one
   of them where he had already been and left him the only one who ever walked
   into anything. Measured: 125-160px off the leader, with 1 of 3 ahead of him.
+- **The shape turns on its own bearing, not on the leader's aim.** `facing` is
+  where he is *pointing*: it snaps onto a target the instant he sees one and
+  snaps back when it dies, and taking the slots off it dragged every follower's
+  post through an arc around him. `squadBearing` eases toward it at
+  `SQUAD_BEARING_RATE` instead, so the formation swings round a corner and
+  ignores him twitching. Measured: the leader's aim swings **1.98 rad/s** while
+  the formation bearing swings **0.49** — a quarter as fast.
+- **Station-keeping is latched and the pace is continuous.** One threshold made
+  a follower step forward, land just inside it, stop, fall behind a pace later
+  and step again; and two fixed speeds either side of `ESCORT_FAR` lurched them
+  by two thirds at the line. They now close to `SQUAD_CLOSE_TO` of the slack
+  once they have started, at a pace that scales with how far behind they are.
+- **A post inside a building is drawn back toward the leader** until it is
+  somewhere they could actually stand. Walking at one is what parks somebody in
+  a doorway.
+
+**Grey officers had no unstick at all, and a sweeping squad is what found it.**
+`unstickTick` is what every bot and civilian runs to notice it is getting
+nowhere; `updateNpcOfficer` never called it. It never showed while they pottered
+round a patrol target a street away — a squad crossing the whole city walks into
+geometry with somewhere to be on the far side of it constantly, and then leans
+on it forever. That is what "stuck facing the door" was, and it is measured:
+spells of over 2.5s in one spot went **9.50% → 0.28%** of crew ticks, and the
+worst single stall **63.5s → 6.2s**.
+
+- **Its breakout knows about walls and not about buildings**, so a squad's has
+  to be checked like any other step. Letting it through unchecked was worse
+  than the stall it fixed: crew spent **16%** of the round indoors. Reverted
+  and the commitment dropped, the veto below picks a line along the frontage
+  instead — **9.81% → 1.04%**.
+- **A refusal commits to going round** for `SQUAD_AVOID_MS` rather than turning
+  on the spot, or they re-aim through the same gap on the next tick and stand
+  in it. That is the whole difference between "went round the building" and
+  "stuck facing the door".
 - **The driver stays with the van** (`guardX`/`guardY`, `VAN_GUARD_RADIUS`).
   Following a squad about is not a driver's job, and parked beside his own
   vehicle he is a sentry and a landmark at once. He is still in

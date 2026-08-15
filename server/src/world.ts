@@ -324,6 +324,17 @@ export interface AiState {
   squadSlot: number;
   sweeps: boolean;
   /**
+   * The bearing the *formation* is held on, eased toward where the leader is
+   * pointing rather than taken from it. Lives on the leader and is read by
+   * everybody keeping station on him.
+   */
+  squadBearing: number;
+  /** Latched station-keeping, so a follower doesn't stutter on the threshold. */
+  squadClosing: boolean;
+  /** Committed to going round something, rather than re-aiming into it. */
+  squadAvoidUntil: number;
+  squadAvoidHeading: number;
+  /**
    * A post to stay near — the van's driver minding the van, or the soldier
    * who put the beacon up holding it. How much ground goes with the post,
    * since a driver stands at his door and a beacon guard has a muster to
@@ -837,6 +848,10 @@ export function newAiState(now: number, x: number, y: number): AiState {
     doorWatchUntil: 0,
     squadSlot: -1,
     sweeps: false,
+    squadBearing: 0,
+    squadClosing: false,
+    squadAvoidUntil: 0,
+    squadAvoidHeading: 0,
     guardX: null,
     guardY: null,
     guardRadius: VAN_GUARD_RADIUS,

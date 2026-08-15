@@ -477,6 +477,9 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
     vehicle.leaderId = id;
     state.squadSlot = 0;
     state.sweeps = true;
+    // Start the formation's bearing where he is already pointing, or it eases
+    // in from zero and the whole squad swings round once on the first corner.
+    state.squadBearing = state.heading;
   } else {
     state.squadSlot = vehicle.dropped;
     state.escortId = vehicle.leaderId;

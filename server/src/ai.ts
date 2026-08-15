@@ -110,6 +110,9 @@ import {
   SQUAD_SPREAD,
   SQUAD_SLOT_ARC,
   SQUAD_PATROL_SPEED_MUL,
+  SQUAD_BEARING_RATE,
+  SQUAD_CLOSE_TO,
+  SQUAD_AVOID_MS,
   SQUAD_SLACK,
   SQUAD_SWEEP_SAMPLES,
   SQUAD_SWEEP_MIN,
@@ -348,6 +351,7 @@ import {
   type World,
 } from './world.js';
 import { fire, fireHeld } from './combat.js';
+
 import { requestBeacon } from './heli.js';
 
 function getAi(world: World, e: Entity, now: number): AiState {
@@ -2990,19 +2994,36 @@ function officerGrade(
  * being a fixed world offset — that is what makes the shape swing round with
  * him when he turns a corner instead of the squad crabbing sideways.
  */
-function squadPost(lead: Entity, state: AiState): { x: number; y: number } {
+function squadPost(
+  world: World,
+  lead: Entity,
+  leadState: AiState,
+  state: AiState,
+): { x: number; y: number } {
   if (state.squadSlot <= 0) return { x: lead.x, y: lead.y };
   // Slots alternate left and right and swing *forward* as they go out, so the
   // first pair sit off his shoulders and the next are out at the flanks and
   // ahead of him. A wedge trailing behind put every one of them where he had
   // already been, and left him the only one walking into anything.
+  //
+  // Off the formation's own slow bearing rather than off `lead.facing`, which
+  // is where he is *aiming*: that snapped to a target and back and dragged
+  // every post through an arc with it.
   const side = state.squadSlot % 2 === 1 ? -1 : 1;
   const rank = Math.ceil(state.squadSlot / 2);
-  // rank 1 sits well behind the beam, rank 2 out past it and forward.
   const swing = Math.PI - Math.min(SQUAD_SLOT_ARC, rank * 1.35);
-  const bearing = lead.facing + side * swing;
+  const bearing = leadState.squadBearing + side * swing;
   const reach = SQUAD_SPREAD * (0.8 + rank * 0.3);
-  return { x: lead.x + Math.cos(bearing) * reach, y: lead.y + Math.sin(bearing) * reach };
+
+  // A post inside a building is one they can never stand on, and walking at it
+  // is what parks somebody in a doorway. Draw it back toward the leader until
+  // it is somewhere they could actually be.
+  for (let t = 1; t > 0.2; t -= 0.2) {
+    const x = lead.x + Math.cos(bearing) * reach * t;
+    const y = lead.y + Math.sin(bearing) * reach * t;
+    if (buildingIndexAt(world, x, y) < 0 && !world.nav.isBlocked(x, y)) return { x, y };
+  }
+  return { x: lead.x, y: lead.y };
 }
 
 /** Anybody on a squad, leader or not, walks at the sweep's pace. */
@@ -3039,16 +3060,69 @@ function squadStep(
   }
 
   const wasOutside = buildingIndexAt(world, e.x, e.y) < 0;
+
+  // **Grey officers have no unstick of their own**, and it never showed while
+  // they only pottered round a patrol target a street away. A squad sweeps the
+  // whole city, so it walks into geometry with somewhere to be on the far side
+  // of it constantly — and then leans on it, because nothing was watching for
+  // an officer getting nowhere. This is the same watchdog bots and civilians
+  // run, and it is most of what "stuck facing the door" actually was.
+  //
+  // Its breakout knows about walls and not about buildings, though, so a
+  // squad's has to be checked like any other step: if it broke out *indoors*,
+  // put them back and drop the commitment, and the veto below picks a line
+  // along the frontage instead. Letting it through unchecked put them inside
+  // for 16% of the round.
+  {
+    const bx = e.x;
+    const by = e.y;
+    if (unstickTick(world, e, state, now, dt, speed)) {
+      if (!wasOutside || buildingIndexAt(world, e.x, e.y) < 0) return;
+      e.x = bx;
+      e.y = by;
+      state.unstickUntil = 0;
+    }
+  }
+
+  // Already committed to going round something: hold that line rather than
+  // re-deciding, or they turn on the spot and aim back into the same doorway.
+  const aim = now < state.squadAvoidUntil ? state.squadAvoidHeading : desired;
+
   const fromX = e.x;
   const fromY = e.y;
-  step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+  step(world, e, state, aim, speed, HUMAN_TURN_RATE, dt, now);
   if (!wasOutside || buildingIndexAt(world, e.x, e.y) < 0) return;
 
+  // Refused. Put them back and commit to walking *along* the frontage instead:
+  // whichever way round leaves them outdoors and on walkable ground, held for
+  // SQUAD_AVOID_MS so they actually clear the building rather than turning,
+  // re-aiming through the same gap, and standing in it.
   e.x = fromX;
   e.y = fromY;
+  let best = aim + Math.PI;
+  let bestRoom = -1;
+  for (const turn of [Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75, Math.PI]) {
+    const h = aim + turn;
+    let room = 0;
+    for (let d = 20; d <= 90; d += 20) {
+      const px = fromX + Math.cos(h) * d;
+      const py = fromY + Math.sin(h) * d;
+      if (buildingIndexAt(world, px, py) >= 0 || world.nav.isBlocked(px, py)) break;
+      room = d;
+    }
+    if (room > bestRoom) {
+      bestRoom = room;
+      best = h;
+    }
+  }
+  state.squadAvoidHeading = best;
+  state.squadAvoidUntil = now + SQUAD_AVOID_MS;
+  state.path = null;
+  state.nextPathAt = 0;
+  // The leader also stops aiming at whatever was on the other side of it.
   if (state.sweeps) sweepTarget(world, e, state, now);
-  state.heading += Math.PI / 2.4;
-  e.facing = state.heading;
+  state.heading = best;
+  e.facing = best;
 }
 
 /**
@@ -3095,6 +3169,13 @@ function sweepTarget(world: World, e: Entity, state: AiState, now: number): void
 
 function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
   const { sight, bloom, interval, gun, damageMul } = officerGrade(world, e.id);
+
+  // The shape the squad holds turns on its own slow bearing rather than on the
+  // leader's aim. Eased every tick on whoever is leading, so it swings round a
+  // corner with him and ignores him snapping onto a target and off again.
+  if (state.squadSlot === 0) {
+    state.squadBearing = turnToward(state.squadBearing, e.facing, SQUAD_BEARING_RATE * dt);
+  }
 
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
@@ -3266,21 +3347,30 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
       // Loose cohesion: a slot bearing off the leader's back rather than the
       // leader's own feet, so four of them arrive as a group instead of
       // stacking on one point and shoving each other off it.
-      const post = squadPost(lead, state);
+      const leadState = world.ai.get(lead.id) ?? state;
+      const post = squadPost(world, lead, leadState, state);
       const gap = Math.hypot(post.x - e.x, post.y - e.y);
       // Held only once they have drifted well off station. Correcting to an
       // exact spot is a squad that marches; the slack is what makes it read as
       // people moving together.
+      //
+      // Latched, because one threshold is a follower that steps forward, lands
+      // just inside it, stops, is left behind a pace later and steps again —
+      // and that stutter is most of what read as the formation being rigid.
       const slack = state.squadSlot > 0 ? SQUAD_SLACK : ESCORT_NEAR;
-      if (gap > slack) {
+      if (gap > slack) state.squadClosing = true;
+      else if (gap < slack * SQUAD_CLOSE_TO) state.squadClosing = false;
+
+      if (state.squadClosing) {
         const desired = widenCorners(
           world,
           e,
           headingToward(world, e, state, post.x, post.y, now),
         );
-        // They hurry when they've fallen behind and stroll when they're close,
-        // so a squad doesn't jog on the spot around whoever called them.
-        const pace = gap > ESCORT_FAR ? HUMAN_WALK_SPEED * 1.9 : HUMAN_WALK_SPEED * 1.15;
+        // Pace scales with how far behind they are rather than flipping between
+        // two speeds at a line — crossing that line lurched them by two thirds.
+        const hurry = Math.min(1, (gap - slack * SQUAD_CLOSE_TO) / Math.max(1, ESCORT_FAR - slack));
+        const pace = HUMAN_WALK_SPEED * (1.05 + 0.85 * hurry);
         squadStep(world, e, state, desired, pace * squadPace(state), dt, now);
         return;
       }

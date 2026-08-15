@@ -1753,6 +1753,31 @@ export const SQUAD_SLACK = 42;
 export const SQUAD_SLOT_ARC = 2.5;
 /** A squad sent to sweep moves like it means it. */
 export const SQUAD_PATROL_SPEED_MUL = 1.45;
+/**
+ * How fast the shape the squad holds is allowed to swing round, in rad/s.
+ *
+ * The slots used to be taken straight off the leader's `facing`, which is the
+ * way he is *aiming* — it snaps to a target the moment he sees one and snaps
+ * back when it dies. Every follower's post then whipped through an arc around
+ * him and they chased it, which is what the crabbing and doubling back was.
+ * The formation now turns on its own slow bearing, eased toward where he is
+ * pointing, so it swings round a corner and ignores him twitching at a target.
+ */
+export const SQUAD_BEARING_RATE = 1.1;
+/**
+ * Station-keeping is latched, not judged against one distance. At a single
+ * threshold a follower steps forward, lands inside it, stops, is left behind a
+ * pace later and steps again — a stutter that reads as indecision. They close
+ * to this fraction of `SQUAD_SLACK` once they have started moving.
+ */
+export const SQUAD_CLOSE_TO = 0.4;
+/**
+ * How long a squad member commits to going *round* something after being
+ * refused a step into it. Without it they turn on the spot, re-aim through the
+ * same doorway on the next tick and stand there — which is exactly what "stuck
+ * facing the door" looks like.
+ */
+export const SQUAD_AVOID_MS = 900;
 
 /**
  * The dirt path's texture, and the lamps at either end of it.
