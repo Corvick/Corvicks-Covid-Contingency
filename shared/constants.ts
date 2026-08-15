@@ -1712,6 +1712,27 @@ export const RIFLEMAN_SHOOT_INTERVAL_MS = 1150;
 export const RIFLEMAN_SIGHT = 620;
 
 /**
+ * Rounds a dispatched crew turns up with, and what they fall back to.
+ *
+ * Deliberately generous — a SWAT team that runs dry in one street fight is not
+ * a SWAT team — but *finite*, so a squad left sweeping for ten minutes is
+ * spending something. When the rifle is empty they draw a sidearm and keep
+ * working: still a far better shot than an ordinary officer, because they are
+ * still the people who came when you asked, but a pistol's reach and rate.
+ */
+export const SWAT_RIFLE_AMMO = 220;
+export const RIFLEMAN_RIFLE_AMMO = 90;
+export const DISPATCHED_PISTOL_BLOOM_RAD = 0.07;
+export const DISPATCHED_PISTOL_INTERVAL_MS = 900;
+/**
+ * And every one of them hits a little softer than the gun's paper figure.
+ * They arrive in numbers, they aim well and they never stop shooting; at the
+ * rifle's full damage a single call cleared streets faster than the player
+ * could walk down them.
+ */
+export const DISPATCHED_DAMAGE_MUL = 0.72;
+
+/**
  * A squad sent by radio does not stand at your shoulder — it sweeps.
  *
  * One of them leads and the rest keep station on it, loosely: a slot bearing
@@ -1720,8 +1741,34 @@ export const RIFLEMAN_SIGHT = 620;
  * the slack is the whole of what makes it read as people moving together
  * rather than as a formation being drawn.
  */
-export const SQUAD_SPREAD = 62;
-export const SQUAD_SLACK = 32;
+export const SQUAD_SPREAD = 96;
+export const SQUAD_SLACK = 42;
+/**
+ * How far round the leader the slots reach. Past a right angle the shape stops
+ * being a file behind him and becomes a *line abreast* — some of them out to
+ * the side and the outermost pair genuinely ahead, which is what a team
+ * sweeping a street actually looks like and what keeps the leader from being
+ * the only one who ever finds anything.
+ */
+export const SQUAD_SLOT_ARC = 2.5;
+/** A squad sent to sweep moves like it means it. */
+export const SQUAD_PATROL_SPEED_MUL = 1.45;
+
+/**
+ * The dirt path's texture, and the lamps at either end of it.
+ *
+ * All of it is drawn from the path polyline the client already has, hashed off
+ * the speck index rather than rolled or stored — the park is the most
+ * overdraw-sensitive thing on screen, so this is a fixed count of small blobs
+ * with no per-frame state and nothing on the wire.
+ */
+export const PARK_PATH_SPECKS = 220;
+export const PARK_PATH_END_SPECKS = 26;
+export const PARK_PATH_END_SCATTER = 42;
+/** How far off the end and off to the side each lamp stands. */
+export const PARK_LAMP_INSET = 10;
+export const PARK_LAMP_OFFSET = 14;
+export const PARK_LAMP_GLOW = 90;
 /** How many spots a sweeping leader considers, and how far off it looks. */
 export const SQUAD_SWEEP_SAMPLES = 12;
 export const SQUAD_SWEEP_MIN = 420;

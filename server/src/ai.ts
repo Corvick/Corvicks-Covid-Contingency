@@ -104,7 +104,12 @@ import {
   RIFLEMAN_SIGHT,
   RIFLEMAN_BLOOM_RAD,
   RIFLEMAN_SHOOT_INTERVAL_MS,
+  DISPATCHED_PISTOL_BLOOM_RAD,
+  DISPATCHED_PISTOL_INTERVAL_MS,
+  DISPATCHED_DAMAGE_MUL,
   SQUAD_SPREAD,
+  SQUAD_SLOT_ARC,
+  SQUAD_PATROL_SPEED_MUL,
   SQUAD_SLACK,
   SQUAD_SWEEP_SAMPLES,
   SQUAD_SWEEP_MIN,
@@ -2929,33 +2934,51 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
 function officerGrade(
   world: World,
   id: string,
-): { sight: number; bloom: number; interval: number; gun?: ItemDef } {
-  // A real gun rather than a damage number: `fire` takes an ItemDef and reads
-  // its damage and reach off it, so a crew's rifle hits exactly as hard as the
-  // one a player can pick up off the floor, and carries as far.
-  if (world.swat.has(id)) {
+): { sight: number; bloom: number; interval: number; gun?: ItemDef; damageMul: number } {
+  const dispatched = world.swat.has(id) || world.riflemen.has(id);
+  if (dispatched) {
+    // The gun comes out of the bag, so running dry is the slot emptying rather
+    // than a flag: `fire` reads damage and reach off the item, and a crew's
+    // rifle hits exactly as the one a player can pick up does — bar
+    // `DISPATCHED_DAMAGE_MUL`, which is what stops a single call levelling a
+    // street faster than you can walk down it.
+    const slot = world.inventories.get(id)?.guns[0];
+    const loaded = slot !== null && slot !== undefined && slot.ammo > 0;
+    const swat = world.swat.has(id);
+    const sight = swat ? SWAT_SIGHT : RIFLEMAN_SIGHT;
+    if (!loaded) {
+      // Out of rifle rounds, so a sidearm. Still a far better shot than the
+      // officer who was already standing on the corner — they are still the
+      // ones who came when you asked — but a pistol's reach and rate.
+      return {
+        sight,
+        bloom: DISPATCHED_PISTOL_BLOOM_RAD,
+        interval: DISPATCHED_PISTOL_INTERVAL_MS,
+        gun: ITEMS.pistol,
+        damageMul: DISPATCHED_DAMAGE_MUL,
+      };
+    }
     return {
-      sight: SWAT_SIGHT,
-      bloom: SWAT_BLOOM_RAD,
-      interval: SWAT_SHOOT_INTERVAL_MS,
-      gun: ITEMS.semiAutoRifle,
-    };
-  }
-  if (world.riflemen.has(id)) {
-    return {
-      sight: RIFLEMAN_SIGHT,
-      bloom: RIFLEMAN_BLOOM_RAD,
-      interval: RIFLEMAN_SHOOT_INTERVAL_MS,
-      gun: ITEMS.boltRifle,
+      sight,
+      bloom: swat ? SWAT_BLOOM_RAD : RIFLEMAN_BLOOM_RAD,
+      interval: swat ? SWAT_SHOOT_INTERVAL_MS : RIFLEMAN_SHOOT_INTERVAL_MS,
+      gun: ITEMS[slot.item],
+      damageMul: DISPATCHED_DAMAGE_MUL,
     };
   }
   if (world.soldiers.has(id)) {
-    return { sight: SOLDIER_SIGHT, bloom: SOLDIER_BLOOM_RAD, interval: SOLDIER_SHOOT_INTERVAL_MS };
+    return {
+      sight: SOLDIER_SIGHT,
+      bloom: SOLDIER_BLOOM_RAD,
+      interval: SOLDIER_SHOOT_INTERVAL_MS,
+      damageMul: 1,
+    };
   }
   return {
     sight: NPC_OFFICER_SIGHT,
     bloom: NPC_OFFICER_BLOOM_RAD,
     interval: NPC_OFFICER_SHOOT_INTERVAL_MS,
+    damageMul: 1,
   };
 }
 
@@ -2969,12 +2992,63 @@ function officerGrade(
  */
 function squadPost(lead: Entity, state: AiState): { x: number; y: number } {
   if (state.squadSlot <= 0) return { x: lead.x, y: lead.y };
-  // Slots 1..n alternate left and right, widening as they go back.
+  // Slots alternate left and right and swing *forward* as they go out, so the
+  // first pair sit off his shoulders and the next are out at the flanks and
+  // ahead of him. A wedge trailing behind put every one of them where he had
+  // already been, and left him the only one walking into anything.
   const side = state.squadSlot % 2 === 1 ? -1 : 1;
   const rank = Math.ceil(state.squadSlot / 2);
-  const bearing = lead.facing + Math.PI + side * (0.5 / rank);
-  const reach = SQUAD_SPREAD * (0.7 + rank * 0.35);
+  // rank 1 sits well behind the beam, rank 2 out past it and forward.
+  const swing = Math.PI - Math.min(SQUAD_SLOT_ARC, rank * 1.35);
+  const bearing = lead.facing + side * swing;
+  const reach = SQUAD_SPREAD * (0.8 + rank * 0.3);
   return { x: lead.x + Math.cos(bearing) * reach, y: lead.y + Math.sin(bearing) * reach };
+}
+
+/** Anybody on a squad, leader or not, walks at the sweep's pace. */
+function squadPace(state: AiState): number {
+  return state.sweeps || state.squadSlot >= 0 ? SQUAD_PATROL_SPEED_MUL : 1;
+}
+
+/**
+ * A squad's step, which refuses to take them indoors.
+ *
+ * They are sweeping the city, not clearing houses: `sweepTarget` already only
+ * ever picks a spot in the street, but the router does not know that a
+ * building is off limits — routes are planned across the nav grid, doors are
+ * not in it, and the shortest line to somewhere often runs through a front
+ * room. So the veto is on the *step*, which is the only place that knows where
+ * the body actually ended up.
+ *
+ * Refusing alone would leave them pressed against a doorway for the rest of the
+ * round, so a refusal also turns them: the leader picks a fresh sweep and
+ * everybody else nudges their heading round to slide along the frontage.
+ */
+function squadStep(
+  world: World,
+  e: Entity,
+  state: AiState,
+  desired: number,
+  speed: number,
+  dt: number,
+  now: number,
+): void {
+  if (state.squadSlot < 0 && !state.sweeps) {
+    step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+    return;
+  }
+
+  const wasOutside = buildingIndexAt(world, e.x, e.y) < 0;
+  const fromX = e.x;
+  const fromY = e.y;
+  step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+  if (!wasOutside || buildingIndexAt(world, e.x, e.y) < 0) return;
+
+  e.x = fromX;
+  e.y = fromY;
+  if (state.sweeps) sweepTarget(world, e, state, now);
+  state.heading += Math.PI / 2.4;
+  e.facing = state.heading;
 }
 
 /**
@@ -3020,7 +3094,7 @@ function sweepTarget(world: World, e: Entity, state: AiState, now: number): void
 }
 
 function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
-  const { sight, bloom, interval, gun } = officerGrade(world, e.id);
+  const { sight, bloom, interval, gun, damageMul } = officerGrade(world, e.id);
 
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
@@ -3054,7 +3128,22 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     // Don't fire until roughly on target, or they shoot at where they were.
     if (now >= state.nextShotAt && Math.abs(angleDelta(state.heading, aim)) < 0.22) {
       state.nextShotAt = now + interval;
-      fire(world, e, state.heading, bloom, now, gun);
+      // A dispatched crew spends rounds out of a real magazine. The slot is
+      // left in the bag once it is empty — `officerGrade` reads the count and
+      // hands them a sidearm from the next shot on, and dropping the slot
+      // would take the shouldered rifle off the drawing a shot early.
+      const bag = world.inventories.get(e.id);
+      const mag = bag?.guns[0];
+      if (bag && mag && mag.ammo > 0) {
+        mag.ammo--;
+        // The last round out of the rifle puts it away and brings the sidearm
+        // up. `activeSlot` is what `heldItem` answers with, so this is also
+        // what takes the shouldered rifle off the body on the wire — an empty
+        // rifle still drawn at the shoulder while its owner fires a pistol is
+        // the two halves disagreeing about what is in his hands.
+        if (mag.ammo <= 0) bag.activeSlot = 0;
+      }
+      fire(world, e, state.heading, bloom, now, gun, 1, damageMul);
     }
 
     // Walk backwards to hold the far edge of their sight line, never turning
@@ -3192,7 +3281,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         // They hurry when they've fallen behind and stroll when they're close,
         // so a squad doesn't jog on the spot around whoever called them.
         const pace = gap > ESCORT_FAR ? HUMAN_WALK_SPEED * 1.9 : HUMAN_WALK_SPEED * 1.15;
-        step(world, e, state, desired, pace, HUMAN_TURN_RATE, dt, now);
+        squadStep(world, e, state, desired, pace * squadPace(state), dt, now);
         return;
       }
       // Close enough. Watch the street rather than the person.
@@ -3217,7 +3306,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
   }
   if (turnAtWallAndRepick(world, e, state, now)) return;
   const desired = widenCorners(world, e, headingToward(world, e, state, state.wanderX, state.wanderY, now));
-  step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+  squadStep(world, e, state, desired, HUMAN_WALK_SPEED * 1.15 * squadPace(state), dt, now);
 }
 
 // ---------------------------------------------------------------- bot officers
@@ -3586,6 +3675,15 @@ function lootWanted(
 
   for (const p of world.pickups.values()) {
     if (BOT_IGNORES.has(p.item)) continue;
+    // **The debug heap is not the city's loot and bots may not shop from it.**
+    // `TEST_DROP_ALL_ITEMS` lays one of every item in the game around each
+    // player as they spawn, and a bot within `BOT_LOOT_RANGE` of that pile
+    // helped itself — taking the radio first, since it scores highest of
+    // anything on the belt. That is a free van and a free SWAT team that no
+    // real round would ever hand out, and it quietly skews every measurement
+    // taken with the flag on. Same test `inACity` uses for the every-gun floor,
+    // and for the same reason.
+    if (p.id.startsWith('loot-test-')) continue;
     // Just had a go at this one. Let it lie for a while, whatever came of it.
     const snubbed = state.lootSnub.get(p.id);
     if (snubbed !== undefined) {

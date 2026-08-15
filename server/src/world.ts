@@ -84,7 +84,7 @@ import {
 import { SpatialGrid } from './spatial.js';
 import { clamp, resolveCircleRect, segmentCircleT, segmentRectT } from './geometry.js';
 import { generateMap } from './mapgen.js';
-import { dropDebugKit, newInventory, spawnPickups } from './inventory.js';
+import { dropDebugKit, heldItem, newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
 import { OUTSIDE, RoomMap } from './rooms.js';
@@ -1706,6 +1706,13 @@ export function toWire(
   // Which way the shield faces is the whole of how it works, so it has to be
   // visible on the body rather than only in the HUD.
   if (worn && worn.shield > 0) state.shield = worn.shieldUp ? 1 : -1;
+  // What is in their hands, so the client can draw the body around the weapon
+  // rather than putting a pistol in everybody's fists whatever they carry.
+  // Omitted for the pistol, which is the default the drawing already assumes.
+  if (worn && e.type === 'officer') {
+    const inHand = heldItem(worn);
+    if (inHand && inHand !== 'pistol') state.held = inHand;
+  }
   if (world.stunned.has(e.id)) state.stunned = true;
   const bashing = world.bashUntil.get(e.id);
   if (bashing !== undefined) {

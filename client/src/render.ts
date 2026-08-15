@@ -62,6 +62,12 @@ import {
   CAR_WIDTH,
   VAN_WIDTH,
   RADIO_COOLDOWN_MS,
+  PARK_PATH_SPECKS,
+  PARK_PATH_END_SPECKS,
+  PARK_PATH_END_SCATTER,
+  PARK_LAMP_INSET,
+  PARK_LAMP_OFFSET,
+  PARK_LAMP_GLOW,
   VAN_REAR_DOOR_ARC,
   VAN_CAB_DOOR_ARC,
   TYRE_SMOKE_PUFFS,
@@ -144,7 +150,11 @@ export function drawPark(ctx: CanvasRenderingContext2D, park: Park, view: Viewpo
   ctx.fillRect(park.x, park.y, park.w, park.h);
 
   if (park.path.length < 2) return;
-  ctx.lineCap = 'round';
+
+  // The path itself. Ends are **butt**, not round: a track worn through grass
+  // stops where people stopped walking, and a domed cap reads as a lozenge
+  // lying on the lawn rather than as a way in.
+  ctx.lineCap = 'butt';
   ctx.lineJoin = 'round';
   for (const [width, colour] of [
     [park.pathWidth + 14, 'rgba(74, 60, 43, 0.45)'],
@@ -157,8 +167,129 @@ export function drawPark(ctx: CanvasRenderingContext2D, park: Park, view: Viewpo
     for (let i = 1; i < park.path.length; i++) ctx.lineTo(park.path[i].x, park.path[i].y);
     ctx.stroke();
   }
-  ctx.lineCap = 'butt';
+
+  drawPathDirt(ctx, park);
   ctx.lineJoin = 'miter';
+
+  // A lamp at each end, so the way in is marked after dark and the two ends
+  // read as entrances rather than as the track simply running out.
+  drawPathLamps(ctx, park);
+}
+
+/**
+ * Grit and scuffing on the path, and a scatter of loose dirt spilling off each
+ * end onto the grass.
+ *
+ * Everything here is hashed off its own index rather than stored or rolled, so
+ * the texture is identical every frame and costs nothing to keep — the park is
+ * already the most overdraw-sensitive thing on screen (see the note on
+ * `drawBushes`), so this is a fixed number of small opaque blobs and no state.
+ */
+function drawPathDirt(ctx: CanvasRenderingContext2D, park: Park): void {
+  const rand = (i: number, salt: number): number => {
+    const v = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453;
+    return v - Math.floor(v);
+  };
+
+  // Along the path: darker grit and lighter scuffs, so it stops being a flat
+  // brown ribbon and starts reading as trodden earth.
+  const segments = park.path.length - 1;
+  for (let i = 0; i < PARK_PATH_SPECKS; i++) {
+    const t = (i + rand(i, 1)) / PARK_PATH_SPECKS;
+    const seg = Math.min(segments - 1, Math.floor(t * segments));
+    const local = t * segments - seg;
+    const a = park.path[seg];
+    const b = park.path[seg + 1];
+    const across = (rand(i, 2) - 0.5) * park.pathWidth * 0.92;
+    const nx = -(b.y - a.y);
+    const ny = b.x - a.x;
+    const len = Math.hypot(nx, ny) || 1;
+    const x = a.x + (b.x - a.x) * local + (nx / len) * across;
+    const y = a.y + (b.y - a.y) * local + (ny / len) * across;
+    const r = 1.1 + rand(i, 3) * 2.6;
+    ctx.fillStyle = rand(i, 4) < 0.5 ? 'rgba(58, 46, 32, 0.75)' : 'rgba(101, 84, 62, 0.6)';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // And the ends, where the track frays out into the grass. A flat cap on its
+  // own is too clean a line — the spill is what makes it look worn rather than
+  // cut.
+  for (const [end, inward] of [
+    [park.path[0], park.path[1]],
+    [park.path[park.path.length - 1], park.path[park.path.length - 2]],
+  ] as Array<[{ x: number; y: number }, { x: number; y: number }]>) {
+    const dx = end.x - inward.x;
+    const dy = end.y - inward.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    for (let i = 0; i < PARK_PATH_END_SPECKS; i++) {
+      const out = rand(i, 7) * PARK_PATH_END_SCATTER;
+      const across = (rand(i, 8) - 0.5) * (park.pathWidth + PARK_PATH_END_SCATTER * 0.8);
+      const x = end.x + ux * out - uy * across;
+      const y = end.y + uy * out + ux * across;
+      const r = 1 + rand(i, 9) * 2.4;
+      // Thinner the further out it has been kicked.
+      ctx.fillStyle = `rgba(74, 60, 43, ${(0.62 * (1 - out / PARK_PATH_END_SCATTER)).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+/**
+ * A lamp post at either end of the path, throwing a faint pool of yellow.
+ *
+ * Derived from the path rather than sent: the two ends are the first and last
+ * points of a polyline the client already has, so this costs nothing on the
+ * wire and cannot drift out of step with where the path actually runs. Set
+ * back off the end and to one side, the way a lamp stands beside a gate rather
+ * than in the middle of it.
+ */
+function drawPathLamps(ctx: CanvasRenderingContext2D, park: Park): void {
+  const ends: Array<[{ x: number; y: number }, { x: number; y: number }]> = [
+    [park.path[0], park.path[1]],
+    [park.path[park.path.length - 1], park.path[park.path.length - 2]],
+  ];
+
+  for (const [end, inward] of ends) {
+    const dx = end.x - inward.x;
+    const dy = end.y - inward.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    // Beside the mouth of the path, a little in from the very end.
+    const x = end.x - ux * PARK_LAMP_INSET - uy * (park.pathWidth / 2 + PARK_LAMP_OFFSET);
+    const y = end.y - uy * PARK_LAMP_INSET + ux * (park.pathWidth / 2 + PARK_LAMP_OFFSET);
+
+    // The pool of light first, under everything.
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, PARK_LAMP_GLOW);
+    glow.addColorStop(0, 'rgba(255, 226, 148, 0.20)');
+    glow.addColorStop(0.5, 'rgba(255, 218, 130, 0.09)');
+    glow.addColorStop(1, 'rgba(255, 214, 120, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(x, y, PARK_LAMP_GLOW, 0, Math.PI * 2);
+    ctx.fill();
+
+    // The post, seen from above: a base, a short shadow cast away from the
+    // path, and the lit head.
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.beginPath();
+    ctx.ellipse(x + ux * 5, y + uy * 5, 6, 4, Math.atan2(uy, ux), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#3f434a';
+    ctx.beginPath();
+    ctx.arc(x, y, 3.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffe89a';
+    ctx.beginPath();
+    ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 export function drawWalls(ctx: CanvasRenderingContext2D, walls: Wall[], view: Viewport): void {
@@ -568,6 +699,56 @@ export function drawHandLinks(
  */
 export const ENTITY_DETAIL_SCALE = 0.5;
 
+/** Which shoulder the butt goes into. +1 is the officer's right. */
+const RIFLE_SIDE = 1;
+
+/** Is this officer carrying something that gets shouldered rather than aimed? */
+function shoulderedRifle(e: EntityState): boolean {
+  return e.held !== undefined && ITEMS[e.held]?.grip === 'rifle';
+}
+
+/**
+ * Where a shouldered rifle and the hands on it sit, in world coordinates.
+ *
+ * Worked out once and shared by the arms and the weapon, which are drawn in
+ * two separate passes either side of the torso — if they each derived their
+ * own the hands would drift off the gun the moment a number changed.
+ *
+ * The butt sits well off the centre line at the shoulder and the muzzle sits
+ * much closer to it, so the weapon angles in across the body as it goes
+ * forward. That is what a shouldered rifle does, and it is also what keeps the
+ * barrel pointing where the rounds actually go.
+ */
+function riflePose(
+  x: number,
+  y: number,
+  dirX: number,
+  dirY: number,
+  perpX: number,
+  perpY: number,
+  radius: number,
+): {
+  buttX: number;
+  buttY: number;
+  gripX: number;
+  gripY: number;
+  foreX: number;
+  foreY: number;
+  muzzleX: number;
+  muzzleY: number;
+} {
+  // (along the facing, across it) in radii, then rotated out to world space.
+  const at = (along: number, across: number): [number, number] => [
+    x + dirX * radius * along + perpX * radius * across * RIFLE_SIDE,
+    y + dirY * radius * along + perpY * radius * across * RIFLE_SIDE,
+  ];
+  const [buttX, buttY] = at(-0.5, 0.72);
+  const [gripX, gripY] = at(0.35, 0.6);
+  const [foreX, foreY] = at(1.5, 0.36);
+  const [muzzleX, muzzleY] = at(2.35, 0.22);
+  return { buttX, buttY, gripX, gripY, foreX, foreY, muzzleX, muzzleY };
+}
+
 export function drawEntity(
   ctx: CanvasRenderingContext2D,
   e: EntityState,
@@ -661,6 +842,26 @@ export function drawEntity(
       ctx.lineTo(sx + dirX * radius * swing, sy + dirY * radius * swing);
       ctx.stroke();
     }
+  } else if (e.type === 'officer' && shoulderedRifle(e)) {
+    // A shouldered rifle: butt into the strong-side shoulder, the weapon lying
+    // along the aim line but offset to that side, and the other hand reaching
+    // across to the forestock. The two arms are doing different jobs and are
+    // drawn differently — that asymmetry is what reads as "rifle" from above,
+    // where a pair of arms out to a point in front reads as "pistol".
+    const g = riflePose(x, y, dirX, dirY, perpX, perpY, radius);
+    ctx.strokeStyle = limbColor;
+    ctx.lineWidth = radius * 0.62;
+    ctx.lineCap = 'round';
+    // Strong-side arm: shoulder to the grip, short and tucked in.
+    ctx.beginPath();
+    ctx.moveTo(x + perpX * shoulder * RIFLE_SIDE, y + perpY * shoulder * RIFLE_SIDE);
+    ctx.lineTo(g.gripX, g.gripY);
+    ctx.stroke();
+    // Support arm: the far shoulder, reaching across and well down the barrel.
+    ctx.beginPath();
+    ctx.moveTo(x - perpX * shoulder * RIFLE_SIDE, y - perpY * shoulder * RIFLE_SIDE);
+    ctx.lineTo(g.foreX, g.foreY);
+    ctx.stroke();
   } else if (e.type === 'officer') {
     const gripX = x + dirX * radius * 1.62;
     const gripY = y + dirY * radius * 1.62;
@@ -699,7 +900,31 @@ export function drawEntity(
   ctx.fillStyle = headColor;
   ctx.fill();
 
-  if (e.type === 'officer') {
+  if (e.type === 'officer' && shoulderedRifle(e)) {
+    // The weapon itself: a long body from the butt at the shoulder out past
+    // the support hand, with a thinner barrel beyond it. Drawn *after* the
+    // torso so it lies over the shoulder rather than disappearing under it.
+    const g = riflePose(x, y, dirX, dirY, perpX, perpY, radius);
+    ctx.lineCap = 'butt';
+    ctx.strokeStyle = '#111827';
+    ctx.lineWidth = radius * 0.34;
+    ctx.beginPath();
+    ctx.moveTo(g.buttX, g.buttY);
+    ctx.lineTo(g.foreX, g.foreY);
+    ctx.stroke();
+    // Barrel: thinner, and carrying on past the hand that is steadying it.
+    ctx.lineWidth = radius * 0.2;
+    ctx.beginPath();
+    ctx.moveTo(g.foreX, g.foreY);
+    ctx.lineTo(g.muzzleX, g.muzzleY);
+    ctx.stroke();
+    // The stock, squared off into the shoulder.
+    ctx.lineWidth = radius * 0.46;
+    ctx.beginPath();
+    ctx.moveTo(g.buttX, g.buttY);
+    ctx.lineTo(g.buttX + (g.gripX - g.buttX) * 0.42, g.buttY + (g.gripY - g.buttY) * 0.42);
+    ctx.stroke();
+  } else if (e.type === 'officer') {
     ctx.save();
     ctx.translate(x + dirX * radius * 1.75, y + dirY * radius * 1.75);
     ctx.rotate(facing);

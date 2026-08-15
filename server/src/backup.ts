@@ -21,6 +21,8 @@ import {
   RADIO_REPLY_DELAY_MS,
   RADIO_REPLY_LINE,
   RADIO_SPEECH_MS,
+  RIFLEMAN_RIFLE_AMMO,
+  SWAT_RIFLE_AMMO,
   SHIELD_POINTS,
   VAN_APPROACH_SPEED,
   VAN_BRAKE_DIST,
@@ -480,13 +482,23 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
     state.escortId = vehicle.leaderId;
   }
 
+  // A real gun with real rounds in it, in a real gun slot. Everything reads
+  // off that afterwards: `officerGrade` takes its damage and reach from the
+  // item, the wire takes the shouldered-rifle profile from it, and running dry
+  // is the slot emptying rather than a special case anywhere.
   if (vehicle.kind === 'car') {
     world.riflemen.add(id);
+    const carInv = newInventory();
+    carInv.guns[0] = { item: 'boltRifle', ammo: RIFLEMAN_RIFLE_AMMO };
+    carInv.activeSlot = 1;
+    world.inventories.set(id, carInv);
     return;
   }
 
   world.swat.add(id);
   const inv = newInventory();
+  inv.guns[0] = { item: 'semiAutoRifle', ammo: SWAT_RIFLE_AMMO };
+  inv.activeSlot = 1;
   inv.utilities.push('riotShield');
   inv.shield = SHIELD_POINTS;
   inv.shieldUp = true;

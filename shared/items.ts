@@ -51,6 +51,19 @@ export interface ItemDef {
    * grenades and kevlar do.
    */
   utilitySlot?: boolean;
+  /**
+   * How it is held, and so how the body is drawn around it.
+   *
+   * Absent means the pistol profile everybody used to get whatever was
+   * actually in their hands: both arms out to a grip on the centre line. A
+   * `rifle` is shouldered instead — butt into one shoulder, the other hand
+   * well down the forestock — which puts the weapon off to one side and is
+   * what makes a rifleman read as a rifleman at a glance.
+   *
+   * On the ItemDef rather than in the drawing so that adding a gun decides
+   * how it is carried in the same place it decides what it does.
+   */
+  grip?: 'rifle';
   /** Guns only. */
   damageMin?: number;
   damageMax?: number;
@@ -185,6 +198,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   },
   boltRifle: {
     id: 'boltRifle',
+    grip: 'rifle',
     kind: 'gun',
     label: 'Bolt Action Rifle',
     short: 'BOLT',
@@ -203,6 +217,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   },
   semiAutoRifle: {
     id: 'semiAutoRifle',
+    grip: 'rifle',
     kind: 'gun',
     label: 'Semi-Automatic Rifle',
     short: 'SEMI',
@@ -225,6 +240,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   },
   sniper: {
     id: 'sniper',
+    grip: 'rifle',
     kind: 'gun',
     label: 'Sniper Rifle',
     short: 'SNPR',
@@ -243,6 +259,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   },
   heavyMg: {
     id: 'heavyMg',
+    grip: 'rifle',
     kind: 'gun',
     label: 'Heavy Machine Gun',
     short: 'HMG',
@@ -267,6 +284,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   },
   chargeRifle: {
     id: 'chargeRifle',
+    grip: 'rifle',
     kind: 'gun',
     label: 'Charge Rifle',
     short: 'CHRG',

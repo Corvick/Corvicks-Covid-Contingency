@@ -379,10 +379,48 @@ Reserved ground like any other landmark, but with two rules of its own.
   *general* bush scatter as well as the park's own fill; the scatter runs over
   the whole map and was dropping bushes on the path until it was told about it.
   Measured: 0 bushes on the path across 12 seeds.
+- **Its ends are flat, and they fray.** `lineCap` is butt rather than round —
+  a track worn through grass stops where people stopped walking, and a domed
+  cap reads as a lozenge lying on the lawn rather than as a way in. A scatter
+  of loose dirt spills off each end (`PARK_PATH_END_*`), because a flat cap on
+  its own is too clean a line to look walked.
+- **A lamp post stands at each end**, set back and off to one side the way one
+  stands beside a gate, throwing a faint yellow pool. Derived from the path
+  polyline the client already has — the two ends are its first and last points
+  — so it costs nothing on the wire and cannot drift out of step with where the
+  path actually runs.
+- **The dirt texture is hashed, not stored and not rolled.** `PARK_PATH_SPECKS`
+  of grit and scuff, positioned off the speck index, so it is identical every
+  frame with no per-frame state. The park is the most overdraw-sensitive thing
+  on screen — see the note on `drawBushes` — so it is a fixed count of small
+  opaque blobs rather than anything translucent and overlapping.
 - **The path needs no nav or collision work.** Bushes slow you down, so a clear
   line through a thicket is the quick way through without any rule saying so.
   It is drawn under everything as ground, one stroked polyline with a wider
   faint pass beneath for the soft edge.
+
+### How a gun is held
+
+**`ItemDef.grip` decides the profile, not the drawing.** Absent is the pistol
+everyone used to get whatever was actually in their hands — both arms out to a
+grip on the centre line. `grip: 'rifle'` is shouldered instead: butt into one
+shoulder, the support hand well down the forestock, and the weapon lying off to
+that side rather than straight out in front. Currently on the bolt action, the
+semi-auto, the sniper, the heavy MG and the charge rifle.
+
+- **The wire carries `held`**, the item id, and only for officers and only when
+  it is not the pistol. A handful of entities pay a short string; the four
+  hundred civilians and zombies pay nothing.
+- **The arms and the weapon are drawn in two passes**, either side of the
+  torso, so the gun lies *over* the shoulder instead of vanishing under the
+  body. `riflePose` is computed once and shared by both — derive it twice and
+  the hands drift off the gun the first time a number changes.
+- **The two arms do different jobs and are drawn differently.** That asymmetry
+  is what reads as "rifle" from above; a symmetric pair reaching to a point in
+  front reads as "pistol" no matter what is drawn at the end of it.
+- Measured off the canvas, gun pixels relative to the body: pistol sits **0.09
+  radii** off the centre line, the rifle **0.76** — and 4903 px of weapon
+  against the pistol's 351.
 
 ### Items, orders and scenery
 
@@ -486,6 +524,12 @@ Reserved ground like any other landmark, but with two rules of its own.
   same player respawning repositions theirs rather than stacking a new one.
   Measured over six cities: **0** debug pickups in a generated city, +27 the
   moment somebody spawns.
+- **Bots may not shop from it either.** `lootWanted` skips any `loot-test-` id,
+  the same test `inACity` uses. A bot within `BOT_LOOT_RANGE` of a player's
+  heap helped itself and took the **radio** first, since it scores highest of
+  anything on the belt — a free van and a free SWAT team that no real round
+  would ever hand out, and a quiet skew on every measurement taken with the
+  flag on.
 - **The every-gun floor still ignores it**, via `inACity` excluding any
   `loot-test-` id — the heap can now appear mid-round, and counting it would
   have the guarantee satisfied by test items while the buildings went without.
@@ -1536,6 +1580,34 @@ you actually asked for when you picked the handset up.
 - **The two out of a patrol car are the same machinery**, one leading and one
   in station, which is what keeps them near each other without a line of code
   about pairs.
+- **They carry real guns with real rounds in them.** `SWAT_RIFLE_AMMO` (220)
+  and `RIFLEMAN_RIFLE_AMMO` (90) sit in an ordinary gun slot, so `officerGrade`
+  reads damage and reach off the item, the wire takes the shouldered-rifle
+  profile off it, and running dry is the slot emptying rather than a flag.
+  Generous, because a team that empties out in one street fight is not a team;
+  finite, because a squad left sweeping for ten minutes should be spending
+  something. **The last round puts the rifle away**: `activeSlot` goes to 0 the
+  moment the magazine empties, which is what stops an empty rifle still being
+  drawn at the shoulder while its owner fires a sidearm.
+- **Dry means a sidearm, not a worse rifleman.** `DISPATCHED_PISTOL_*` — still
+  a far better shot than the officer who was already on the corner, but a
+  pistol's reach and rate.
+- **`DISPATCHED_DAMAGE_MUL` (0.72) is on all of them.** They arrive in numbers,
+  aim well and never stop shooting; at the rifle's paper damage one call
+  cleared streets faster than you could walk down them.
+- **They sweep at `SQUAD_PATROL_SPEED_MUL`** and **never go indoors.**
+  `sweepTarget` only ever picks a spot in the street, but the router does not
+  know a building is off limits — doors are not in the nav grid and the short
+  line to somewhere often runs through a front room. So the veto is on the
+  *step*, in `squadStep`, which is the only place that knows where the body
+  actually ended up; a refusal also turns them, or they would press at a
+  doorway for the rest of the round. Measured: **0.0-0.3%** of crew ticks spent
+  inside a building.
+- **The formation fans out rather than trailing.** Slots swing forward as they
+  go out (`SQUAD_SLOT_ARC`), so the first pair sit off the leader's shoulders
+  and the outer pair are genuinely *ahead* of him. A wedge behind put every one
+  of them where he had already been and left him the only one who ever walked
+  into anything. Measured: 125-160px off the leader, with 1 of 3 ahead of him.
 - **The driver stays with the van** (`guardX`/`guardY`, `VAN_GUARD_RADIUS`).
   Following a squad about is not a driver's job, and parked beside his own
   vehicle he is a sentry and a landmark at once. He is still in
@@ -1591,13 +1663,16 @@ when you asked. The trigger is slower than a player's semi-auto (620 against
 Sight, bloom, cadence, and what they are holding — a lookup rather than a chain
 of ternaries, because there are four now:
 
-| | sight | bloom | cadence | gun |
-|---|---|---|---|---|
-| ambient, already on the street | 420 | 0.22 | 2000 | — |
-| the van's **driver** | as ambient — he was driving, not shooting |
-| **riflemen**, out of a patrol car | 620 | 0.045 | 1150 | bolt action |
-| **SWAT**, out of a van | 560 | 0.045 | 620 | semi-auto |
-| **soldiers**, off a helicopter | 520 | 0.07 | 850 | — |
+| | sight | bloom | cadence | gun | rounds |
+|---|---|---|---|---|---|
+| ambient, already on the street | 420 | 0.22 | 2000 | — | ∞ |
+| the van's **driver** | as ambient — he was driving, not shooting | | | | |
+| **riflemen**, out of a patrol car | 620 | 0.045 | 1150 | bolt action | 90 |
+| **SWAT**, out of a van | 560 | 0.045 | 620 | semi-auto | 220 |
+| either of those, **dry** | as above | 0.07 | 900 | pistol | ∞ |
+| **soldiers**, off a helicopter | 520 | 0.07 | 850 | — | ∞ |
+
+Everything a call sent also takes `DISPATCHED_DAMAGE_MUL`.
 
 Anybody the radio sent is a better shot than anybody who was already standing
 there, which is most of the point of picking the handset up. Only SWAT and

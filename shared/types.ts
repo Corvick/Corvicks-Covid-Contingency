@@ -60,6 +60,16 @@ export interface EntityState {
   burning?: boolean;
   /** Id of the partner whose hand they're holding, if any. */
   hand?: string;
+  /**
+   * What is actually in this officer's hands, so the body can be drawn around
+   * it — a shouldered rifle rather than a pistol held out in front.
+   *
+   * Absent means the pistol profile, which is what everybody got regardless of
+   * what they were carrying before this existed. Only sent for officers, and
+   * only when it is not the pistol, so it costs a short string on a handful of
+   * entities rather than anything on the four hundred.
+   */
+  held?: ItemId;
 }
 
 export interface Wall {
