@@ -129,8 +129,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     // hand. `collect` turns it into `dualPistols` in slot 0 rather than taking
     // a slot, which is why this spawns but is excluded from the every-gun floor.
     rarity: 2,
-    damageMin: 15,
-    damageMax: 25,
+    damageMin: 14,
+    damageMax: 23,
     bloom: 0.06,
     cooldownMs: 1000,
     range: 720,
@@ -142,8 +142,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'DUAL',
     color: '#e2e8f0',
     rarity: 0, // never loot: it is what slot 0 becomes
-    damageMin: 15,
-    damageMax: 25,
+    damageMin: 14,
+    damageMax: 23,
     // Both hands at once: two rounds side by side per pull, on the pistol's
     // own cadence. `pellets` is what fires them; `parallel` is what keeps them
     // apart, so they read as two guns rather than one with a wide barrel.
@@ -166,7 +166,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     // and the stagger went in. A held burst now stops a charge dead without
     // dropping much of it.
     damageMin: 4,
-    damageMax: 8,
+    damageMax: 7,
     bloom: 0.13,
     cooldownMs: 110,
     range: 700,
@@ -185,8 +185,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     // action and the machine gun. The rares are left at 1 so raising these
     // makes the common guns commoner rather than everything commoner.
     rarity: 9,
-    damageMin: 7,
-    damageMax: 13,
+    damageMin: 6,
+    damageMax: 12,
     bloom: 0.3,
     cooldownMs: 850,
     range: 340,
@@ -205,8 +205,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     color: '#d6b27c',
     // The common one. Turns up in houses more often than anything else.
     rarity: 12,
-    damageMin: 42,
-    damageMax: 64,
+    damageMin: 38,
+    damageMax: 58,
     bloom: 0.012,
     cooldownMs: 1150, // a shade slower than a pistol: you have to work the bolt
     range: 900,
@@ -229,8 +229,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     // as fast as you can work the bolt — so it gives up the thing the bolt is
     // actually for. Less damage per round, three times the bloom, and a lighter
     // stagger, in exchange for two and a half times the rate.
-    damageMin: 26,
-    damageMax: 40,
+    damageMin: 23,
+    damageMax: 36,
     bloom: 0.04,
     cooldownMs: 470,
     range: 820,
@@ -246,8 +246,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'SNPR',
     color: '#22d3ee',
     rarity: 1,
-    damageMin: 70,
-    damageMax: 95,
+    damageMin: 63,
+    damageMax: 86,
     bloom: 0.003,
     cooldownMs: 1500,
     range: 2200,
@@ -265,8 +265,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     short: 'HMG',
     color: '#f97316',
     rarity: 1,
-    damageMin: 11,
-    damageMax: 18,
+    damageMin: 10,
+    damageMax: 16,
     // Hopeless from the hip — the whole point is to put it down first.
     bloom: 0.34,
     cooldownMs: 95,

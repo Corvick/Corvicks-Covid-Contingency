@@ -2939,50 +2939,65 @@ function officerGrade(
   world: World,
   id: string,
 ): { sight: number; bloom: number; interval: number; gun?: ItemDef; damageMul: number } {
-  const dispatched = world.swat.has(id) || world.riflemen.has(id);
-  if (dispatched) {
-    // The gun comes out of the bag, so running dry is the slot emptying rather
-    // than a flag: `fire` reads damage and reach off the item, and a crew's
-    // rifle hits exactly as the one a player can pick up does — bar
-    // `DISPATCHED_DAMAGE_MUL`, which is what stops a single call levelling a
-    // street faster than you can walk down it.
-    const slot = world.inventories.get(id)?.guns[0];
-    const loaded = slot !== null && slot !== undefined && slot.ammo > 0;
-    const swat = world.swat.has(id);
-    const sight = swat ? SWAT_SIGHT : RIFLEMAN_SIGHT;
-    if (!loaded) {
-      // Out of rifle rounds, so a sidearm. Still a far better shot than the
-      // officer who was already standing on the corner — they are still the
-      // ones who came when you asked — but a pistol's reach and rate.
-      return {
-        sight,
-        bloom: DISPATCHED_PISTOL_BLOOM_RAD,
-        interval: DISPATCHED_PISTOL_INTERVAL_MS,
-        gun: ITEMS.pistol,
-        damageMul: DISPATCHED_DAMAGE_MUL,
-      };
-    }
+  // Which tier of grey officer this is. Anybody a call sent — a van, a patrol
+  // car, or a helicopter off a smoke grenade — carries a real rifle out of a
+  // real gun slot and takes `DISPATCHED_DAMAGE_MUL` on top: they arrive in
+  // numbers, aim well and never stop shooting, and at the gun's paper damage
+  // one call cleared streets faster than you could walk down them.
+  const tier = world.swat.has(id)
+    ? { sight: SWAT_SIGHT, bloom: SWAT_BLOOM_RAD, interval: SWAT_SHOOT_INTERVAL_MS, sent: true }
+    : world.riflemen.has(id)
+      ? {
+          sight: RIFLEMAN_SIGHT,
+          bloom: RIFLEMAN_BLOOM_RAD,
+          interval: RIFLEMAN_SHOOT_INTERVAL_MS,
+          sent: true,
+        }
+      : world.soldiers.has(id)
+        ? {
+            sight: SOLDIER_SIGHT,
+            bloom: SOLDIER_BLOOM_RAD,
+            interval: SOLDIER_SHOOT_INTERVAL_MS,
+            sent: true,
+          }
+        : {
+            sight: NPC_OFFICER_SIGHT,
+            bloom: NPC_OFFICER_BLOOM_RAD,
+            interval: NPC_OFFICER_SHOOT_INTERVAL_MS,
+            sent: false,
+          };
+
+  if (!tier.sent) {
     return {
-      sight,
-      bloom: swat ? SWAT_BLOOM_RAD : RIFLEMAN_BLOOM_RAD,
-      interval: swat ? SWAT_SHOOT_INTERVAL_MS : RIFLEMAN_SHOOT_INTERVAL_MS,
-      gun: ITEMS[slot.item],
-      damageMul: DISPATCHED_DAMAGE_MUL,
-    };
-  }
-  if (world.soldiers.has(id)) {
-    return {
-      sight: SOLDIER_SIGHT,
-      bloom: SOLDIER_BLOOM_RAD,
-      interval: SOLDIER_SHOOT_INTERVAL_MS,
+      sight: tier.sight,
+      bloom: tier.bloom,
+      interval: tier.interval,
       damageMul: 1,
     };
   }
+
+  // The gun comes out of the bag, so running dry is the slot emptying rather
+  // than a flag anywhere: `fire` reads damage and reach off the item, and their
+  // rifle hits exactly as the one a player can pick up does.
+  const slot = world.inventories.get(id)?.guns[0];
+  if (!slot || slot.ammo <= 0) {
+    // Out of rifle rounds, so a sidearm. Still a far better shot than the
+    // officer who was already standing on the corner — they are still the ones
+    // who came when you asked — but a pistol's reach and rate.
+    return {
+      sight: tier.sight,
+      bloom: DISPATCHED_PISTOL_BLOOM_RAD,
+      interval: DISPATCHED_PISTOL_INTERVAL_MS,
+      gun: ITEMS.pistol,
+      damageMul: DISPATCHED_DAMAGE_MUL,
+    };
+  }
   return {
-    sight: NPC_OFFICER_SIGHT,
-    bloom: NPC_OFFICER_BLOOM_RAD,
-    interval: NPC_OFFICER_SHOOT_INTERVAL_MS,
-    damageMul: 1,
+    sight: tier.sight,
+    bloom: tier.bloom,
+    interval: tier.interval,
+    gun: ITEMS[slot.item],
+    damageMul: DISPATCHED_DAMAGE_MUL,
   };
 }
 

@@ -60,6 +60,7 @@ import {
   VAN_LENGTH,
   CAR_LENGTH,
   CAR_WIDTH,
+  CAR_DOOR_ARC,
   VAN_WIDTH,
   RADIO_COOLDOWN_MS,
   PARK_PATH_SPECKS,
@@ -1631,8 +1632,8 @@ function drawPatrolCar(
   ctx.fill();
 
   ctx.fillStyle = '#111827';
-  for (const fx of [-L + 9, L - 11]) {
-    for (const fy of [-W - 1, W - 4]) ctx.fillRect(fx, fy, 8, 5);
+  for (const fx of [-L + 10, L - 14]) {
+    for (const fy of [-W - 1, W - 5]) ctx.fillRect(fx, fy, 10, 6);
   }
 
   ctx.beginPath();
@@ -1651,21 +1652,49 @@ function drawPatrolCar(
   // Cabin: windscreen, roof, rear window.
   ctx.fillStyle = 'rgba(30, 41, 59, 0.85)';
   ctx.beginPath();
-  ctx.roundRect(-5, -W + 3, 15, CAR_WIDTH - 6, 3);
+  ctx.roundRect(-8, -W + 3, 22, CAR_WIDTH - 6, 3);
   ctx.fill();
   ctx.fillStyle = 'rgba(148, 197, 253, 0.6)';
-  ctx.fillRect(L - 16, -W + 4, 5, CAR_WIDTH - 8);
-  ctx.fillRect(-L + 11, -W + 4, 4, CAR_WIDTH - 8);
+  ctx.fillRect(L - 20, -W + 4, 6, CAR_WIDTH - 8);
+  ctx.fillRect(-L + 13, -W + 4, 5, CAR_WIDTH - 8);
 
   ctx.fillStyle = '#fef9c3';
   ctx.fillRect(L - 3, -W + 3, 3, 4);
   ctx.fillRect(L - 3, W - 7, 3, 4);
 
+  // Both doors, one either side at the cabin — the end the pair get out of.
+  // They stay open afterwards, like the van's: a car standing on a corner with
+  // its doors hanging open says what happened there without anybody watching.
+  const open = car.cabOpen ?? 0;
+  if (open > 0) {
+    const leaf = CAR_LENGTH * 0.34;
+    for (const side of [-1, 1]) {
+      ctx.save();
+      // Hinged at the front edge of the opening, the leaf lying back along the
+      // flank. The rotation is **negated against the side**: the leaf points in
+      // -x, so swinging it outward on the +y flank needs a negative angle.
+      // Signed the other way it swings *inward* and the door is drawn white on
+      // the white roof, which is exactly as visible as not drawing it.
+      ctx.translate(3, side * W);
+      ctx.rotate(-side * CAR_DOOR_ARC * open);
+      ctx.fillStyle = '#e2e8f0';
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.rect(-leaf, -1.75, leaf, 3.5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   const beat = Math.sin(now * 0.012) > 0;
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+  ctx.fillRect(-7, -W + 1, 13, CAR_WIDTH - 2);
   ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.65)';
-  ctx.fillRect(-4, -W + 2, 8, 4);
+  ctx.fillRect(-6, -W + 2, 11, W - 2);
   ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.65)' : '#3b82f6';
-  ctx.fillRect(-4, W - 6, 8, 4);
+  ctx.fillRect(-6, 1, 11, W - 3);
   ctx.restore();
 }
 

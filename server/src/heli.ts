@@ -20,7 +20,9 @@ import {
   GRENADE_BOUNCE,
   BEACON_INBOUND_LINE,
   BEACON_SHOUT_MS,
+  SOLDIER_RIFLE_AMMO,
 } from '../../shared/constants.js';
+import { newInventory } from './inventory.js';
 import {
   findSpawnNear,
   hasLineOfSight,
@@ -258,6 +260,18 @@ function dropSoldier(world: World, heli: Helicopter, now: number): void {
   }
   world.ai.set(id, state);
   world.soldiers.add(id);
+
+  // They come off the helicopter with a semi-automatic, the same way the van's
+  // crew come out of the back with one: a real gun in a real slot, so `fire`
+  // reads its damage and reach off the item, the wire takes the shouldered
+  // profile off it, and running dry drops them to a sidearm with no special
+  // case anywhere. Before this they shot the unnamed default that grey
+  // officers fall back on.
+  const inv = newInventory();
+  inv.guns[0] = { item: 'semiAutoRifle', ammo: SOLDIER_RIFLE_AMMO };
+  inv.activeSlot = 1;
+  world.inventories.set(id, inv);
+
   // Rope down rather than pop in.
   world.materializeUntil.set(id, now + 600);
 }

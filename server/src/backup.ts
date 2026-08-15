@@ -556,6 +556,12 @@ export function updateBackup(world: World, now: number, dt: number): void {
           vehicle.nextDropAt = now + BACKUP_DOOR_SWING_MS;
           continue;
         }
+      } else if (vehicle.cabOpen === 0) {
+        // The car's two doors go together — one either side, both at the
+        // cabin, which is where `seatFor` puts the pair getting out of it.
+        vehicle.cabOpen = 0.001;
+        vehicle.nextDropAt = now + BACKUP_DOOR_SWING_MS;
+        continue;
       }
       unload(world, vehicle, now);
       vehicle.dropped++;

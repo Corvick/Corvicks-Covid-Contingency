@@ -1631,9 +1631,15 @@ export const VAN_CAB_DOOR_ARC = 1.5;
  */
 export const VAN_LENGTH = 82;
 export const VAN_WIDTH = 38;
-/** The patrol car the second and third radio calls send instead. */
-export const CAR_LENGTH = 46;
-export const CAR_WIDTH = 22;
+/**
+ * The patrol car the second and third radio calls send instead. Bigger than
+ * the 46×22 it started at — next to an 82×38 van it read as a toy, and two
+ * officers have to be able to get out of the thing.
+ */
+export const CAR_LENGTH = 62;
+export const CAR_WIDTH = 28;
+/** How far the car's two side doors swing. */
+export const CAR_DOOR_ARC = 1.35;
 /**
  * How much room a vehicle needs either side of the lane it drives in down, and
  * how finely that lane is checked. It must not arrive *through* a building —
@@ -1722,6 +1728,7 @@ export const RIFLEMAN_SIGHT = 620;
  */
 export const SWAT_RIFLE_AMMO = 220;
 export const RIFLEMAN_RIFLE_AMMO = 90;
+export const SOLDIER_RIFLE_AMMO = 140;
 export const DISPATCHED_PISTOL_BLOOM_RAD = 0.07;
 export const DISPATCHED_PISTOL_INTERVAL_MS = 900;
 /**
@@ -1730,7 +1737,7 @@ export const DISPATCHED_PISTOL_INTERVAL_MS = 900;
  * rifle's full damage a single call cleared streets faster than the player
  * could walk down them.
  */
-export const DISPATCHED_DAMAGE_MUL = 0.72;
+export const DISPATCHED_DAMAGE_MUL = 0.65;
 
 /**
  * A squad sent by radio does not stand at your shoulder — it sweeps.

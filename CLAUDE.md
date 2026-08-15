@@ -439,6 +439,21 @@ Reserved ground like any other landmark, but with two rules of its own.
   It is drawn under everything as ground, one stroked polyline with a wider
   faint pass beneath for the soft edge.
 
+### A joining zombie does not reset the grapple clock
+
+`endsAt` is set **only inside `if (!session)`** in `updateZombie` — creating the
+session. Everything after that is `session.zombieIds.add(e.id)`, so a second or
+third zombie piling on inherits the deadline the first one set and cannot push
+it back. Measured with a staged pile: the deadline was +1805ms when the first
+grabbed and +1805ms after a second joined, moved by **0ms**, and it resolved at
++1833ms — one tick past, which is the 30Hz granularity.
+
+What *can* look like a reset is a fresh grab: `resolveGrapple` deletes the
+session, and a zombie still stood on you starts a new one with a new deadline
+on the next tick. That is a second grapple rather than a lengthened one, and
+`world.grappleImmune` — the window kevlar and the shield buy — is the only
+thing that interrupts it.
+
 ### How a gun is held
 
 **`ItemDef.grip` decides the profile, not the drawing.** Absent is the pistol
@@ -540,6 +555,14 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
   - **`freeSpots` asks by pickup id, not by item.** The floor now covers nearly
     the whole registry, so a set of already-placed *items* would leave nothing
     takeable at all; `loot-oneoff-` and `loot-min-` ids are what is off limits.
+- **Every gun bar two took a 10% cut**, rounded to whole numbers: pistol 15-25
+  → 14-23, bolt action 42-64 → 38-58, sniper 70-95 → 63-86, and so on down the
+  registry. The **charge rifle** and the **flamethrower** are exempt — the
+  charge rifle's whole point is the top bar landing hard, and the
+  flamethrower's damage figure is 1-2 because the *fire* is the weapon and
+  cutting it would mean nothing. `GUN_DAMAGE_MIN`/`MAX`, the unnamed default a
+  grey officer with no gun falls back on, is deliberately left alone: it is not
+  a gun in the registry and nobody asked for ambient officers to be nerfed.
 - **The city is meant to be full of three guns.** `boltRifle`, `machineGun`
   and `shotgun` carry the weight (12/11/9) and every rare stays at 1, so
   raising them makes the common guns commoner rather than everything commoner.
@@ -1579,7 +1602,15 @@ same curve, and is what goes on the wire.
   and keeps no particle state but a single timestamp per skid.
 
 The **car does none of it**. Two officers turning up is a smaller event than a
-SWAT team arriving and should read as one.
+SWAT team arriving and should read as one — but it is **62×28** now rather than
+the 46×22 it started at. Next to an 82×38 van it read as a toy, and two people
+have to be able to get out of the thing. Its two doors swing open together, one
+either side at the cabin, which is where `seatFor` puts the pair.
+
+*The door's rotation is negated against the side it is on.* The leaf points in
+-x, so swinging it outward on the +y flank takes a **negative** angle; signed
+the other way it swings inward and gets drawn white on the white roof, which is
+exactly as visible as not drawing it at all.
 
 **The doors open, and they stay open.** The rear doors swing first and the team
 comes out of them; the cab door swings and the driver comes out of that. The
@@ -1743,10 +1774,14 @@ of ternaries, because there are four now:
 | the van's **driver** | as ambient — he was driving, not shooting | | | | |
 | **riflemen**, out of a patrol car | 620 | 0.045 | 1150 | bolt action | 90 |
 | **SWAT**, out of a van | 560 | 0.045 | 620 | semi-auto | 220 |
-| either of those, **dry** | as above | 0.07 | 900 | pistol | ∞ |
-| **soldiers**, off a helicopter | 520 | 0.07 | 850 | — | ∞ |
+| **soldiers**, off a helicopter | 520 | 0.07 | 850 | semi-auto | 140 |
+| any of those three, **dry** | as their tier | 0.07 | 900 | pistol | ∞ |
 
-Everything a call sent also takes `DISPATCHED_DAMAGE_MUL`.
+**Anybody a call sent carries a real gun and takes `DISPATCHED_DAMAGE_MUL`** —
+a van, a patrol car or a helicopter off a smoke grenade alike. The tier decides
+sight, bloom and cadence; the *bag* decides the weapon, so running dry is a slot
+emptying rather than a flag, and the pistol fallback needs no case of its own.
+Only the ambient officer standing on the corner has no bag and no multiplier.
 
 Anybody the radio sent is a better shot than anybody who was already standing
 there, which is most of the point of picking the handset up. Only SWAT and
