@@ -1727,7 +1727,15 @@ export function drawMinimap(
         : pick
           ? 'CLICK AGAIN TO CONFIRM'
           : 'CLICK TO CALL THE BEACON IN';
-  ctx.fillStyle = '#e8e4dc';
+  // The title takes the marker's colour once there is one, so the state is
+  // said twice: what the marker looks like, and what it is waiting for.
+  ctx.fillStyle = beacon?.placed
+    ? '#22c55e'
+    : beacon?.pending
+      ? '#facc15'
+      : pick
+        ? '#e5e7eb'
+        : '#e8e4dc';
   ctx.font = 'bold 13px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
@@ -1750,15 +1758,42 @@ export function drawMinimap(
         : null;
 
   if (marker) {
-    const bx = wx(marker.x);
-    const by = wy(marker.y);
+    // Snapped to the pixel grid. A 2px stroke on a fractional centre is spread
+    // across three columns at partial alpha and comes out as a grey smudge on
+    // a dark map — which is how the first click ended up looking like nothing
+    // had happened at all.
+    const bx = Math.round(wx(marker.x)) + 0.5;
+    const by = Math.round(wy(marker.y)) + 0.5;
+    const half = 8;
+
+    // Cross-hairs the width of the panel. The marker is a dozen pixels on a
+    // map of a whole city; the lines are what actually catch the eye, and they
+    // double as the read-off for where the spot sits against the streets.
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = marker.color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x, by);
+    ctx.lineTo(x + w, by);
+    ctx.moveTo(bx, y);
+    ctx.lineTo(bx, y + h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // The square itself: filled as well as outlined, so it reads as a marker
+    // rather than as four thin lines.
+    ctx.fillStyle = marker.color;
+    ctx.globalAlpha = 0.28;
+    ctx.fillRect(bx - half, by - half, half * 2, half * 2);
+    ctx.globalAlpha = 1;
     ctx.strokeStyle = marker.color;
     ctx.lineWidth = 2;
-    ctx.strokeRect(bx - 6, by - 6, 12, 12);
-    // A dot in the middle, so a small square still has a definite centre at
-    // the scale the whole city is drawn at.
-    ctx.fillStyle = marker.color;
-    ctx.fillRect(bx - 1.5, by - 1.5, 3, 3);
+    ctx.strokeRect(bx - half, by - half, half * 2, half * 2);
+    ctx.fillRect(bx - 2, by - 2, 4, 4);
+
     if (beacon?.placed) {
       // The ring people are counted inside, so the number has a shape.
       ctx.globalAlpha = 0.35;

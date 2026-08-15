@@ -555,6 +555,18 @@ Reserved ground like any other landmark, but with two rules of its own.
   the HUD renumbers with them, so what is on screen is what the key selects.
   With both worn that is 13 slots against ten number keys; the scroll wheel
   already walks the bar, which is how the last few are reached.
+  - **`inventory.gunSlots` is the count; `inventory.guns.length` is the array**,
+    and the array is *always* the full `GUN_SLOTS + GUNSLING_SLOTS`. They agree
+    only while a gunsling is in the bag, and the client's `heldItemId` was
+    mixing them: without a sling the bar numbers the utilities from 4 while it
+    read slot 4 as the fourth *gun* slot — the one the sling would open — found
+    it empty and answered `null`. Everything the client gates on the held item
+    then quietly stopped: **no beacon map, no scope reticle, no charge bars, on
+    every bag without a sling in it**. The server never had it; `heldItem`
+    there has always asked `gunSlots(inv)`. Anything indexing the bar must use
+    the same arithmetic the HUD numbers it with, or it is right only by luck —
+    and the luck here was a test player who happened to pick up a gunsling,
+    which is why it survived a session of driving the real client.
 - **Taking the pack off is refused rather than resolved.** Dropping a backpack
   while over the base capacity would have to spill something, and choosing what
   to spill on the player's behalf is worse than saying no.

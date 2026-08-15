@@ -486,6 +486,22 @@ canvas.addEventListener(
   true,
 );
 
+/**
+ * Losing the window drops every mode the mouse is in the middle of.
+ *
+ * `input.ts` already lets go of the keys and buttons on blur, but the wheel and
+ * an armed order live up here and did not. Alt-tabbing while holding Q leaves
+ * `wheel.open` true for the rest of the round, and the wheel branch swallows
+ * every left click from then on — so the beacon map, which is checked *after*
+ * it, silently stops opening. Nothing about the symptom points at the wheel,
+ * which is what makes it worth closing off rather than leaving to be found.
+ */
+window.addEventListener('blur', () => {
+  wheel.open = false;
+  armedAbility = null;
+  closeMinimap();
+});
+
 // Right-click cancels an armed order instead of firing it off somewhere, and
 // on the beacon map it takes back a marker you have put down but not committed.
 // With nothing marked it is the way out of the map.
@@ -818,12 +834,27 @@ function fogRadius(): number {
 }
 
 /** Whatever is in the active slot, as an item id. */
+/**
+ * What is actually in hand, by the same arithmetic the HUD numbers the bar
+ * with — `inventory.gunSlots`, the count this bag can *use*, not
+ * `inventory.guns.length`, which is the array and is always the full
+ * `GUN_SLOTS + GUNSLING_SLOTS`.
+ *
+ * Those two are the same number only while a gunsling is in the bag, and they
+ * were being mixed here. Without one the bar numbers the utilities from 4
+ * while this read slot 4 as the fourth *gun* slot — the one the sling would
+ * have opened up — found it empty, and answered `null`. Everything the client
+ * gates on the held item then quietly stopped: no beacon map, no scope
+ * reticle, no charge bars, on every bag in the game without a sling in it.
+ * The server never had the bug; `heldItem` there has always asked
+ * `gunSlots(inv)`.
+ */
 function heldItemId(): ItemId | null {
   if (!inventory) return null;
   const slot = inventory.activeSlot;
   if (slot === 0) return 'pistol';
-  if (slot <= inventory.guns.length) return inventory.guns[slot - 1]?.item ?? null;
-  return inventory.utilities[slot - inventory.guns.length - 1] ?? null;
+  if (slot <= inventory.gunSlots) return inventory.guns[slot - 1]?.item ?? null;
+  return inventory.utilities[slot - inventory.gunSlots - 1] ?? null;
 }
 
 /**
