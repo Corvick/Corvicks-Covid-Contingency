@@ -253,6 +253,19 @@ export function seatedPlayers(lobby: Lobby): string[] {
   return ids;
 }
 
+/**
+ * Just the ones on team two. Which seat somebody took is the only thing that
+ * decides what they spawn as, so this is the whole of the officer/dog choice —
+ * there is no separate class pick anywhere.
+ */
+export function seatedDogs(lobby: Lobby): Set<string> {
+  const ids = new Set<string>();
+  for (const seat of lobby.dogs) {
+    if (seat.state === 'player') ids.add(seat.id);
+  }
+  return ids;
+}
+
 export function botCount(lobby: Lobby): number {
   return lobby.humans.filter((s) => s.state === 'bot').length;
 }

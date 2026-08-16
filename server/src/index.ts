@@ -71,10 +71,12 @@ import {
   rebuildNav,
   resetWorld,
   resolveCollisions,
+  spawnDog,
   speedAt,
   toWire,
   type Entity,
 } from './world.js';
+import { dogHudFor, updateDogs } from './dog.js';
 import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
 import { processShooting, steerAim } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
@@ -100,6 +102,7 @@ import {
   leaveLobby,
   lobbyOf,
   say,
+  seatedDogs,
   seatedPlayers,
   setSpectating,
   sit,
@@ -127,22 +130,9 @@ function broadcast(message: ServerMessage): void {
   for (const socket of sockets.values()) send(socket, message);
 }
 
-/**
- * Put a connection into the world as an officer. Nobody gets one on connect
- * any more — you arrive at the front end, and only a lobby starting a round
- * puts you in a city. The first one in gets the designated start point so
- * testing needs no hike.
- */
-function spawnPlayer(id: string): void {
-  const isPlayerOne = world.playerIds.size === 0;
-  const start = playerOneStart(world);
-  const spawn = isPlayerOne
-    ? findSpawnNear(world, start.x, start.y, ENTITY_RADIUS.officer)
-    : findSpawn(world, ENTITY_RADIUS.officer);
-
-  world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
-  world.playerIds.add(id);
-  world.commands.set(id, {
+/** Nothing pressed. What every fresh player, of either kind, starts holding. */
+function blankCommand() {
+  return {
     input: { up: false, down: false, left: false, right: false },
     aim: 0,
     aimX: 0,
@@ -151,7 +141,37 @@ function spawnPlayer(id: string): void {
     sprint: false,
     interact: false,
     rightDown: false,
-  });
+  };
+}
+
+/**
+ * Put a connection into the world. Nobody gets an entity on connect any more —
+ * you arrive at the front end, and only a lobby starting a round puts you in a
+ * city. The first officer in gets the designated start point so testing needs
+ * no hike.
+ *
+ * Which seat they took at the front end is the whole of the choice: a dog slot
+ * spawns a dog, at the breach with the rest of the outbreak, and takes none of
+ * the officer kit below — no inventory, no rally charges, no debug heap. It
+ * still needs a command entry, which is what the input loop writes into.
+ */
+function spawnPlayer(id: string, asDog = false): void {
+  if (asDog) {
+    world.playerIds.add(id);
+    spawnDog(world, id);
+    world.commands.set(id, blankCommand());
+    return;
+  }
+
+  const isPlayerOne = world.playerIds.size === 0;
+  const start = playerOneStart(world);
+  const spawn = isPlayerOne
+    ? findSpawnNear(world, start.x, start.y, ENTITY_RADIUS.officer)
+    : findSpawn(world, ENTITY_RADIUS.officer);
+
+  world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
+  world.playerIds.add(id);
+  world.commands.set(id, blankCommand());
   world.inventories.set(id, newInventory());
   world.stamina.set(id, STAMINA_MAX);
   world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
@@ -167,6 +187,10 @@ function despawnPlayer(id: string): void {
   world.playerIds.delete(id);
   world.commands.delete(id);
   world.inventories.delete(id);
+  world.dogs.delete(id);
+  world.dogState.delete(id);
+  world.dogsOut.delete(id);
+  world.dogDeaths.delete(id);
 }
 
 /** Push the browse list to everyone still choosing where to go. */
@@ -225,17 +249,25 @@ function startLobby(lobby: Lobby): void {
   lobby.running = true;
   clearNotice(lobby);
   world.botOfficerCount = bots;
+  // Which team each of them sat on. Read *before* `resetWorld`, because the
+  // respawn loop inside it consults `world.dogs` to decide what to rebuild
+  // anyone already in the world as.
+  const dogs = seatedDogs(lobby);
+  world.dogs.clear();
+  world.dogState.clear();
+  world.dogsOut.clear();
+  world.corpses.length = 0;
+  world.dogDeaths.clear();
+  for (const connId of dogs) world.dogs.add(connId);
   resetWorld(world);
-  for (const connId of seated) spawnPlayer(connId);
+  for (const connId of seated) spawnPlayer(connId, dogs.has(connId));
   // resetWorld clears the watchers, so they go back in afterwards. A spectator
   // has no entity at all — they see the whole city instead of a fogged slice.
   for (const connId of lobby.spectators) world.spectators.add(connId);
 
-  const dogs = lobby.dogs.filter((s) => s.state === 'player').length;
   console.log(
-    `[server] "${lobby.name}" started — ${seated.length} players, ` +
-      `${bots} bot officers, ${lobby.spectators.size} watching` +
-      (dogs > 0 ? `, ${dogs} in dog slots (spawning as officers for now)` : ''),
+    `[server] "${lobby.name}" started — ${seated.length - dogs.size} officers, ` +
+      `${dogs.size} dogs, ${bots} bot officers, ${lobby.spectators.size} watching`,
   );
 
   // Chat gets told; a solo room doesn't need telling, since the game is about
@@ -475,6 +507,10 @@ wss.on('connection', (socket) => {
     world.playerIds.delete(id);
     world.spectators.delete(id);
     world.commands.delete(id);
+    world.dogs.delete(id);
+    world.dogState.delete(id);
+    world.dogsOut.delete(id);
+    world.dogDeaths.delete(id);
     world.ai.delete(id);
     world.grapples.delete(id);
     world.pendingInfections.delete(id);
@@ -488,6 +524,10 @@ wss.on('connection', (socket) => {
 
 function updatePlayers(dt: number, frozen: Set<string>, now: number): void {
   for (const id of world.playerIds) {
+    // Dogs are players too, but nothing below applies to one: no weapon to
+    // steer the aim with, no boots, no bipod, and a body that turns at its own
+    // rate rather than snapping. `updateDogs` is the whole of theirs.
+    if (world.dogs.has(id)) continue;
     const entity = world.entities.get(id);
     const command = world.commands.get(id);
     if (!entity || !command) continue;
@@ -586,9 +626,17 @@ function visibleTo(viewer: Entity, now: number): EntityState[] {
   const out: EntityState[] = [];
   // A cure gun anywhere in the bag picks the infected out of a crowd — you
   // can't aim a cure at somebody you can't tell apart from everyone else.
+  //
+  // A flamethrower does the same, but only **in hand**. It answers the infected
+  // now (see `FLAME_INFECTED_DAMAGE_MUL`) and a weapon whose whole job is a
+  // problem nobody can see is a weapon nobody uses. Held rather than carried
+  // because it is a thing you raise and look down, where the cure gun's is a
+  // triage you do with the whole bag — and it keeps the hole in the fog shut
+  // for anyone merely walking around with one slung.
   const inv = world.inventories.get(viewer.id);
   const carriesCure = inv ? inv.utilities.includes('cureGun') : false;
-  const reveal = viewer.type === 'zombie' || carriesCure;
+  const burningThem = inv ? heldItem(inv) === 'flamethrower' : false;
+  const reveal = viewer.type === 'zombie' || carriesCure || burningThem;
   const sight = sightRadiusFor(viewer);
 
   /**
@@ -726,6 +774,10 @@ function tick(): void {
     const frozen = computeFrozen(world);
 
     updatePlayers(dt, frozen, now);
+    // Before the AI and before collision: a shaken victim is dragged onto the
+    // jaws here and pushed back out of anything it was dragged into below,
+    // which is the same deal every other body in the world gets.
+    updateDogs(world, dt, now);
     updateAi(world, now, dt, frozen);
     resolveCollisions(world);
     // Sandbags are deliberately not in the nav grid — like doors, routes are
@@ -823,6 +875,7 @@ function tick(): void {
         viewer?.y ?? 0,
         now,
       ),
+      dog: dogHudFor(world, id, now),
       grenades: airGrenades,
       smokes: airSmokes,
       blasts: airBlasts,
@@ -830,6 +883,9 @@ function tick(): void {
       emplacements: emplacementsToWire(world),
     vehicles: vehiclesToWire(world),
     mines: minesToWire(world, now),
+    // Unfogged, deliberately: a handful in a whole round, and a body you walked
+    // past should not blink out because you turned round.
+    corpses: world.corpses,
     towers: world.towers,
     zaps: world.zaps,
       fires: firesToWire(world, now),

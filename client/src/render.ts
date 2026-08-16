@@ -20,6 +20,7 @@ import type {
   BeaconState,
   MineState,
   BackupVehicleState,
+  CorpseState,
   ShotKind,
   Wall,
   Window as WindowPane,
@@ -80,7 +81,57 @@ import {
   MINIMAP_MAX_W,
   MINIMAP_MARGIN,
   BEACON_MUSTER_RADIUS,
+  DOG_ART_RADIUS,
+  DOG_MAX_HEALTH,
+  DOG_BODY_COLOR,
+  DOG_FUR_COLOR,
+  DOG_HEAD_COLOR,
+  DOG_DECAY_COLOR,
+  DOG_ROT_COLOR,
+  DOG_MAW_COLOR,
+  DOG_BONE_COLOR,
+  DOG_EYE_COLOR,
+  GRIME_TILE,
+  GRIME_BLOTCHES,
+  GRIME_GRIT,
+  GRIME_CRACKS,
+  GROUND_COLOR,
+  BLOOD_COLOR,
+  BLOOD_DECAL_MAX,
+  BLOOD_DECAL_MS,
+  BLOOD_SPRAY_MS,
+  BLOOD_SPRAY_DROPS,
+  BLOOD_SPRAY_SPEED,
+  DOG_FADE_FROM,
+  DOG_RESPAWN_FADE_MS,
+  VIGNETTE_ALPHA,
+  VIGNETTE_INNER,
 } from '../../shared/constants.js';
+import type { DogHud } from '../../shared/types.js';
+import { dogSprites, drawSprite } from './dogsprite.js';
+
+const TAU = Math.PI * 2;
+
+/** Shortest signed difference from `a` to `b`. The client's own small copy. */
+function angDelta(a: number, b: number): number {
+  let d = (b - a) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return d;
+}
+
+/**
+ * A tiny deterministic generator, so anything hashed out of it — the grime
+ * tile, a dog's rot patches — is identical every run and every frame with no
+ * state stored per blob. Same trick the park's dirt path uses.
+ */
+function rng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
 
 export interface Viewport {
   x: number;
@@ -121,8 +172,105 @@ function visible(view: Viewport, x: number, y: number, pad: number): boolean {
   );
 }
 
+/**
+ * The filth on the road, baked into one tile and repeated.
+ *
+ * Built once and handed to the canvas as a pattern, so a five-thousand-pixel
+ * city of grime costs **one fill** at any zoom — the rasteriser only touches
+ * the pixels actually on screen. Scattering blobs over the viewport per frame
+ * is the obvious way to write this and is the expensive one: that is the same
+ * fill-rate trap `drawBushes` fell into, where a hundred overlapping
+ * translucent circles cost per pixel per frame and their union costs one.
+ *
+ * Everything is drawn four times, wrapped by a tile in each direction, so
+ * nothing that crosses an edge leaves a seam where the pattern repeats.
+ */
+let grimePattern: CanvasPattern | null = null;
+
+function grimeTile(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  if (grimePattern) return grimePattern;
+
+  const tile = document.createElement('canvas');
+  tile.width = GRIME_TILE;
+  tile.height = GRIME_TILE;
+  const g = tile.getContext('2d');
+  if (!g) return null;
+  const rand = rng(0x9e3779b9);
+
+  // Anything crossing an edge has to appear on the far side too, or the repeat
+  // shows as a grid of hard lines across the whole city.
+  const wrapped = (x: number, y: number, draw: (px: number, py: number) => void) => {
+    for (const ox of [0, -GRIME_TILE, GRIME_TILE]) {
+      for (const oy of [0, -GRIME_TILE, GRIME_TILE]) draw(x + ox, y + oy);
+    }
+  };
+
+  // Wet patches and worn tarmac: broad, low-contrast, and the thing that stops
+  // the road reading as a flat colour.
+  // Kept very low contrast on purpose. At any strength you can actually make
+  // out an individual blotch, you can also make out where the tile repeats —
+  // the road turns into a grid of identical stains. They are here to break up
+  // a flat fill, not to be seen.
+  for (let i = 0; i < GRIME_BLOTCHES; i++) {
+    const x = rand() * GRIME_TILE;
+    const y = rand() * GRIME_TILE;
+    const r = 10 + rand() * 30;
+    const dark = rand() < 0.62;
+    g.fillStyle = dark ? 'rgba(0, 0, 0, 0.05)' : 'rgba(96, 92, 82, 0.022)';
+    wrapped(x, y, (px, py) => {
+      g.beginPath();
+      g.ellipse(px, py, r, r * (0.55 + rand() * 0.5), rand() * TAU, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // Cracks. Short, kinked, and darker than anything else on the tile.
+  g.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+  g.lineCap = 'round';
+  for (let i = 0; i < GRIME_CRACKS; i++) {
+    let x = rand() * GRIME_TILE;
+    let y = rand() * GRIME_TILE;
+    let a = rand() * TAU;
+    const pts: Array<[number, number]> = [[x, y]];
+    for (let s = 0; s < 5; s++) {
+      a += (rand() - 0.5) * 1.2;
+      x += Math.cos(a) * (8 + rand() * 16);
+      y += Math.sin(a) * (8 + rand() * 16);
+      pts.push([x, y]);
+    }
+    g.lineWidth = 0.6 + rand() * 0.9;
+    wrapped(0, 0, (ox, oy) => {
+      g.beginPath();
+      g.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+      for (let p = 1; p < pts.length; p++) g.lineTo(pts[p][0] + ox, pts[p][1] + oy);
+      g.stroke();
+    });
+  }
+
+  // Grit. One path, filled once — a few hundred separate fills would undo the
+  // whole point even at build time.
+  g.beginPath();
+  for (let i = 0; i < GRIME_GRIT; i++) {
+    const x = rand() * GRIME_TILE;
+    const y = rand() * GRIME_TILE;
+    const s = 0.8 + rand() * 1.5;
+    wrapped(x, y, (px, py) => g.rect(px, py, s, s));
+  }
+  g.fillStyle = 'rgba(126, 120, 108, 0.1)';
+  g.fill();
+
+  grimePattern = ctx.createPattern(tile, 'repeat');
+  return grimePattern;
+}
+
 export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
-  ctx.fillStyle = '#23262b';
+  ctx.fillStyle = GROUND_COLOR;
+  ctx.fillRect(0, 0, map.width, map.height);
+  const pattern = grimeTile(ctx);
+  if (!pattern) return;
+  // The pattern is in user space, so it scales and pans with the world — the
+  // grime is *on the road* rather than a screen overlay that slides under it.
+  ctx.fillStyle = pattern;
   ctx.fillRect(0, 0, map.width, map.height);
 }
 
@@ -757,6 +905,15 @@ export function drawEntity(
   now = 0,
   simple = false,
 ): void {
+  // A dog is a zombie everywhere in the simulation and nothing like one on
+  // screen: four legs, a neck, and a body drawn along its length rather than a
+  // disc with arms. It gets its own function rather than a run of branches
+  // through this one.
+  if (e.dog) {
+    drawDog(ctx, e, isSelf, now, simple);
+    return;
+  }
+
   const radius = ENTITY_RADIUS[e.type];
 
   // A bot officer holds a player's slot, so it is picked out from the ambient
@@ -1061,6 +1218,988 @@ export function drawEntity(
     ctx.beginPath();
     ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
     ctx.stroke();
+  }
+}
+
+// ------------------------------------------------------------------- the dog
+/**
+ * A dog drawn from a snapshot alone would be four legs snapping between poses
+ * thirty times a second, so the drawing keeps a little state of its own.
+ *
+ * None of it is authority over anything: the two angles are *eased toward* the
+ * server's, which is ordinary interpolation and cannot drift, and the gait is
+ * derived from how far the body has actually moved. Driving the legs off a
+ * clock instead would have a dog paddling its feet while stood still and
+ * sliding along at a walk while sprinting.
+ */
+interface DogPose {
+  facing: number;
+  head: number;
+  /** Where the legs are in their cycle, in radians. */
+  gait: number;
+  /**
+   * How far the head has actually come apart, easing toward wherever the state
+   * says it should be.
+   *
+   * The state is a flag that flips — lunging or not — and a head that snapped
+   * open and shut on it had no *opening* to look at, which is the whole event.
+   * Easing it here rather than on the server is right: nothing about the bite
+   * depends on how wide the jaws are drawn, and the wire carries a boolean.
+   */
+  split: number;
+  /** Smoothed pace, so the cycle advances evenly between snapshots. */
+  speed: number;
+  /** The last direction it was actually travelling — the gait swings along it. */
+  travel: number;
+  x: number;
+  y: number;
+  at: number;
+}
+const dogPoses = new Map<string, DogPose>();
+
+/** How quickly the drawn angles catch the server's. Anti-stepping, not lag. */
+const DOG_EASE_MS = 45;
+/** One full leg cycle per this many pixels of ground covered. */
+const DOG_STRIDE = 40;
+/**
+ * How far out the paws are when the body pivots, as a share of the art radius.
+ * It is the arm of the arc they sweep — the only thing turning the gait needs
+ * to know to be measured in the same pixels walking is.
+ */
+const DOG_TURN_ARM = 0.9;
+/** A fixed bend in the tail, so a dead weight is not a straight stick. */
+const DOG_TAIL_KINK = 0.22;
+/** How far a paw swings fore and aft of its hip, in radii. */
+const DOG_STEP_REACH = 0.42;
+/**
+ * How far a paw stands out from its hip.
+ *
+ * A dog's legs sit *under* it and only just show past the ribs; much more and
+ * from directly above it stops being a dog and becomes a spider. This has been
+ * wrong in both directions — 0.42 was the spider, 0.3 tucked them so far under
+ * that only the paws showed at the corners. The body is 0.6 radii wide, so a
+ * hip at 0.36 plus this leaves the paw a little proud of the flank, which is
+ * what you actually see looking down at a dog.
+ */
+const DOG_LEG_REACH = 0.36;
+/**
+ * The two bones, in radii. Their *sum* is the leg's maximum span and the paw is
+ * kept well inside it — at a neutral stance the leg is folded to about half its
+ * reach, which is what a dog's leg looks like from directly above and what
+ * leaves the joint room to straighten as the paw swings out.
+ *
+ * The upper is the longer of the two, as a limb is.
+ */
+const DOG_UPPER_LEN = 0.36;
+const DOG_LOWER_LEN = 0.32;
+
+/** Front-left and rear-right together, then the other diagonal: a trot. */
+const DOG_LEG_PHASE = [0, Math.PI, Math.PI, 0];
+/**
+ * Where a dead dog's legs end up, fore and aft in radii. Deliberately at odds
+ * with each other — a corpse whose legs are still in a matched pair reads as an
+ * animal standing still rather than as one that fell over.
+ */
+const DOG_DEAD_SPLAY = [0.5, -0.2, 0.34, -0.46];
+/** How far a dead head lolls off the spine. */
+const DOG_DEAD_LOLL = 0.5;
+/** Along the spine, and across it, in radii. Front pair first. */
+const DOG_HIPS: Array<[number, number]> = [
+  [0.62, -0.36],
+  [0.62, 0.36],
+  [-0.7, -0.4],
+  [-0.7, 0.4],
+];
+
+function dogPoseFor(e: EntityState, now: number): DogPose {
+  let pose = dogPoses.get(e.id);
+  if (!pose) {
+    pose = {
+      facing: e.facing,
+      head: e.head ?? e.facing,
+      gait: 0,
+      split: 0,
+      speed: 0,
+      travel: e.facing,
+      x: e.x,
+      y: e.y,
+      at: now,
+    };
+    dogPoses.set(e.id, pose);
+    return pose;
+  }
+
+  const dtMs = Math.min(120, Math.max(0, now - pose.at));
+  pose.at = now;
+
+  // Exponential ease, framerate-independent.
+  const k = 1 - Math.exp(-dtMs / DOG_EASE_MS);
+  const wasFacing = pose.facing;
+  pose.facing += angDelta(pose.facing, e.facing) * k;
+  pose.head += angDelta(pose.head, e.head ?? e.facing) * k;
+
+  // Snapshots land at 30Hz and frames at 60+, so half the frames see no
+  // movement at all. Smoothing the *pace* rather than stepping the gait by the
+  // raw delta is what keeps the legs from stuttering between packets.
+  const walked = Math.hypot(e.x - pose.x, e.y - pose.y);
+  if (walked > 0.05) pose.travel = Math.atan2(e.y - pose.y, e.x - pose.x);
+  pose.x = e.x;
+  pose.y = e.y;
+
+  // **Turning is ground covered too.** A body pivoting on the spot moves no
+  // distance at all, so a gait driven by displacement alone leaves the dog
+  // rotating with its feet welded to the road. What the paws actually travel is
+  // the arc their own radius sweeps, so that arc is simply added to the
+  // distance walked and the same gait handles both.
+  const turned = Math.abs(angDelta(wasFacing, pose.facing)) * DOG_ART_RADIUS * DOG_TURN_ARM;
+  const moved = walked + turned;
+  const instant = dtMs > 0 ? (moved / dtMs) * 1000 : pose.speed;
+
+  // **The jaws, eased — and they slam shut far faster than they open.** The
+  // state is a flag that flips, so a head driven straight off it was simply
+  // open on some frames and shut on others. The mouth is *held* open now, so
+  // the opening is a thing you sit inside and the closing is the only beat left
+  // with any snap in it.
+  const wantSplit = e.lunging
+    ? DOG_SPLIT_ARC
+    : e.grappling
+      ? DOG_SPLIT_ARC * (0.62 + Math.sin(now * 0.028) * 0.16)
+      : 0.04;
+  const jawEase = wantSplit > pose.split ? DOG_JAW_OPEN_MS : DOG_JAW_SHUT_MS;
+  pose.split += (wantSplit - pose.split) * (1 - Math.exp(-dtMs / jawEase));
+  pose.speed += (instant - pose.speed) * 0.2;
+  if (pose.speed < 4) pose.speed = 0;
+  pose.gait += ((pose.speed * (dtMs / 1000)) / DOG_STRIDE) * TAU;
+  if (pose.gait > TAU * 1024) pose.gait -= TAU * 1024;
+
+  return pose;
+}
+
+/** Drop the drawing state for anything that has gone. Called on a new city. */
+export function clearDogPoses(): void {
+  dogPoses.clear();
+}
+/**
+ * Posing the dog.
+ *
+ * Every solid piece of it is a part baked once by `dogsprite.ts`; nothing here
+ * paints, it only decides where the pieces go. That split is what lets the
+ * animal be a finished bit of art *and* be articulated — the alternative is
+ * one baked picture of a dog, which cannot turn its head.
+ *
+ * Three things carry the read of it, and each is worth its cost:
+ *
+ * - **The head is posed off its own angle, not the body's.** That is the one
+ *   thing that makes it look like an animal watching you rather than a sprite
+ *   pointed at you, and it is the only reason `head` is on the wire.
+ * - **The legs swing along the direction of travel**, not along the spine — a
+ *   dog backing away from an officer while still facing him has to walk
+ *   backwards, and a gait keyed to the facing would have it moonwalking.
+ * - **The head comes apart rather than opening.** A dog opening its mouth is a
+ *   dog. Two halves peeling off a hinge at the neck, each taking an eye with
+ *   it, with the throat open between them, is not.
+ */
+
+/** How far each half of the head swings off the centre line, fully open. */
+const DOG_SPLIT_ARC = 1.05;
+/**
+ * How quickly the jaws chase that.
+ *
+ * **Shutting is the violent one.** The mouth is *held* open now — two full
+ * seconds of it — so the opening is a thing you sit inside rather than a beat,
+ * and the only moment left with any snap in it is the closing. Easing that shut
+ * over a quarter of a second threw the whole event away: the jaws sagged
+ * together like a drawbridge. It slams now, and the saliva strung across the
+ * gap goes with it in the same frame.
+ */
+const DOG_JAW_OPEN_MS = 90;
+const DOG_JAW_SHUT_MS = 35;
+/**
+ * How far the two halves also pull *apart* as they swing, in radii.
+ *
+ * Rotation alone is a jaw on a hinge however wide it goes. A little separation
+ * at the hinge itself is what turns it into a head coming apart — the seam
+ * opens along its whole length rather than only at the muzzle.
+ */
+const DOG_SPLIT_SPREAD = 0.12;
+/** Strings of saliva across the gap. */
+const DOG_DROOL_STRANDS = 7;
+
+function drawDog(
+  ctx: CanvasRenderingContext2D,
+  e: EntityState,
+  isSelf: boolean,
+  now: number,
+  simple: boolean,
+): void {
+  const r = DOG_ART_RADIUS;
+  const pose = dogPoseFor(e, now);
+  const art = dogSprites();
+
+  /**
+   * **Dead: grey, sprawled, and going nowhere.**
+   *
+   * One filter on the context does the greying, so a corpse is drawn by exactly
+   * the same code as a live dog and cannot drift out of step with it. The
+   * sprawl is the other half — a body in a *standing* pose reads as a dog that
+   * has simply stopped, so the legs are thrown out, the head lolls off the
+   * spine, and the whole thing is squashed a little across its length, which is
+   * what something lying down looks like from above.
+   */
+  if (e.dead) {
+    ctx.save();
+    ctx.filter = 'grayscale(1) brightness(0.5) contrast(0.85)';
+    ctx.globalAlpha *= 0.95;
+    pose.speed = 0;
+    pose.gait = hashId(e.id) % 6; // legs frozen somewhere other than neutral
+    pose.split = 0.34; // the mouth left half open
+  }
+
+  if (simple) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(pose.facing);
+    ctx.fillStyle = DOG_BODY_COLOR;
+    ctx.fillRect(-r * 1.4, -r * 0.5, r * 2.8, r);
+    ctx.restore();
+    return;
+  }
+
+  // Latched or being wrestled: the whole animal worries at whatever it has.
+  let x = e.x;
+  let y = e.y;
+  let facing = pose.facing;
+  let head = pose.head;
+  if (e.grappling) {
+    const phase = now * 0.03 + hashId(e.id);
+    const thrash = Math.sin(phase * 1.9) * 2.6;
+    x += -Math.sin(facing) * thrash;
+    y += Math.cos(facing) * thrash;
+    head += Math.sin(phase * 2.7) * 0.13;
+  }
+  // The head goes over as it falls, and which way is hashed so a row of bodies
+  // are not all lolling identically.
+  if (e.dead) head += hashId(e.id) % 2 === 0 ? DOG_DEAD_LOLL : -DOG_DEAD_LOLL;
+
+  const dirX = Math.cos(facing);
+  const dirY = Math.sin(facing);
+  const perpX = -dirY;
+  const perpY = dirX;
+  /** (along the spine, across it) in radii → world. */
+  const at = (along: number, across: number): [number, number] => [
+    x + dirX * r * along + perpX * r * across,
+    y + dirY * r * along + perpY * r * across,
+  ];
+
+  // How far the head has actually come apart — eased in `dogPoseFor`, because
+  // the wire only carries a flag and a head that snapped open and shut on it
+  // gave the one moment worth watching no screen time at all.
+  const split = pose.split;
+
+  // ---- the shadow it casts. Under everything: a body with nothing beneath it
+  // floats, and one soft ellipse is the cheapest possible fix for that.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.beginPath();
+  ctx.ellipse(x + 2, y + 3, r * 1.55, r * 0.7, facing, 0, TAU);
+  ctx.fill();
+
+  // ---- legs, under the body so the hips disappear into it. Two bones each,
+  // with the knee pushed out from the spine so it reads as bent rather than as
+  // a stick poking out of the side.
+  const travelOff = angDelta(facing, pose.travel);
+  const swingX = Math.cos(facing + travelOff);
+  const swingY = Math.sin(facing + travelOff);
+  for (let i = 0; i < 4; i++) {
+    const [along, across] = DOG_HIPS[i];
+    const [hx, hy] = at(along, across);
+    const side = Math.sign(across);
+    const front = along > 0;
+    const phase = pose.gait + DOG_LEG_PHASE[i];
+    const running = pose.speed > 0 ? 1 : 0;
+    // A corpse's legs are thrown out at odds with each other and stay there. A
+    // body in a standing pose reads as a dog that has simply stopped.
+    const swing = e.dead
+      ? DOG_DEAD_SPLAY[i] * r
+      : Math.cos(phase) * DOG_STEP_REACH * r * running;
+    // **The foot is down for most of the cycle and picked up briefly.** A plain
+    // `max(0, sin)` has it in the air half its life, which is a paddle rather
+    // than a walk; raising it to a power narrows the lift into a short event and
+    // leaves the rest of the stride planted.
+    const lift = Math.pow(Math.max(0, Math.sin(phase)), 2.5) * running;
+    const reach = r * DOG_LEG_REACH * (1 - 0.3 * lift);
+
+    const pawX = hx + perpX * side * reach + swingX * swing;
+    const pawY = hy + perpY * side * reach + swingY * swing;
+
+    /**
+     * **Two-bone IK, because the knee was the whole problem.**
+     *
+     * It used to be the midpoint of hip-to-paw nudged sideways, which means the
+     * two bones were always in the same relative pose and the entire leg simply
+     * *rotated* about the hip as the paw swung — a stick on a pivot, which is
+     * exactly what it looked like. Solving for the joint against two fixed bone
+     * lengths makes the leg **fold and extend** instead: the paw swinging out
+     * to the front of its stride is further from the hip than the paw underneath
+     * it, so the leg straightens and gathers over the cycle on its own.
+     *
+     * The bones being fixed also means the sprite stretch is now a constant,
+     * where before every frame drew a slightly different-length limb.
+     */
+    const legX = pawX - hx;
+    const legY = pawY - hy;
+    const rawLen = Math.hypot(legX, legY) || 0.001;
+    const ux = legX / rawLen;
+    const uy = legY / rawLen;
+    const upperLen = DOG_UPPER_LEN * r;
+    const lowerLen = DOG_LOWER_LEN * r;
+    const span = Math.min(rawLen, upperLen + lowerLen - 0.001);
+    const kx = (span * span + upperLen * upperLen - lowerLen * lowerLen) / (2 * span);
+    const ky = Math.sqrt(Math.max(0, upperLen * upperLen - kx * kx));
+    // Which way the joint folds. A dog's elbow points *back* and its stifle
+    // points *forward*, so the front and rear legs bend opposite ways — get
+    // this the same on all four and it walks like a table.
+    const jointX = -uy;
+    const jointY = ux;
+    const fold = front ? -1 : 1;
+    const bend = (jointX * dirX + jointY * dirY) * fold >= 0 ? 1 : -1;
+    const kneeX = hx + ux * kx + jointX * ky * bend;
+    const kneeY = hy + uy * kx + jointY * ky * bend;
+
+    const pawAngle = Math.atan2(pawY - kneeY, pawX - kneeX);
+    // **Paw first, then the leg over it.** Drawn last it sat on top of the
+    // shin like a blob stuck on the end; from above the leg comes down *onto*
+    // the foot, so the lower bone should overlap the ankle and leave only the
+    // toes showing past it. Upper over lower at the knee, for the same reason.
+    drawSprite(ctx, art.paw, pawX, pawY, pawAngle, side < 0);
+    drawSprite(ctx, art.limb, kneeX, kneeY, pawAngle, side < 0, lowerLen / (r * 0.56));
+    drawSprite(
+      ctx,
+      art.limb,
+      hx,
+      hy,
+      Math.atan2(kneeY - hy, kneeX - hx),
+      side < 0,
+      upperLen / (r * 0.56),
+    );
+  }
+
+  // ---- tail: two tapering segments off the rump.
+  //
+  // **It does not wag.** A wagging tail is a happy dog, and it was the last
+  // thing on the animal still reading as a pet. It trails: a fixed kink so it
+  // is not a stick, and it swings out behind a turn because the second segment
+  // lags the first, which is a thing a dead weight does rather than a mood.
+  //
+  // Strokes rather than the baked limb: a limb sprite is a limb, and reusing
+  // one here put a fifth leg on the back of the animal. Ink first then fill,
+  // which is the same two-pass contour every baked part carries.
+  {
+    const [rootX, rootY] = at(-1.16, 0);
+    const a1 = facing + Math.PI + DOG_TAIL_KINK;
+    const midX = rootX + Math.cos(a1) * r * 0.5;
+    const midY = rootY + Math.sin(a1) * r * 0.5;
+    const a2 = a1 + DOG_TAIL_KINK * 1.6;
+    const tipX = midX + Math.cos(a2) * r * 0.46;
+    const tipY = midY + Math.sin(a2) * r * 0.46;
+    ctx.lineCap = 'round';
+    for (const [ink, w1, w2] of [
+      [true, 0.24, 0.15],
+      [false, 0.17, 0.08],
+    ] as Array<[boolean, number, number]>) {
+      // **Tip first, then the root over it.** Drawn the other way round the
+      // thin bare end sat on top of the thick root at the joint, which reads as
+      // a stick laid across the tail rather than as the same tail tapering. A
+      // limb always goes over the segment beyond it, the same as the paw.
+      //
+      // The last third is stripped: bare bone rather than hide. A tail is the
+      // one part of the silhouette that sticks out into empty ground with
+      // nothing behind it, so a change of colour out there reads instantly.
+      ctx.strokeStyle = ink ? '#0a0806' : shade(DOG_BONE_COLOR, -58);
+      ctx.lineWidth = r * w2;
+      ctx.beginPath();
+      ctx.moveTo(midX, midY);
+      ctx.lineTo(tipX, tipY);
+      ctx.stroke();
+      ctx.strokeStyle = ink ? '#0a0806' : shade(DOG_BODY_COLOR, -14);
+      ctx.lineWidth = r * w1;
+      ctx.beginPath();
+      ctx.moveTo(rootX, rootY);
+      ctx.lineTo(midX, midY);
+      ctx.stroke();
+    }
+  }
+
+  // ---- neck, before the torso so the shoulders sit over it.
+  //
+  // The hinge sits well forward of the chest. Tucked back at 0.34 the drawn
+  // nose landed at 1.24 radii — *inside* the 1.3-radius front of the torso —
+  // so the head was buried in the shoulders and the animal read as a lozenge
+  // with a face painted on the end. Out here the whole head clears the body and
+  // the neck has something to be.
+  const [hingeX, hingeY] = at(0.86, 0);
+  const [chestX, chestY] = at(0.5, 0);
+  ctx.strokeStyle = '#0a0806';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = r * 0.68;
+  ctx.beginPath();
+  ctx.moveTo(chestX, chestY);
+  ctx.lineTo(hingeX, hingeY);
+  ctx.stroke();
+  ctx.strokeStyle = shade(DOG_BODY_COLOR, -8);
+  ctx.lineWidth = r * 0.54;
+  ctx.beginPath();
+  ctx.moveTo(chestX, chestY);
+  ctx.lineTo(hingeX, hingeY);
+  ctx.stroke();
+
+  drawSprite(ctx, art.body, x, y, facing);
+
+  // ---- the head, as two halves peeling off the hinge at the neck.
+  dogHeadHalves(ctx, hingeX, hingeY, head, split, r, hashId(e.id), now, e.dead === true);
+
+  if (e.health < DOG_MAX_HEALTH) {
+    const w = r * 2.4;
+    const pct = Math.max(0, e.health / DOG_MAX_HEALTH);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.fillRect(x - w / 2, y - r - 13, w, 4);
+    ctx.fillStyle = '#f87171';
+    ctx.fillRect(x - w / 2, y - r - 13, w * pct, 4);
+  }
+
+  if (e.dead) ctx.restore();
+
+  // **No self-ring on a dog.** Every other body gets a white outline when it is
+  // yours, and on a dog it was the loudest thing on screen — a bright hard
+  // ellipse round the one entity whose whole design is being dark and hard to
+  // read. It is also the least necessary one: there are at most two dogs in a
+  // round, the camera is on yours, and `drawSelfMarker` already puts a chevron
+  // where it went if the pan takes it off screen.
+  void isSelf;
+}
+
+/**
+ * The two halves of the head, and the throat between them.
+ *
+ * Each half is one baked sprite, hinged at the back of the skull and mirrored
+ * for the far side, so the pair meet exactly along the centre line when shut
+ * and there is no separate "closed" drawing to keep in step.
+ *
+ * The eyes are live rather than baked, because they are additive and have to
+ * lie over whatever the halves are doing — and because they are the one bright
+ * thing on the animal, which is worth keeping under direct control.
+ */
+function dogHeadHalves(
+  ctx: CanvasRenderingContext2D,
+  hingeX: number,
+  hingeY: number,
+  head: number,
+  split: number,
+  r: number,
+  seed: number,
+  now: number,
+  dead: boolean,
+): void {
+  const art = dogSprites();
+
+  // The throat, between the halves. Drawn first so they close over it, and only
+  // worth anything once there is a gap to see it through.
+  if (split > 0.12) {
+    const gap = Math.min(1, split / DOG_SPLIT_ARC);
+    ctx.save();
+    ctx.translate(hingeX, hingeY);
+    ctx.rotate(head);
+    ctx.scale(r, r);
+    // Kept *inside* the jaws. The half-skulls reach 0.9 radii, so a throat any
+    // longer than this pokes out past the muzzle tips and stops being a throat
+    // — it becomes a red blob stuck on the front of the animal, which is
+    // exactly what a wide split made of it.
+    ctx.fillStyle = DOG_MAW_COLOR;
+    ctx.beginPath();
+    ctx.ellipse(0.36, 0, 0.46, 0.3 * gap + 0.04, 0, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(8, 3, 4, 0.75)';
+    ctx.beginPath();
+    ctx.ellipse(0.26, 0, 0.26, 0.17 * gap + 0.02, 0, 0, TAU);
+    ctx.fill();
+    // A wet sheen down one side of the throat, so the inside reads as slick
+    // rather than as a hole cut in the head.
+    ctx.fillStyle = `rgba(226, 182, 176, ${0.1 + 0.1 * gap})`;
+    ctx.beginPath();
+    ctx.ellipse(0.4, -0.09 * gap, 0.24, 0.045 * gap + 0.01, -0.2, 0, TAU);
+    ctx.fill();
+
+    /**
+     * **The tongue.** It was two flat ellipses of maw and nothing else, which
+     * reads as a hole rather than as the inside of an animal.
+     *
+     * What makes it unpleasant rather than merely present is that it does not
+     * sit still and it does not sit straight: it lolls out to one side, past the
+     * teeth, over the jaw line — a tongue that stays politely inside the mouth
+     * is a tongue nobody notices. It is split at the tip, it is drawn as a
+     * tapering body rather than a stroke so it has a shape, and the wet
+     * highlight runs *down its middle* rather than round its edge, which is the
+     * difference between wet and outlined.
+     */
+    // **It has to reach past the teeth.** Kept inside the jaws it is the same
+    // colour and roughly the same shape as the throat behind it, so it reads as
+    // more maw rather than as a tongue — the muzzle ends at 0.9 radii and this
+    // lolls out beyond it, which is the only way the eye picks it out as a
+    // separate thing hanging out of the animal.
+    const loll = Math.sin(now * 0.0034) * 0.22 + 0.12;
+    const lick = 1.05 + Math.sin(now * 0.0021) * 0.16;
+    const reach = (0.42 + 0.62 * gap) * lick;
+    const tipX = reach;
+    const tipY = loll * (0.3 + 0.7 * gap);
+    const wide = 0.1 + 0.05 * gap;
+    ctx.beginPath();
+    ctx.moveTo(0.05, -wide * 0.8);
+    // Out along the mouth, swelling at the middle and tapering to the fork.
+    ctx.bezierCurveTo(reach * 0.4, -wide - 0.02, reach * 0.72, tipY - wide, tipX, tipY - wide * 0.3);
+    // The split: two points with a notch bitten between them.
+    ctx.lineTo(tipX + 0.09, tipY - wide * 0.55);
+    ctx.lineTo(tipX + 0.02, tipY);
+    ctx.lineTo(tipX + 0.09, tipY + wide * 0.55);
+    ctx.lineTo(tipX, tipY + wide * 0.3);
+    ctx.bezierCurveTo(reach * 0.72, tipY + wide, reach * 0.4, wide + 0.02, 0.05, wide * 0.8);
+    ctx.closePath();
+    // Lighter than the throat behind it, or the two merge into one red shape.
+    const tongue = ctx.createLinearGradient(0.05, 0, tipX, tipY);
+    tongue.addColorStop(0, '#48101a');
+    tongue.addColorStop(0.5, '#93303a');
+    tongue.addColorStop(1, '#5e1622');
+    ctx.fillStyle = tongue;
+    ctx.fill();
+    // Its own dark contour, so it sits *in front of* the jaws rather than
+    // looking painted onto them.
+    ctx.strokeStyle = 'rgba(14, 4, 7, 0.7)';
+    ctx.lineWidth = 0.028;
+    ctx.stroke();
+    // The groove down the middle, and a sheen along one side of it.
+    ctx.strokeStyle = 'rgba(22, 5, 8, 0.55)';
+    ctx.lineWidth = 0.03;
+    ctx.beginPath();
+    ctx.moveTo(0.12, 0);
+    ctx.quadraticCurveTo(reach * 0.6, tipY * 0.5, tipX, tipY);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(236, 190, 190, 0.3)';
+    ctx.lineWidth = 0.022;
+    ctx.beginPath();
+    ctx.moveTo(0.16, -wide * 0.35);
+    ctx.quadraticCurveTo(reach * 0.6, tipY * 0.5 - wide * 0.35, tipX * 0.92, tipY - wide * 0.3);
+    ctx.stroke();
+
+    /**
+     * Saliva, and it is most of what sells the head *coming apart* rather than
+     * opening.
+     *
+     * Each strand has its own breaking point: below it the string bridges the
+     * gap and bows, past it the thing has given way and hangs off both halves
+     * with a bead swinging on each stub. Since the strands are hashed off the
+     * dog's id, they break in the same order every time — the mouth comes apart
+     * the same way twice, which is what makes it read as anatomy rather than as
+     * particles. They also thin as they stretch, because a string being drawn
+     * out does.
+     */
+    const strand = rng(seed ^ 0x77aa);
+    for (let i = 0; i < DOG_DROOL_STRANDS; i++) {
+      const along = 0.1 + (i / DOG_DROOL_STRANDS) * 0.72;
+      const breaks = 0.4 + strand() * 0.62;
+      const reach = 0.32 * gap;
+      const sag = (strand() - 0.5) * 0.1 + Math.sin(now * 0.005 + i * 1.7) * 0.03;
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 0.034 * (1 - 0.55 * gap);
+      ctx.strokeStyle = `rgba(232, 220, 206, ${0.6 - 0.22 * gap})`;
+
+      if (gap < breaks) {
+        ctx.beginPath();
+        ctx.moveTo(along, -reach);
+        ctx.quadraticCurveTo(along + sag, 0, along, reach);
+        ctx.stroke();
+        continue;
+      }
+
+      // Given way. Two stubs, each with a bead of it on the end.
+      const stub = reach * (0.3 + 0.25 * strand());
+      ctx.beginPath();
+      ctx.moveTo(along, -reach);
+      ctx.quadraticCurveTo(along + sag, -reach + stub * 0.5, along + sag * 1.6, -reach + stub);
+      ctx.moveTo(along, reach);
+      ctx.quadraticCurveTo(along + sag, reach - stub * 0.5, along + sag * 1.6, reach - stub);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(232, 220, 206, ${0.5 - 0.15 * gap})`;
+      ctx.beginPath();
+      ctx.arc(along + sag * 1.6, -reach + stub, 0.034, 0, TAU);
+      ctx.arc(along + sag * 1.6, reach - stub, 0.034, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  for (const side of [-1, 1]) {
+    const a = head + split * side;
+    // **The halves pull apart as well as swinging.** Rotation alone is a jaw on
+    // a hinge however wide it goes, because the two pieces stay joined at the
+    // back. Sliding each one out from the hinge opens the seam along its whole
+    // length instead, which is the difference between a mouth and a skull
+    // coming apart.
+    const spread = r * DOG_SPLIT_SPREAD * split * side;
+    const hx = hingeX + Math.cos(a + Math.PI / 2) * spread;
+    const hy = hingeY + Math.sin(a + Math.PI / 2) * spread;
+    // Which side keeps its hide is fixed rather than hashed — a dog with a bone
+    // face on the same side every time is a design; one that changes per animal
+    // is noise.
+    drawSprite(ctx, side > 0 ? art.headHide : art.headBone, hx, hy, a, side < 0);
+
+    // **A corpse's eyes are out.** The glow is drawn additively, so under the
+    // corpse's greyscale filter it would come through as a pale smear rather
+    // than as light — and a dead animal whose eyes are still lit is not dead.
+    if (dead) {
+      ctx.restore();
+      continue;
+    }
+
+    // The eye, riding this half — so the pair come apart with the head. Drawn
+    // additively, and it is the one bright thing on the animal.
+    //
+    // The soft outer glow is kept small on purpose: at anything like the radius
+    // it wants to be, an additive wash covers the whole skull and the head
+    // comes out cream-coloured whichever side you are looking at. It is there
+    // to say the eye is lit, not to light the animal.
+    // Off the *spread* hinge, not the true one — the eye rides its half, so it
+    // has to be carried by the pull-apart as well as by the swing.
+    const ex = hx + Math.cos(a) * r * 0.3 + Math.cos(a + Math.PI / 2) * r * 0.19 * side;
+    const ey = hy + Math.sin(a) * r * 0.3 + Math.sin(a + Math.PI / 2) * r * 0.19 * side;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(255, 176, 30, 0.1)';
+    ctx.beginPath();
+    ctx.arc(ex, ey, r * 0.26, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 200, 55, 0.22)';
+    ctx.beginPath();
+    ctx.arc(ex, ey, r * 0.14, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = DOG_EYE_COLOR;
+    ctx.beginPath();
+    // The bare side's is a smaller, dimmer point down in the socket.
+    ctx.arc(ex, ey, r * (side > 0 ? 0.08 : 0.055), 0, TAU);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+}
+
+
+/**
+ * The bodies. Every dog put down this round, left where it fell.
+ *
+ * Drawn through `drawEntity` with `dead` set, so a corpse is the same animal
+ * the same way round — there is no second drawing of a dog to keep in step with
+ * the first. The greying is one `filter` on the context: with a handful of
+ * these in a whole round that is far cheaper than baking a second set of grey
+ * sprites, and it cannot fall out of step with the live ones.
+ */
+export function drawCorpses(
+  ctx: CanvasRenderingContext2D,
+  corpses: CorpseState[],
+  view: Viewport,
+  now: number,
+): void {
+  for (let i = 0; i < corpses.length; i++) {
+    const c = corpses[i];
+    if (!visible(view, c.x, c.y, DOG_ART_RADIUS * 2)) continue;
+    drawEntity(
+      ctx,
+      {
+        // Stable per corpse, so the hashed rot and fur stay put on the body.
+        id: `corpse-${i}`,
+        type: 'zombie',
+        x: c.x,
+        y: c.y,
+        facing: c.facing,
+        head: c.head,
+        health: 0,
+        dog: true,
+        dead: true,
+      },
+      false,
+      now,
+      false,
+    );
+  }
+}
+
+// ------------------------------------------------------------------- blood
+/**
+ * Blood is derived, not sent.
+ *
+ * `Shot.hit` already says a round found a body and `x2,y2` is exactly where it
+ * stopped, so the client has everything it needs and the wire carries nothing
+ * new. A hit spawns two things with different lifetimes: droplets thrown along
+ * the round's line, gone in half a second, and marks on the road that stay.
+ */
+interface BloodDecal {
+  x: number;
+  y: number;
+  r: number;
+  born: number;
+}
+interface BloodDrop {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  born: number;
+}
+const bloodDecals: BloodDecal[] = [];
+const bloodDrops: BloodDrop[] = [];
+
+/** How many alpha steps the decals are drawn in — see `drawBlood`. */
+const BLOOD_BANDS = 4;
+
+export function spawnBlood(x: number, y: number, angle: number, now: number): void {
+  const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
+  // Marks on the ground, thrown on past the body along the round's line.
+  for (let i = 0; i < 4; i++) {
+    const spread = angle + (rand() - 0.5) * 1.5;
+    const d = rand() * 26;
+    bloodDecals.push({
+      x: x + Math.cos(spread) * d + (rand() - 0.5) * 8,
+      y: y + Math.sin(spread) * d + (rand() - 0.5) * 8,
+      r: 2.2 + rand() * 5.5,
+      born: now,
+    });
+  }
+  if (bloodDecals.length > BLOOD_DECAL_MAX) {
+    bloodDecals.splice(0, bloodDecals.length - BLOOD_DECAL_MAX);
+  }
+
+  for (let i = 0; i < BLOOD_SPRAY_DROPS; i++) {
+    const spread = angle + (rand() - 0.5) * 1.4;
+    const speed = BLOOD_SPRAY_SPEED * (0.35 + rand() * 0.9);
+    bloodDrops.push({
+      x,
+      y,
+      vx: Math.cos(spread) * speed,
+      vy: Math.sin(spread) * speed,
+      born: now,
+    });
+  }
+}
+
+/** A new city has none of the old one's blood on it. */
+export function clearBlood(): void {
+  bloodDecals.length = 0;
+  bloodDrops.length = 0;
+}
+
+/**
+ * The dried marks, under the bodies.
+ *
+ * Every visible decal of a given age goes into **one path, filled once**. Two
+ * hundred separate translucent fills is the park's mistake again in red — the
+ * cost of a translucent blob is paid per pixel per frame, and the union of a
+ * group costs about what one of them does. Four bands is enough for the fade
+ * to read as continuous.
+ */
+export function drawBlood(ctx: CanvasRenderingContext2D, view: Viewport, now: number): void {
+  if (bloodDecals.length === 0) return;
+
+  // Cull the dead in the same walk rather than filtering into a new array
+  // thirty times a second.
+  let write = 0;
+  for (let i = 0; i < bloodDecals.length; i++) {
+    if (now - bloodDecals[i].born < BLOOD_DECAL_MS) bloodDecals[write++] = bloodDecals[i];
+  }
+  bloodDecals.length = write;
+
+  for (let band = 0; band < BLOOD_BANDS; band++) {
+    let any = false;
+    ctx.beginPath();
+    for (const d of bloodDecals) {
+      const age = (now - d.born) / BLOOD_DECAL_MS;
+      if (Math.min(BLOOD_BANDS - 1, Math.floor(age * BLOOD_BANDS)) !== band) continue;
+      if (!visible(view, d.x, d.y, d.r + 4)) continue;
+      ctx.moveTo(d.x + d.r, d.y);
+      ctx.arc(d.x, d.y, d.r, 0, TAU);
+      any = true;
+    }
+    if (!any) continue;
+    // Fresh is nearly opaque and wet-looking; old is a stain. It never reaches
+    // nothing — a mark on tarmac does not disappear, it just stops being red.
+    const t = band / (BLOOD_BANDS - 1);
+    ctx.globalAlpha = 0.62 - t * 0.42;
+    ctx.fillStyle = BLOOD_COLOR;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** The wet part: droplets in the air, over the bodies. */
+export function drawBloodSpray(ctx: CanvasRenderingContext2D, now: number): void {
+  if (bloodDrops.length === 0) return;
+
+  let write = 0;
+  ctx.strokeStyle = '#7f1416';
+  ctx.lineCap = 'round';
+  for (let i = 0; i < bloodDrops.length; i++) {
+    const drop = bloodDrops[i];
+    const age = now - drop.born;
+    if (age >= BLOOD_SPRAY_MS) continue;
+    bloodDrops[write++] = drop;
+
+    // Thrown, and slowing. Drawn as a streak along its own velocity, which is
+    // what separates a droplet in flight from a dot.
+    const t = age / 1000;
+    const drag = Math.exp(-t * 4.5);
+    const px = drop.x + drop.vx * ((1 - drag) / 4.5);
+    const py = drop.y + drop.vy * ((1 - drag) / 4.5);
+    const life = 1 - age / BLOOD_SPRAY_MS;
+    ctx.globalAlpha = life * 0.85;
+    ctx.lineWidth = 0.8 + life * 1.6;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px - drop.vx * drag * 0.014, py - drop.vy * drag * 0.014);
+    ctx.stroke();
+  }
+  bloodDrops.length = write;
+  ctx.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- vignette
+/**
+ * The corners go dark. Built once at viewport size and blitted, rather than
+ * rebuilt per frame — a gradient allocation plus a full-screen translucent fill
+ * every frame is a real cost for something that never changes.
+ */
+let vignetteLayer: HTMLCanvasElement | null = null;
+
+/**
+ * Going down, and coming back.
+ *
+ * Deliberately *not* a straight ramp across the death window. You watch your own
+ * animal fall and grey out for the first `DOG_FADE_FROM` of it — which is the
+ * whole reason the body stays in the world at all — and only then does the
+ * screen start to go. Coming back is quicker than going, because waking up
+ * somewhere else wants to be abrupt.
+ */
+export function drawDeathFade(
+  ctx: CanvasRenderingContext2D,
+  dying: number,
+  sinceAlive: number,
+  vw: number,
+  vh: number,
+): void {
+  let alpha = 0;
+  if (dying >= 0) {
+    alpha = Math.max(0, (dying - DOG_FADE_FROM) / (1 - DOG_FADE_FROM));
+  } else if (sinceAlive >= 0 && sinceAlive < DOG_RESPAWN_FADE_MS) {
+    alpha = 1 - sinceAlive / DOG_RESPAWN_FADE_MS;
+  }
+  if (alpha <= 0) return;
+  ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(1, alpha)})`;
+  ctx.fillRect(0, 0, vw, vh);
+}
+
+export function drawVignette(ctx: CanvasRenderingContext2D, vw: number, vh: number): void {
+  if (!vignetteLayer || vignetteLayer.width !== vw || vignetteLayer.height !== vh) {
+    const layer = document.createElement('canvas');
+    layer.width = vw;
+    layer.height = vh;
+    const g = layer.getContext('2d');
+    if (!g) return;
+    const outer = Math.hypot(vw, vh) / 2;
+    const gradient = g.createRadialGradient(vw / 2, vh / 2, outer * VIGNETTE_INNER, vw / 2, vh / 2, outer);
+    gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    gradient.addColorStop(0.7, `rgba(6, 5, 4, ${VIGNETTE_ALPHA * 0.42})`);
+    gradient.addColorStop(1, `rgba(6, 5, 4, ${VIGNETTE_ALPHA})`);
+    g.fillStyle = gradient;
+    g.fillRect(0, 0, vw, vh);
+    vignetteLayer = layer;
+  }
+  ctx.drawImage(vignetteLayer, 0, 0);
+}
+
+// ------------------------------------------------------------------ dog HUD
+/**
+ * What a dog is told, in place of the slot bar it has no use for.
+ *
+ * Two readouts and they answer different questions: the jaws say *can I bite
+ * yet*, and the hold says *how much longer must I stay on this one*. The second
+ * one is the whole mechanic — the shaded part of it is what shaking has already
+ * torn off, so worrying at somebody visibly eats the bar rather than merely
+ * making it run down faster, which nobody could tell apart from waiting.
+ */
+export function drawDogHud(
+  ctx: CanvasRenderingContext2D,
+  dog: DogHud,
+  vw: number,
+  vh: number,
+): void {
+  const w = 220;
+  const h = 12;
+  const x = (vw - w) / 2;
+  const y = vh - 34;
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+
+  // What is left of the horde to come back out of — this dog's lives, and the
+  // only number on the HUD that only ever goes down. Beside the bar rather than
+  // in it: it is not a thing that fills.
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = dog.hosts > 6 ? '#94a3b8' : dog.hosts > 0 ? '#fbbf24' : '#ef4444';
+  ctx.fillText(`${dog.hosts} LEFT TO RISE FROM`, x - 10, y + h / 2);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  if (dog.latched) {
+    // What is left of the bite, and how much of it was shaken off. The shaken
+    // part is drawn as ground already taken, beyond the live bar.
+    const held = Math.max(0, Math.min(1, dog.hold));
+    const shaken = Math.max(0, Math.min(1 - held, dog.shaken));
+    ctx.fillStyle = '#7f1d1d';
+    ctx.fillRect(x + w * held, y, w * shaken, h);
+    ctx.fillStyle = '#dc2626';
+    ctx.fillRect(x, y, w * held, h);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SHAKE — MOVE THE MOUSE', vw / 2, y + h / 2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    return;
+  }
+
+  // Jaws open: how much of the window is left, draining. Its own reading and
+  // its own colour, because "how long can I hold this" and "when may I open it
+  // again" are opposite questions and one bar answering both gets read wrong in
+  // the half-second that matters.
+  if (dog.jawsOpen >= 0) {
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, dog.jawsOpen)), h);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('JAWS OPEN — RUN THEM DOWN', vw / 2, y + h / 2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    return;
+  }
+
+  const ready = dog.bite >= 1;
+  ctx.fillStyle = ready ? '#ca8a04' : '#57534e';
+  ctx.fillRect(x, y, w * Math.max(0, Math.min(1, dog.bite)), h);
+  if (ready) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('JAWS READY — HOLD LEFT CLICK', vw / 2, y + h / 2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
   }
 }
 

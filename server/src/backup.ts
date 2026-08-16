@@ -490,11 +490,15 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
   // item, the wire takes the shouldered-rifle profile from it, and running dry
   // is the slot emptying rather than a special case anywhere.
   if (vehicle.kind === 'car') {
+    // Still tracked, so anything that wants to know where a crew came from
+    // still can — but grey is grey now and they shoot like any other grey
+    // officer. See `officerGrade`.
     world.riflemen.add(id);
-    const carInv = newInventory();
-    carInv.guns[0] = { item: 'boltRifle', ammo: RIFLEMAN_RIFLE_AMMO };
-    carInv.activeSlot = 1;
-    world.inventories.set(id, carInv);
+    // No rifle any more: a grey officer carries the sidearm every grey officer
+    // carries. Leaving a bolt action in the bag would still put a shouldered
+    // rifle on the wire and on the body, which is the drawing claiming
+    // something `officerGrade` no longer does.
+    world.inventories.set(id, newInventory());
     return;
   }
 

@@ -63,6 +63,8 @@ import {
   RALLY_STARTING_CHARGES,
   FOLLOW_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
+  DOG_RADIUS,
+  DOG_MAX_HEALTH,
   BOLT_FLEE_CHANCE,
   INDOOR_STAY_CHANCE,
   WITNESS_FOLLOW_CHANCE,
@@ -96,6 +98,7 @@ import type { Emplacement } from './emplacement.js';
 import type { BackupVehicle } from './backup.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
+import type { DogState } from './dog.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -590,6 +593,46 @@ export interface World {
   helicopters: Map<string, Helicopter>;
   /** Officers played by the machine, standing in for absent players. */
   bots: Set<string>;
+  /**
+   * The grey officers the city started with, as against anyone a radio call
+   * sent afterwards. They are the standing garrison, spread evenly over the
+   * map, and they are what stops a dog simply running to an empty corner and
+   * starting an outbreak there — see `CITY_OFFICER_DOG_*`.
+   */
+  cityOfficers: Set<string>;
+  /**
+   * Connections playing a dog rather than an officer, and the head, jaws and
+   * bite clock that go with each.
+   *
+   * Keyed by connection like `playerIds` rather than rebuilt per round, because
+   * which seat somebody took is a lobby fact and survives a restart: a dog
+   * player who restarts the round is still a dog player.
+   */
+  dogs: Set<string>;
+  dogState: Map<string, DogState>;
+  /**
+   * Dogs that have run out of horde to come back out of. They hold no entity
+   * from that moment and are out of the round — which is what makes every
+   * zombie the officers put down worth something to them.
+   */
+  dogsOut: Set<string>;
+  /**
+   * Every dog put down this round, left where it fell. Permanent for the round
+   * — the animal rises again out of a shambler somewhere else and the body it
+   * left stays exactly where somebody shot it, which is the only lasting mark
+   * the officers get for having killed one.
+   */
+  corpses: Array<{ x: number; y: number; facing: number; head: number }>;
+  /**
+   * Dogs that are down, and when they went.
+   *
+   * **On the world rather than on `DogState`**, which is where this started and
+   * is a trap: that state is created lazily on the first tick and *deleted* on
+   * every respawn, so a dog shot in either of those windows had nowhere to
+   * record that it had died — it dropped a body, kept its entity, and could be
+   * killed again on the very next round. Keyed by id here, it always exists.
+   */
+  dogDeaths: Map<string, number>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
   /**
@@ -707,6 +750,40 @@ export function makeEntity(id: string, type: EntityType, x: number, y: number): 
     maxHealth: ENTITY_MAX_HEALTH[type],
     speedMul: rollSpeedMul(type),
   };
+}
+
+/**
+ * A dog is an ordinary zombie entity with its own build. `speedMul` is pinned
+ * to 1 like any other player's — the shamble variation exists so a horde
+ * doesn't move as one blob, and a person driving one should get exactly the
+ * pace the constants say.
+ */
+export function makeDogEntity(id: string, x: number, y: number): Entity {
+  const e = makeEntity(id, 'zombie', x, y);
+  e.radius = DOG_RADIUS;
+  e.maxHealth = DOG_MAX_HEALTH;
+  e.health = DOG_MAX_HEALTH;
+  e.speedMul = 1;
+  return e;
+}
+
+/**
+ * Put a dog into the world. It comes in at the breach with the rest of the
+ * outbreak — it is not a thing that was already standing in the city.
+ *
+ * The bite state is *deleted* rather than reset here: `dogTick` creates it on
+ * first use, so there is one place that knows what a fresh one looks like.
+ */
+export function spawnDog(world: World, id: string): void {
+  const origin = world.outbreakOrigin;
+  const spawn = findSpawnNear(world, origin.x, origin.y, DOG_RADIUS);
+  world.entities.set(id, makeDogEntity(id, spawn.x, spawn.y));
+  world.dogs.add(id);
+  world.dogsOut.delete(id);
+  world.dogDeaths.delete(id);
+  world.dogState.delete(id);
+  world.stamina.set(id, STAMINA_MAX);
+  world.exhausted.delete(id);
 }
 
 /**
@@ -1185,6 +1262,12 @@ export function createWorld(): World {
     squadLeads: new Set(),
     dispatched: new Set(),
     bots: new Set(),
+    cityOfficers: new Set(),
+    dogs: new Set(),
+    dogState: new Map(),
+    dogsOut: new Set(),
+    corpses: [],
+    dogDeaths: new Map(),
     botOfficerCount: BOT_OFFICER_COUNT,
     towers: [],
     beacon: null,
@@ -1257,6 +1340,7 @@ export function resetWorld(world: World): void {
   world.squadLeads.clear();
   world.dispatched.clear();
   world.bots.clear();
+  world.cityOfficers.clear();
   world.grapples.clear();
   world.grappleImmune.clear();
   world.pendingInfections.clear();
@@ -1295,8 +1379,16 @@ export function resetWorld(world: World): void {
   spawnPickups(world);
 
   // Player one gets the designated start point; everyone else spawns at random.
+  // Which *seat* somebody took decides what they come back as — `world.dogs` is
+  // keyed by connection and deliberately outlives a restart, unlike everything
+  // else cleared above.
   let first = true;
   for (const id of world.playerIds) {
+    if (world.dogs.has(id)) {
+      spawnDog(world, id);
+      continue;
+    }
+    world.dogState.delete(id);
     const start = playerOneStart(world);
     const spawn = first
       ? findSpawnNear(world, start.x, start.y, ENTITY_RADIUS.officer)
@@ -1312,6 +1404,106 @@ export function resetWorld(world: World): void {
     // `spawnPickups` above, which clears the table.
     dropDebugKit(world, id, spawn.x, spawn.y);
   }
+}
+
+/** Let go of everything: whoever had hold of this id, and whoever it had. */
+function releaseGrapples(world: World, id: string): void {
+  world.grapples.delete(id);
+  for (const [targetId, session] of world.grapples) {
+    session.zombieIds.delete(id);
+    if (session.zombieIds.size === 0) world.grapples.delete(targetId);
+  }
+}
+
+/** Take a body out of the world, and everything keyed to it with it. */
+function removeEntity(world: World, id: string): void {
+  world.entities.delete(id);
+  world.ai.delete(id);
+  world.burning.delete(id);
+  world.stunned.delete(id);
+  world.materializeUntil.delete(id);
+  releaseGrapples(world, id);
+}
+
+/**
+ * The dog comes back **out of the horde**: a shambler somewhere on the map
+ * stops being a shambler and stands up as the dog. That is the whole of its
+ * lives system — the outbreak is its health bar, and every zombie the officers
+ * put down is one fewer body it can come back in.
+ *
+ * Never out of another dog, and never out of itself.
+ */
+export function respawnDogFromHorde(world: World, dog: Entity, now: number): boolean {
+  const hosts: Entity[] = [];
+  for (const e of world.entities.values()) {
+    if (e.type !== 'zombie' || e.id === dog.id || world.dogs.has(e.id)) continue;
+    hosts.push(e);
+  }
+  if (hosts.length === 0) return false;
+
+  const host = hosts[Math.floor(Math.random() * hosts.length)];
+  // The dog entity is *moved* rather than rebuilt, so nothing keyed to its id
+  // anywhere else has to be rebuilt with it.
+  dog.x = host.x;
+  dog.y = host.y;
+  dog.health = dog.maxHealth;
+  removeEntity(world, host.id);
+
+  world.dogState.delete(dog.id);
+  world.stamina.set(dog.id, STAMINA_MAX);
+  world.exhausted.delete(dog.id);
+  // It fades in where the shambler was, so the swap is something you can watch
+  // happen rather than a body silently teleporting.
+  world.materializeUntil.set(dog.id, now + MATERIALIZE_MS);
+  return true;
+}
+
+/**
+ * One body dying, wherever it died.
+ *
+ * Bullets, fire and blasts each used to write their own version of this, which
+ * is exactly how a grenade came to delete a *player's dog* outright — `heli.ts`
+ * removed any zombie it dropped, and a dog is a zombie. Anything that can take
+ * an entity's health to zero calls this instead.
+ */
+export function killEntity(world: World, e: Entity, now: number): void {
+  if (world.dogs.has(e.id)) {
+    const dog = world.dogState.get(e.id);
+    // Already down and waiting to rise. Rounds keep landing on the body — the
+    // entity is still here, which is the point — and none of them kill it twice.
+    if (world.dogDeaths.has(e.id)) return;
+
+    // It goes down **where it stands and stays there to be looked at**. The
+    // body it leaves is permanent; whether it gets back up at all is settled
+    // when the clock runs out, in `updateDogs`, because the horde it needs to
+    // rise out of can change in the meantime.
+    world.corpses.push({
+      x: Math.round(e.x),
+      y: Math.round(e.y),
+      facing: Math.round(e.facing * 100) / 100,
+      head: Math.round((dog ? dog.head : e.facing) * 100) / 100,
+    });
+    releaseGrapples(world, e.id);
+    e.health = 0;
+    world.dogDeaths.set(e.id, now);
+    if (dog) {
+      dog.victimId = null;
+      dog.jawsOpenedAt = 0;
+    }
+    return;
+  }
+
+  if (world.playerIds.has(e.id)) {
+    // Infection is permanent — a downed officer comes back in the middle of
+    // town rather than leaving the round.
+    e.health = e.maxHealth;
+    e.x = world.map.width / 2;
+    e.y = world.map.height / 2;
+    releaseGrapples(world, e.id);
+    return;
+  }
+
+  removeEntity(world, e.id);
 }
 
 /** True when this entity is locked in a grapple, as victim or as attacker. */
@@ -1431,13 +1623,51 @@ function populate(world: World): void {
     addHuman(placed, spawn.x, spawn.y);
   }
 
+  /**
+   * The standing garrison, **spread evenly over the map rather than scattered**.
+   *
+   * Purely random placement clumps — that is what random does — and a clump
+   * leaves whole quarters of the city with nobody in uniform in them, which is
+   * exactly where a dog goes to start an outbreak nobody can answer. So the map
+   * is cut into a grid with one officer to a cell, and each is sampled inside
+   * its own cell. Every quarter of the city has somebody in it.
+   *
+   * The grid is sized to the count rather than the other way round, so changing
+   * `NPC_OFFICER_MIN`/`MAX` needs nothing here.
+   */
   const officerCount =
     NPC_OFFICER_MIN + Math.floor(Math.random() * (NPC_OFFICER_MAX - NPC_OFFICER_MIN + 1));
+  // Cells shaped to the map rather than square, so a wide city gets a wide
+  // grid and no cell is a long thin strip.
+  const cols = Math.max(1, Math.round(Math.sqrt((officerCount * WORLD_WIDTH) / WORLD_HEIGHT)));
+  const rows = Math.ceil(officerCount / cols);
+  const cellW = WORLD_WIDTH / cols;
+  const cellH = WORLD_HEIGHT / rows;
+
+  // There are usually more cells than officers, so some go empty — and taken in
+  // order they are always the *same* cells, which hands the dog a permanently
+  // unguarded bottom corner. Shuffling the cell list moves the gap somewhere
+  // different every round, which is the whole point of the exercise.
+  const cells = Array.from({ length: cols * rows }, (_, n) => n);
+  for (let i = cells.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [cells[i], cells[j]] = [cells[j], cells[i]];
+  }
+
   for (let i = 0; i < officerCount; i++) {
-    const spawn = findSpawn(world, ENTITY_RADIUS.officer);
+    const cell = cells[i % cells.length];
+    const cx = cell % cols;
+    const cy = Math.floor(cell / cols);
+    const spawn = findSpawn(world, ENTITY_RADIUS.officer, {
+      x: cx * cellW,
+      y: cy * cellH,
+      w: cellW,
+      h: cellH,
+    });
     const id = `npc-officer-${i}`;
     world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
     world.ai.set(id, newAiState(now, spawn.x, spawn.y));
+    world.cityOfficers.add(id);
   }
 
   // Bot officers stand in for the players who aren't here. They get the same
@@ -1702,6 +1932,18 @@ export function toWire(
   }
   if (e.type === 'officer' && !world.playerIds.has(e.id)) state.npc = true;
   if (world.bots.has(e.id)) state.bot = true;
+  // The head is a second angle, and only a dog has one. Sent rounded like
+  // `facing` — a body the client eases toward anyway, at 30Hz.
+  if (world.dogs.has(e.id)) {
+    state.dog = true;
+    // Before its first tick there is no dog state yet, and the honest answer
+    // then is that the head is pointing where the body is. Sending nothing
+    // would leave the client guessing on the frame a dog appears.
+    const dog = world.dogState.get(e.id);
+    state.head = Math.round((dog ? dog.head : e.facing) * 100) / 100;
+    if (dog && dog.jawsOpenedAt > 0) state.lunging = true;
+    if (world.dogDeaths.has(e.id)) state.dead = true;
+  }
   if (world.burning.has(e.id)) state.burning = true;
   if (world.soldiers.has(e.id)) state.soldier = true;
   if (world.swat.has(e.id)) state.swat = true;

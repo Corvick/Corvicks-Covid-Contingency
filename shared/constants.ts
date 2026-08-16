@@ -3,8 +3,19 @@ import type { EntityType } from './types.js';
 // ---------------------------------------------------------------- world
 export const WORLD_WIDTH = 5000;
 export const WORLD_HEIGHT = 3700;
-export const VIEWPORT_WIDTH = 960;
-export const VIEWPORT_HEIGHT = 600;
+/**
+ * The backbuffer. The page scales it to fit the window keeping 16:9, so this is
+ * how much *world* you see rather than how big the window is.
+ *
+ * **Raising it is not free and the cost is not the pixels.** Everything derived
+ * from the viewport grows with it: `CAMERA_PAN_Y` carries the difference
+ * between the axes, and the three sight radii have to cover wherever the camera
+ * can put the screen — which at 1920x1080 is 3.1x the ground, so roughly three
+ * times as many entities are inside every viewer's fog and get serialised to
+ * them every tick. The painting is 3.6x. See the note on `PLAYER_SIGHT_RADIUS`.
+ */
+export const VIEWPORT_WIDTH = 1920;
+export const VIEWPORT_HEIGHT = 1080;
 export const TICK_RATE = 30;
 
 // ---------------------------------------------------------------- map gen
@@ -98,20 +109,56 @@ export const PLAYER_RADIUS = 14;
  */
 export const PLAYER_SPEED = 160;
 /**
- * Big enough to cover the viewport — fog is about occlusion, not range. Raised
- * from 640 when the camera pan went in: the far corner of a panned screen is
- * hypot(480, 540) = 722 from the officer, and a client lighting ground the
- * server never sent entities for is the bug this constant exists to prevent.
+ * Big enough to cover the viewport — fog is about occlusion, not range.
+ *
+ * **It is derived from `CAMERA_PAN_X`, not chosen.** A client lighting ground
+ * the server never sent entities for is the bug this constant exists to
+ * prevent, and the camera pan is what decides how far the screen can reach.
+ * Computed the way `fogRadius()` does — the furthest screen corner the push can
+ * produce, *sampled* over a quarter turn rather than bounded, since the push
+ * follows a unit direction and the two axes cannot both be at maximum at once.
+ *
+ * At 1920x1080, zoom 1.6 and a pan of 100/243 world px that corner is 874. This
+ * is that with a little headroom. Move the pan and this moves with it, or the
+ * far half of the screen goes dark.
  */
-export const PLAYER_SIGHT_RADIUS = 760;
+export const PLAYER_SIGHT_RADIUS = 890;
 /**
  * How far the camera drifts as the cursor nears the edge of the screen.
- * Nothing to do with scopes or equipment.
+ * Nothing to do with scopes or equipment, and it applies to **anything a person
+ * drives** — an officer or a dog alike, since it is a property of the camera
+ * rather than of what is in your hands.
  *
- * Sideways it is a small thing — the screen is already wide and there is no
- * awareness to win there, so this is just the camera answering the mouse.
+ * It used to be 60, on the reasoning that the screen is already wide so there
+ * is no *awareness* to win sideways. That is true and it was still wrong: at 60
+ * against a vertical 240, running the mouse to the left edge moved the camera
+ * by a quarter of a body width while running it to the top moved half a screen,
+ * and the thing felt broken on one axis. What you feel is the camera moving,
+ * not the arithmetic behind it.
+ *
+ * Raising it is not free — see the note on `PLAYER_SIGHT_RADIUS`. The fog has
+ * to reach wherever the camera can put the screen, and the server has to send
+ * entities that far, so this number sets the other two. If it goes up again,
+ * re-derive them.
  */
-export const CAMERA_PAN_X = 60;
+export const CAMERA_PAN_X = 100;
+
+/**
+ * How far in the player's camera sits. 1 is the old framing; above that you see
+ * less ground, larger.
+ *
+ * **It is the fog lever, not the pan.** Measured across pan 50 to 90 the fog
+ * polygon's area moved by three percentage points; going from 1.0 to 1.6 zoom
+ * took it to a third. Everything the fog costs is set by how much *world* is on
+ * screen, and the zoom is the only thing that changes that.
+ *
+ * **And it multiplies the pan rather than fighting it.** What you feel is the
+ * camera moving in *screen* pixels, and those are world pixels times the zoom —
+ * so `CAMERA_PAN_X` came down from 160 to 100 while the felt movement stayed
+ * exactly where it was (100 × 1.6 = 160 screen px, as before). The sideways pan
+ * is not being given up to pay for this; it is being paid for by the zoom.
+ */
+export const CAMERA_ZOOM = 1.6;
 /**
  * Up and down it carries the difference between the two axes on top of that,
  * which is the whole reason the pan exists: the viewport is 960x600, so
@@ -119,7 +166,28 @@ export const CAMERA_PAN_X = 60;
  * above and below. Derived rather than written down, so the two stay square
  * with each other if either the pan or the viewport ever changes.
  */
-export const CAMERA_PAN_Y = CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / 2;
+/**
+ * How much of the half-screen the *base* pan is allowed to spend.
+ *
+ * **The pan must never carry you out of the frame.** Equalising awareness on
+ * both axes wants a vertical pan of 362 world px, which is 580 screen px
+ * against a half-screen of 540 — so at full downward deflection the body you
+ * are driving sat 40px above the top edge, everywhere on the map, and the fog
+ * hole went off with it. What is left on screen is lit ground and the outer
+ * falloff of the fog: no walls, no bodies, nothing. It reads exactly like the
+ * renderer giving up, which is how it was reported.
+ *
+ * This caps the vertical reach so the equal-awareness derivation can ask for
+ * whatever it likes and still not lose the player. It deliberately does **not**
+ * cap `SCOPE_PUSH`: an officer down a scope leaving the bottom of the screen is
+ * the intended Foxhole behaviour, and `drawSelfMarker` exists for exactly that.
+ */
+const PAN_KEEP_ON_SCREEN = 0.72;
+
+export const CAMERA_PAN_Y = Math.min(
+  CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / (2 * CAMERA_ZOOM),
+  ((VIEWPORT_HEIGHT / 2) * PAN_KEEP_ON_SCREEN) / CAMERA_ZOOM,
+);
 
 // ---------------------------------------------------------------- fog of war
 /** Visibility is recomputed on this cadence rather than every frame. */
@@ -180,6 +248,242 @@ export const ZOMBIE_LUNGE_COOLDOWN_MS = 2600;
 /** Winded after wrestling someone. */
 export const ZOMBIE_POST_GRAPPLE_SLOW = 0.5;
 export const ZOMBIE_POST_GRAPPLE_MS = 2600;
+
+// ---------------------------------------------------------------- the dog
+/**
+ * The zombie dog. A player on the other team, never an NPC — which is why it
+ * carries no traits, no perception interval and no search state: everything a
+ * shambler needs those for, a person is doing with a mouse.
+ *
+ * It is a *zombie* everywhere it matters. Bullets find it, the crowd runs from
+ * it, the danger field is sourced from it and the victory count includes it,
+ * all because it goes into the world as `type: 'zombie'` with a `dog` flag on
+ * it — the same shape `bot`, `swat` and `soldier` already use to make four
+ * grades of officer out of one type. What is different about it is drawn, not
+ * declared.
+ */
+/**
+ * Half again the size of a zombie, and **the city sets the ceiling on this.**
+ *
+ * The narrowest opening anywhere is `CLEAR` in `mapgen` at 46px — the doorway
+ * `repairEnclosures` cuts — and ordinary doorways are `GAP` (2) tiles, 56px. A
+ * radius of 19 is a 38px body, which gets through the tightest of those with
+ * four pixels either side. Push it much past 20 and the dog starts snagging in
+ * doorways, and a hunting animal that cannot follow people indoors is no use
+ * at all. Everything drawn is in units of this, so the art scales with it.
+ */
+export const DOG_RADIUS = 19;
+/**
+ * The unit everything *drawn* is measured in, as against `DOG_RADIUS`, which is
+ * what the world collides against.
+ *
+ * They are deliberately different. The collision circle is capped by the
+ * narrowest doorway in the city and cannot grow; how big the animal *looks* is
+ * an art decision and has no business being held hostage to that. A long thin
+ * body is the case that makes the split obvious — its collision circle is
+ * sized by its width and its picture is sized by its length.
+ */
+export const DOG_ART_RADIUS = 23;
+/**
+ * Lower than it was. The dog's real durability is its lives — it comes back out
+ * of the horde — so the body itself does not also need to soak a magazine. A
+ * dog that can stand in the open trading fire with the garrison is one that
+ * never has to think about where it is.
+ */
+export const DOG_MAX_HEALTH = 90;
+
+/**
+ * Rounds knock the dog about, but not the way they knock a shambler about.
+ *
+ * A shambler taking a rifle round is meant to be stopped in its tracks; a dog
+ * is the thing that gets away, and a full stagger on a body that is *driven*
+ * reads as the controls being taken off you rather than as being hit. So it
+ * takes a shorter stagger at part strength — enough that walking into fire
+ * costs you the chase, not enough to pin you while the street reloads.
+ *
+ * `STRENGTH` is how much of the weapon's own slow it feels: 0 is none, 1 is a
+ * shambler's. The stagger a player can *see* is what matters, so both numbers
+ * are deliberately generous rather than token.
+ */
+export const DOG_STAGGER_TIME_MUL = 0.55;
+export const DOG_STAGGER_STRENGTH = 0.5;
+
+/**
+ * How long the dog lies where it fell before it rises again somewhere else.
+ *
+ * **The body stays on screen for it.** Cutting straight to the new one gives
+ * being killed no weight at all — you would simply find yourself elsewhere. The
+ * window is long enough to watch your own animal go down and grey out, and then
+ * for the screen to go black, which is the only part of a respawn worth
+ * dramatising.
+ */
+export const DOG_DEATH_MS = 2400;
+/** How long the screen takes to come back once it has risen. */
+export const DOG_RESPAWN_FADE_MS = 520;
+/** Where in the death window the fade to black begins, as a fraction of it. */
+export const DOG_FADE_FROM = 0.42;
+/**
+ * Quicker than an officer flat out, and that is the whole chase.
+ *
+ * A dog that cannot run one down never gets to bite anybody; a dog that can do
+ * it indefinitely makes running away pointless. So it wins the sprint and pays
+ * for it — its reserve empties half again as fast as an officer's and fills
+ * more slowly, so a chase is a handful of seconds and then a decision.
+ */
+export const DOG_SPEED = 182;
+export const DOG_SPRINT_MULTIPLIER = 1.8;
+export const DOG_STAMINA_DRAIN_PER_SEC = 62;
+export const DOG_STAMINA_REGEN_PER_SEC = 8;
+
+/**
+ * The body swings after the head, and that gap is the whole feel of the thing.
+ *
+ * Both ease toward the mouse and the head simply gets there first — it is not
+ * a separate input, and there is nothing to aim independently. What stops it
+ * being a turret on a chassis is `DOG_HEAD_MAX_YAW`: past that the neck is out
+ * of travel and the head can only go where the body takes it, so whipping the
+ * mouse round throws the head across, drags the shoulders after it and the
+ * back end comes round last.
+ */
+export const DOG_BODY_TURN_RATE = 6.2; // rad/s
+export const DOG_HEAD_TURN_RATE = 13; // rad/s
+export const DOG_HEAD_MAX_YAW = 1.05; // ~60° off the spine, either way
+/** Anchored by its own teeth, it pivots rather than turns. */
+export const DOG_LATCHED_TURN_MUL = 0.55;
+
+/**
+ * The jaws are on the head, not on the flanks: a bite only reaches what is in
+ * front of the muzzle, inside `DOG_BITE_ARC` of where the head is pointing.
+ */
+/**
+ * How far forward of the body centre the jaws actually are, in radii. It has to
+ * match where `render.ts` puts the head, or the bite lands somewhere other than
+ * where the teeth are drawn — which is unreadable from the outside and reads as
+ * the reach being wrong.
+ */
+export const DOG_MUZZLE_OUT = 1.25;
+
+/**
+ * What the city's standing garrison does to a dog: never misses it, and hits it
+ * 30% harder than it hits anything else.
+ *
+ * A rule about the map rather than about marksmanship. A dog that can outrun
+ * everything will always find the quarter with nobody in it and start an
+ * outbreak there long before help can cross the city — spreading the garrison
+ * evenly is half the answer, and each of them being genuinely dangerous when
+ * you get there is the other half. Only the officers the city *started* with:
+ * anyone a radio call sent afterwards is the response, not the deterrent.
+ */
+export const CITY_OFFICER_DOG_DAMAGE_MUL = 1.3;
+
+/**
+ * Fire is the flamethrower's answer to an outbreak, and the infected are what
+ * it is for.
+ *
+ * Somebody already bitten burns *like* the dead — the civilian floor that makes
+ * burning the healthy impossible does not cover them — and this much harder
+ * than the dead on top. That gives the weapon a job nothing else has: the
+ * charge rifle takes one carrier at a time and the cure gun saves one at a
+ * time, where a stream across a crowd that is half turned already stops the
+ * next thirty seconds happening at all.
+ *
+ * It comes with the sight to aim it: a flamethrower **in hand** picks the
+ * infected out of a crowd, the same narrow hole in the fog the cure gun punches
+ * and for the same reason — a weapon that answers a problem nobody can see is a
+ * weapon nobody uses.
+ */
+export const FLAME_INFECTED_DAMAGE_MUL = 1.6;
+
+/**
+ * How far the head may swing before the body bothers to follow.
+ *
+ * The dead space is the whole character of the neck: inside it the head turns
+ * on its own and the body does not stir at all, which is what a dog watching
+ * something looks like. Past it the shoulders come round, and they come to rest
+ * exactly this far behind — so a sweep always leaves the head leading.
+ */
+export const DOG_BODY_DEADZONE = 0.18; // ~10°
+export const DOG_BITE_REACH = 26;
+export const DOG_BITE_ARC = 0.95;
+/**
+ * **The bite is held, not snapped.** The trigger holds the mouth open for up to
+ * this long and the first body to walk into it is taken; let go, or run out the
+ * clock, and the jaws shut and have to recover.
+ *
+ * It used to be a snap on the click, which made the whole move a timing test
+ * against a 30Hz tick — and reduced the animal to a mouse button. Holding the
+ * jaws open moves the skill to where it belongs, which is putting the dog in
+ * the right place and pointing its head at somebody, and it is also simply what
+ * a dog charging you looks like.
+ */
+export const DOG_JAWS_OPEN_MS = 2000;
+/**
+ * And it is a long recovery, because the open window is generous. Two seconds
+ * of jaws followed by nearly two of nothing is the rhythm — a dog that misses
+ * has to disengage and come round again rather than gnashing on the spot.
+ */
+export const DOG_BITE_COOLDOWN_MS = 1800;
+/**
+ * What the jaws take out of a door when they shut on one.
+ *
+ * **Once per open-and-shut**, not per tick — the mouth is held open now, and
+ * chewing continuously while it is would take a door off its hinges in a
+ * second. So the efficient way through a door is to tap: open, shut, wait out
+ * the recovery, again. Holding is for catching people, tapping is for wood, and
+ * the same button does both without a mode.
+ *
+ * A shut door has to *delay* a dog rather than stop it — one that follows
+ * people indoors and then loses them to a door anybody can pull is beaten by a
+ * door handle, and the shamblers have been tearing at doors since long before
+ * it existed. Sized so `DOOR_HEALTH` 1600 takes four bites, which at the
+ * recovery between them is a handful of seconds of standing at it.
+ */
+export const DOG_DOOR_DAMAGE = 420;
+/**
+ * How long the jaws have to stay in before the infection takes.
+ *
+ * Deliberately far longer than a zombie's two seconds, because unlike a
+ * shambler the dog has something to *do* about it: shaking is what brings the
+ * clock in, down to `DOG_BITE_MIN_MS` at the very fastest. Hang on doing
+ * nothing and it is the slowest bite in the game.
+ */
+export const DOG_BITE_MS = 3600;
+export const DOG_BITE_MIN_MS = 900;
+/**
+ * How much of the clock one radian of shaking takes off.
+ *
+ * A shake is a *reversal*, not travel: a steady sweep of the mouse credits
+ * nothing until it comes back the other way, or a player who simply spun in
+ * circles would shorten a bite as fast as one who worried at it. See
+ * `DOG_WIGGLE_MIN_RAD` — a run shorter than that is a twitch, not a shake, and
+ * it stops a jittering hand earning anything.
+ */
+export const DOG_WIGGLE_MS_PER_RAD = 620;
+export const DOG_WIGGLE_MIN_RAD = 0.12;
+/**
+ * How hard the victim is dragged onto the jaw point each tick, and how far
+ * sideways a shake throws them. The drag is what makes a latched dog a thing
+ * you are attached to rather than a thing standing next to you.
+ */
+export const DOG_DRAG_PULL = 0.5;
+export const DOG_SHAKE_THROW = 26;
+
+/**
+ * Its coat, and what is left of it.
+ *
+ * Deliberately close together and all very dark bar two: the eyes and the
+ * bone. A body drawn in six colours of similar weight reads as a toy, and the
+ * whole point of the animal is that the only things you can pick out of the
+ * dark are its teeth and what it is looking at you with.
+ */
+export const DOG_BODY_COLOR = '#3a342d'; // the back — charcoal with the brown left in
+export const DOG_FUR_COLOR = '#4e463a'; // the saddle down the spine, a shade up
+export const DOG_HEAD_COLOR = '#5b452f'; // warmer, the way a shepherd's face is
+export const DOG_DECAY_COLOR = '#8b8d74'; // hide gone off: sickly, pale, greenish
+export const DOG_ROT_COLOR = '#6d4232';
+export const DOG_MAW_COLOR = '#4a1418'; // down its throat, and inside the flank
+export const DOG_BONE_COLOR = '#cfc7ad';
+export const DOG_EYE_COLOR = '#ffd23d';
 
 /**
  * A badly shot zombie drags. Nothing changes above this fraction of health;
@@ -742,7 +1046,7 @@ export const SHOT_SLOW_MULTIPLIER = 0.36;
  * Scoping sees further than the naked eye — without this the sniper could out-
  * range the fog and shoot at ground with nothing drawn on it.
  */
-export const SNIPER_SIGHT_RADIUS = 1500;
+export const SNIPER_SIGHT_RADIUS = 1310;
 /**
  * Aiming past your own screen, the way Foxhole does it: the camera slides off
  * the officer toward the reticle rather than zooming out.
@@ -1191,10 +1495,27 @@ export const RETALIATE_CHANCE = 0.45;
 export const RETALIATE_COMMIT_MS = 1600;
 
 // ---------------------------------------------------------------- NPC officers
-export const NPC_OFFICER_MIN = 4;
-export const NPC_OFFICER_MAX = 7;
-export const NPC_OFFICER_SHOOT_INTERVAL_MS = 2000;
-export const NPC_OFFICER_BLOOM_RAD = 0.22; // still poor, but less wild
+/**
+ * The city's standing garrison: **more of them, spread evenly, and they can
+ * shoot.**
+ *
+ * The count is not decoration — it is the whole of whether "spread evenly"
+ * means anything. Measured as the furthest any spot on the map can be from the
+ * nearest officer: at 4-7 it is ~2200px on a map whose diagonal is 6200, so
+ * there is always a quarter of the city with nobody in it, which is exactly
+ * where a dog goes. At 10-14 that falls to ~1500px.
+ */
+export const NPC_OFFICER_MIN = 10;
+export const NPC_OFFICER_MAX = 14;
+/**
+ * They used to be deliberately hopeless — 0.22 radians of bloom on a two-second
+ * trigger, which is a miss at any range worth caring about. Grey is one grade
+ * now and it is a competent one: the same pistol accuracy anyone a radio call
+ * sends has, at a slightly slower trigger, because they are the ones who were
+ * already standing there rather than the ones who came when you asked.
+ */
+export const NPC_OFFICER_SHOOT_INTERVAL_MS = 1100;
+export const NPC_OFFICER_BLOOM_RAD = 0.07;
 /** They give ground to hold the far edge of their sight line. */
 export const NPC_OFFICER_RETREAT_DIST = 360;
 export const NPC_OFFICER_TURN_RATE = 13; // quick, but not a turret
@@ -1443,8 +1764,20 @@ export const BOOTS_STAMINA_MUL = 0.62;
 /** Backpack and gunsling: extra slots while you carry them. */
 export const BACKPACK_SLOTS = 2;
 export const GUNSLING_SLOTS = 1;
-/** Binoculars push the camera out too, the way a scope does but gently. */
-export const BINOCULAR_SIGHT_RADIUS = 980;
+/**
+ * Binoculars push the camera out too, the way a scope does but gently — so
+ * this is derived the same way `PLAYER_SIGHT_RADIUS` is, off
+ * `BINOCULAR_PUSH + CAMERA_PAN_*`.
+ *
+ * **It was already short before the pan changed**, which is worth recording: at
+ * a pan of 60 the corner was 1036 against this at 980, so the client had been
+ * lighting fifty-odd pixels of ground the server was not sending entities for
+ * whenever the binoculars came up. Exactly the fault raising the sniper once
+ * caused, and invisible unless you go looking, because what it produces is an
+ * empty street rather than an error. At 1920x1080, zoom 1.6 and a pan of
+ * 100/243 the corner is 1164.
+ */
+export const BINOCULAR_SIGHT_RADIUS = 1180;
 /**
  * How far the zombie tracker will look before it gives up and points nowhere.
  *
@@ -2065,3 +2398,46 @@ export const ESCAPE_SAMPLES = 16;
 export const ESCAPE_DISTANCE = 420;
 /** Commit to a chosen escape for this long so they don't dither. */
 export const ESCAPE_COMMIT_MS = 1200;
+
+// ---------------------------------------------------------------- grime
+/**
+ * The city is filthy, and that is drawn rather than tinted.
+ *
+ * One tile is hashed once at startup and repeated across the whole map as a
+ * canvas pattern, so the ground costs **one fill** however far the camera is
+ * pulled back. That is the same lesson `drawBushes` taught: a hundred separate
+ * translucent blobs is fill-rate paid per pixel per frame, and the union of
+ * them costs about what one does. A per-frame scatter over the viewport was the
+ * obvious way to write this and is the expensive one.
+ */
+export const GRIME_TILE = 256;
+export const GROUND_COLOR = '#1b1d20';
+export const GRIME_BLOTCHES = 26;
+export const GRIME_GRIT = 260;
+export const GRIME_CRACKS = 7;
+
+/**
+ * A round finding a body leaves a mark on the ground that stays. Nothing about
+ * it reaches the wire — `Shot.hit` already says a round landed and `x2,y2` is
+ * exactly where, so blood is derived from what the client is drawing anyway.
+ *
+ * Capped, and every visible decal of a given age goes into **one path filled
+ * once** rather than a fill each. Four hundred separate translucent fills is
+ * the park's mistake again, in red.
+ */
+export const BLOOD_DECAL_MAX = 200;
+export const BLOOD_DECAL_MS = 40000;
+/** The wet part: droplets thrown along the round's line, gone in half a second. */
+export const BLOOD_SPRAY_MS = 520;
+export const BLOOD_SPRAY_DROPS = 9;
+export const BLOOD_SPRAY_SPEED = 190;
+export const BLOOD_COLOR = '#5c0d10';
+
+/**
+ * How dark the corners of the screen get. Under the HUD and over the fog, so
+ * it frames the world without dimming anything you have to read. One cached
+ * image drawn once a frame — a gradient rebuilt per frame is a full-screen
+ * translucent fill *and* a gradient allocation.
+ */
+export const VIGNETTE_ALPHA = 0.55;
+export const VIGNETTE_INNER = 0.42;

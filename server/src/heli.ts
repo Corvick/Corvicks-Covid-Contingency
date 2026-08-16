@@ -26,6 +26,7 @@ import { newInventory } from './inventory.js';
 import {
   findSpawnNear,
   hasLineOfSight,
+  killEntity,
   makeEntity,
   newAiState,
   type Entity,
@@ -300,14 +301,9 @@ function detonate(world: World, x: number, y: number, now: number): void {
     const damage = BLAST_DAMAGE_MIN + (BLAST_DAMAGE_MAX - BLAST_DAMAGE_MIN) * falloff;
     e.health -= damage;
     if (e.health > 0) continue;
-
-    world.entities.delete(e.id);
-    world.ai.delete(e.id);
-    world.grapples.delete(e.id);
-    for (const [targetId, session] of world.grapples) {
-      session.zombieIds.delete(e.id);
-      if (session.zombieIds.size === 0) world.grapples.delete(targetId);
-    }
+    // Was a bare delete, which took a *player's* dog off the map outright —
+    // a dog is a zombie, and this branch only ever asked about the type.
+    killEntity(world, e, now);
   }
 }
 

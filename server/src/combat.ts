@@ -43,12 +43,14 @@ import {
   GRAPPLED_COOLDOWN_MUL,
 } from '../../shared/constants.js';
 import { throwGrenade } from './heli.js';
+import { staggerDog } from './dog.js';
 import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
 import { angleDelta, segmentCircleT, segmentRectT, turnToward } from './geometry.js';
 import {
   damageWindow,
   isInGrapple,
   isWindowIntact,
+  killEntity,
   newAiState,
   rollSpeedMul,
   type Entity,
@@ -277,6 +279,21 @@ function hit(
   victim.health -= damage;
 
   if (victim.health > 0) {
+    // A dog is driven rather than steered, so none of the AI reaction below
+    // applies to it — but it still gets knocked about. A shorter stagger at
+    // part strength: enough that walking into fire costs it the chase, not
+    // enough to pin it while the street reloads. See `DOG_STAGGER_STRENGTH`.
+    if (world.dogs.has(victim.id)) {
+      staggerDog(
+        world,
+        victim.id,
+        now,
+        def?.slowMs ?? SHOT_SLOW_MS,
+        def?.slowMul ?? SHOT_SLOW_MULTIPLIER,
+      );
+      return;
+    }
+
     // A zombie mid-grapple keeps its grip and its facing — it doesn't look up.
     // Otherwise it spins toward the shot, and may break off to hunt the shooter.
     if (!world.playerIds.has(victim.id) && !isInGrapple(world, victim.id)) {
@@ -315,21 +332,10 @@ function hit(
     return;
   }
 
-  if (world.playerIds.has(victim.id)) {
-    // Infection is permanent — a downed player comes back as a zombie.
-    victim.health = victim.maxHealth;
-    victim.x = world.map.width / 2;
-    victim.y = world.map.height / 2;
-  } else {
-    world.entities.delete(victim.id);
-    world.ai.delete(victim.id);
-  }
-
-  world.grapples.delete(victim.id);
-  for (const [targetId, session] of world.grapples) {
-    session.zombieIds.delete(victim.id);
-    if (session.zombieIds.size === 0) world.grapples.delete(targetId);
-  }
+  // Whether that is a body removed, an officer put back in the middle of town
+  // or a dog standing up out of one of its own is `killEntity`'s business —
+  // three copies of this used to disagree about it.
+  killEntity(world, victim, now);
 }
 
 /** Turns a zombie back into a civilian. */

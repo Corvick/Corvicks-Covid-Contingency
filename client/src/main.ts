@@ -19,6 +19,7 @@ import {
   BINOCULAR_PUSH,
   CAMERA_PAN_X,
   CAMERA_PAN_Y,
+  CAMERA_ZOOM,
   SCOPE_EASE_MS,
 } from '../../shared/constants.js';
 import type {
@@ -39,6 +40,8 @@ import type {
   FireState,
   MineState,
   BackupVehicleState,
+  CorpseState,
+  DogHud,
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats } from './net.js';
@@ -73,6 +76,15 @@ import {
   minimapFrame,
   drawFires,
   drawBurning,
+  drawBlood,
+  drawBloodSpray,
+  spawnBlood,
+  clearBlood,
+  clearDogPoses,
+  drawDogHud,
+  drawCorpses,
+  drawDeathFade,
+  drawVignette,
   drawPond,
   drawSmoke,
   drawStamina,
@@ -111,6 +123,8 @@ const gameOverPanel = document.getElementById('game-over') as HTMLDivElement;
 const gameOverRestart = document.getElementById('game-over-restart') as HTMLButtonElement;
 const victoryPanel = document.getElementById('victory') as HTMLDivElement;
 const victoryRestart = document.getElementById('victory-restart') as HTMLButtonElement;
+const dogOutPanel = document.getElementById('dog-out') as HTMLDivElement;
+const dogOutRestart = document.getElementById('dog-out-restart') as HTMLButtonElement;
 const hud = document.getElementById('hud') as HTMLDivElement;
 const perfHud = document.getElementById('perf') as HTMLDivElement;
 
@@ -139,6 +153,10 @@ let followCharges = 0;
 let following = false;
 let pickups: PickupState[] = [];
 let inventory: InventoryState | null = null;
+/** The dog's jaws and bite clock, or null for anyone playing an officer. */
+let dogHud: DogHud | null = null;
+/** When it last got back up, so the screen can fade in off the black. */
+let dogRoseAt = -1;
 let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
 let blasts: BlastState[] = [];
@@ -146,6 +164,7 @@ let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
 let vehicles: BackupVehicleState[] = [];
 let mines: MineState[] = [];
+let corpses: CorpseState[] = [];
 let towers: BeaconState[] = [];
 let zaps: Array<{ x: number; y: number; at: number }> = [];
 let fires: FireState[] = [];
@@ -248,6 +267,10 @@ const { send } = connect((msg) => {
     doorStates.clear();
     doorPrompt = null;
     doorEpoch++;
+    // A fresh city has none of the last one's blood on it, and no dog's legs
+    // half way through a stride they took in a street that no longer exists.
+    clearBlood();
+    clearDogPoses();
     // A new city starts framed on the whole thing again.
     spectateZoom = 1;
     spectateX = WORLD_WIDTH / 2;
@@ -280,6 +303,16 @@ const { send } = connect((msg) => {
     following = msg.following;
     pickups = msg.pickups;
     inventory = msg.inventory;
+    // When it was last on its feet, so the screen can fade back *in* after a
+    // death. The server says "dying 0..1" and then simply stops; how long the
+    // coming-back takes is a drawing decision and lives here.
+    if ((dogHud?.dying ?? -1) >= 0 && (msg.dog?.dying ?? -1) < 0) {
+      dogRoseAt = performance.now();
+    }
+    dogHud = msg.dog;
+    // The dog's own ending, which is nothing to do with the global one — the
+    // city carries on and it watches, so this is its panel and not that one.
+    dogOutPanel.classList.toggle('hidden', !(dogHud?.out ?? false));
     grenades = msg.grenades;
     smokes = msg.smokes;
     blasts = msg.blasts;
@@ -287,6 +320,7 @@ const { send } = connect((msg) => {
     emplacements = msg.emplacements;
     vehicles = msg.vehicles;
     mines = msg.mines;
+    corpses = msg.corpses;
     towers = msg.towers;
     zaps = msg.zaps;
     fires = msg.fires;
@@ -305,7 +339,16 @@ const { send } = connect((msg) => {
     }
     if (msg.shots.length > 0) {
       const now = performance.now();
-      for (const shot of msg.shots) tracers.push({ ...shot, born: now });
+      for (const shot of msg.shots) {
+        tracers.push({ ...shot, born: now });
+        // A round that found a body, and where it stopped. Nothing about blood
+        // is on the wire — `hit` and the endpoint are already here for the
+        // tracer, so the splatter is derived from what is being drawn anyway.
+        // A cure and a flame both "hit" and neither draws any.
+        if (shot.hit && shot.kind === undefined) {
+          spawnBlood(shot.x2, shot.y2, Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1), now);
+        }
+      }
     }
   }
 });
@@ -344,10 +387,12 @@ function standDown(): void {
   input.slotPressed = -1;
   pushX = 0;
   pushY = 0;
+  dogHud = null;
   tracked.clear();
   tracers = [];
   gameOverPanel.classList.add('hidden');
   victoryPanel.classList.add('hidden');
+  dogOutPanel.classList.add('hidden');
 }
 
 /**
@@ -374,8 +419,9 @@ window.addEventListener('keydown', (e) => {
     else if (solo) setPaused(!paused);
     else quitToMenu();
   }
-  // Hold Q to open the ability wheel, always centred on the viewport.
-  if (e.code === 'KeyQ' && !wheel.open && !spectating) {
+  // Hold Q to open the ability wheel, always centred on the viewport. A dog
+  // has nobody to shout at.
+  if (e.code === 'KeyQ' && !wheel.open && !spectating && !dogHud) {
     wheel.open = true;
     wheel.cx = VIEWPORT_WIDTH / 2;
     wheel.cy = VIEWPORT_HEIGHT / 2;
@@ -522,9 +568,10 @@ canvas.addEventListener('contextmenu', () => {
 canvas.addEventListener(
   'wheel',
   (e) => {
-    // Playing: the wheel walks the slot bar rather than zooming.
+    // Playing: the wheel walks the slot bar rather than zooming. A dog has no
+    // bar to walk.
     if (!spectating) {
-      if (!inventory) return;
+      if (!inventory || dogHud) return;
       e.preventDefault();
       // Grows with a sling or a pack, so the wheel reaches slots the number
       // row runs out of keys for.
@@ -576,6 +623,7 @@ function applyZoom(): void {
 // everyone stands. A new round is a new lobby now.
 gameOverRestart.addEventListener('click', quitToMenu);
 victoryRestart.addEventListener('click', quitToMenu);
+dogOutRestart.addEventListener('click', quitToMenu);
 
 /**
  * Stop the world, or start it again. The server is what actually freezes —
@@ -648,6 +696,9 @@ const ENTITY_FIELDS = [
   'thermal',
   'breaking',
   'burning',
+  'dog',
+  'head',
+  'lunging',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
 
 function copyInto(into: EntityState, from: EntityState): void {
@@ -721,10 +772,12 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
       scale,
     };
   }
-  // A player's camera is always 1:1. Down a scope it slides off the officer
-  // toward the reticle rather than zooming out — see `updateScope`.
-  const w = VIEWPORT_WIDTH;
-  const h = VIEWPORT_HEIGHT;
+  // A player's camera is pulled in by `CAMERA_ZOOM` — the backbuffer stays
+  // 1920x1080 and you simply see less ground, larger. Down a scope it slides
+  // off the officer toward the reticle rather than zooming out; that is
+  // `updateScope`, and it rides on top of this.
+  const w = VIEWPORT_WIDTH / CAMERA_ZOOM;
+  const h = VIEWPORT_HEIGHT / CAMERA_ZOOM;
   return {
     view: {
       x:
@@ -738,7 +791,7 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
       w,
       h,
     },
-    scale: 1,
+    scale: CAMERA_ZOOM,
   };
 }
 
@@ -750,8 +803,19 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
 let pushX = 0;
 let pushY = 0;
 
-/** How far a scope lets the camera run: 0 for anything ordinary. */
+/**
+ * How far a scope lets the camera run: 0 for anything ordinary.
+ *
+ * A dog carries nothing, so it is always 0 — said outright rather than left to
+ * fall out of the empty inventory the server sends it, which answers "pistol"
+ * and happens to have no scope. That is the right answer by accident, and it
+ * would stop being right the day the placeholder bag changes.
+ *
+ * The *pan* is not part of this and applies to a dog exactly as it does to an
+ * officer: it is a property of the camera, not of what is in your hands.
+ */
 function scopeReach(): number {
+  if (dogHud) return 0;
   const held = heldItemId();
   if (ITEMS[held ?? 'pistol']?.scope) return SCOPE_PUSH;
   if (held === 'binoculars') return BINOCULAR_PUSH;
@@ -763,10 +827,20 @@ function scopeReach(): number {
  *
  * The pan rides on top of whatever the scope gives, and it is not a scope
  * feature at all — it is there because the viewport is wider than it is tall,
- * so without it you are aware of 480px of street to either side and only 300px
- * above and below. `CAMERA_PAN_Y` is derived to carry that 180px difference,
- * so both axes reach the same distance at every zoom level: 540 with nothing
- * in hand, 970 down a scope.
+ * so without it you are aware of far more street to either side than above and
+ * below. `CAMERA_PAN_Y` is derived to carry that difference and even the two
+ * axes up.
+ *
+ * **It no longer evens them up completely, and that is deliberate.** The
+ * derivation asks for 362 world px vertically, which at this zoom is 580 screen
+ * px against a half-screen of 540 — so at full deflection the body you are
+ * driving was pushed clean off the top of the frame, taking the fog hole with
+ * it and leaving nothing on screen but lit ground. `PAN_KEEP_ON_SCREEN` caps it
+ * at 243, which reaches 580 world px vertically against 700 sideways. Not equal,
+ * but on screen.
+ *
+ * The cap is on the pan only. A scope still slides the officer off the bottom —
+ * that is the intended Foxhole behaviour and `drawSelfMarker` is there for it.
  */
 function cameraReach(): { x: number; y: number } {
   const scope = scopeReach();
@@ -824,9 +898,11 @@ function fogRadius(): number {
   let worst = 0;
   for (let i = 0; i <= 8; i++) {
     const a = (i / 8) * (Math.PI / 2);
+    // Half the screen in *world* units, which the zoom shrinks — that shrinking
+    // is the whole reason zooming in is the fog lever.
     const d = Math.hypot(
-      VIEWPORT_WIDTH / 2 + Math.cos(a) * reach.x,
-      VIEWPORT_HEIGHT / 2 + Math.sin(a) * reach.y,
+      VIEWPORT_WIDTH / (2 * CAMERA_ZOOM) + Math.cos(a) * reach.x,
+      VIEWPORT_HEIGHT / (2 * CAMERA_ZOOM) + Math.sin(a) * reach.y,
     );
     if (d > worst) worst = d;
   }
@@ -1000,8 +1076,8 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   // between rebuilds.
   const reach = cameraReach();
   const slack = FOG_MOVE_EPSILON + 40;
-  const clipW = VIEWPORT_WIDTH / 2 + reach.x + slack;
-  const clipH = VIEWPORT_HEIGHT / 2 + reach.y + slack;
+  const clipW = VIEWPORT_WIDTH / (2 * CAMERA_ZOOM) + reach.x + slack;
+  const clipH = VIEWPORT_HEIGHT / (2 * CAMERA_ZOOM) + reach.y + slack;
   const t0 = performance.now();
   cachedPoly = visibilityPolygon(me.x, me.y, radius, occludersFor(map), map.bushes, clipW, clipH);
   fogComputeMs = performance.now() - t0;
@@ -1065,7 +1141,12 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
 function drawFog(me: EntityState, view: Viewport, now: number): void {
   if (!map) return;
 
-  const s = FOG_MASK_SCALE;
+  // Two different scales, and mixing them is a real bug. `m` is the mask's own
+  // resolution against the viewport — a screen-space number, which is what the
+  // blur is measured in. `s` additionally carries the camera zoom, because
+  // everything else here is converting *world* coordinates onto that mask.
+  const m = FOG_MASK_SCALE;
+  const s = FOG_MASK_SCALE * CAMERA_ZOOM;
   const mw = fogCanvas.width;
   const mh = fogCanvas.height;
 
@@ -1088,7 +1169,7 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
 
     fogCtx.globalCompositeOperation = 'destination-out';
     fogCtx.fillStyle = gradient;
-    fogCtx.filter = `blur(${FOG_BLUR_PX * s}px)`;
+    fogCtx.filter = `blur(${FOG_BLUR_PX * m}px)`;
 
     fogCtx.beginPath();
     fogCtx.moveTo((poly[0].x - view.x) * s, (poly[0].y - view.y) * s);
@@ -1214,6 +1295,10 @@ function render() {
     // Under everything else: it is ground, and the bushes stand on it.
     drawPark(ctx, map.park, view);
     drawPond(ctx, map.pond, view);
+    // On the road, under the walls and everyone standing on it.
+    drawBlood(ctx, view, now);
+    // Bodies lie on the blood and under everyone still on their feet.
+    drawCorpses(ctx, corpses, view, now);
     drawWalls(ctx, map.walls, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
     drawDoors(ctx, map.doors, doorStates, view);
@@ -1266,6 +1351,8 @@ function render() {
     (t) => now - t.born < (t.kind === 'flame' ? FLAME_TRACER_MS : TRACER_LIFETIME_MS),
   );
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
+  // Over the bodies: it is coming off them.
+  drawBloodSpray(ctx, now);
 
   drawZaps(ctx, zaps, view, now);
   drawDucks(ctx, ducks, view);
@@ -1301,11 +1388,34 @@ function render() {
     ctx.restore();
   }
 
+  // Over the fog, under the HUD: it frames the world without dimming anything
+  // you actually have to read.
+  drawVignette(ctx, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+
+  // Going down, and coming back. Over the world and *under* the HUD, so the
+  // counts and the panels stay readable through it.
+  if (dogHud) {
+    drawDeathFade(
+      ctx,
+      dogHud.dying,
+      dogRoseAt >= 0 ? now - dogRoseAt : -1,
+      VIEWPORT_WIDTH,
+      VIEWPORT_HEIGHT,
+    );
+  }
+
   // HUD sits above the fog so guidance stays legible.
   drawBeacons(ctx, beacons, view, scale, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
 
   if (!spectating) {
-    if (inventory && me) {
+    // A dog carries nothing, opens nothing and picks nothing up, so the slot
+    // bar and the E prompt are simply not drawn for one — its jaws and its bite
+    // clock go where they were.
+    // Nothing to read off a bar while you are lying on the road being greyed
+    // out — the jaws and the bite clock belong to a dog that is up.
+    if (dogHud && dogHud.dying < 0) {
+      drawDogHud(ctx, dogHud, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    } else if (inventory && me && !dogHud) {
       // A door under your nose owns the E key, so it owns the prompt too.
       if (doorPrompt) {
         drawDoorPrompt(ctx, doorPrompt, (me.x - view.x) * scale, (me.y - view.y) * scale);
@@ -1319,7 +1429,15 @@ function render() {
     // tall. Rather than shorten the vertical reach to keep the officer in
     // frame — which is the very thing the scope is for — he goes off the edge
     // and this marks where. Over the slot bar, not under it.
-    if (me) drawSelfMarker(ctx, me.x - view.x, me.y - view.y, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    if (me) {
+      drawSelfMarker(
+        ctx,
+        (me.x - view.x) * scale,
+        (me.y - view.y) * scale,
+        VIEWPORT_WIDTH,
+        VIEWPORT_HEIGHT,
+      );
+    }
     // The beacon map goes over the HUD — it is a thing you stop and read, and
     // it closes itself the moment the handset leaves your hand.
     if (minimapOpen && map) {

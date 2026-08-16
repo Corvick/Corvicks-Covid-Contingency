@@ -4,9 +4,23 @@
     <meta charset="UTF-8" />
     <title>Zombie Simulator</title>
     <style>
-      html, body { margin: 0; height: 100%; background: #111; overflow: hidden; font-family: sans-serif; }
-      #stage { position: relative; width: 960px; margin: 40px auto; }
-      canvas { display: block; background: #222; cursor: none; }
+      html, body {
+        margin: 0; height: 100%; background: #111; overflow: hidden;
+        font-family: sans-serif; display: grid; place-items: center;
+      }
+      /*
+        The canvas renders at VIEWPORT_WIDTH x VIEWPORT_HEIGHT and is *scaled*
+        to fit the window, keeping its aspect ratio — a 1920x1080 backbuffer on
+        a 1440p laptop has to letterbox rather than overflow. `input.ts` already
+        maps client pixels back to canvas pixels through getBoundingClientRect,
+        so the scaling costs the mouse nothing.
+      */
+      #stage {
+        position: relative;
+        width: min(100vw, calc(100vh * 16 / 9));
+        aspect-ratio: 16 / 9;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: #222; cursor: none; }
 
       #hud {
         position: absolute; top: 8px; left: 12px;
@@ -271,6 +285,19 @@
           <h2>Outbreak Contained</h2>
           <p>Every zombie has been put down.</p>
           <button id="victory-restart">Back to menu</button>
+        </div>
+      </div>
+
+      <!--
+        The dog's own ending. It is not the global game over — the round carries
+        on around it, and it keeps watching, so this panel says what happened to
+        *it* rather than to the city.
+      -->
+      <div id="dog-out" class="overlay hidden">
+        <div class="panel">
+          <h2>Put Down</h2>
+          <p>Nothing left on the streets to rise out of.</p>
+          <button id="dog-out-restart">Back to menu</button>
         </div>
       </div>
     </div>

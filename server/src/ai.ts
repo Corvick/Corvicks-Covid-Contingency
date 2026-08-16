@@ -194,6 +194,8 @@ import {
   BOT_BOLT_DIST,
   BOT_SAFE_DIST,
   BOT_SHAKEN_MS,
+  CITY_OFFICER_DOG_DAMAGE_MUL,
+  GRAPPLED_COOLDOWN_MUL,
   BOT_SPRINT_TRIGGER,
   BOT_DODGE_RANGE,
   BOT_DODGE_CONE,
@@ -2944,34 +2946,38 @@ function officerGrade(
   // real gun slot and takes `DISPATCHED_DAMAGE_MUL` on top: they arrive in
   // numbers, aim well and never stop shooting, and at the gun's paper damage
   // one call cleared streets faster than you could walk down them.
+  //
+  // **Every grey officer is now one thing.** There used to be three grades of
+  // them — the one already on the corner, the van's driver, and the pair out of
+  // a patrol car with bolt action rifles — and telling them apart on screen was
+  // impossible, because they are all the same grey figure. So grey is grey: the
+  // officer's pistol, at an accuracy worth respecting. Only the two grades that
+  // are *drawn* differently keep their own profile.
   const tier = world.swat.has(id)
     ? { sight: SWAT_SIGHT, bloom: SWAT_BLOOM_RAD, interval: SWAT_SHOOT_INTERVAL_MS, sent: true }
-    : world.riflemen.has(id)
+    : world.soldiers.has(id)
       ? {
-          sight: RIFLEMAN_SIGHT,
-          bloom: RIFLEMAN_BLOOM_RAD,
-          interval: RIFLEMAN_SHOOT_INTERVAL_MS,
+          sight: SOLDIER_SIGHT,
+          bloom: SOLDIER_BLOOM_RAD,
+          interval: SOLDIER_SHOOT_INTERVAL_MS,
           sent: true,
         }
-      : world.soldiers.has(id)
-        ? {
-            sight: SOLDIER_SIGHT,
-            bloom: SOLDIER_BLOOM_RAD,
-            interval: SOLDIER_SHOOT_INTERVAL_MS,
-            sent: true,
-          }
-        : {
-            sight: NPC_OFFICER_SIGHT,
-            bloom: NPC_OFFICER_BLOOM_RAD,
-            interval: NPC_OFFICER_SHOOT_INTERVAL_MS,
-            sent: false,
-          };
+      : {
+          sight: NPC_OFFICER_SIGHT,
+          bloom: NPC_OFFICER_BLOOM_RAD,
+          interval: NPC_OFFICER_SHOOT_INTERVAL_MS,
+          sent: false,
+        };
 
   if (!tier.sent) {
+    // The pistol out of the registry rather than the unnamed `GUN_DAMAGE_*`
+    // fallback, so a grey officer's round hits exactly as a player's sidearm
+    // does and there is one number to tune instead of two.
     return {
       sight: tier.sight,
       bloom: tier.bloom,
       interval: tier.interval,
+      gun: ITEMS.pistol,
       damageMul: 1,
     };
   }
@@ -3239,7 +3245,27 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         // the two halves disagreeing about what is in his hands.
         if (mag.ammo <= 0) bag.activeSlot = 0;
       }
-      fire(world, e, state.heading, bloom, now, gun, 1, damageMul);
+      // **The garrison does not miss a dog.** The officers the city started
+      // with shoot it dead straight and harder than they shoot anything else.
+      //
+      // This is a rule about the *map*, not about marksmanship: without it a
+      // dog simply runs to whichever quarter has nobody in it and starts an
+      // outbreak there faster than anyone can cross the city to answer. Being
+      // spread evenly is half of that answer and being genuinely dangerous when
+      // you get there is the other half. Anyone a radio call sent later is
+      // exempt — they are the response, not the deterrent.
+      const atDog = threat !== undefined && world.dogs.has(threat.id);
+      const onTheDog = atDog && world.cityOfficers.has(e.id);
+      fire(
+        world,
+        e,
+        state.heading,
+        onTheDog ? 0 : bloom,
+        now,
+        gun,
+        1,
+        damageMul * (onTheDog ? CITY_OFFICER_DOG_DAMAGE_MUL : 1),
+      );
     }
 
     // Walk backwards to hold the far edge of their sight line, never turning
@@ -4551,6 +4577,26 @@ function botWalkSpeed(inv: Inventory): number {
   return BOT_WALK_SPEED * (inv.utilities.includes('combatBoots') ? BOOTS_SPEED_MUL : 1);
 }
 
+/**
+ * How far off the nearest dog it can actually see is, or Infinity.
+ *
+ * Walked directly rather than kept anywhere: a lobby holds two dog seats, so
+ * this is a loop of at most two and one line-of-sight ray, which is cheaper
+ * than any bookkeeping that would keep the answer up to date.
+ */
+function nearestDogInSight(world: World, e: Entity): number {
+  let best = Infinity;
+  for (const id of world.dogs) {
+    const dog = world.entities.get(id);
+    if (!dog) continue;
+    const d = Math.hypot(dog.x - e.x, dog.y - e.y);
+    if (d >= best || d > BOT_SAFE_DIST) continue;
+    if (!hasLineOfSight(world, e.x, e.y, dog.x, dog.y, true)) continue;
+    best = d;
+  }
+  return best;
+}
+
 function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, dt: number): void {
   const inv = world.inventories.get(e.id);
   if (!inv) return;
@@ -4668,7 +4714,20 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // 23/40 alive against 22/40, while the median city finished with 263
     // zombies in it rather than 229. Four officers who stop fighting are four
     // officers who lose the city, and then die in it anyway.
-    if (closest < BOT_BOLT_DIST) state.bolting = true;
+    // **Never turn your back on the dog.**
+    //
+    // Bolting is turning round and running, and against a shambler that works
+    // because a jogging officer outpaces one. A dog is faster than a sprinting
+    // officer, so running from it is simply presenting it your back at the
+    // exact moment it catches you — every bolt is a free bite. Facing it and
+    // giving ground keeps the gun on it the whole way, which is the only thing
+    // that has ever made one break off.
+    //
+    // Only while it is *in view*: a dog on the other side of the city is no
+    // reason to stand and take a pack in the face.
+    const dogOnUs = nearestDogInSight(world, e) < BOT_SAFE_DIST;
+    if (dogOnUs) state.bolting = false;
+    else if (closest < BOT_BOLT_DIST) state.bolting = true;
     else if (closest > BOT_SAFE_DIST || state.botWinded) state.bolting = false;
 
     if (state.bolting) {
@@ -4703,7 +4762,13 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     if (closest > BOT_SAFE_DIST && chargeInfectedTick(world, e, state, inv, now, dt)) return;
 
     // Standing and fighting: face it, hold the best gun, and open up.
-    botStaminaTick(state, false, dt, inv);
+    //
+    // The reserve is ticked exactly once a tick. Giving ground now *spends* it
+    // (see the kite below), so this refill has to stand aside on those ticks or
+    // the two calls fight each other and a sprint drains at the difference
+    // between them. The flag is last tick's decision, which is what the
+    // hysteresis makes it anyway.
+    if (!state.botGiving) botStaminaTick(state, false, dt, inv);
     // A curable human nearby is worth the cure gun over anything else.
     if (!cureTick(world, e, state, inv, now, dt)) {
       const want = longestGun(inv);
@@ -4757,7 +4822,16 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const bearing = state.botClosing
         ? aim
         : giveGroundHeading(world, e, state, Math.atan2(-dy, -dx));
-      const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv) * BOT_KITE_SPEED_MUL);
+      // **Giving ground is a sprint.** Kiting used to back off at a fraction of
+      // a *walk*, which is slower than everything it was backing away from — so
+      // the gap it was trying to keep closed anyway and the kite was a slower
+      // way of standing still. It spends the reserve like a bolt does and drops
+      // to a walk when winded, which `botStaminaTick` already handles; closing
+      // in stays a walk, because walking *toward* something is not urgent.
+      const pace = state.botGiving
+        ? botStaminaTick(state, true, dt, inv)
+        : botWalkSpeed(inv);
+      const speed = speedAt(world, e.x, e.y, pace * BOT_KITE_SPEED_MUL);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
       // Slide along whichever axis is open rather than stopping dead.
@@ -5420,37 +5494,24 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
     if (zombieAtSandbag(world, e, state, now)) return;
 
     // Entities are kept apart by collision, so "contact" needs a little slack.
-    const immuneUntil = world.grappleImmune.get(target.id);
-    if (immuneUntil !== undefined && now >= immuneUntil) world.grappleImmune.delete(target.id);
-    const shielded = immuneUntil !== undefined && now < immuneUntil;
-
-    // A riot shield turns a grab away outright from whichever side it happens
-    // to be covering — in front while it is up, behind while it is slung. It
-    // costs a charge and buys the same breathing space the vest does, and
-    // being caught from the *other* side is the whole cost of carrying one.
-    if (!shielded && dist <= e.radius + target.radius + GRAPPLE_REACH_BONUS) {
-      const inv = world.inventories.get(target.id);
-      if (inv && inv.shield > 0) {
-        const off = Math.abs(angleDelta(Math.atan2(e.y - target.y, e.x - target.x), target.facing));
-        const covered = inv.shieldUp
-          ? off <= SHIELD_FRONT_ARC
-          : off >= Math.PI - SHIELD_BACK_ARC;
-        if (covered) {
-          inv.shield--;
-          if (inv.shield <= 0) {
-            inv.shieldUp = false;
-            const at = inv.utilities.indexOf('riotShield');
-            if (at >= 0) inv.utilities.splice(at, 1);
-          }
-          world.grappleImmune.set(target.id, now + KEVLAR_IMMUNE_MS);
-          return;
-        }
+    if (dist <= e.radius + target.radius + GRAPPLE_REACH_BONUS) {
+      // Two randoms averaged rather than one: a triangular roll, so a grab is
+      // about two seconds nearly every time and the 1s and 3s ends are rare.
+      // See GRAPPLE_MIN_MS.
+      const roll = (Math.random() + Math.random()) / 2;
+      const got = attemptGrab(
+        world,
+        e,
+        target,
+        now,
+        GRAPPLE_MIN_MS + roll * (GRAPPLE_MAX_MS - GRAPPLE_MIN_MS),
+      );
+      if (got === 'grabbed') {
+        e.facing = Math.atan2(target.y - e.y, target.x - e.x);
+        return;
       }
-    }
-
-    if (!shielded && dist <= e.radius + target.radius + GRAPPLE_REACH_BONUS) {
-      let session = world.grapples.get(target.id);
-      if (session && session.zombieIds.size >= MAX_GRAPPLERS && !session.zombieIds.has(e.id)) {
+      if (got === 'shielded') return;
+      if (got === 'full') {
         // Pack is full. Drop the target *and* the memory of where they were,
         // otherwise the last-seen position drags us straight back to the pile.
         state.targetId = null;
@@ -5463,25 +5524,7 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
         state.wanderX = Math.atan2(e.y - target.y, e.x - target.x) + (Math.random() - 0.5) * 1.4;
         return;
       }
-      if (!session) {
-        // A vest turns a grab into a brief scuffle it loses.
-        const vest = world.inventories.get(target.id);
-        const armoured = vest !== undefined && vest.kevlar > 0;
-        // Two randoms averaged rather than one: a triangular roll, so a grab
-        // is about two seconds nearly every time and the 1s and 3s ends are
-        // rare. See GRAPPLE_MIN_MS.
-        const roll = (Math.random() + Math.random()) / 2;
-        session = {
-          zombieIds: new Set(),
-          endsAt: armoured
-            ? now + KEVLAR_GRAPPLE_MS
-            : now + GRAPPLE_MIN_MS + roll * (GRAPPLE_MAX_MS - GRAPPLE_MIN_MS),
-        };
-        world.grapples.set(target.id, session);
-      }
-      session.zombieIds.add(e.id);
-      e.facing = Math.atan2(target.y - e.y, target.x - e.x);
-      return;
+      // 'immune' — the vest's breather. Keep coming; they just can't be held.
     }
 
     // Burst of speed to close the final gap.
@@ -5656,6 +5699,83 @@ interface GrappleLike {
 }
 
 /**
+ * What came of trying to get hold of somebody.
+ *
+ * `shielded` and `immune` are both refusals and they are deliberately not the
+ * same one: a shield spent turns the attacker away for that tick, where the
+ * breather a vest buys leaves it still coming — it simply cannot get a grip.
+ * Collapsing the two makes kevlar look like a shield and a shield look useless.
+ */
+export type GrabResult = 'grabbed' | 'shielded' | 'immune' | 'full';
+
+/**
+ * One attacker getting hold of one victim. The caller has already decided the
+ * two are close enough — a zombie measures body to body, a dog measures off the
+ * end of its muzzle — and everything about whether the grab is *allowed* is
+ * here.
+ *
+ * It exists as one function because a dog is a second thing that grabs people,
+ * and kevlar, the riot shield, the immunity window and `MAX_GRAPPLERS` all have
+ * to mean the same thing to both of them. Written twice they would drift, and
+ * the drift would show up as "the vest doesn't work on dogs" a month later.
+ *
+ * `holdMs` is how long this attacker's grip lasts — two seconds for a zombie,
+ * far longer for a dog, which has shaking to do something about it. Armour
+ * overrides it either way: a vest turns any grab into a scuffle it loses.
+ */
+export function attemptGrab(
+  world: World,
+  attacker: Entity,
+  target: Entity,
+  now: number,
+  holdMs: number,
+): GrabResult {
+  const immuneUntil = world.grappleImmune.get(target.id);
+  if (immuneUntil !== undefined && now >= immuneUntil) world.grappleImmune.delete(target.id);
+  if (immuneUntil !== undefined && now < immuneUntil) return 'immune';
+
+  // A riot shield turns a grab away outright from whichever side it happens to
+  // be covering — in front while it is up, behind while it is slung. It costs a
+  // charge and buys the same breathing space the vest does, and being caught
+  // from the *other* side is the whole cost of carrying one.
+  const inv = world.inventories.get(target.id);
+  if (inv && inv.shield > 0) {
+    const off = Math.abs(
+      angleDelta(Math.atan2(attacker.y - target.y, attacker.x - target.x), target.facing),
+    );
+    const covered = inv.shieldUp ? off <= SHIELD_FRONT_ARC : off >= Math.PI - SHIELD_BACK_ARC;
+    if (covered) {
+      inv.shield--;
+      if (inv.shield <= 0) {
+        inv.shieldUp = false;
+        const at = inv.utilities.indexOf('riotShield');
+        if (at >= 0) inv.utilities.splice(at, 1);
+      }
+      world.grappleImmune.set(target.id, now + KEVLAR_IMMUNE_MS);
+      return 'shielded';
+    }
+  }
+
+  let session = world.grapples.get(target.id);
+  if (session && session.zombieIds.size >= MAX_GRAPPLERS && !session.zombieIds.has(attacker.id)) {
+    return 'full';
+  }
+  if (!session) {
+    // A vest turns a grab into a brief scuffle it loses.
+    const armoured = inv !== undefined && inv.kevlar > 0;
+    session = {
+      zombieIds: new Set(),
+      endsAt: now + (armoured ? KEVLAR_GRAPPLE_MS : holdMs),
+    };
+    world.grapples.set(target.id, session);
+  }
+  // Joining an existing grip inherits its deadline and cannot push it back —
+  // see the note on `endsAt` only ever being set inside the `if (!session)`.
+  session.zombieIds.add(attacker.id);
+  return 'grabbed';
+}
+
+/**
  * A grapple almost always ends with the victim breaking free while carrying
  * the infection — they run, then turn minutes later. Clean escapes and
  * on-the-spot turns are both uncommon, and pile-ons push toward turning now.
@@ -5815,7 +5935,6 @@ export function processPendingInfections(world: World, now: number): void {
 function pinnedOfficerTick(world: World, e: Entity, state: AiState, now: number): void {
   if (!isInGrapple(world, e.id)) return;
   const inv = world.inventories.get(e.id);
-  if (!inv) return;
 
   // Whatever has hold of us, by preference — otherwise whatever we were on.
   const session = world.grapples.get(e.id);
@@ -5837,7 +5956,34 @@ function pinnedOfficerTick(world: World, e: Entity, state: AiState, now: number)
   const aim = Math.atan2(attacker.y - e.y, attacker.x - e.x);
   e.facing = aim;
   state.heading = aim;
-  fireHeld(world, e, inv, aim, now);
+
+  if (inv) {
+    fireHeld(world, e, inv, aim, now);
+    return;
+  }
+
+  // **No bag at all, which is every officer the city started with.** They shoot
+  // through `officerGrade` rather than out of an inventory, so `fireHeld` — and
+  // with it this whole branch — did nothing for them: a grey officer with a dog
+  // on his arm simply stood there and was eaten. The grade already knows what
+  // he is holding and how fast, so the only thing to add is the same penalty
+  // `fireHeld` charges a grappled man.
+  if (now < state.nextShotAt) return;
+  const { bloom, interval, gun, damageMul } = officerGrade(world, e.id);
+  state.nextShotAt = now + interval * GRAPPLED_COOLDOWN_MUL;
+  // The garrison does not miss a dog, and being bitten by one is exactly when
+  // that is supposed to matter.
+  const onTheDog = world.dogs.has(attacker.id) && world.cityOfficers.has(e.id);
+  fire(
+    world,
+    e,
+    aim,
+    onTheDog ? 0 : bloom,
+    now,
+    gun,
+    1,
+    damageMul * (onTheDog ? CITY_OFFICER_DOG_DAMAGE_MUL : 1),
+  );
 }
 
 export function updateAi(world: World, now: number, dt: number, frozen: Set<string>): void {

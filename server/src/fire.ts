@@ -18,9 +18,10 @@ import {
   FLAME_LAND_INSET,
   FLAME_SPREAD,
   FLAME_TRAVEL_MS,
+  FLAME_INFECTED_DAMAGE_MUL,
 } from '../../shared/constants.js';
 import { segmentCircleT, segmentRectT } from './geometry.js';
-import { isWindowIntact, type Entity, type World } from './world.js';
+import { isWindowIntact, killEntity, type Entity, type World } from './world.js';
 import type { Wall } from '../../shared/types.js';
 
 /**
@@ -200,10 +201,25 @@ export function sprayFlame(
  * burning the uninfected becomes a cheaper way to stop an outbreak than
  * fighting it. Officers don't catch at all for the same kind of reason.
  */
+/**
+ * Does fire treat this body as one of the dead?
+ *
+ * Civilians cannot be burned to death, by construction — a flamethrower that
+ * clears a street of the people you are there to save is a tool for losing.
+ * **Somebody already carrying the infection is not that case.** They are going
+ * to turn, everyone can see it coming, and burning them is the crowd-level
+ * answer to an outbreak the way the charge rifle is the single-target one and
+ * the cure gun is the merciful one. So the protection is a rule about the
+ * *uninfected*, and it lifts the moment they are bitten.
+ */
+function burnsLikeTheDead(world: World, victim: Entity): boolean {
+  return victim.type !== 'human' || world.pendingInfections.has(victim.id);
+}
+
 export function ignite(world: World, victim: Entity, now: number, ms: number): void {
   if (victim.type === 'officer') return; // officers don't catch, for now
 
-  if (victim.type === 'human') {
+  if (!burnsLikeTheDead(world, victim)) {
     const cap = now + HUMAN_BURN_MS;
     world.burning.set(victim.id, Math.min(cap, Math.max(world.burning.get(victim.id) ?? 0, cap)));
     return;
@@ -254,14 +270,18 @@ export function updateFires(world: World, now: number, dt: number): void {
       world.burning.delete(id);
       continue;
     }
-    // A zombie alight is dying; a civilian alight is having a bad moment.
-    if (e.type === 'human') {
+    // A zombie alight is dying; a clean civilian alight is having a bad moment.
+    // Somebody already bitten burns like the dead, and *harder* than the dead —
+    // fire is what the flamethrower has that nothing else does against a crowd
+    // that is half turned already.
+    if (!burnsLikeTheDead(world, e)) {
       // Standing in a fire re-lights them every tick, so the short burn alone
       // still adds up to a kill given a minute. The floor is what makes it
       // properly impossible rather than merely slow.
       e.health = Math.max(HUMAN_BURN_FLOOR, e.health - HUMAN_BURN_DAMAGE_PER_SEC * dt);
     } else {
-      e.health -= BURN_DAMAGE_PER_SEC * dt;
+      const carrying = e.type === 'human' && world.pendingInfections.has(id);
+      e.health -= BURN_DAMAGE_PER_SEC * (carrying ? FLAME_INFECTED_DAMAGE_MUL : 1) * dt;
     }
     // Burning is a state of movement as much as of health: they flail.
     const state = world.ai.get(id);
@@ -271,12 +291,10 @@ export function updateFires(world: World, now: number, dt: number): void {
     }
     if (e.health <= 0) {
       world.burning.delete(id);
-      if (!world.playerIds.has(id)) {
-        world.entities.delete(id);
-        world.ai.delete(id);
-        world.grapples.delete(id);
-        for (const session of world.grapples.values()) session.zombieIds.delete(id);
-      }
+      // Players used to be skipped outright here, which was harmless while the
+      // only ones who could catch were officers — and officers cannot. A dog
+      // is a player *and* burns, so it would have sat at zero health forever.
+      killEntity(world, e, now);
     }
   }
 }

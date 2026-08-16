@@ -67,6 +67,8 @@ Server modules and what each owns:
 - `doorplayer.ts` — the player's press-and-hold of E at a door, and its prompt
 - `combat.ts` — hitscan, weapons, window damage; `fireHeld` is the one
   trigger both players and bots pull
+- `dog.ts` — the playable zombie dog: its neck, its legs, its jaws, and what
+  shaking does to whoever is in them
 - `lobby.ts` — the rooms people wait in: create/join/sit/chat, and the browse
   list. Nobody has an entity until their lobby starts a round
 - `emplacement.ts` — the pocket gunner: its crew, its sandbags, its arc
@@ -751,6 +753,15 @@ from one place and no call site had to learn about it.
   looting, no turn rate: the arm is being held, so it fires where it already
   points. Measured over two seeds: 4 and 12 shots across 499 and 1008 ticks
   spent grappled, which is what a 5s cooldown buys.
+- **It bailed out on the city's own officers for two years of code.** It opened
+  with `const inv = ...; if (!inv) return;` — and a grey officer the city
+  started with has **no inventory at all**: they shoot through `officerGrade`,
+  not out of a bag. So every one of them stood mute and still while something
+  ate them, and the only ones who ever fought back pinned were bots and the crew
+  a radio sent. It falls through to the grade's own gun and cadence now, times
+  `GRAPPLED_COOLDOWN_MUL` like everyone else. Measured with a dog latched on
+  one: **2 rounds over 302 grappled ticks, taking the dog 90 → 40hp** — the
+  anti-dog accuracy applies here too, which is exactly when it should.
 
 ### Turning
 
@@ -793,26 +804,133 @@ zombie red, and most of them say so.
 
 ### Aiming past your own screen
 
+**The viewport is 1920×1080**, scaled by the page to fit the window keeping
+16:9 — the backbuffer is how much *world* you see, not how big the window is,
+and `input.ts` already maps client pixels back through `getBoundingClientRect`
+so the scaling costs the mouse nothing.
+
+**Raising it is not free, and the cost is not the pixels.** Everything derived
+from the viewport grows: `CAMERA_PAN_Y` carries the difference between the axes
+(580 now), and the three sight radii have to cover wherever the camera can put
+the screen — **1540 / 1820 / 1950** against 860 / 1180 / 1500 at 960×600. That
+is 3.1× the ground inside every viewer's fog, so roughly three times as many
+entities are serialised to each of them every tick, on top of 3.6× the pixels to
+paint.
+
+**The fog paid for it, and `CAMERA_ZOOM` paid the fog back.** At 1080p with the
+camera at 1:1 the polygon cost **6.4-16ms indoors with 15ms frame spikes**,
+against 0.5ms at 960×600 — a rebuild at 12.5Hz costing 12-16ms blows a 144Hz
+frame budget every time it fires.
+
+**The lever is the zoom, not the pan.** Everything the fog costs is set by how
+much *world* is on screen. Modelled across pan 50 to 90 the polygon's area moved
+by three percentage points; going from 1.0 to 1.6 zoom took it to a third. So
+the camera was pulled in rather than the pan cut back. Measured after, at three
+spots including the same dense indoor block: **fog 0.90 / 1.18 / 2.48ms, spike
+0ms**, and the sight radii fell out of it — 1540 → **970**, 1820 → **1240**,
+1950 → **1380**, which is a third of the ground serialised per viewer as well.
+
+- **The zoom multiplies the pan rather than fighting it.** What you feel is the
+  camera moving in *screen* pixels, and those are world pixels times the zoom.
+  `CAMERA_PAN_X` came down 160 → 100 and the felt movement did not change at
+  all: 100 × 1.6 is the same 160 screen px it was. The sideways pan was not sold
+  to buy this.
+- **`CAMERA_PAN_Y` is derived through the zoom too** — the 840px difference
+  between the axes is a *screen* quantity, so in world units it shrinks with the
+  zoom and the two axes still reach equally.
+- **The fog mask needed the zoom and did not have it.** `drawFog` converts world
+  coordinates onto a mask held at `FOG_MASK_SCALE` of the viewport, so the
+  conversion is `FOG_MASK_SCALE * CAMERA_ZOOM` — while the *blur* is a screen
+  quantity and stays on `FOG_MASK_SCALE` alone. Two scales that were the same
+  number while the camera was 1:1, and are not any more.
+- **The endgame is still not measured**: four hundred entities in view is what
+  stalled this game once before (see the note on paint under performance).
+
+**The camera is pulled in by `CAMERA_ZOOM` (1.6)** — the backbuffer stays
+1920x1080 and you simply see less ground, larger: 1200x675 world pixels rather
+than 1920x1080. That is still more of the city than the old 960x600 build
+showed, at nearly twice the fidelity.
+
 **The camera pans with the cursor, and this is not a scope feature.** It exists
-because the viewport is 960×600: without it you are aware of 480px of street to
-either side and only 300px above and below. `CAMERA_PAN_X` (60) is the small
-sideways one — there is no awareness to win there, it is just the camera
-answering the mouse — and `CAMERA_PAN_Y` is **derived** as
-`CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / 2`, so it carries the
-180px difference between the two axes on top. Both then reach the same
-distance: 540 with nothing in hand, 970 down a scope. Derived rather than
-written down so the two cannot drift apart if either the pan or the viewport
-changes.
+because the screen is wider than it is tall: without it you are aware of far
+more street to either side than above and below. `CAMERA_PAN_Y` is **derived** as
+`CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / (2 * CAMERA_ZOOM)`, so it
+carries the difference between the two axes on top and evens them up. Derived
+rather than written down so the two cannot drift apart if either the pan or the
+viewport changes.
 
-That is what pushed `PLAYER_SIGHT_RADIUS` from 640 to 760: the far corner of a
-panned screen is 727 from the officer, and a client lighting ground the server
-never sent entities for is the exact bug that constant exists to prevent.
+**But the pan must never carry you out of the frame, and the derivation alone
+will.** Evening the axes up asks for 362 world px vertically, which at
+`CAMERA_ZOOM` 1.6 is **580 screen px against a half-screen of 540** — so at full
+vertical deflection the body you are driving sat 40px past the top edge, on any
+ground the view clamp wasn't already pinning. The fog hole is centred on the
+player and went off with it, leaving a screen of lit ground and the outer
+falloff: no walls, no bodies, nothing. Reported as *"in different locations when
+my cursor goes to a spot, everything but the floor and some fog stop
+rendering"*, which is exactly what it looks like.
 
-Fog cost with the pan in, measured over 200 spots: hip fire **0.62ms** median
-(still under the 0.87ms it was before any of this, because of the clip below),
-binoculars 1.98ms, a scope 2.93ms median / 7.5ms worst. The worst case is only
-paid while a scope is actually in hand and only on a rebuild (12.5Hz). If it
-ever needs trimming the knobs are `SCOPE_PUSH` and `CAMERA_PAN_X`.
+- **`PAN_KEEP_ON_SCREEN` (0.72) caps the vertical reach** at 243 world px. The
+  derivation can go on asking for whatever it likes; the cap is what keeps the
+  player in frame. The two axes no longer reach the same distance — 580 world px
+  vertically against 700 sideways — and that is the trade.
+- **The cap is on the pan only, never on `SCOPE_PUSH`.** An officer down a scope
+  leaving the bottom of the screen is the intended Foxhole behaviour and
+  `drawSelfMarker` exists for precisely that. A dog's `scopeReach()` is 0, so a
+  dog can never leave the frame at all.
+- **The view clamp is what hid this**, and it is worth knowing when re-measuring:
+  near a map edge `cameraFor` pins `view.y` and the player stays put on screen
+  however hard the pan pushes. Reproducing it live means standing well inside the
+  map, which is why the honest measurement is the sweep below rather than driving
+  a round and watching.
+- Measured by replicating `updateScope` + `cameraFor` against the real constants
+  and sweeping the cursor over a 41×41 grid of the frame, both pans in **one
+  build**: uncapped, **28 of 1681** cursor positions put the player outside the
+  frame, worst overshoot 40px, at the top and bottom edges. Capped, **0 of 1681**,
+  and the player never comes closer than **151px** to an edge. Fog against what
+  the server sends afterwards: 890/890, 1164 against 1180, 1294 against 1310.
+
+**It applies to anything a person drives**, officer or dog. `updateScope` has no
+branch on what you are at all — the pan is a property of the camera rather than
+of what is in your hands. A dog's `scopeReach()` is 0, said outright rather than
+left to fall out of the empty inventory the server sends it (which answers
+"pistol", and so happens to have no scope — the right answer by accident).
+
+**`CAMERA_PAN_X` went 60 → 160, and the reasoning behind 60 was wrong.** The
+argument was that the screen is already wide so there is no *awareness* to win
+sideways, which is true and still the wrong call: at 60 against a vertical 240,
+running the mouse to the left edge moved the camera a quarter of a body width
+while running it to the top moved half a screen. What you feel is the camera
+moving, not the arithmetic behind it. The sideways-to-vertical ratio is 0.47
+now, against 0.25.
+
+**The three sight radii are derived from the pan, not chosen.** The fog has to
+reach wherever the camera can put the screen and the server has to send entities
+that far, so the pan and the zoom between them set all three. At 1920×1080,
+`CAMERA_ZOOM` 1.6 and a pan of 100/243 the sampled corners are 874 / 1164 / 1294,
+and the radii are **890 / 1180 / 1310**. Move the pan, the zoom or the viewport
+and re-derive them, or the far half of the screen goes dark. Note the zoom cuts
+both ways: pulling the camera *in* shrinks how much world is on screen, which is
+why it is the cheapest lever on fog cost and why these came down rather than up.
+
+- **The binoculars were already short before any of this**, which is worth
+  recording. At the old pan the corner was 1036 against a sight radius of 980,
+  so the client had been lighting fifty-odd pixels of ground the server was not
+  sending entities for whenever they came up — the same fault raising the sniper
+  once caused. It is invisible unless you go looking, because what it produces
+  is an empty street rather than an error.
+- **The check worth keeping** is `fogRadius(reach) <= sightRadius` for each of
+  hip fire, binoculars and a scope. Measured after the pan cap: **890/890, 1164
+  against 1180, 1294 against 1310** — no dark band on any of the three.
+
+Fog cost, measured over 200 spots at the *old* pan of 60: hip fire **0.62ms**
+median (still under the 0.87ms it was before any of this, because of the clip
+below), binoculars 1.98ms, a scope 2.93ms median / 7.5ms worst. The worst case
+is only paid while a scope is actually in hand and only on a rebuild (12.5Hz).
+Those figures are from before the pan went to 160 and the radii with it, so they
+are a floor rather than the current number — a live city with a dog on screen
+reads **0.50ms** on the HUD at 144fps, so nothing has gone wrong, but the
+200-spot sweep has not been re-run. If it ever needs trimming the knobs are
+`SCOPE_PUSH` and `CAMERA_PAN_X`.
 
 **The scope and the binoculars push the camera; they do not zoom it.** Zooming
 was the first answer and the wrong one — it shrinks the officer, the city and
@@ -1062,8 +1180,8 @@ which is a fire vanishing rather than a fire dying. `FIRE_FADE_FRACTION` gives
 the last 45% of a patch's life over to going out, and the curve reaches
 genuinely nothing: 0.34 alpha down to 0.000, 1.0 scale down to 0.30.
 
-**Civilians cannot be burned to death, by construction.** `ignite` caps them at
-`HUMAN_BURN_MS` (700ms) rather than extending, they take
+**Clean civilians cannot be burned to death, by construction.** `ignite` caps
+them at `HUMAN_BURN_MS` (700ms) rather than extending, they take
 `HUMAN_BURN_DAMAGE_PER_SEC` (2) instead of 26, and `updateFires` clamps them at
 `HUMAN_BURN_FLOOR`. All three are needed: the cap alone still lets a civilian
 parked in a fire be re-lit every tick, and 2/s is still a kill given a minute.
@@ -1072,6 +1190,259 @@ alive. This is a rule about the game, not about fire: without it the
 flamethrower is a tool for clearing a street of the people you are there to
 save, and burning the uninfected is a cheaper way to stop an outbreak than
 fighting it. Same shape as kevlar's absolute "can't be infected".
+
+**The infected are the exception, and they are what the weapon is for.**
+`burnsLikeTheDead` is the one test: somebody already carrying it burns with no
+cap, no floor, and `FLAME_INFECTED_DAMAGE_MUL` on top. The protection is a rule
+about the *uninfected* and it lifts the moment they are bitten — they are going
+to turn, everyone can see it coming, and this is the crowd-level answer to an
+outbreak where the charge rifle takes one carrier at a time and the cure gun
+saves one at a time. Verified in the same fire, side by side: two minutes leaves
+a clean civilian on 25hp and burns a bitten one down.
+
+**And it comes with the sight to aim it.** A flamethrower **in hand** picks the
+infected out of a crowd — the same narrow hole in server-enforced fog the cure
+gun punches, for the same reason: a weapon that answers a problem nobody can see
+is a weapon nobody uses. Held rather than merely carried, unlike the cure gun's,
+because it is a thing you raise and look down; walking around with one slung
+does not open the fog.
+
+### The zombie dog
+
+Team 2's seat, and the first thing on the outbreak's side a person can drive.
+`server/src/dog.ts` owns it.
+
+**It is a zombie with a `dog` flag, not a type of its own.** That is the whole
+reason it needed so little code. `type: 'zombie'` means bullets find it
+(`fire` only ever considered zombies), the crowd runs from it (`senseThreats`
+takes zombies as threats), the danger field is sourced from it, `countZombies`
+includes it so victory cannot fire while one is alive, and officers and bots
+target and shoot it. **None of that is written down anywhere.** It is the same
+shape `bot`, `swat`, `soldier` and `squadLead` already use to make four grades
+of officer out of one type — what is different about a dog is drawn, not
+declared. `EntityType` still has an unused `zombieMaster` for the other half of
+team 2; a separate type there is a bigger question, because a zombie master
+probably *shouldn't* be shot like an ordinary zombie.
+
+- **Which seat you took is the entire choice.** `seatedDogs` reads the lobby,
+  `spawnPlayer(id, asDog)` branches once, and a dog gets none of the officer
+  kit — no inventory, no rally charges, no debug heap. `world.dogs` is keyed by
+  connection like `playerIds` and deliberately survives `resetWorld`, so
+  restarting a round does not turn a dog player into an officer.
+- **`DOG_RADIUS` is what it collides with; `DOG_ART_RADIUS` is what it looks
+  like, and they are deliberately different numbers.** The collision circle is
+  capped by the narrowest doorway in the city and cannot grow: `CLEAR` in
+  `mapgen` is 46px, so a 38px body gets through with four pixels either side,
+  and much past 20 the dog snags in doorways — a hunting animal that cannot
+  follow people indoors is no use at all. How big it *looks* is an art decision
+  and has no business being held hostage to that, so the drawing is measured in
+  its own unit (23). Measured over six cities: narrowest 46px, **0** doorways
+  too tight. Anything geometric that has to line up with the *picture* — the
+  muzzle, and so the bite — measures in art radii too.
+- **`DOG_MUZZLE_OUT` keeps the jaws where the teeth are drawn.** The bite was
+  measured from the body centre while the head is drawn 1.25 radii forward, so
+  it landed a quarter of the animal behind where you can see it. The two have
+  to move together.
+- **It comes in at the breach**, with the rest of the outbreak.
+
+**The horde is its lives.** Shot down, the dog comes back **out of a shambler**:
+one somewhere on the map stops being a shambler and stands up as the dog, at
+that body's position, on full health. Run out of shamblers and the next death
+is the end of it — no entity, out of the round, and the HUD says so.
+
+**Dying is something you watch.** The body stays exactly where it fell for
+`DOG_DEATH_MS`, greyed and sprawled, and only then does the animal rise
+somewhere else — cutting straight to the new one gives being killed no weight
+at all, you would simply find yourself elsewhere. The screen holds on the body
+for the first `DOG_FADE_FROM` of that window and then goes to black, and comes
+back off it faster than it went. Measured: flagged dead for **2400ms of a
+2400ms window**, then up on full health 1859px away with the horde one shorter.
+
+- **The body it leaves is permanent.** `world.corpses` is never trimmed, so
+  four deaths leave four bodies for the rest of the round — the only lasting
+  mark the officers get for having killed one. Sent unfogged: a handful in a
+  whole round, and a corpse should not blink out because you turned round.
+- **`world.dogDeaths` is on the world, not on `DogState`, and that is the whole
+  bug.** It started on the dog's own state, which is created lazily on the first
+  tick and *deleted* on every respawn — so a dog shot in either of those windows
+  had nowhere to record that it had died. It dropped a body, kept its entity,
+  and could be killed again on the very next round. Measured before the fix: six
+  rounds on one body left **six corpses**; after, one.
+- **Whether it gets back up is settled when the clock runs out**, not when it
+  dies. The horde it needs to rise out of can be shot down — or turned up —
+  while it is lying there.
+- **A corpse is drawn by the same code as a live dog**, through `drawEntity`
+  with `dead` set: one `filter` on the context greys it, the legs are thrown out
+  at odds with each other, the head lolls, and the eyes go out. Baking a second
+  set of grey sprites would be cheaper per draw and would drift out of step with
+  the live ones the first time anything changed; at a handful of bodies a round
+  the filter is the right trade.
+
+- **That makes every zombie the officers put down worth something to both
+  sides**, which is the whole reason for it. It also closes the loop with the
+  win condition for free: a dog that is out holds no entity, so it stops being
+  counted by `countZombies`, and victory can fire the moment the last shambler
+  goes with it.
+- **Never out of another dog, and never out of itself.** Two dogs in a lobby do
+  not feed on each other.
+- **The entity is *moved*, not rebuilt**, so nothing keyed to its id anywhere
+  else has to be rebuilt with it, and it materialises in where the shambler was
+  — the swap is something you can watch rather than a body teleporting.
+- **`hosts` on the wire is counted, not kept.** Zombies are created and killed
+  all over the map by things that have no idea a dog exists, so a running total
+  would go stale; walking the entities once per snapshot for the one viewer who
+  needs it is cheaper than keeping it correct everywhere.
+- **`killEntity` in `world.ts` is where all of this lives, and pulling it out
+  fixed a real bug.** Bullets, fire and blasts each had their own copy of "this
+  body died" — and `heli.ts` deleted *any* zombie it dropped, which would have
+  removed a player's dog from the map outright, no respawn and no ending. Fire
+  had the mirror-image fault: it skipped players entirely, which was harmless
+  while only officers were players and officers cannot catch, and would have
+  left a burning dog sat at zero health forever. One function, three callers.
+- **`updatePlayers` skips it entirely.** Not one line of walking an officer
+  round applies: no weapon to steer the aim with, no boots, no bipod, and a body
+  that turns at its own rate rather than snapping. `processShooting` skips it
+  too, because it is not an officer, so left-click reaches `dog.ts` untouched.
+
+**The head leads and the body swings after it.** Both ease toward the mouse and
+the head simply gets there first (`DOG_HEAD_TURN_RATE` 13 rad/s against
+`DOG_BODY_TURN_RATE` 6.2). What stops it being a turret on a chassis is
+`DOG_HEAD_MAX_YAW`: past 60° the neck is out of travel and the head can only go
+where the body takes it. Measured, whipping the aim through 180°: the head is
+ahead of the body on 15 of 40 ticks and settles at tick 10 against the body's
+15. Movement stays WASD world-relative like an officer's — a dog you had to
+steer like a tank would be unplayable, and being able to back off while still
+looking at somebody is most of what the neck is *for*.
+
+- **There is dead space before the shoulders stir at all.** Inside
+  `DOG_BODY_DEADZONE` (~10°) the head turns on its own and the body does not
+  move — which is what a dog watching something looks like, and it is the whole
+  difference between a neck and a swivel mount. Past it the body chases the
+  *edge* of the dead space rather than the mouse, so it comes to rest exactly
+  that far behind and a sweep always leaves the head leading; chasing the mouse
+  itself closes the last ten degrees on arrival and undoes the point of it.
+  Measured: a flick of 0.126rad moves the body **0.00000rad**, and a swing to
+  1.400rad settles the body at 1.220 — trailing by exactly the dead space.
+- **Turning is ground covered, so the legs step through it.** A body pivoting on
+  the spot moves no distance at all, and a gait driven by displacement alone
+  left the dog rotating with its feet welded to the road. What the paws actually
+  travel is the arc their own radius sweeps, so that arc is simply added to the
+  distance walked and one gait handles walking and turning alike.
+- **The tail does not wag.** A wagging tail is a happy dog, and it was the last
+  thing on the animal still reading as a pet. It trails with a fixed kink, and
+  swings out behind a turn only because the second segment lags the first —
+  which is a thing a dead weight does rather than a mood.
+
+**The bite is held, not snapped.** Left click holds the mouth *open* for
+`DOG_JAWS_OPEN_MS` (2s) and the first body to walk into it is taken; let go, or
+run the window out, and the jaws shut and have to recover for
+`DOG_BITE_COOLDOWN_MS` (1.8s). Holding through the recovery opens them again, so
+a held button is a rhythm of open, shut, wait, open with no clicking.
+
+It used to snap on the click, which made the whole move a timing test against a
+30Hz tick and reduced the animal to a mouse button. Holding the jaws open puts
+the skill where it belongs — getting the dog into the right place with its head
+pointed at somebody — and is also simply what a dog charging you looks like.
+Measured: jaws open **2033ms** of a 2000ms window then shut with the button
+still down, **1833ms** shut against a 1800ms recovery, then open again; and
+somebody walked into an already-open mouth is taken with **no click at the
+moment of contact**.
+
+- **Tapping is how a door is chewed, holding is how a person is caught**, and
+  the same button does both with no mode. `DOG_DOOR_DAMAGE` lands once per
+  open-and-shut rather than per tick — chewing continuously while the mouth is
+  held open would take a door off its hinges in about a second. Measured: a
+  `DOOR_HEALTH` 1600 door down in **5.7s over 4 taps**.
+- **The HUD needs both readings.** "How long can I hold this open" and "when may
+  I open it again" are opposite questions, and one bar answering both gets read
+  wrong in the half-second that matters — so the open window drains in its own
+  colour and the recovery fills in another.
+
+**A bite is a latch, and shaking is what resolves it.** The jaws reach
+`DOG_BITE_REACH` past the *muzzle*, inside `DOG_BITE_ARC` of where the head is
+pointing — so the dog has to be looking at somebody rather than merely stood
+next to them. Measured: somebody at its tail is never bitten.
+
+- **`DOG_BITE_MS` is 3.6s, far longer than a shambler's two seconds**, because
+  unlike a shambler the dog has something to *do* about it. Hang on doing
+  nothing and it is the slowest bite in the game; worry at it and it lands in
+  under a second (`DOG_BITE_MIN_MS`). Measured: 3633ms held still, 933ms shaken,
+  with 75% of the clock torn off.
+- **A shake is a reversal, not travel.** Banking raw angular movement would let
+  somebody who spun the mouse in one direction shorten a bite as fast as one
+  worrying at it — and since the head is capped off the spine anyway, a
+  sustained sweep just drags the whole body round. The run in one direction is
+  banked only when the head comes back the other way, and a run under
+  `DOG_WIGGLE_MIN_RAD` is a twitch rather than a shake. Measured: spinning the
+  mouse one way held for 3633ms of a 3600ms bite — no credit at all.
+- **The floor is measured from when the bite started, not from now.** Written
+  the obvious way — `now + DOG_BITE_MIN_MS` — every credit shoves the deadline
+  three-quarters of a second into the future, so a player who keeps shaking
+  keeps renewing it and **the bite never lands at all**. Measured before the
+  fix: 400 ticks latched and still going.
+- **The jaw point sits at the two bodies' own separation, not inside it.** Held
+  any closer, the drag and `resolveCollisions` spend every tick undoing each
+  other — the drag hauls the victim in, collision shoves them apart, and the
+  pair slides bodily down the street with nobody driving. Measured: 106px of
+  travel over a bite where the mouse never moved. Now 0.0px/tick held still
+  against 13.5px/tick shaken, which is the throw doing its job and nothing else.
+- **A snap that catches nobody bites the door.** A dog that follows people
+  indoors and then stops dead at the first thing they pull shut is a dog beaten
+  by a door handle — and the shamblers have been tearing at doors since long
+  before it existed. A body always wins the jaws over a slab, so this only runs
+  when the snap found no one, and only for a shut door inside the same
+  `DOG_BITE_ARC` a throat has to be in. `DOG_DOOR_DAMAGE` is heavier per hit
+  than `DOOR_ZOMBIE_DAMAGE` because the dog pays the full jaw cooldown for each
+  one where a pack does not. Measured: a `DOOR_HEALTH` 1600 door off its hinges
+  after **8.4s** of biting — a delay, not a wall.
+- **Everything about whether a grab is *allowed* is `attemptGrab`, shared with
+  the shamblers.** Pulled out of `updateZombie` when the dog needed it: kevlar,
+  the riot shield, `world.grappleImmune` and `MAX_GRAPPLERS` have to mean the
+  same thing to both, and written twice they would drift into "the vest doesn't
+  work on dogs" a month later. `shielded` and `immune` are deliberately
+  different results — a shield spent turns the attacker away for that tick,
+  where a vest's breather leaves it still coming. Measured both ways round:
+  kevlar spends a use and denies the infection for a zombie *and* a dog; the
+  shield refuses both before any grapple exists at all.
+- **The grapple resolves through `resolveGrapple` like any other.** Escape roll,
+  instant turn, pending infection — a dog bite infects exactly as a grab does,
+  with no second code path.
+
+**Rounds knock it about, but not the way they knock a shambler about.** A
+shambler taking a rifle round is meant to be stopped in its tracks; a dog is the
+thing that gets away, and a full stagger on a body somebody is *driving* reads
+as the controls being taken off you rather than as being hit. So it takes a
+shorter stagger at part strength (`DOG_STAGGER_TIME_MUL`,
+`DOG_STAGGER_STRENGTH`) — a bolt action drops a shambler to 0.35 of pace and the
+dog to 0.68. Measured over 1.33s of sprinting down a pinned lane: 408px clean
+against 231px staggered. It has no `AiState`, so the pair live on `DogState` and
+`moveDog` reads them; `hit` calls `staggerDog` and needs to know nothing else.
+
+**Its health came down to 90.** The dog's real durability is its lives — it
+comes back out of the horde — so the body itself does not also need to soak a
+magazine. One that can stand in the open trading fire with the garrison never
+has to think about where it is.
+
+**Sprint is free, because a dog is a player.** `world.stamina` and
+`world.exhausted` are per-id and the HUD bar already reads them; `dog.ts` just
+maintains them. It wins a flat-out chase (328 px/s sprinting against an
+officer's 272) and pays for it — `DOG_STAMINA_DRAIN_PER_SEC` 62 against 46, and
+a slower refill. That is the whole chase: a handful of seconds, then a decision.
+
+**The HUD is two bars and a count, and they answer different questions.** The
+jaws say *can I bite yet*; the hold says *how much longer must I stay on this
+one*, with the part shaking has already torn off drawn as ground taken beyond
+the live bar — without that second reading, worrying at somebody is
+indistinguishable from waiting. Beside them is how many shamblers are left to
+rise out of, which is the only number on the screen that only ever goes down,
+so it sits *next to* the bar rather than in it: it is not a thing that fills.
+Everything an officer's HUD does — the slot bar, the E prompt, the Q wheel, the
+scroll — is simply not drawn for a dog.
+
+**Its ending is its own, not the city's.** `#dog-out` is a separate panel from
+`#game-over`: the round carries on around a dog that is out, and with no entity
+it falls through to the spectator path and keeps watching. Telling it "every
+survivor has turned" when the opposite happened would be simply wrong.
 
 ### Bot officers
 
@@ -1094,9 +1465,25 @@ races with zombies. A bot is meant to win them.
   not where they're standing, so it fires once instead of re-rolling every tick
   they spend inside.
 - **Giving ground and running away are different things.** Above
-  `BOT_BOLT_DIST` (120) a bot *kites*: it backs off at `BOT_KITE_SPEED_MUL`
-  (0.75) with the gun still up and the shot already fired that tick. Only
-  inside that does it turn its back and run. The bolt distance came down from
+  `BOT_BOLT_DIST` (120) a bot *kites*: it backs off with the gun still up and
+  the shot already fired that tick. Only inside that does it turn its back and
+  run.
+- **Kiting is a sprint.** It used to back off at a fraction of a *walk* — 86
+  px/s against a zombie's 94-133 — so the gap it was trying to hold closed
+  anyway and the kite was a slower way of standing still. It spends the reserve
+  like a bolt does and drops to a walk when winded. Closing *in* stays a walk,
+  because walking toward something is not urgent. The reserve is ticked exactly
+  once per tick: the fight branch's refill stands aside on a kiting tick, or the
+  two calls fight each other and a sprint drains at the difference between them.
+- **A bot never turns its back on the dog.** Bolting works against a shambler
+  because a jogging officer outpaces one; a dog is faster than a sprinting
+  officer, so running from it is presenting your back at the exact moment it
+  catches you, and every bolt is a free bite. With one in view inside
+  `BOT_SAFE_DIST` the bolt latch is held off and the bot gives ground facing it
+  instead. Measured with a dog 70px away: **0 of 90 ticks bolting**, gun on it
+  for 86 of 90 — against **87 of 90 ticks bolting** from an ordinary zombie at
+  the same 70px, which is the control that says the rule refuses *that threat*
+  rather than refusing to bolt at all. The bolt distance came down from
   165 and `BOT_SAFE_DIST` from 400, because an officer that breaks off at the
   first sight of one is an officer that never fights. The kiting band is wide
   for a rifle and narrow for a shotgun, which is right — a shotgun wants to be
@@ -1350,6 +1737,199 @@ magazine, which made swapping a way to manufacture ammo.
   comparison and pushing a body out is a slide along the same ray; nav grid,
   collision and the drawn bank all read `pondRadiusAt`, so what you see is
   exactly what you cannot cross.
+
+### Art direction: grim and dirty
+
+The beginning of the final look, not the end of it. Three things went in with
+the dog, and all three are built the cheap way on purpose.
+
+- **The road is a hashed tile, not a per-frame scatter.** One 256px tile of
+  blotches, cracks and grit is built once and repeated as a canvas pattern, so
+  the ground costs **one fill** at any zoom — the rasteriser only touches what
+  is on screen. Scattering blobs over the viewport every frame is the obvious
+  way to write it and is the expensive one; that is `drawBushes`'s lesson again.
+  It is kept at *very* low contrast, and not for taste: at any strength where
+  you can make out an individual blotch you can also make out where the tile
+  repeats, and the city turns into a grid of identical stains.
+- **Blood is derived, not sent.** `Shot.hit` already says a round found a body
+  and `x2,y2` is exactly where it stopped, so the wire carries nothing new. A
+  hit throws droplets along the round's line for half a second and leaves marks
+  on the road for forty. Every visible decal of a given age goes into **one
+  path filled once** — four alpha bands for two hundred marks — which is the
+  park's mistake avoided again, in red. `kind` gates it, so a cure and a flame
+  draw none.
+- **The vignette is one cached image.** Built at viewport size and blitted,
+  under the HUD and over the fog, so it frames the world without dimming
+  anything you have to read.
+
+### The dog is baked, not drawn
+
+`client/src/dogsprite.ts` paints the dog's parts **once** into offscreen
+canvases; `render.ts` only poses them. This is the seam to reach for if
+anything else ever needs to look better than live shapes will allow.
+
+- **Baking buys finish, not detail.** The look stays what the rest of the game
+  already is — bold flat shapes, strong silhouette, the same family as the
+  officers and the crowd. What a bake buys is the *finish* on those shapes:
+  supersampled edges and soft form shading that no per-frame budget would
+  cover. Painted fur and per-pixel grain were built first and thrown away —
+  they read as a different game pasted into this one. **The reference photo is
+  for silhouette and the top-down read, not for the rendering style.**
+- **It is parts, not a picture.** One baked sprite of a whole dog is a dead
+  sprite: the head has to swing, the halves have to come apart, the legs have
+  to walk. So the body, *one* head half, *one* limb segment and one paw are
+  baked, and the poser assembles them — ordinary 2D cutout animation, which is
+  what buys finished parts and articulation at once. Both bones of all four
+  legs are the same limb sprite.
+- **The legs are two-bone IK, and nothing less will do.** The knee started as
+  the midpoint of hip-to-paw nudged sideways, which keeps the two bones in a
+  fixed relative pose — so the whole leg simply *rotated* about the hip as the
+  paw swung, and it read exactly as a stick on a pivot. Solving the joint
+  against two fixed bone lengths makes the leg **fold and extend** instead: a
+  paw out at the front of its stride is further from the hip than one underneath
+  the dog, so the leg gathers and straightens over the cycle on its own. Fixed
+  bones also make the sprite stretch a constant, where before every frame drew a
+  slightly different-length limb.
+  - **Front and rear must fold opposite ways.** A dog's elbow points back and
+    its stifle points forward; give all four the same bend and it walks like a
+    table.
+  - **The foot is down for most of the cycle.** `max(0, sin)` has it airborne
+    half its life, which is a paddle rather than a walk — raising it to a power
+    narrows the lift into a short event and leaves the rest of the stride
+    planted.
+  - **Paw first, then the leg over it.** Drawn last it sits on top of the shin
+    like a blob stuck on the end. From above the leg comes down *onto* the foot,
+    so the lower bone overlaps the ankle and only the toes show past it — and
+    the upper goes over the lower at the knee for the same reason.
+- **Supersampling is most of the win.** Everything is painted at `DOG_SS` (6)
+  times final size and drawn back down; the downscale is a free high-quality
+  antialias. At a body barely forty pixels long, clean edges are most of what
+  "looks good" means.
+- **Mirroring, so the two sides cannot disagree.** One head half and one limb
+  are baked and drawn flipped, via `drawSprite`'s `flip`.
+- **`roundOff` is the trick worth knowing**: a *blurred dark stroke laid on a
+  shape's own outline, inside a clip of that shape*. It turns a flat blob into
+  a rounded one, and a blur is unaffordable per frame and free once.
+- **The head splits; it is not a jaw on a hinge.** A dog opening its mouth is a
+  dog. Two half-skulls peel apart about a hinge at the neck, each taking an eye
+  with it, throat open between and strings of saliva still bridging the gap.
+  Each half is baked with its inner edge flat along y=0, so at rest the pair
+  meet exactly on the centre line and read as one head with a seam — **there is
+  no separate "closed" drawing.**
+  - **They pull apart as well as swinging** (`DOG_SPLIT_SPREAD`). Rotation alone
+    is a jaw on a hinge however wide it goes, because the two pieces stay joined
+    at the back; sliding each one out from the hinge opens the seam along its
+    whole length, which is the difference between a mouth and a skull coming
+    apart.
+  - **The opening is eased, and it slams shut.** The wire carries a boolean, so
+    a head driven straight off it was simply open on some frames and shut on
+    others. Now that the mouth is *held* open for two seconds, the opening is a
+    thing you sit inside rather than a beat, and **the closing is the only
+    moment left with any snap in it** — `DOG_JAW_SHUT_MS` is 35ms against
+    `DOG_JAW_OPEN_MS`'s 90. Easing the close over a quarter-second, which is
+    what it did first, made the jaws sag together like a drawbridge.
+  - **The saliva is most of what sells it.** Each strand has its own breaking
+    point, hashed off the dog's id: below it the string bridges the gap and
+    bows, past it the thing has given way and hangs off both halves with a bead
+    swinging on each stub. Hashed rather than rolled means the mouth comes apart
+    the same way twice, which is what makes it read as anatomy rather than as
+    particles. They thin as they stretch, because a string being drawn out does.
+  - **The throat has to stay inside the jaws.** The half-skulls reach 0.9 radii,
+    so a maw drawn any longer pokes past the muzzle tips and stops being a
+    throat — it becomes a red blob stuck on the front of the animal, which is
+    exactly what widening the split first produced.
+  - **The tongue has to reach *past* them, for the same reason in reverse.**
+    Kept inside the mouth it is the same colour and roughly the same shape as
+    the throat behind it and reads as more maw; lolling out beyond the muzzle,
+    lighter than the throat and carrying its own dark contour, it reads as a
+    separate thing hanging out of the animal. It is a tapering body with a
+    forked tip rather than a stroke, it lolls to one side, and it moves on its
+    own clock — a tongue that sits politely still inside the mouth is one nobody
+    notices.
+- **A dog gets no self-ring.** Every other body draws a white outline when it is
+  yours; on a dog it was the loudest thing on screen, a bright hard ellipse
+  round the one entity whose whole design is being dark and hard to read. It is
+  also the least necessary one — at most two dogs exist, the camera is on yours,
+  and `drawSelfMarker` still puts a chevron where it went if the pan takes it
+  off screen.
+- **The eyes stay live**, not baked: they are additive and have to lie over
+  whatever the halves are doing. The glow radius is small on purpose — at any
+  radius it wants to be, the wash covers the whole skull and the head comes out
+  cream whichever side you look at. It says the eye is lit; it does not light
+  the animal.
+- **The head has to clear the shoulders.** Hinged at 0.34 radii the drawn nose
+  landed at 1.24 — *inside* the 1.3-radius front of the torso — so the head was
+  buried and the animal read as a lozenge with a face painted on the end. It
+  hinges at 0.86 now, well forward, and the neck has something to be.
+- **Ears are the single thing that made it look cute**, and the fix is shape
+  rather than size: a soft round ear is what a puppy has. They are knife-thin
+  blades raked back off the skull now, with a notch bitten out of the trailing
+  edge and the bare side's torn to a stump. The asymmetry is what stops a pair
+  of ears looking designed.
+- **The silhouette is where gruesomeness lives.** Chunks are bitten out of the
+  torso outline — dark ovals drawn from *outside* the shape, so the clip keeps
+  only the part that lands on the body and each is a piece of the dog that is
+  simply missing, with a rim of raw meat where the hide gave way. A smooth
+  outline reads as a healthy animal whatever is painted inside it; this is the
+  one change that makes the shape itself look wrong.
+- **The rest of the gore is texture, and all of it is dark.** A row of spine
+  knuckles pushing up through the hide, matted wet streaks with one thin sheen
+  each, a torn cheek on the bare side showing back teeth even when the mouth is
+  shut, blood worked back from the jaw line and drawn *over* the teeth (clean
+  white teeth in a bloody mouth is the giveaway that the blood is a decal), and
+  the last third of the tail stripped to bone — which reads instantly because a
+  tail is the one part of the silhouette that sticks out into empty ground.
+- **The maggots only work because the wound is nearly black.** Seven pale grains
+  against the cavity: the cheapest unpleasant detail on the animal, and
+  invisible against anything lighter.
+- **The ribs must be uneven.** Four, one snapped short, one bowed further than
+  its neighbours — evenly spaced and evenly bright is the barcode this already
+  got wrong once.
+- **None of it costs a frame.** All of it is painted once into the part sprites
+  at startup, which is the whole reason the animal can carry this much detail;
+  the per-frame cost is still about twenty `drawImage` calls.
+- **Four things went wrong repeatedly, all of them brightness or scale.** Bone
+  at full value makes half the head the lightest thing on screen and reads as a
+  mask. Five even bright ribs is a barcode, not a ribcage. The legs were too
+  long and the paws too splayed *twice* — from directly above that is not a
+  dog, it is a spider with a starfish at each corner. And pale leg tips at the
+  bigger size turn into little sprouts at each corner. All of them pull the eye
+  off the head, which is the one place it should be; everything bar the teeth
+  and the eyes is shaded well down.
+#### How photoreal it could get, and why it isn't
+
+`client/photodog.html` is a **standalone study**, imported by nothing. It asks
+how far a top-down dog can be pushed with no regard for cost: a deferred
+renderer that bakes a height field from ~45 ellipsoid masses, differentiates it
+into surface normals, lights every pixel by hand (wrapped diffuse, Blinn-Phong,
+AO off the height, rim, a little subsurface red through the thin parts), then
+lays **130,000 individual hairs** over it, each lit by the surface it grows out
+of and following a flow field. **1.9s for one frame** at 2200×1480.
+
+Keep it. It is the reference for anything that ever needs to look better than
+flat shapes, and the two findings out of it are worth more than the picture:
+
+- **Shading was never the bottleneck; geometry is.** The coat genuinely reads as
+  fur and the body genuinely has form — but the mouth, drawn as flat 2D over the
+  top, looks *pasted on*, and no amount of lighting fixes that. Everything has
+  to be in the height field or nothing should be. And ellipsoid blobs cannot
+  make a skull, a jaw hinge or a shoulder blade: the body reads as a furry tube
+  because it is one. Reaching photoreal means a real 3D model rendered to sprite
+  sheets offline, which is a different project.
+- **The lighting was ported into `dogsprite.ts` and reverted.** Deriving a
+  height field from each part's own alpha and lighting off it is strictly better
+  *when it is the only lighting* — and strictly worse on top of gradients that
+  were already hand-painted to look right. The two shade the same form twice and
+  the animal comes out flat, grey and desaturated. Measured by eye against the
+  version before it, which was plainly better. **Do not re-attempt this without
+  first stripping the hand-painted gradients out.**
+
+- **`client/dogpose.html` is the rig** — it imports the real `drawEntity` and
+  drives frames off `setInterval`, because rAF is throttled to nothing while
+  the browser pane isn't compositing. It draws the poses at 6x *and at 1:1 with
+  an officer beside them*, which matters: judging a 13px animal at six times
+  life is how you end up with detail nobody sees and a silhouette that doesn't
+  read. Measured in a live city: 144fps, 2.7ms tick, with the dog on screen.
 
 ## Performance rules (these matter — 400+ entities)
 
@@ -1777,18 +2357,44 @@ hit and carry exactly like the one a player can pick up. `SWAT_BLOOM_RAD`
 when you asked. The trigger is slower than a player's semi-auto (620 against
 470) so a four-man stack doesn't level a street before you have crossed it.
 
-**Four grades of grey officer, and `officerGrade` is all of the difference.**
-Sight, bloom, cadence, and what they are holding — a lookup rather than a chain
-of ternaries, because there are four now:
+**Grey is one grade. `officerGrade` is all of the difference, and there are
+only three tiers now** — the two that are *drawn* differently, plus everybody
+else:
 
 | | sight | bloom | cadence | gun | rounds |
 |---|---|---|---|---|---|
-| ambient, already on the street | 420 | 0.22 | 2000 | — | ∞ |
-| the van's **driver** | as ambient — he was driving, not shooting | | | | |
-| **riflemen**, out of a patrol car | 620 | 0.045 | 1150 | bolt action | 90 |
+| **any grey officer** — on the corner, the van's driver, out of a patrol car | 420 | 0.07 | 1100 | pistol | ∞ |
 | **SWAT**, out of a van | 560 | 0.045 | 620 | semi-auto | 220 |
 | **soldiers**, off a helicopter | 520 | 0.07 | 850 | semi-auto | 140 |
-| any of those three, **dry** | as their tier | 0.07 | 900 | pistol | ∞ |
+| either of those two, **dry** | as their tier | 0.07 | 900 | pistol | ∞ |
+
+There used to be three grades of grey and **you could not tell them apart on
+screen**, because they are all the same grey figure — the ambient one was
+deliberately hopeless (0.22 bloom on a two-second trigger, a miss at any range
+worth caring about) while the pair out of a patrol car carried bolt action
+rifles. Grey is grey now: the officer's own pistol, at an accuracy worth
+respecting. The patrol car's crew lost their rifles with it, and their bag is
+emptied rather than left holding one — a rifle in the slot still puts a
+shouldered rifle on the wire, which would be the drawing claiming something
+`officerGrade` no longer does.
+
+**The garrison is spread evenly, and it is deadly to a dog.** Both halves are
+one idea: a dog that outruns everything will always find the quarter of the city
+with nobody in it and start an outbreak there long before help can cross the
+map.
+
+- **`populate` lays the city's officers on a grid**, one to a cell, each sampled
+  inside its own cell — and the cell list is **shuffled**, because there are
+  more cells than officers and taken in order the empty ones are always the same
+  corner. Measured as the furthest any spot on the map can be from the nearest
+  officer: **1481px spread against 1831px random**, over five cities.
+- **The count is what makes that mean anything**, so it went 4-7 → 10-14. At the
+  old count the same measure was ~2200px on a map whose diagonal is 6200 — the
+  spread was real and there was still always an empty quarter.
+- **Only the officers the city started with** (`world.cityOfficers`) get the
+  anti-dog rule: no bloom at all against one, and `CITY_OFFICER_DOG_DAMAGE_MUL`
+  on top. Anyone a radio call sent afterwards is the response, not the
+  deterrent, and shoots a dog like anything else.
 
 **Anybody a call sent carries a real gun and takes `DISPATCHED_DAMAGE_MUL`** —
 a van, a patrol car or a helicopter off a smoke grenade alike. The tier decides
@@ -2071,9 +2677,6 @@ the client — it never leaves the server.
 
 ## Not built yet
 
-- **The zombie dog master.** Lobby team 2 has two dog slots and they work — you
-  can sit in one, the server counts it and logs it — but there is no dog, so
-  whoever took one spawns as an officer.
 - Zombie master (the playable zombie) — `zombieMaster` type exists, unused
 - Victory condition fires but has only been observed once, via a bot
 

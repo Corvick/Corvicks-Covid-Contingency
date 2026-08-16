@@ -61,6 +61,30 @@ export interface EntityState {
   /** Id of the partner whose hand they're holding, if any. */
   hand?: string;
   /**
+   * A zombie dog rather than a shambler — always a player, never AI.
+   *
+   * It rides on `type: 'zombie'` with this flag on top, the same way four
+   * grades of officer share one type. That is not a shortcut: a dog *is* part
+   * of the outbreak everywhere it counts, so bullets find it, the crowd runs
+   * from it, the danger field is sourced from it and the victory count includes
+   * it, all with no code anywhere saying so.
+   */
+  dog?: boolean;
+  /**
+   * Where the head is pointing, as against `facing`, which is the spine. The
+   * head leads and the body swings after it — see `DOG_HEAD_TURN_RATE`. Only
+   * ever sent for dogs, so two entities pay for it rather than four hundred.
+   */
+  head?: number;
+  /** Mid-snap: the jaws are thrown open and thrown forward. Dogs only. */
+  lunging?: boolean;
+  /**
+   * Down. Drawn grey and sprawled, and going nowhere — a dog holds its own
+   * body on screen for `DOG_DEATH_MS` before it rises again somewhere else, so
+   * that being killed is something you watch rather than a cut.
+   */
+  dead?: boolean;
+  /**
    * What is actually in this officer's hands, so the body can be drawn around
    * it — a shouldered rifle rather than a pistol held out in front.
    *
@@ -132,6 +156,23 @@ export interface SpeechState {
   text: string;
   /** Crackling out of a handset rather than out of a mouth: drawn jagged. */
   radio?: boolean;
+}
+
+/**
+ * A dog that was put down, left where it fell. Permanent scenery for the rest
+ * of the round: the animal rises again out of a shambler somewhere else, and
+ * the body it left stays exactly where somebody shot it.
+ *
+ * Sent to everyone unfogged — there are a handful of these in a whole round,
+ * and a corpse you walked past ten seconds ago should not blink out because you
+ * turned round.
+ */
+export interface CorpseState {
+  x: number;
+  y: number;
+  /** The pose it died in: the spine, and where the head had fallen. */
+  facing: number;
+  head: number;
 }
 
 /** A survivor beacon: a small mast people can be sent to. */
@@ -394,6 +435,50 @@ export interface LobbyView {
 
 export type AbilityId = 'rally' | 'follow' | 'wait' | 'beacon';
 
+/**
+ * What a dog needs on screen, and nothing an officer would. Null for everyone
+ * who isn't one, so the field costs a word on every other snapshot.
+ *
+ * `hold` and `shaken` are two readings of the same clock and both are needed:
+ * one is how much bite is left, the other is how much of it the shaking has
+ * already taken off. Without the second, worrying at somebody looks exactly
+ * like waiting.
+ */
+export interface DogHud {
+  /** Jaw recovery since the last bite, 0-1. 1 is ready to open. */
+  bite: number;
+  /**
+   * How much of the open window is left, 1 down to 0 — or -1 while the jaws are
+   * shut. Its own reading rather than folded into `bite`, because "how long can
+   * I hold this open" and "when may I open it again" are opposite questions and
+   * a single bar answering both would be read wrong in the half-second that
+   * matters.
+   */
+  jawsOpen: number;
+  /** Teeth actually in somebody. */
+  latched: boolean;
+  /** How much of the bite clock is left, 1 down to 0. */
+  hold: number;
+  /** The share of it shaking has torn off so far, 0-1. */
+  shaken: number;
+  /**
+   * How many shamblers are left on the map to come back out of — which is this
+   * dog's lives, and the only number on its HUD that goes down for good.
+   */
+  hosts: number;
+  /** No horde left and it went down. Out of the round. */
+  out: boolean;
+  /**
+   * Being killed, 0 to 1 across `DOG_DEATH_MS`; -1 while up.
+   *
+   * The client watches its own body go down for the first part of it and then
+   * fades to black, so the ramp is deliberately the *whole* window rather than
+   * just the fade — where in it the screen starts going dark is a drawing
+   * decision and belongs on the client.
+   */
+  dying: number;
+}
+
 /** A lootable item lying on the floor. */
 export interface PickupState {
   id: string;
@@ -583,6 +668,8 @@ export type ServerMessage =
       following: boolean;
       pickups: PickupState[];
       inventory: InventoryState;
+      /** The dog's own readouts, or null for anyone who isn't one. */
+      dog: DogHud | null;
       grenades: GrenadeState[];
       smokes: SmokeState[];
       blasts: BlastState[];
@@ -591,6 +678,8 @@ export type ServerMessage =
       emplacements: EmplacementState[];
       vehicles: BackupVehicleState[];
       mines: MineState[];
+      /** Every dog put down this round, left where it fell. */
+      corpses: CorpseState[];
       towers: BeaconState[];
       zaps: Array<{ x: number; y: number; at: number }>;
       /** Ground still burning. */
