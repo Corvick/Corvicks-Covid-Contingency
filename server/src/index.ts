@@ -754,9 +754,28 @@ let tickTimeTotal = 0;
 let lastPerfLog = Date.now();
 /** Exponential moving average of tick cost, surfaced on the client HUD. */
 let rollingTickMs = 0;
+/** Worst single tick since the last `[perf]` line — an EMA hides the spikes. */
+let worstTickMs = 0;
+
+/**
+ * Where the tick went, accumulated across the log window.
+ *
+ * The same trick as the client's frame profiler, and for the same reason: the
+ * HUD says a tick cost 31ms, and that number on its own cannot say whether it
+ * is the AI, the collision pass, the per-viewer serialisation or a nav rebuild
+ * — which are four different fixes. Costs a `performance.now()` per phase.
+ */
+const phaseTotals = new Map<string, number>();
+let phaseAt = 0;
+function mark(label: string): void {
+  const t = performance.now();
+  phaseTotals.set(label, (phaseTotals.get(label) ?? 0) + (t - phaseAt));
+  phaseAt = t;
+}
 
 function tick(): void {
   const started = performance.now();
+  phaseAt = started;
   const dt = TICK_MS / 1000;
   const now = Date.now();
 
@@ -768,17 +787,24 @@ function tick(): void {
   if (!world.paused) {
     // Glass smashed last tick opened a new way through — take it in once here,
     // rather than once per pane.
-    if (world.navDirty) rebuildNav(world);
+    // A whole new NavGrid and DangerField, and any smashed pane sets it off.
+    if (world.navDirty) {
+      rebuildNav(world);
+      mark('rebuildNav');
+    }
 
     rebuildEntityGrid(world);
     const frozen = computeFrozen(world);
+    mark('grid+frozen');
 
     updatePlayers(dt, frozen, now);
     // Before the AI and before collision: a shaken victim is dragged onto the
     // jaws here and pushed back out of anything it was dragged into below,
     // which is the same deal every other body in the world gets.
     updateDogs(world, dt, now);
+    mark('players+dogs');
     updateAi(world, now, dt, frozen);
+    mark('updateAi');
     resolveCollisions(world);
     // Sandbags are deliberately not in the nav grid — like doors, routes are
     // planned as though they weren't there and whoever walks into one deals
@@ -787,6 +813,7 @@ function tick(): void {
     // A parked squad car is solid to bodies, like the sandbags, and pushed out
     // of here rather than through the nav grid for the same reason.
     resolveVehicleCollisions(world);
+    mark('collisions');
 
     rebuildEntityGrid(world);
     updateEmplacements(world, now, dt);
@@ -797,6 +824,7 @@ function tick(): void {
     updateMines(world, now);
     updateDucks(world, now, dt);
     updateFires(world, now, dt);
+    mark('shooting+world');
   }
 
   const survivors = countSurvivors(world);
@@ -846,6 +874,7 @@ function tick(): void {
   // Once only a handful of humans are left, point the way to each of them.
   const humans = humanPositions(world);
   const beacons = humans.length > 0 && humans.length <= BEACON_THRESHOLD ? humans : [];
+  mark('prep');
 
   for (const [id, socket] of sockets) {
     const viewer = world.entities.get(id);
@@ -903,19 +932,32 @@ function tick(): void {
     });
   }
   world.shots.length = 0;
+  mark('serialise+send');
 
   const elapsed = performance.now() - started;
   rollingTickMs = rollingTickMs === 0 ? elapsed : rollingTickMs * 0.9 + elapsed * 0.1;
   tickTimeTotal += elapsed;
   tickSamples++;
+  if (elapsed > worstTickMs) worstTickMs = elapsed;
   if (now - lastPerfLog >= 5000) {
     const avg = tickTimeTotal / tickSamples;
+    // Per tick, biggest first, so the line reads as "where the tick went".
+    const split = Array.from(phaseTotals)
+      .map(([label, total]) => [label, total / tickSamples] as const)
+      .sort((a, b) => b[1] - a[1])
+      .filter(([, ms]) => ms >= 0.05)
+      .map(([label, ms]) => `${label} ${ms.toFixed(1)}`)
+      .join(' · ');
     console.log(
       `[perf] avg tick ${avg.toFixed(1)}ms / ${TICK_MS.toFixed(1)}ms budget ` +
-        `| ${world.entities.size} entities | ${sockets.size} clients | ${survivors} survivors`,
+        `(worst ${worstTickMs.toFixed(1)}) ` +
+        `| ${world.entities.size} entities | ${sockets.size} clients | ${survivors} survivors\n` +
+        `       ${split}`,
     );
     tickTimeTotal = 0;
     tickSamples = 0;
+    worstTickMs = 0;
+    phaseTotals.clear();
     lastPerfLog = now;
   }
 }

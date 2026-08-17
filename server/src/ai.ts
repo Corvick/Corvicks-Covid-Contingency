@@ -462,7 +462,25 @@ function senseThreats(
 ): void {
   const inv0 = world.inventories.get(e.id);
   const reach = inv0?.utilities.includes('thermalGoggles') ? Math.max(sight, THERMAL_RANGE) : sight;
-  const nearby = world.entityGrid.queryCircle(e.x, e.y, reach, new Set<Entity>());
+  // The zombie grid, not the everybody grid. This loop discards every
+  // non-zombie on the type check below, so asking the full grid meant
+  // collecting a couple of dozen civilians per perception tick to find the one
+  // or two that mattered — a cost that grew with how many people were alive
+  // rather than with how far the outbreak had got.
+  const nearby = world.zombieGrid.queryCircle(e.x, e.y, reach, new Set<Entity>());
+
+  // Somebody visibly going over is a threat too, and is not in the zombie grid
+  // until they actually turn. `pendingInfections` is small — dozens at most,
+  // against five hundred bodies — so it is walked directly rather than kept in
+  // a grid of its own. The box test matches `queryCircle`, which is a bounding
+  // box of the same half-extent.
+  for (const [id, turnAt] of world.pendingInfections) {
+    if (turnAt - now > TURNING_TELL_MS) continue;
+    const other = world.entities.get(id);
+    if (!other || other.type === 'zombie') continue;
+    if (Math.abs(other.x - e.x) > reach || Math.abs(other.y - e.y) > reach) continue;
+    nearby.add(other);
+  }
 
   state.threatPoints.length = 0;
   let nearest: Entity | null = null;

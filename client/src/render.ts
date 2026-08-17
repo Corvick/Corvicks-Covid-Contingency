@@ -1436,6 +1436,22 @@ function drawDog(
   const pose = dogPoseFor(e, now);
   const art = dogSprites();
 
+  // Zoomed far out, before anything else: a body at this size is the same
+  // couple of pixels whether it is alive or dead, so there is nothing for the
+  // greying below to show. It has to come *first* — taken after it, the dead
+  // branch's `save` was left on the stack by this early return and the
+  // grayscale filter stayed set on the context for the rest of the frame,
+  // which put a three-stage filter chain on every draw after the first corpse.
+  if (simple) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(pose.facing);
+    ctx.fillStyle = DOG_BODY_COLOR;
+    ctx.fillRect(-r * 1.4, -r * 0.5, r * 2.8, r);
+    ctx.restore();
+    return;
+  }
+
   /**
    * **Dead: grey, sprawled, and going nowhere.**
    *
@@ -1445,6 +1461,9 @@ function drawDog(
    * has simply stopped, so the legs are thrown out, the head lolls off the
    * spine, and the whole thing is squashed a little across its length, which is
    * what something lying down looks like from above.
+   *
+   * Balanced by the `restore` at the end of this function, so every path out of
+   * here below this point must go through it.
    */
   if (e.dead) {
     ctx.save();
@@ -1453,16 +1472,6 @@ function drawDog(
     pose.speed = 0;
     pose.gait = hashId(e.id) % 6; // legs frozen somewhere other than neutral
     pose.split = 0.34; // the mouth left half open
-  }
-
-  if (simple) {
-    ctx.save();
-    ctx.translate(e.x, e.y);
-    ctx.rotate(pose.facing);
-    ctx.fillStyle = DOG_BODY_COLOR;
-    ctx.fillRect(-r * 1.4, -r * 0.5, r * 2.8, r);
-    ctx.restore();
-    return;
   }
 
   // Latched or being wrestled: the whole animal worries at whatever it has.

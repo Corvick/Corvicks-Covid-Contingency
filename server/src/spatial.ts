@@ -67,4 +67,36 @@ export class SpatialGrid<T> {
   queryCircle(x: number, y: number, radius: number, out: Set<T>): Set<T> {
     return this.queryRect(x - radius, y - radius, x + radius, y + radius, out);
   }
+
+  /**
+   * True as soon as any item in the overlapping cells satisfies `test`.
+   *
+   * For a *question* — is anything in the way? — collecting first is pure
+   * waste: `queryRect` builds a Set of every wall in the box (a sight line
+   * across a city collects well over a hundred) before a single one is tested,
+   * when the answer is usually decided by the first or second. This allocates
+   * nothing and stops at the first hit.
+   *
+   * It does **not** deduplicate, deliberately. An item straddling two cells is
+   * tested twice, which for a predicate costs one extra test and cannot change
+   * the answer — where the Set was paying an identity hash on every item to
+   * prevent exactly that.
+   */
+  some(minX: number, minY: number, maxX: number, maxY: number, test: (item: T) => boolean): boolean {
+    const c0 = this.col(minX);
+    const c1 = this.col(maxX);
+    const r0 = this.row(minY);
+    const r1 = this.row(maxY);
+
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const bucket = this.cells.get(r * this.cols + c);
+        if (!bucket) continue;
+        for (let i = 0; i < bucket.length; i++) {
+          if (test(bucket[i])) return true;
+        }
+      }
+    }
+    return false;
+  }
 }

@@ -1536,10 +1536,16 @@ function render() {
 
   const fpsClass = fps >= 55 ? '' : fps >= 40 ? 'warn' : 'bad';
   const tickClass = serverTickMs < 16 ? '' : serverTickMs < 28 ? 'warn' : 'bad';
+  // `render` against the frame gap is the fork in the road: a gap far larger
+  // than render means the cost is not in drawing at all, and the phase split
+  // says which part of drawing it is when it is.
+  const renderClass = lastRenderMs < 8 ? '' : lastRenderMs < 14 ? 'warn' : 'bad';
   perfHud.innerHTML =
     `<span class="${fpsClass}">${Math.round(fps)} fps</span> · spike ${worstFrameMs.toFixed(0)}ms<br>` +
     `<span class="${tickClass}">tick ${serverTickMs.toFixed(2)}ms</span> / 33.3ms<br>` +
-    `fog ${fogComputeMs.toFixed(2)}ms · ${tracked.size} drawn`;
+    `fogpoly ${fogComputeMs.toFixed(2)}ms · ${tracked.size} drawn<br>` +
+    `<span class="${renderClass}">render ${lastRenderMs.toFixed(1)}ms</span><br>` +
+    phases.map(([l, c]) => `${l} ${c.toFixed(1)}`).join(' · ');
 
   requestAnimationFrame(render);
 }

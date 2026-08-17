@@ -542,6 +542,18 @@ export interface World {
   exhausted: Set<string>;
   shots: Shot[];
   entityGrid: SpatialGrid<Entity>;
+  /**
+   * Just the zombies, rebuilt beside `entityGrid`.
+   *
+   * Threat perception asks "what is coming for me", and it used to ask that of
+   * the grid holding *everybody* — collecting a couple of dozen neighbours and
+   * then rejecting all but the zombies on a type check. In a city of 500
+   * civilians and five zombies that is the wrong question by two orders of
+   * magnitude, and its cost scaled with how many people were alive rather than
+   * with how far the outbreak had got. Same trick as the danger field: build
+   * the answer once for everybody instead of letting each of them go and look.
+   */
+  zombieGrid: SpatialGrid<Entity>;
   wallGrid: SpatialGrid<Wall>;
   bushGrid: SpatialGrid<Bush>;
   /** Panes are see-through but solid; index matches map.windows. */
@@ -1062,8 +1074,14 @@ export function rebuildNav(world: World): void {
 
 export function rebuildEntityGrid(world: World): void {
   world.entityGrid.clear();
+  world.zombieGrid.clear();
   for (const e of world.entities.values()) {
     world.entityGrid.insertRect(e, e.x - e.radius, e.y - e.radius, e.x + e.radius, e.y + e.radius);
+    // Filled in the walk that was already being paid for, so the second grid
+    // costs an extra branch rather than an extra pass.
+    if (e.type === 'zombie') {
+      world.zombieGrid.insertRect(e, e.x - e.radius, e.y - e.radius, e.x + e.radius, e.y + e.radius);
+    }
   }
 }
 
@@ -1082,27 +1100,33 @@ export function hasLineOfSight(
   const minY = Math.min(y1, y2);
   const maxY = Math.max(y1, y2);
 
-  const walls = world.wallGrid.queryRect(minX, minY, maxX, maxY, new Set<Wall>());
-  for (const wall of walls) {
-    if (segmentRectT(x1, y1, x2, y2, wall) !== null) return false;
+  // Three questions, not three collections — see `some`. This is the hottest
+  // predicate in the server: every viewer's fog and every perception tick runs
+  // it, and the sight line's bounding box collects well over a hundred walls.
+  if (world.wallGrid.some(minX, minY, maxX, maxY, (wall) => segmentRectT(x1, y1, x2, y2, wall) !== null)) {
+    return false;
   }
 
   // A shut door is opaque, unlike the glass beside it.
-  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
-  for (const index of slabs) {
+  const blockedByDoor = world.doorGrid.some(minX, minY, maxX, maxY, (index) => {
     const door = world.doors[index];
-    if (!door || door.open || door.broken) continue;
-    if (segmentRectT(x1, y1, x2, y2, door.rect) !== null) return false;
-  }
+    return !!door && !door.open && !door.broken && segmentRectT(x1, y1, x2, y2, door.rect) !== null;
+  });
+  if (blockedByDoor) return false;
 
   if (!seeThroughBushes) {
-    const bushes = world.bushGrid.queryRect(minX, minY, maxX, maxY, new Set<Bush>());
-    for (const bush of bushes) {
+    const blockedByBush = world.bushGrid.some(
+      minX,
+      minY,
+      maxX,
+      maxY,
       // The bush you're standing in doesn't block your own view out of it —
       // others still can't see in, which is what makes hiding work.
-      if (Math.hypot(bush.x - x1, bush.y - y1) <= bush.r) continue;
-      if (segmentCircleT(x1, y1, x2, y2, bush.x, bush.y, bush.r) !== null) return false;
-    }
+      (bush) =>
+        Math.hypot(bush.x - x1, bush.y - y1) > bush.r &&
+        segmentCircleT(x1, y1, x2, y2, bush.x, bush.y, bush.r) !== null,
+    );
+    if (blockedByBush) return false;
   }
 
   return true;
@@ -1119,24 +1143,26 @@ export function hasWallClearPath(world: World, x1: number, y1: number, x2: numbe
   const minY = Math.min(y1, y2);
   const maxY = Math.max(y1, y2);
 
-  const walls = world.wallGrid.queryRect(minX, minY, maxX, maxY, new Set<Wall>());
-  for (const wall of walls) {
-    if (segmentRectT(x1, y1, x2, y2, wall) !== null) return false;
+  // Asked as three questions rather than three collections — see `some`.
+  if (world.wallGrid.some(minX, minY, maxX, maxY, (wall) => segmentRectT(x1, y1, x2, y2, wall) !== null)) {
+    return false;
   }
 
-  const panes = world.windowGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
-  for (const index of panes) {
-    if (!isWindowIntact(world, index)) continue;
-    if (segmentRectT(x1, y1, x2, y2, world.map.windows[index]) !== null) return false;
-  }
+  const blockedByPane = world.windowGrid.some(
+    minX,
+    minY,
+    maxX,
+    maxY,
+    (index) =>
+      isWindowIntact(world, index) && segmentRectT(x1, y1, x2, y2, world.map.windows[index]) !== null,
+  );
+  if (blockedByPane) return false;
 
-  const slabs = world.doorGrid.queryRect(minX, minY, maxX, maxY, new Set<number>());
-  for (const index of slabs) {
+  const blockedByDoor = world.doorGrid.some(minX, minY, maxX, maxY, (index) => {
     const door = world.doors[index];
-    if (!door || door.open || door.broken) continue;
-    if (segmentRectT(x1, y1, x2, y2, door.rect) !== null) return false;
-  }
-  return true;
+    return !!door && !door.open && !door.broken && segmentRectT(x1, y1, x2, y2, door.rect) !== null;
+  });
+  return !blockedByDoor;
 }
 
 export function isInBush(world: World, x: number, y: number): boolean {
@@ -1239,6 +1265,7 @@ export function createWorld(): World {
     exhausted: new Set(),
     shots: [],
     entityGrid: new SpatialGrid<Entity>(ENTITY_CELL, WORLD_WIDTH, WORLD_HEIGHT),
+    zombieGrid: new SpatialGrid<Entity>(ENTITY_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     wallGrid: new SpatialGrid<Wall>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     bushGrid: new SpatialGrid<Bush>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     windowGrid: new SpatialGrid<number>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),

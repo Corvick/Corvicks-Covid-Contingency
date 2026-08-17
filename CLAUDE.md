@@ -1948,6 +1948,30 @@ flat shapes, and the two findings out of it are worth more than the picture:
   entity, not per tick; bush scanning and refuge choice are cached per entity.
 - **The danger field is the scaling primitive.** One BFS from all zombies at 6Hz
   serves every human in O(1). Prefer adding to it over per-entity searches.
+  `world.zombieGrid` is the third one: threat perception asked the grid holding
+  *everybody* what was near, collected a couple of dozen neighbours and then
+  rejected all but the zombies on a type check — so its cost scaled with how
+  many people were alive rather than with how far the outbreak had got. It is
+  filled in the walk `rebuildEntityGrid` was already paying for. Measured with
+  the old behaviour gated back in, alternating every 50 ticks on the same
+  evolving world: `updateAi` median **5.36→3.99 / 7.33→6.73 / 8.67→6.97**,
+  better in 3 of 3 cities on both median and p90.
+- **Ask the broadphase a question rather than for a collection.**
+  `SpatialGrid.some` walks the cells and stops at the first item that matches,
+  allocating nothing. `hasLineOfSight` and `hasWallClearPath` used to build a
+  `Set` of every wall in the sight line's bounding box — over a hundred of them
+  — before testing a single one, when the answer is usually settled by the
+  first. It deliberately does **not** deduplicate: an item straddling two cells
+  gets tested twice, which for a predicate costs one extra test and cannot
+  change the answer, where the `Set` was paying an identity hash on every item
+  to prevent exactly that. Measured over 6000 sight lines: **2.5x** on
+  `hasLineOfSight`, **2.3x** on `hasWallClearPath`, and 6000/6000 samples
+  answered identically to the version it replaced.
+  - **A `Set` is not always the slow choice.** The same array-and-stamp
+    treatment applied to `queryRect` wholesale measured 2.6x on perception-sized
+    queries and **0.8x — slower — on collision-sized ones**, which are by far
+    the most numerous. Small queries collect ~6 walls and a small `Set` beats
+    the bookkeeping. That is why `queryRect` still returns one.
   The **room map** is the second one, and the same trick: build the answer once
   for everybody rather than letting each entity go and look. `RoomMap` costs
   1-8ms alongside `generateMap`, once per round, and occupancy is two counters
@@ -1957,10 +1981,28 @@ flat shapes, and the two findings out of it are worth more than the picture:
   change, three seeds at 120s: 195/91/63 zombies, in line with what the same
   seeds produced before, so the outbreak still takes hold at the larger size.
   `generateMap` went ~7ms → ~17ms, once per round.
-- The headless harness — `updateAi` + collision + shooting, no fog and no
-  per-viewer serialisation — measures **1.74ms median / 2.47ms p95 at 516
-  entities** on the larger map. The older ~2.4ms/3.2ms figure quoted for a live
-  server includes fog and serialisation and is not comparable to it.
+- **A headless harness must advance a clock, or it measures nothing.** This
+  section used to claim the harness cost **1.74ms median at 516 entities**. That
+  figure was an artifact and the real cost was roughly eight times it. Ticks run
+  back to back complete in microseconds, so `Date.now()` barely moves — and
+  every time-gated piece of work is therefore skipped almost every tick:
+  perception at 10Hz staggered per entity, the danger rebuild, re-picking a
+  wander target. The harness was measuring an AI that was mostly not running.
+  Advance a clock by `TICK_MS` per iteration and pass *that* as `now`. Doing so
+  took the same harness from 1.7ms to 13.4ms, which finally agreed with the live
+  server's own `[perf]` line. **Anything measured headlessly before this is
+  suspect.** `server/tickprof.ts` is the corrected harness.
+- **The server prints where its tick went**, every 5s, next to the average:
+  `updateAi 7.5 · collisions 2.7 · prep 0.8 · grid+frozen 0.5`. The client HUD's
+  `tick` number alone cannot distinguish the AI from the collision pass from
+  per-viewer serialisation, which are different fixes. Same trick as the
+  client's frame profiler.
+- **The tick is dominated by `updateAi`, not by serialisation.** Measured at
+  ~515 survivors: `updateAi` is roughly 60-70% of it, collisions ~20%, and
+  everything a *player* costs that a spectator does not — `visibleTo`,
+  `visiblePickups`, the snapshot and its `JSON.stringify` — totals about 1.3ms.
+  Cost varies hugely between cities (8.9ms and 19.7ms from identical code), so
+  quote a range and never compare two single runs.
 - `generateMap` costs ~17ms, once per round. The connectivity repair pass builds
   a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
