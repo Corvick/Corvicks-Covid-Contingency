@@ -201,6 +201,13 @@ let fps = 0;
 let lastFrameAt = 0;
 let worstFrameMs = 0;
 let worstResetAt = 0;
+/** The frame gap split into render / network / everything else, smoothed. */
+let smoothGap = 0;
+let smoothNet = 0;
+let smoothElse = 0;
+/** Snapshot throughput, accumulated over the same one-second window as `spike`. */
+let bytesThisSecond = 0;
+let kbPerSec = 0;
 
 const input = trackInput(canvas);
 
@@ -1214,7 +1221,9 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
  * `SLOW_FRAME_MS` — which is the only way to tell which part of a frame is
  * responsible for a stutter on someone else's machine.
  */
-const SLOW_FRAME_MS = 45;
+// Below a 30fps frame. It was 45, which never fired on a client sitting at 45
+// fps — exactly the case worth a breakdown. Rate-limited to one a second.
+const SLOW_FRAME_MS = 28;
 let phaseAt = 0;
 let phases: Array<[string, number]> = [];
 /** The previous frame's breakdown — the gap we report on is time since then. */
@@ -1271,6 +1280,19 @@ function render() {
   const gap = lastFrameAt > 0 ? now - lastFrameAt : 0;
   const net = takeNetStats();
   if (gap >= SLOW_FRAME_MS) reportSlowGap(gap, now, tracked.size, net);
+
+  // The same split, smoothed and kept on the HUD rather than only logged when
+  // a frame blows the budget. `render` alone cannot tell a slow frame from a
+  // frame that spent its time between the frames — parsing a snapshot, applying
+  // it, or waiting on a browser that never scheduled us. `else` being the big
+  // number means the cost is in none of the things this client does.
+  const netMs = net.parseMs + net.applyMs;
+  const elsewhere = Math.max(0, gap - lastRenderMs - netMs);
+  const ease = (prev: number, next: number) => (prev === 0 ? next : prev * 0.9 + next * 0.1);
+  smoothGap = ease(smoothGap, gap);
+  smoothNet = ease(smoothNet, netMs);
+  smoothElse = ease(smoothElse, elsewhere);
+  bytesThisSecond += net.bytes;
 
   phases = [];
   phaseAt = now;
@@ -1525,6 +1547,8 @@ function render() {
   }
   lastFrameAt = now;
   if (now - worstResetAt > 1000) {
+    kbPerSec = bytesThisSecond / 1024;
+    bytesThisSecond = 0;
     worstResetAt = now;
     worstFrameMs = 0;
   }
@@ -1544,7 +1568,11 @@ function render() {
     `<span class="${fpsClass}">${Math.round(fps)} fps</span> · spike ${worstFrameMs.toFixed(0)}ms<br>` +
     `<span class="${tickClass}">tick ${serverTickMs.toFixed(2)}ms</span> / 33.3ms<br>` +
     `fogpoly ${fogComputeMs.toFixed(2)}ms · ${tracked.size} drawn<br>` +
-    `<span class="${renderClass}">render ${lastRenderMs.toFixed(1)}ms</span><br>` +
+    // The frame gap, split. Whichever of these three is large is the one to
+    // chase; `else` large means it is not this client's doing at all.
+    `gap ${smoothGap.toFixed(1)} = <span class="${renderClass}">render ${lastRenderMs.toFixed(1)}</span>` +
+    ` + net ${smoothNet.toFixed(1)} + else ${smoothElse.toFixed(1)}<br>` +
+    `${kbPerSec.toFixed(0)}KB/s in<br>` +
     phases.map(([l, c]) => `${l} ${c.toFixed(1)}`).join(' · ');
 
   requestAnimationFrame(render);
