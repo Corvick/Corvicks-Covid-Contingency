@@ -69,6 +69,29 @@ export class SpatialGrid<T> {
   }
 
   /**
+   * Visit every item in the overlapping cells, allocating nothing.
+   *
+   * Like `queryRect` without the collection — for callers that want to look at
+   * the neighbours rather than keep them. It does **not** deduplicate: an item
+   * straddling two cells is visited once per cell, so a caller that cares must
+   * say so itself (see `doorsNear`, which stamps by index).
+   */
+  each(minX: number, minY: number, maxX: number, maxY: number, visit: (item: T) => void): void {
+    const c0 = this.col(minX);
+    const c1 = this.col(maxX);
+    const r0 = this.row(minY);
+    const r1 = this.row(maxY);
+
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const bucket = this.cells.get(r * this.cols + c);
+        if (!bucket) continue;
+        for (let i = 0; i < bucket.length; i++) visit(bucket[i]);
+      }
+    }
+  }
+
+  /**
    * True as soon as any item in the overlapping cells satisfies `test`.
    *
    * For a *question* — is anything in the way? — collecting first is pure

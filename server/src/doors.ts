@@ -124,9 +124,34 @@ export function claimDoor(world: World, index: number, byId: string, until: numb
 }
 
 /** Every door slab near a point, shut or not. */
+/**
+ * Dedup by door index rather than by hashing.
+ *
+ * This runs per entity per tick out of `doorTick`, and it used to build a `Set`
+ * and then copy it into an array — two allocations and an identity hash per
+ * door, to deduplicate a handful of small integers. A door index is a dense
+ * `number`, so a stamp array indexed by it settles the same question with one
+ * comparison and no allocation. The generation counter is what saves clearing
+ * it: a stamp from a previous call cannot match this call's `gen`.
+ */
+const doorStamps = { seen: new Int32Array(0), gen: 0 };
+
 export function doorsNear(world: World, x: number, y: number, radius: number): number[] {
-  const found = world.doorGrid.queryCircle(x, y, radius, new Set<number>());
-  return Array.from(found);
+  if (doorStamps.seen.length < world.doors.length) {
+    doorStamps.seen = new Int32Array(world.doors.length);
+  }
+  const gen = ++doorStamps.gen;
+  const seen = doorStamps.seen;
+  // Still a fresh array: callers hold the result while iterating, and some of
+  // them call back into here from inside that loop, so a shared buffer would
+  // have one walk overwrite another's.
+  const out: number[] = [];
+  world.doorGrid.each(x - radius, y - radius, x + radius, y + radius, (index) => {
+    if (seen[index] === gen) return;
+    seen[index] = gen;
+    out.push(index);
+  });
+  return out;
 }
 
 /**
