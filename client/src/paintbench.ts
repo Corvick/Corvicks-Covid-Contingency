@@ -276,7 +276,59 @@ function runPickups(): void {
   out.textContent = lines.join('\n');
 }
 
+/**
+ * What the viewport change cost.
+ *
+ * `VIEWPORT_WIDTH/HEIGHT` went 960x600 to 1920x1080 in one commit — 3.6x the
+ * pixels, every frame, for the same scene. This draws an identical player's-eye
+ * frame at both sizes so the difference is the resolution and nothing else.
+ */
+function runViewport(): void {
+  lines.push(`\n=== the same frame at both viewport sizes ===`);
+  lines.push('  backbuffer          issue    paint    total');
+  const all: Layers = { groundSolid: true, grime: true, walls: true, entities: true, vignette: true };
+
+  for (const [w, h] of [
+    [960, 600],
+    [1920, 1080],
+  ] as Array<[number, number]>) {
+    canvas.width = w;
+    canvas.height = h;
+    // Same world, same zoom — only how much of it fits on the backbuffer.
+    const view: Viewport = {
+      x: WORLD_W / 2 - w / playerScale / 2,
+      y: WORLD_H / 2 - h / playerScale / 2,
+      w: w / playerScale,
+      h: h / playerScale,
+    };
+    const issues: number[] = [];
+    const totals: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const t0 = performance.now();
+      for (let r = 0; r < REPEATS; r++) frame(view, playerScale, all);
+      const t1 = performance.now();
+      ctx.getImageData(0, 0, 1, 1);
+      const t2 = performance.now();
+      if (i >= 5) {
+        issues.push((t1 - t0) / REPEATS);
+        totals.push((t2 - t0) / REPEATS);
+      }
+    }
+    issues.sort((a, b) => a - b);
+    totals.sort((a, b) => a - b);
+    const m = Math.floor(issues.length / 2);
+    const paint = totals[m] - issues[m];
+    lines.push(
+      `  ${`${w}x${h}`.padEnd(18)} ${issues[m].toFixed(2).padStart(6)}  ${paint.toFixed(2).padStart(6)}  ${totals[m].toFixed(2).padStart(6)}`,
+    );
+  }
+  canvas.width = VIEWPORT_WIDTH;
+  canvas.height = VIEWPORT_HEIGHT;
+  out.textContent = lines.join('\n');
+}
+
 setTimeout(() => {
+  runViewport();
   run('SPECTATOR (whole city framed)', specView, specScale);
   run('PLAYER (1:1, CAMERA_ZOOM)', playerView, playerScale);
   runPickups();

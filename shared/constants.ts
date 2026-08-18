@@ -118,11 +118,11 @@ export const PLAYER_SPEED = 160;
  * produce, *sampled* over a quarter turn rather than bounded, since the push
  * follows a unit direction and the two axes cannot both be at maximum at once.
  *
- * At 1920x1080, zoom 1.6 and a pan of 100/243 world px that corner is 874. This
+ * At 1920x1080, zoom 2.0 and a pan of 80/194 world px that corner is 704. This
  * is that with a little headroom. Move the pan and this moves with it, or the
  * far half of the screen goes dark.
  */
-export const PLAYER_SIGHT_RADIUS = 890;
+export const PLAYER_SIGHT_RADIUS = 720;
 /**
  * How far the camera drifts as the cursor nears the edge of the screen.
  * Nothing to do with scopes or equipment, and it applies to **anything a person
@@ -141,7 +141,7 @@ export const PLAYER_SIGHT_RADIUS = 890;
  * entities that far, so this number sets the other two. If it goes up again,
  * re-derive them.
  */
-export const CAMERA_PAN_X = 100;
+export const CAMERA_PAN_X = 80;
 
 /**
  * How far in the player's camera sits. 1 is the old framing; above that you see
@@ -158,7 +158,7 @@ export const CAMERA_PAN_X = 100;
  * exactly where it was (100 × 1.6 = 160 screen px, as before). The sideways pan
  * is not being given up to pay for this; it is being paid for by the zoom.
  */
-export const CAMERA_ZOOM = 1.6;
+export const CAMERA_ZOOM = 2.0;
 /**
  * Up and down it carries the difference between the two axes on top of that,
  * which is the whole reason the pan exists: the viewport is 960x600, so
@@ -1046,7 +1046,7 @@ export const SHOT_SLOW_MULTIPLIER = 0.36;
  * Scoping sees further than the naked eye — without this the sniper could out-
  * range the fog and shoot at ground with nothing drawn on it.
  */
-export const SNIPER_SIGHT_RADIUS = 1310;
+export const SNIPER_SIGHT_RADIUS = 1145;
 /**
  * Aiming past your own screen, the way Foxhole does it: the camera slides off
  * the officer toward the reticle rather than zooming out.
@@ -1775,9 +1775,9 @@ export const GUNSLING_SLOTS = 1;
  * whenever the binoculars came up. Exactly the fault raising the sniper once
  * caused, and invisible unless you go looking, because what it produces is an
  * empty street rather than an error. At 1920x1080, zoom 1.6 and a pan of
- * 100/243 the corner is 1164.
+ * 80/194 the corner is 996.
  */
-export const BINOCULAR_SIGHT_RADIUS = 1180;
+export const BINOCULAR_SIGHT_RADIUS = 1015;
 /**
  * How far the zombie tracker will look before it gives up and points nowhere.
  *

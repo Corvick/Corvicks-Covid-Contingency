@@ -832,7 +832,7 @@ spots including the same dense indoor block: **fog 0.90 / 1.18 / 2.48ms, spike
 
 - **The zoom multiplies the pan rather than fighting it.** What you feel is the
   camera moving in *screen* pixels, and those are world pixels times the zoom.
-  `CAMERA_PAN_X` came down 160 → 100 and the felt movement did not change at
+  `CAMERA_PAN_X` came down 160 → 100 → **80** as the zoom went 1.6 → 2.0, and the felt movement did not change at
   all: 100 × 1.6 is the same 160 screen px it was. The sideways pan was not sold
   to buy this.
 - **`CAMERA_PAN_Y` is derived through the zoom too** — the 840px difference
@@ -847,7 +847,7 @@ spots including the same dense indoor block: **fog 0.90 / 1.18 / 2.48ms, spike
   stalled this game once before (see the note on paint under performance).
 
 **The camera is pulled in by `CAMERA_ZOOM` (1.6)** — the backbuffer stays
-1920x1080 and you simply see less ground, larger: 1200x675 world pixels rather
+1920x1080 and you simply see less ground, larger: 960x540 world pixels rather
 than 1920x1080. That is still more of the city than the old 960x600 build
 showed, at nearly twice the fidelity.
 
@@ -906,11 +906,31 @@ now, against 0.25.
 **The three sight radii are derived from the pan, not chosen.** The fog has to
 reach wherever the camera can put the screen and the server has to send entities
 that far, so the pan and the zoom between them set all three. At 1920×1080,
-`CAMERA_ZOOM` 1.6 and a pan of 100/243 the sampled corners are 874 / 1164 / 1294,
-and the radii are **890 / 1180 / 1310**. Move the pan, the zoom or the viewport
+`CAMERA_ZOOM` 2.0 and a pan of 80/194 the sampled corners are 704 / 996 / 1125,
+and the radii are **720 / 1015 / 1145**. Move the pan, the zoom or the viewport
 and re-derive them, or the far half of the screen goes dark. Note the zoom cuts
 both ways: pulling the camera *in* shrinks how much world is on screen, which is
 why it is the cheapest lever on fog cost and why these came down rather than up.
+
+**`server/zoomderive.ts` is that derivation, so it never has to be done by
+hand.** It replicates `cameraReach` and `fogRadius` exactly and prints, for a
+range of candidate zooms, the world on screen, the pan, the three radii each
+demands, and whether the current constants still cover the fog — validated
+against the figures this section already quoted for zoom 1.6.
+
+**The zoom went 1.6 → 2.0 to buy frames back, and it is the honest lever.**
+Raising the viewport to 1920×1080 had put 1200×675 of world on screen against
+the 960×600 the game shipped with, and the cost of that is not the pixels: a
+bigger view is more bodies drawn, more ground for the fog polygon, and longer
+sight radii, which is more entities serialised per viewer. At 2.0 the view is
+**960×540** — back to roughly what it always was — at 1080p sharpness. Measured
+over 200 viewpoints in a real city, the fog polygon **1.59 → 0.81ms median**,
+p90 **3.21 → 1.40**, worst **5.66 → 2.70**, with ~36% fewer bodies in view on
+top of that.
+  - **It does nothing for a spectator.** `cameraFor` frames the whole city on
+    `SPECTATE_FIT`, not `CAMERA_ZOOM`, and a spectator is sent every entity
+    regardless of any sight radius. Watching is the expensive way to run this
+    game and the zoom cannot help it.
 
 - **The binoculars were already short before any of this**, which is worth
   recording. At the old pan the corner was 1036 against a sight radius of 980,
