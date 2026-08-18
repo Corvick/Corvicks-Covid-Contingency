@@ -706,6 +706,11 @@ const ENTITY_FIELDS = [
   'dog',
   'head',
   'lunging',
+  // Missing here once already, with exactly the consequence the note below
+  // describes: a dog that died had been tracked since it spawned, so `dead`
+  // never reached it and it went on drawing as a live animal — eyes lit, health
+  // bar up — stood on top of its own corpse.
+  'dead',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
 
 function copyInto(into: EntityState, from: EntityState): void {
@@ -1354,6 +1359,14 @@ function render() {
     }
     // Heat contacts are drawn after the fog instead, so they carry through it.
     if (s.thermal) continue;
+    // **A body is drawn once, by `drawCorpses`.** A killed dog keeps its entity
+    // for `DOG_DEATH_MS` so there is something to watch lying there, and the
+    // corpse goes into `world.corpses` at the same instant and at the same
+    // coordinates — so both were drawn, one on top of the other. The corpse is
+    // the permanent record and holds the pose it died in, so that is the one
+    // that draws, and the moment the entity gets up and leaves nothing on
+    // screen changes.
+    if (s.dead) continue;
     // Your own character never fades — it's always fully in view.
     const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;

@@ -1277,6 +1277,16 @@ back off it faster than it went. Measured: flagged dead for **2400ms of a
   set of grey sprites would be cheaper per draw and would drift out of step with
   the live ones the first time anything changed; at a handful of bodies a round
   the filter is the right trade.
+  - **A body is drawn once, and it is the corpse that draws it.** A killed dog
+    keeps its entity for `DOG_DEATH_MS` so there is something lying there to
+    watch, and `killEntity` pushes the corpse at the same instant and the same
+    coordinates — so both were drawn, one over the other. The corpse is the
+    permanent record and holds the pose it died in, so the entity loop skips
+    anything `dead` and nothing on screen changes at the moment the animal gets
+    up and leaves.
+  - **A corpse has no health to report.** The bar is drawn whenever health is
+    below the maximum, and a body is on zero, so every corpse wore an empty bar
+    — which reads as something still in the fight.
   - **A corpse in view used to wipe the camera transform for the rest of the
     frame, and this was the big one.** The "eyes are out" branch in
     `dogHeadHalves` read `if (dead) { ctx.restore(); continue; }` — and there is
@@ -2046,6 +2056,13 @@ flat shapes, and the two findings out of it are worth more than the picture:
   keeping the parsed ones, so they die young instead of being promoted. Add a
   field to `EntityState` and you must add it to `ENTITY_FIELDS` — two flags
   were missed once and silently never reached an entity after its first frame.
+  **It has now happened three times**, and the third is the clearest statement
+  of why it is so hard to spot: `dead` was missed, and a dog is *always* already
+  tracked by the time it dies — you have been driving it — so the flag could
+  never arrive. The animal went on being drawn alive, eyes lit and health bar
+  up, standing on its own corpse. Nothing errors; the field simply stops at the
+  first frame, so the symptom is always "this state change never happens to
+  something that has been on screen a while".
 
 ## Key decisions worth not re-litigating
 

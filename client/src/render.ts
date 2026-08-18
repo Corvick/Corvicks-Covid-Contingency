@@ -1666,7 +1666,10 @@ function drawDog(
   // ---- the head, as two halves peeling off the hinge at the neck.
   dogHeadHalves(ctx, hingeX, hingeY, head, split, r, hashId(e.id), now, e.dead === true);
 
-  if (e.health < DOG_MAX_HEALTH) {
+  // **A corpse has no health to report.** The bar is drawn whenever health is
+  // under the maximum, and a body is on zero — so every corpse in the city wore
+  // an empty bar over it, which reads as a thing still in the fight.
+  if (!e.dead && e.health < DOG_MAX_HEALTH) {
     const w = r * 2.4;
     const pct = Math.max(0, e.health / DOG_MAX_HEALTH);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
