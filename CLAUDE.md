@@ -1277,6 +1277,33 @@ back off it faster than it went. Measured: flagged dead for **2400ms of a
   set of grey sprites would be cheaper per draw and would drift out of step with
   the live ones the first time anything changed; at a handful of bodies a round
   the filter is the right trade.
+  - **A corpse in view used to wipe the camera transform for the rest of the
+    frame, and this was the big one.** The "eyes are out" branch in
+    `dogHeadHalves` read `if (dead) { ctx.restore(); continue; }` — and there is
+    no `save` anywhere in that loop. It ran once per side, so **two** pops per
+    corpse it never pushed: the first took `drawDog`'s greyscale filter off
+    early, the second took **the world transform** off the stack. Everything
+    drawn after that in the frame — walls, doors, bodies, tracers, fog — landed
+    in raw canvas pixels.
+    - **It explains both of the reports it produced.** The ground, park, pond
+      and blood are drawn *before* `drawCorpses`, so they alone stayed put:
+      that is *"everything but the floor and some fog stop rendering"*. And the
+      rest, drawn at 1:1 world coordinates with no camera offset, is *"the dog
+      was small and off to the right, almost like a mini map, and half a
+      building was being rendered"*.
+    - **It reads as cursor-dependent without being cursor-dependent.** The pan
+      moves the camera, the camera decides whether a corpse is on screen, and
+      the corpse is what breaks the frame — so it fires at a different cursor
+      position everywhere you stand.
+    - **Verified by counting the stack rather than by looking.** Monkey-patch
+      `save`/`restore` on a scratch context, call the real `drawEntity`, and
+      read the depth and `getTransform().e` afterwards. A live dog leaves depth
+      1 / min 0 / translate 10; a corpse left depth **-1**, min **-2**,
+      translate **0**. After the fix a corpse matches a live dog exactly, in
+      all of grappling, zoomed-out-simple and several-in-one-frame.
+    - The lesson: `ctx.restore()` with no `save()` beside it does not fail
+      loudly — it silently steals the caller's state, and canvas ignores a pop
+      on an empty stack, so the damage shows up far away from its cause.
 
 - **That makes every zombie the officers put down worth something to both
   sides**, which is the whole reason for it. It also closes the loop with the

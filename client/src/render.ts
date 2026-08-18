@@ -1862,10 +1862,19 @@ function dogHeadHalves(
     // **A corpse's eyes are out.** The glow is drawn additively, so under the
     // corpse's greyscale filter it would come through as a pale smear rather
     // than as light — and a dead animal whose eyes are still lit is not dead.
-    if (dead) {
-      ctx.restore();
-      continue;
-    }
+    //
+    // Skipping the eye is *all* this does. There is no `save` in this loop, so
+    // the `restore` that used to sit here popped a state it never pushed —
+    // twice per corpse, once per side. The first pop took `drawDog`'s greyscale
+    // filter off early; the second took **the world transform** off the stack,
+    // and every single thing drawn after that in the frame — walls, doors,
+    // bodies, effects, fog — landed in raw canvas pixels instead of world ones.
+    // The ground, the park, the pond and the blood are drawn *before* the
+    // corpses and so were the only things still in the right place, which is
+    // what "everything but the floor stops rendering" was, and drawing the rest
+    // at 1:1 world coordinates in the corner of the screen is what "the dog was
+    // small and off to the right, like a minimap" was.
+    if (dead) continue;
 
     // The eye, riding this half — so the pair come apart with the head. Drawn
     // additively, and it is the one bright thing on the animal.
