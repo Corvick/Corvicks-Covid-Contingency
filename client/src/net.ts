@@ -27,11 +27,27 @@ export function takeNetStats(): { parseMs: number; applyMs: number; bytes: numbe
 export function connect(onMessage: (msg: ServerMessage) => void): Connection {
   let ws: WebSocket | null = null;
 
-  /** `?server=8090` points at a second server, leaving a live game alone. */
-  const port = new URLSearchParams(location.search).get('server') || '8080';
+  /**
+   * Where the server is.
+   *
+   * `?server=8090` is a port on this machine — a second server, leaving a live
+   * game alone. `?server=192.168.1.50` or `?server=192.168.1.50:8080` is a
+   * *different machine*, which is the point: the simulation and the browser are
+   * both single-threaded CPU work, and on a four-core laptop they fight each
+   * other. Putting the server on another box is the one change that separates
+   * them without giving anything up in the game itself.
+   */
+  const asked = new URLSearchParams(location.search).get('server') ?? '';
+  const host = /^\d+$/.test(asked)
+    ? `${location.hostname}:${asked}` // bare number: a port here
+    : asked
+      ? asked.includes(':')
+        ? asked
+        : `${asked}:8080` // a host with the usual port
+      : `${location.hostname}:8080`;
 
   function open() {
-    const socket = new WebSocket(`ws://${location.hostname}:${port}`);
+    const socket = new WebSocket(`ws://${host}`);
     ws = socket;
 
     socket.addEventListener('message', (event) => {
