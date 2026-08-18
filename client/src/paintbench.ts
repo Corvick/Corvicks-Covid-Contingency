@@ -10,8 +10,8 @@
  * Open `/paintbench.html`.
  */
 import { VIEWPORT_WIDTH, VIEWPORT_HEIGHT, CAMERA_ZOOM } from '../../shared/constants.js';
-import { drawGround, drawVignette, drawEntity, drawWalls, ENTITY_DETAIL_SCALE } from './render.js';
-import type { EntityState, MapData, Wall } from '../../shared/types.js';
+import { drawGround, drawVignette, drawEntity, drawWalls, drawPickups, ENTITY_DETAIL_SCALE } from './render.js';
+import type { EntityState, MapData, Wall, PickupState } from '../../shared/types.js';
 import type { Viewport } from './render.js';
 
 const out = document.getElementById('out') as HTMLElement;
@@ -226,9 +226,60 @@ function runDom(): void {
   out.textContent = lines.join('\n');
 }
 
+/**
+ * `drawPickups` was the dearest function in the client: it set `ctx.font` — a
+ * CSS font-string parse — once per item per frame, and drew a 7px label that is
+ * about a pixel across once the city is framed. This is the before and after.
+ */
+function runPickups(): void {
+  const items: PickupState[] = [];
+  for (let i = 0; i < 120; i++) {
+    items.push({
+      id: `loot-${i}`,
+      item: (['pistol', 'boltRifle', 'kevlar', 'shotgun', 'radio'] as const)[i % 5],
+      x: rnd() * WORLD_W,
+      y: rnd() * WORLD_H,
+    } as PickupState);
+  }
+
+  const time = (label: string, fn: () => void): number => {
+    for (let i = 0; i < 8; i++) fn();
+    const runs: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const t0 = performance.now();
+      for (let r = 0; r < REPEATS; r++) fn();
+      ctx.getImageData(0, 0, 1, 1);
+      runs.push((performance.now() - t0) / REPEATS);
+    }
+    runs.sort((a, b) => a - b);
+    lines.push(`  ${label.padEnd(38)} ${runs[10].toFixed(3)}ms`);
+    return runs[10];
+  };
+
+  const frameWith = (view: Viewport, scale: number, s: number): void => {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0b0d10';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.translate(-view.x, -view.y);
+    drawPickups(ctx, items, view, 0, s);
+    ctx.restore();
+  };
+
+  lines.push(`\n=== ${items.length} pickups, the whole city framed ===`);
+  // Forcing the label on at spectator scale is what the old code always did.
+  time('with labels (what it used to do)', () => frameWith(specView, specScale, 1));
+  time('labels dropped below 0.5 scale', () => frameWith(specView, specScale, specScale));
+  lines.push(`\n=== ${items.length} pickups at a player's zoom (labels kept) ===`);
+  time('labels drawn', () => frameWith(playerView, playerScale, playerScale));
+  out.textContent = lines.join('\n');
+}
+
 setTimeout(() => {
   run('SPECTATOR (whole city framed)', specView, specScale);
   run('PLAYER (1:1, CAMERA_ZOOM)', playerView, playerScale);
+  runPickups();
   runDom();
   lines.push('\n(paint = time the rasteriser needed once the commands were in;');
   lines.push(' this is the part that lands in the frame gap as `elsewhere`.)');

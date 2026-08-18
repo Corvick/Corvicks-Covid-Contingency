@@ -2061,6 +2061,33 @@ flat shapes, and the two findings out of it are worth more than the picture:
 - `generateMap` costs ~17ms, once per round. The connectivity repair pass builds
   a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
+- **The frame budget is spent in crumbs, not in one place.** A 25s incognito
+  trace, no mouse, no keyboard, 5 bots: the rAF callback is **6.8ms median** and
+  3 frames in 854 ran over 16.7ms, yet frames arrived **29.4ms apart** and
+  `BeginFrame` fired ~65 times a second against 33.6 rAF fires. The browser was
+  offering frames and the page was missing every other one. Nothing in the
+  pipeline is dear — `RasterTask` totals **35ms across the whole 25 seconds**,
+  `Paint` 26ms, `Commit` 1.02ms median. What is true is that the main thread is
+  busy 43% of wall clock, which over 854 frames is **12.8ms a frame against a
+  16.7ms budget** — 77% utilisation, where any jitter slips a frame and the
+  frame rate halves. There is no single thing to fix; there is a few
+  milliseconds to find.
+  - **Incognito ruled the extensions out.** Same 34fps with them gone, though
+    GC did drop 4x (MajorGC 399ms → 87ms), so extensions were costing something
+    — just not the frame rate.
+- **`ctx.font` is a CSS parse, and it was being set per item per frame.**
+  `drawPickups` was the dearest function in the client (623ms of a 25s trace,
+  with `fillText` a further 346ms) because it assigned `font`, `textAlign` and
+  `textBaseline` inside its loop, with the same values every time, for every
+  item on screen — and a spectator sees the whole city's loot at once. Hoisted
+  out, and the label dropped below `PICKUP_LABEL_SCALE` where a 7px glyph lands
+  on about a pixel. Measured over 120 pickups with the city framed: **3.10ms →
+  1.70ms**.
+  - **Batching them into one path per colour is 2x slower**, and was tried. The
+    `Map` and the per-colour arrays are rebuilt every frame, and that allocation
+    costs more than the fill-and-stroke pairs it saves. What makes the batching
+    work for `drawBushes` and the blood decals is that neither has per-item
+    state to sort into buckets first. Measured: 3.95ms → 8.19ms.
 - **The client was laying out the page on every mouse move.** This is the one
   that was actually costing frames, and nothing in the render loop could show it.
   `updateMouse` read `canvas.getBoundingClientRect()` per `mousemove` — a

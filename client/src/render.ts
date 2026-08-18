@@ -3747,23 +3747,49 @@ export function drawBurning(
   ctx.restore();
 }
 
+/**
+ * Below this scale a four-character label 7px tall lands on about a pixel of
+ * screen, so it is drawn as an unreadable smudge at the cost of a `fillText`
+ * each. The same idea as `ENTITY_DETAIL_SCALE`, for the same reason.
+ */
+export const PICKUP_LABEL_SCALE = 0.5;
+
 export function drawPickups(
   ctx: CanvasRenderingContext2D,
   pickups: PickupState[],
   view: Viewport,
   now: number,
+  scale = 1,
 ): void {
+  // **Set once, not once per pickup.** Assigning `ctx.font` parses a CSS font
+  // string, and this loop was doing it — along with the two text alignments —
+  // for every item on screen, every frame, with the same value each time. A
+  // spectator sees the whole city's loot at once, so that was a hundred-odd
+  // font parses a frame: `drawPickups` was the dearest function in the client
+  // and `fillText` was close behind it.
+  // Grouping these into one path per colour was tried and is **2x slower**:
+  // the Map and the per-colour arrays are rebuilt every frame, and that
+  // allocation costs more than the fill-and-stroke pairs it saves. The batching
+  // that works for bushes and blood works because those hold no per-item state
+  // to sort into buckets first.
+  const labels = scale >= PICKUP_LABEL_SCALE;
+  if (labels) {
+    ctx.font = 'bold 7px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+  }
+  ctx.lineWidth = 1.5;
+
   for (const p of pickups) {
     if (!visible(view, p.x, p.y, 30)) continue;
     const def = ITEMS[p.item];
     const bob = Math.sin(now * 0.004 + p.x * 0.05) * 2;
-
-    ctx.save();
-    ctx.translate(p.x, p.y + bob);
+    const x = p.x;
+    const y = p.y + bob;
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.beginPath();
-    ctx.ellipse(0, 9, 10, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(x, y + 9, 10, 4, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // A gun with nothing left in it goes grey, so it reads as scenery at a
@@ -3771,27 +3797,23 @@ export function drawPickups(
     const spent = p.ammo === 0;
     ctx.fillStyle = spent ? EMPTY_PICKUP_COLOR : def.color;
     ctx.strokeStyle = 'rgba(15, 23, 42, 0.8)';
-    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.roundRect(-8, -8, 16, 16, 3);
+    ctx.roundRect(x - 8, y - 8, 16, 16, 3);
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = spent ? '#1f2937' : '#0f172a';
-    ctx.font = 'bold 7px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(def.short.slice(0, 4), 0, 0);
+    if (labels) {
+      ctx.fillStyle = spent ? '#1f2937' : '#0f172a';
+      ctx.fillText(def.short.slice(0, 4), x, y);
+    }
     if (spent) {
       // A bar through it: colour alone is easy to miss on a dim item.
       ctx.strokeStyle = 'rgba(31, 41, 55, 0.9)';
-      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(-7, 7);
-      ctx.lineTo(7, -7);
+      ctx.moveTo(x - 7, y + 7);
+      ctx.lineTo(x + 7, y - 7);
       ctx.stroke();
     }
-    ctx.restore();
   }
 }
 

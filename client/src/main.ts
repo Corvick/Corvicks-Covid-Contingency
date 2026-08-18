@@ -1342,7 +1342,7 @@ function render() {
     drawBeaconTowers(ctx, towers, view, now);
     drawEmplacements(ctx, emplacements, view);
     drawFires(ctx, fires, view, now);
-    drawPickups(ctx, pickups, view, now);
+    drawPickups(ctx, pickups, view, now, scale);
   }
   mark('map');
 
