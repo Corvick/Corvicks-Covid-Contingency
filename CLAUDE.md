@@ -2132,6 +2132,46 @@ like *in the data* is the opposite — a shoelace area near zero, because a
 self-overlapping path cancels itself out while canvas fills it by nonzero
 winding. Measure the polygon, not the impression.
 
+**A second, unrelated collapse: a wall you are standing *in* used to blind you
+completely.** `rayRect` clamps its near hit to zero for an origin inside the
+rect, so every ray in every direction came back at distance 0, the polygon
+collapsed onto the viewer, and the fog was left with no hole at all. The fill is
+`rgba(4,6,9,0.92)` rather than opaque, so what is on screen is the whole world at
+8% — the ground and the faint ghosts of buildings, no walls, no bodies, no dog.
+Reported as *"everything but the floor and some fog stop rendering"* and
+*"sometimes nothing"*.
+
+- **The rule already existed for bushes and had never been applied to rects.**
+  Ten lines below it: *"a bush you're standing in doesn't blind you — you see
+  out, others can't see in"*. Walls now skip the same way, inclusive of the
+  edge, since a centre landing exactly on the boundary collapses it identically
+  and collision permits that.
+- **Collision keeps you out of walls, so the way in is a door shutting on you.**
+  A shut door's slab is an occluder; an open one is not. Stand in a doorway,
+  have somebody slam it — which is precisely what `slamsDoors` does on sight of
+  a threat — and your centre is inside the slab. Measured over three cities,
+  900 ticks each, sampling every body every 10th tick: **0** samples inside a
+  wall, **24 / 66 / 32** inside a shut door, and they are not all civilians —
+  officers turn up too.
+- **The dog gets it worst, and gets it on respawn.**
+  `respawnDogFromHorde` sets `dog.x = host.x` outright, so it rises exactly
+  where a shambler stood — and the shamblers most likely to be standing in a
+  slab are the ones clawing at a shut door. Dying and coming back into a
+  doorway blacks the screen out on the first frame. It also chews doors and
+  stands in doorways by trade.
+- Measured in isolation, viewer inside the occluder: **0.0% of the circle
+  visible → 95-100%**, while the open-ground controls are untouched at 80.3%
+  and 66.9% — occlusion still works exactly as it did for walls you are not in.
+
+**The watchdog cries wolf, and it is worth knowing before trusting it.** Its
+second test is `|fraction - lastFraction| > 0.3`, which fires on the perfectly
+legitimate jump from standing in the street to standing in a room. A reported
+`[fog] OFF at 1778,231 ... 3% of circle visible, seed 680400261` was checked
+against that regenerated city: the spot is **56px clear of the nearest wall and
+inside nothing at all**. A genuine collapse reads 0%, not 3%, and being cached
+(`fogpoly 0.00ms`) it often does not log at all. Regenerate the seed and test
+the coordinates before believing the line.
+
 ### Right-click, and the riot shield
 
 **Right mouse is reported raw and resolved on the server**, the way E already

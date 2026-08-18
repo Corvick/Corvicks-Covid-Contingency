@@ -108,6 +108,19 @@ export function visibilityPolygon(
 ): Point[] {
   const nearWalls: Wall[] = [];
   for (const w of walls) {
+    // A wall you are standing *in* doesn't blind you — the same rule the
+    // bushes below already follow, and it was never applied to rects.
+    //
+    // `rayRect` clamps its near hit to zero for an origin inside the rect, so
+    // every ray in every direction comes back at distance 0, the polygon
+    // collapses onto the viewer, and the fog is left with no hole at all. The
+    // fill is 0.92 rather than opaque, so what is on screen is the whole world
+    // at 8% — ground and the faint ghosts of buildings, no walls, no bodies.
+    // That is the "everything but the floor and some fog stops rendering" case.
+    //
+    // Inclusive of the edge, because a centre landing exactly on the boundary
+    // collapses it in precisely the same way, and collision permits that.
+    if (px >= w.x && px <= w.x + w.w && py >= w.y && py <= w.y + w.h) continue;
     if (
       w.x - clipW <= px &&
       w.x + w.w + clipW >= px &&
