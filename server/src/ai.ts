@@ -253,6 +253,7 @@ import {
   FRESH_ZOMBIE_SLOW_MS,
   FRESH_ZOMBIE_SLOW_MUL,
   TURNED_REMARK_CHANCE,
+  PATH_MAX_NODES,
   REPATH_INTERVAL_MS,
   WORLD_WIDTH,
   WORLD_HEIGHT,
@@ -395,12 +396,19 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
   const goalMoved = Math.hypot(gx - state.pathGoalX, gy - state.pathGoalY) > 60;
   const needsPath = !state.path || state.pathIndex >= state.path.length || goalMoved;
 
+  // The budget is in *nodes*, not in searches. Capping the count alone let ten
+  // worst-case routes land on one tick and cost 200ms between them — see
+  // PATH_NODE_BUDGET_PER_TICK. Charged after the fact, because how far a search
+  // has to look is not knowable before it runs: one over-budget search is
+  // allowed to finish, and it is the *next* caller that is turned away.
   if (needsPath && now >= state.nextPathAt && world.pathBudget > 0) {
-    world.pathBudget--;
     state.nextPathAt = now + REPATH_INTERVAL_MS;
     state.pathGoalX = gx;
     state.pathGoalY = gy;
-    state.path = world.nav.findPath(e.x, e.y, gx, gy);
+    // Capped by what is *left* of the tick, not just by the per-search limit,
+    // so a single awkward route cannot spend the whole frame on its own.
+    state.path = world.nav.findPath(e.x, e.y, gx, gy, Math.min(PATH_MAX_NODES, world.pathBudget));
+    world.pathBudget -= Math.max(1, world.nav.lastExpanded);
     state.pathIndex = 0;
   }
 

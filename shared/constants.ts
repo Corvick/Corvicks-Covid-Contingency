@@ -2325,6 +2325,38 @@ export const REPATH_INTERVAL_MS = 700;
  * back to walking straight into whatever wall is in the way.
  */
 export const PATH_MAX_NODES = 14000;
+/**
+ * Node budget for a whole *tick*, shared by every search in it.
+ *
+ * **This is the cap that matters, and for a long time nothing enforced it.**
+ * `PATH_BUDGET_PER_TICK` caps how many searches may run and `PATH_MAX_NODES`
+ * caps how far each may explore, but nothing capped the product — and the
+ * product is what the tick actually spends. Ten searches at the node cap is
+ * 140,000 expansions inside a 33.3ms budget.
+ *
+ * Measured on a 358x265 grid: a typical search costs 1.88ms, but the worst
+ * costs **20ms**, and ten of those is **200ms** — which is exactly the spike
+ * that was being reported. Long routes and searches that cannot succeed are
+ * the expensive ones, and a panicking crowd re-plans together, so the bad
+ * searches arrive on the same tick rather than spread out.
+ *
+ * Sized against what a live city actually asks for, not against what the
+ * pathfinder can be made to do. Measured over two cities, 2300 ticks each:
+ * demand is **median 340-465 nodes a tick** and does nothing at all on a tenth
+ * of them — but p99 is 14-15k and the worst tick asks for 28k. It is entirely a
+ * tail problem, which is why it shows up as a stutter rather than as a slow
+ * game.
+ *
+ * At 12000 the budget binds on **1.8-2.5%** of ticks and leaves the median
+ * untouched. Going to 24000 — the first number tried here — would have bound on
+ * 0.0% and fixed nothing at all, which is worth recording: a cap chosen by
+ * eye, above the p99 it was meant to catch, is a cap that never fires.
+ *
+ * Anybody refused waits for the next tick, which `REPATH_INTERVAL_MS` and the
+ * fall-back to `slideToward` already handle — being refused a path is a case
+ * every call site has always had to cope with.
+ */
+export const PATH_NODE_BUDGET_PER_TICK = 12000;
 
 // ---------------------------------------------------------------- rumour
 /**

@@ -248,7 +248,25 @@ export class NavGrid {
     return true;
   }
 
-  findPath(sx: number, sy: number, tx: number, ty: number): Waypoint[] | null {
+  /**
+   * Nodes the last `findPath` expanded.
+   *
+   * The tick's budget is spent in these rather than in whole searches — see
+   * `PATH_NODE_BUDGET_PER_TICK`. Reported on the grid rather than returned
+   * alongside the path so that no call site has to change shape; the one
+   * caller that keeps a budget reads it straight after the call.
+   */
+  lastExpanded = 0;
+
+  /**
+   * `maxNodes` is how far this one search may look, defaulting to the whole
+   * per-search cap. The caller passes what is left of the *tick's* budget, so
+   * one awkward route cannot spend the whole frame — a search that hits the
+   * cap returns null and the caller falls back to walking at the goal, which
+   * is a case every call site already had to handle.
+   */
+  findPath(sx: number, sy: number, tx: number, ty: number, maxNodes = PATH_MAX_NODES): Waypoint[] | null {
+    this.lastExpanded = 0;
     const start = this.nearestOpen(this.cellAt(sx, sy));
     const goal = this.nearestOpen(this.cellAt(tx, ty));
     if (start < 0 || goal < 0) return null;
@@ -276,8 +294,12 @@ export class NavGrid {
     let expanded = 0;
     while (heap.size > 0) {
       const current = heap.pop();
-      if (current === goal) return this.reconstruct(current, generation, tx, ty);
-      if (++expanded > PATH_MAX_NODES) break;
+      if (current === goal) {
+        this.lastExpanded = expanded;
+        return this.reconstruct(current, generation, tx, ty);
+      }
+      if (++expanded > maxNodes) break;
+      this.lastExpanded = expanded;
 
       const cc = current % cols;
       const cr = (current / cols) | 0;

@@ -1980,9 +1980,27 @@ flat shapes, and the two findings out of it are worth more than the picture:
   bush-refuge scan is 0.37ms across every hider on the map. All three were
   plausible and all three were wrong.
 
-- **Everything expensive is budgeted or cached.** A\* is capped at
-  `PATH_BUDGET_PER_TICK` (10) searches; AI perception runs at 10Hz staggered per
-  entity, not per tick; bush scanning and refuge choice are cached per entity.
+- **Everything expensive is budgeted or cached.** AI perception runs at 10Hz
+  staggered per entity, not per tick; bush scanning and refuge choice are cached
+  per entity.
+- **Budget the work, not the number of calls.** A\* was capped at
+  `PATH_BUDGET_PER_TICK` (10) *searches* and `PATH_MAX_NODES` (14000) nodes per
+  search — and nothing capped the product, which is what the tick actually
+  spends. Ten searches at the cap is 140,000 node expansions inside a 33.3ms
+  budget. Measured on a 358x265 grid: a typical search costs 1.6-2.3ms and the
+  worst **27ms**, so ten of those is **274ms** — which is the sporadic spike
+  that was being reported. `world.pathBudget` is charged in *nodes* now
+  (`PATH_NODE_BUDGET_PER_TICK`), and each search is additionally capped by
+  what is left of the tick, so one awkward route cannot take the frame.
+  - **Size a cap against measured demand, or it never fires.** The first value
+    tried was 24000, picked by eye. Real demand in a live city is **median
+    340-465 nodes a tick**, p99 14-15k, worst 28k — so 24000 would have bound
+    on 0.0% of ticks and changed nothing. 12000 binds on 1.8-2.5% and leaves
+    the median untouched. `server/nodedemand.ts` measured it; `pathbench.ts`
+    is what measures per-search cost and the success-rate cost of a tighter cap
+    (14000 finds 84.5% of random cross-map routes, 8000 finds 72.7%).
+  - Measured A/B, alternating on one evolving world: p99 **14.8→13.4** and
+    **12.8→11.3ms**, median unchanged. It is a bound on the tail, not a speed-up.
 - **The danger field is the scaling primitive.** One BFS from all zombies at 6Hz
   serves every human in O(1). Prefer adding to it over per-entity searches.
   `world.zombieGrid` is the third one: threat perception asked the grid holding
@@ -2043,6 +2061,21 @@ flat shapes, and the two findings out of it are worth more than the picture:
 - `generateMap` costs ~17ms, once per round. The connectivity repair pass builds
   a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
+- **Paint is measurable, and it is not the problem.** `render` on the HUD times
+  the canvas *commands*; rasterising them happens after rAF returns, so it lands
+  in the frame gap as `elsewhere` and profiling the render loop cannot see it.
+  `client/paintbench.ts` forces the rasteriser with a 1px `getImageData` and so
+  measures it even in a pane that never composites — draw each configuration
+  several times behind one readback, or the readback's own 4-5ms swamps the
+  answer and "no grime" measures slower than "everything on".
+  Measured at 1920x1080: the whole scene paints in **4.9ms** framed on the city
+  and **1.5ms** at a player's zoom. The grim-and-dirty art added nothing worth
+  having — the grime tile is **0.09ms** and the vignette **0.36ms**, because
+  both are cached and the fill is one pass. Walls are the dearest layer for a
+  spectator (2.15ms) and entities for a player (0.44ms). The per-frame DOM the
+  HUD writes is **0.3ms**. So a client reporting `else 24ms` is not spending it
+  on any of these, and the next place to look is the browser itself — whether
+  canvas is GPU-accelerated, and what else on the box wants the CPU.
 - **The endgame stall was paint, not simulation.** Four hundred entities each
   cost ~41 canvas path operations, all rasterised at once with the whole map
   framed. Below `ENTITY_DETAIL_SCALE` an entity draws as a single dot, and

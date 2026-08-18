@@ -26,7 +26,7 @@ import {
   PLAYER_SPEED,
   PLAYER_SIGHT_RADIUS,
   ENTITY_RADIUS,
-  PATH_BUDGET_PER_TICK,
+  PATH_NODE_BUDGET_PER_TICK,
   STAMINA_MAX,
   STAMINA_DRAIN_PER_SEC,
   STAMINA_REGEN_PER_SEC,
@@ -767,19 +767,33 @@ let worstTickMs = 0;
  */
 const phaseTotals = new Map<string, number>();
 let phaseAt = 0;
+/**
+ * The current tick's own split, and the worst one seen in this window.
+ *
+ * The average says the tick costs 15ms; what is actually felt is the one that
+ * cost 200. Those are not the same question and an average cannot answer the
+ * second — a spike that lands once every few seconds is invisible in a mean
+ * over 150 ticks and is exactly what a stutter is. So the breakdown of the
+ * worst tick is kept whole, rather than folded into the totals.
+ */
+const phaseThisTick: Array<[string, number]> = [];
+let worstPhases: Array<[string, number]> = [];
 function mark(label: string): void {
   const t = performance.now();
-  phaseTotals.set(label, (phaseTotals.get(label) ?? 0) + (t - phaseAt));
+  const cost = t - phaseAt;
+  phaseTotals.set(label, (phaseTotals.get(label) ?? 0) + cost);
+  phaseThisTick.push([label, cost]);
   phaseAt = t;
 }
 
 function tick(): void {
   const started = performance.now();
   phaseAt = started;
+  phaseThisTick.length = 0;
   const dt = TICK_MS / 1000;
   const now = Date.now();
 
-  world.pathBudget = PATH_BUDGET_PER_TICK;
+  world.pathBudget = PATH_NODE_BUDGET_PER_TICK;
 
   // Paused: nothing in the world advances, but snapshots keep going out so the
   // frozen scene stays on screen behind the panel. Only ever set by a solo
@@ -938,7 +952,10 @@ function tick(): void {
   rollingTickMs = rollingTickMs === 0 ? elapsed : rollingTickMs * 0.9 + elapsed * 0.1;
   tickTimeTotal += elapsed;
   tickSamples++;
-  if (elapsed > worstTickMs) worstTickMs = elapsed;
+  if (elapsed > worstTickMs) {
+    worstTickMs = elapsed;
+    worstPhases = phaseThisTick.slice();
+  }
   if (now - lastPerfLog >= 5000) {
     const avg = tickTimeTotal / tickSamples;
     // Per tick, biggest first, so the line reads as "where the tick went".
@@ -948,15 +965,28 @@ function tick(): void {
       .filter(([, ms]) => ms >= 0.05)
       .map(([label, ms]) => `${label} ${ms.toFixed(1)}`)
       .join(' · ');
+    // The worst tick gets its own line, and only when it is genuinely out of
+    // line with the average — a spike is a different fault from a slow mean.
+    const worstSplit = worstPhases
+      .filter(([, ms]) => ms >= 0.5)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, ms]) => `${label} ${ms.toFixed(1)}`)
+      .join(' · ');
+    const spike =
+      worstTickMs > Math.max(TICK_MS, avg * 2)
+        ? `\n       WORST ${worstTickMs.toFixed(1)}ms was: ${worstSplit || '(all phases small — GC or the event loop)'}`
+        : '';
+
     console.log(
       `[perf] avg tick ${avg.toFixed(1)}ms / ${TICK_MS.toFixed(1)}ms budget ` +
         `(worst ${worstTickMs.toFixed(1)}) ` +
         `| ${world.entities.size} entities | ${sockets.size} clients | ${survivors} survivors\n` +
-        `       ${split}`,
+        `       ${split}${spike}`,
     );
     tickTimeTotal = 0;
     tickSamples = 0;
     worstTickMs = 0;
+    worstPhases = [];
     phaseTotals.clear();
     lastPerfLog = now;
   }
