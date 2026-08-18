@@ -822,6 +822,22 @@ camera at 1:1 the polygon cost **6.4-16ms indoors with 15ms frame spikes**,
 against 0.5ms at 960×600 — a rebuild at 12.5Hz costing 12-16ms blows a 144Hz
 frame budget every time it fires.
 
+- **Indoors is no longer the worst case, and that figure above is history.**
+  The occluder clip is what fixed it: a room's walls and a street's walls are
+  both culled to the same viewport box, so the polygon no longer cares much
+  which you are standing in. Measured over 150 viewpoints of each: **indoors
+  4.29ms median / 15.94 worst, outdoors 4.03 / 15.19.** Do not go looking for an
+  indoor fog problem; there isn't one any more.
+- **One visibility polygon costs more than drawing five hundred people**, and
+  this is what makes a spectator *cheaper per frame* than a player — which is
+  backwards from what anybody expects and was reported as such. A spectator
+  computes no polygon at all (`drawFog` is skipped) and draws every body as a
+  single dot below `ENTITY_DETAIL_SCALE`: **519 bodies for ~1.5ms and
+  `fogpoly 0.00`.** A player draws a dozen bodies for well under a millisecond
+  and then pays 2.5-8ms for the fog. What makes *spectating* expensive is
+  nothing to do with drawing — it is the 56KB snapshot and 500 `copyInto` calls
+  arriving thirty times a second.
+
 **The lever is the zoom, not the pan.** Everything the fog costs is set by how
 much *world* is on screen. Modelled across pan 50 to 90 the polygon's area moved
 by three percentage points; going from 1.0 to 1.6 zoom took it to a third. So
