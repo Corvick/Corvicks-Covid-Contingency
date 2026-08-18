@@ -2061,6 +2061,30 @@ flat shapes, and the two findings out of it are worth more than the picture:
 - `generateMap` costs ~17ms, once per round. The connectivity repair pass builds
   a nav grid per iteration, so keep its iteration cap low.
 - Client shows fps / tick ms / fog ms top-right. Watch it after AI changes.
+- **The client was laying out the page on every mouse move.** This is the one
+  that was actually costing frames, and nothing in the render loop could show it.
+  `updateMouse` read `canvas.getBoundingClientRect()` per `mousemove` — a
+  *layout read* — while the HUD rewrote `innerHTML` every frame, so the layout
+  was always dirty and the read always forced a real reflow. Moving the mouse
+  across a spectator view laid out the page a hundred times a second.
+  - **The frame callback was never the problem, and a trace proves it.** Over
+    41s: the rAF callback is **6.5ms median** and **1 frame in 1526** ran over
+    16.7ms — yet frames arrived **25ms apart**. The main thread was idle 55% of
+    the time. The longest tasks were not drawing at all: a **320ms MajorGC**,
+    and input handling at **228ms / 96ms / 64ms** with `Layout` and
+    `UpdateLayoutTree` nested inside them. Chrome's own "Forced reflow" insight
+    named it.
+  - The rect is cached and refreshed on `resize`, on capture-phase `scroll`, and
+    by a `ResizeObserver` — the letterboxing changes the canvas's displayed size
+    without a window resize of its own. Verified: 200 synthetic mousemoves now
+    cause **0** `getBoundingClientRect` calls, and a resize causes exactly 1.
+  - The text readouts are written at **5Hz**, and the counts line only when it
+    changes. Assigning the same string still dirties layout, and nobody can read
+    a number that moves sixty times a second.
+  - **The lesson is the shape of it**: a cheap call in an event handler, made
+    expensive by an unrelated write somewhere else. Neither half is wrong on its
+    own. Anything reading layout — `getBoundingClientRect`, `offsetWidth`,
+    `getComputedStyle` — must not sit in a handler that fires per input event.
 - **Paint is measurable, and it is not the problem.** `render` on the HUD times
   the canvas *commands*; rasterising them happens after rAF returns, so it lands
   in the frame gap as `elsewhere` and profiling the render loop cannot see it.

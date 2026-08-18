@@ -78,8 +78,36 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     if (key) tracker.state[key] = false;
   });
 
+  /**
+   * Where the canvas sits on the page, cached.
+   *
+   * `getBoundingClientRect` is a *layout read*. Called from the mousemove
+   * handler it forced a synchronous reflow on every single mouse event — and
+   * because the HUD rewrites its `innerHTML` every frame, the layout was always
+   * dirty and so the reflow always actually ran. Moving the mouse across a
+   * spectator view was therefore laying out the page a hundred times a second.
+   *
+   * Measured in a 41s trace: the frame callback itself is 6.5ms median and only
+   * 1 frame in 1526 ran over 16.7ms, yet frames arrived 25ms apart and the
+   * longest main-thread tasks were input handling — 228ms, 96ms, 64ms — with
+   * `Layout` and `UpdateLayoutTree` inside them. Chrome's own "Forced reflow"
+   * insight flagged it.
+   *
+   * The rect only changes when the window does, so it is read once and then on
+   * resize. `ResizeObserver` covers the letterboxing, which changes the canvas's
+   * displayed size without a window resize event of its own.
+   */
+  let rect = canvas.getBoundingClientRect();
+  const refreshRect = (): void => {
+    rect = canvas.getBoundingClientRect();
+  };
+  window.addEventListener('resize', refreshRect);
+  // A scroll moves the canvas without resizing it; capture so it fires for any
+  // scrolling ancestor rather than only the window.
+  window.addEventListener('scroll', refreshRect, true);
+  new ResizeObserver(refreshRect).observe(canvas);
+
   function updateMouse(e: MouseEvent) {
-    const rect = canvas.getBoundingClientRect();
     // The canvas is letterboxed by CSS, so map client px back to canvas px.
     tracker.mouseX = ((e.clientX - rect.left) / rect.width) * canvas.width;
     tracker.mouseY = ((e.clientY - rect.top) / rect.height) * canvas.height;

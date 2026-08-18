@@ -208,6 +208,11 @@ let smoothElse = 0;
 /** Snapshot throughput, accumulated over the same one-second window as `spike`. */
 let bytesThisSecond = 0;
 let kbPerSec = 0;
+/** How often the text readouts are rewritten — see the note where they are. */
+const HUD_UPDATE_MS = 200;
+let hudWrittenAt = 0;
+/** The counts line as last written, so an unchanged one isn't rewritten. */
+let lastHudLine = '';
 
 const input = trackInput(canvas);
 
@@ -1539,8 +1544,10 @@ function render() {
   }
 
 
+  // Only written when it actually changes. Assigning the same string still
+  // dirties layout, and these are counts that move a few times a second at most.
   const counts = `survivors ${survivors} · incubating ${infectedCount} · zombies ${zombieCount}`;
-  hud.textContent = spectating
+  const line = spectating
     ? `SPECTATING (WASD pan · shift faster · scroll zoom) — ${counts}`
     // The cure gun is the only thing that tells you about yourself. The server
     // sends null unless one is in hand, so there is nothing to read otherwise.
@@ -1549,6 +1556,10 @@ function render() {
       : inventory?.selfInfected === false
         ? `${counts} · you are clean`
         : counts;
+  if (line !== lastHudLine) {
+    lastHudLine = line;
+    hud.textContent = line;
+  }
 
   // Perf readout: client frame rate, worst frame in the last second, and the
   // server's tick cost against its 33.3ms budget.
@@ -1571,22 +1582,33 @@ function render() {
   lastRenderMs = performance.now() - now;
   lastPhases = phases;
 
-  const fpsClass = fps >= 55 ? '' : fps >= 40 ? 'warn' : 'bad';
-  const tickClass = serverTickMs < 16 ? '' : serverTickMs < 28 ? 'warn' : 'bad';
-  // `render` against the frame gap is the fork in the road: a gap far larger
-  // than render means the cost is not in drawing at all, and the phase split
-  // says which part of drawing it is when it is.
-  const renderClass = lastRenderMs < 8 ? '' : lastRenderMs < 14 ? 'warn' : 'bad';
-  perfHud.innerHTML =
-    `<span class="${fpsClass}">${Math.round(fps)} fps</span> · spike ${worstFrameMs.toFixed(0)}ms<br>` +
-    `<span class="${tickClass}">tick ${serverTickMs.toFixed(2)}ms</span> / 33.3ms<br>` +
-    `fogpoly ${fogComputeMs.toFixed(2)}ms · ${tracked.size} drawn<br>` +
-    // The frame gap, split. Whichever of these three is large is the one to
-    // chase; `else` large means it is not this client's doing at all.
-    `gap ${smoothGap.toFixed(1)} = <span class="${renderClass}">render ${lastRenderMs.toFixed(1)}</span>` +
-    ` + net ${smoothNet.toFixed(1)} + else ${smoothElse.toFixed(1)}<br>` +
-    `${kbPerSec.toFixed(0)}KB/s in<br>` +
-    phases.map(([l, c]) => `${l} ${c.toFixed(1)}`).join(' · ');
+  // **The readout is written a few times a second, not sixty.**
+  //
+  // Rewriting `innerHTML` invalidates layout, and anything that then *reads*
+  // layout — `getBoundingClientRect` in the mouse handler was the one that
+  // mattered — has to force a reflow to answer. Written every frame, the page's
+  // layout was never clean. Nobody can read a number that changes sixty times a
+  // second anyway, and the values here are already smoothed over far longer
+  // than 200ms.
+  if (now - hudWrittenAt >= HUD_UPDATE_MS) {
+    hudWrittenAt = now;
+    const fpsClass = fps >= 55 ? '' : fps >= 40 ? 'warn' : 'bad';
+    const tickClass = serverTickMs < 16 ? '' : serverTickMs < 28 ? 'warn' : 'bad';
+    // `render` against the frame gap is the fork in the road: a gap far larger
+    // than render means the cost is not in drawing at all, and the phase split
+    // says which part of drawing it is when it is.
+    const renderClass = lastRenderMs < 8 ? '' : lastRenderMs < 14 ? 'warn' : 'bad';
+    perfHud.innerHTML =
+      `<span class="${fpsClass}">${Math.round(fps)} fps</span> · spike ${worstFrameMs.toFixed(0)}ms<br>` +
+      `<span class="${tickClass}">tick ${serverTickMs.toFixed(2)}ms</span> / 33.3ms<br>` +
+      `fogpoly ${fogComputeMs.toFixed(2)}ms · ${tracked.size} drawn<br>` +
+      // The frame gap, split. Whichever of these three is large is the one to
+      // chase; `else` large means it is not this client's doing at all.
+      `gap ${smoothGap.toFixed(1)} = <span class="${renderClass}">render ${lastRenderMs.toFixed(1)}</span>` +
+      ` + net ${smoothNet.toFixed(1)} + else ${smoothElse.toFixed(1)}<br>` +
+      `${kbPerSec.toFixed(0)}KB/s in<br>` +
+      phases.map(([l, c]) => `${l} ${c.toFixed(1)}`).join(' · ');
+  }
 
   requestAnimationFrame(render);
 }
