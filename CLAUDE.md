@@ -193,6 +193,35 @@ leaves a game on 8080 alone. It covers the shape and alphabet of 4000 codes,
 that no two live lobbies collide, that every letter gets drawn, six ways of
 mistyping or pasting one, and the four refusals.
 
+#### The link carries the code
+
+`?join=MZGD` — the whole invitation as one thing to paste. Four letters is
+already short, but it is four letters typed into a box the guest has to be told
+how to find; a link is one click out of a chat window. With a gamertag already
+remembered it goes **title → lobby, no clicks at all**; without one it stops at
+the single field standing in the way and then goes straight in.
+
+- **It is spent on `welcome`, not at page load, and this was a real bug.**
+  `net.ts` drops a send on the floor when the socket is still connecting —
+  silently, no error and no queue — so the auto-join fired into nothing and the
+  guest sat on the JOIN screen with the right code in the box and no idea why
+  nothing had happened. `welcome` is the first thing the server says, so it is
+  the honest "you may talk now". `takeInvite` needs a code, a name *and* a
+  socket, is called from all three becoming true in whatever order they do, and
+  the first call that finds all three clears it. **Anything else that wants to
+  send at startup has the same trap waiting for it.**
+- **COPY INVITE LINK is refused on localhost.** The link is built from
+  `location.origin` — the only address known to actually reach this server —
+  so a host playing at `http://localhost:8080` would copy a link meaning "your
+  own PC" and paste it to four people. A button that hands out a broken link is
+  worse than no button, so it disables itself and says which address to open the
+  game on instead. `Host Online.bat` therefore opens the LAN address rather than
+  localhost, and through a tunnel you open the https URL and the link carries
+  that.
+- **Two buttons, not one that changes meaning.** The link goes in a chat window;
+  the code gets read aloud to somebody already looking at the game. Different
+  moments, so both stay.
+
 ### Playing over the internet
 
 The codes say *which room*; they say nothing about *which machine*, and that

@@ -182,6 +182,22 @@
       }
       #btn-copy-code:hover { background: #3a2d1c; }
       #btn-copy-code.done { border-color: #1c9a49; background: #14301f; color: #4ade80; }
+      #btn-copy-link {
+        padding: 8px 14px; font: inherit; font-size: 11px; letter-spacing: 0.1em;
+        cursor: pointer; border: 1px solid #1c9a49; border-radius: 3px;
+        background: #14301f; color: #4ade80;
+      }
+      #btn-copy-link:hover { background: #1b4029; }
+      #btn-copy-link.done { border-color: #1c9a49; background: #14301f; color: #86efac; }
+      /* A link to localhost is no use to anybody else, so it is refused
+         rather than quietly handing out one that cannot work. */
+      #btn-copy-link:disabled {
+        cursor: default; border-color: #3a3f47; background: #1a1d22; color: #5b6472;
+      }
+      #invite-hint {
+        margin: -12px 0 14px; max-width: 640px; text-align: center;
+        color: #6b7280; font-size: 11px; letter-spacing: 0.03em;
+      }
 
       .name-input {
         width: 260px; padding: 11px 12px; margin: 0 0 10px; box-sizing: border-box;
@@ -270,7 +286,9 @@
             <span class="label">JOIN CODE</span>
             <span id="lobby-code">····</span>
             <button id="btn-copy-code">COPY</button>
+            <button id="btn-copy-link">COPY INVITE LINK</button>
           </div>
+          <p id="invite-hint"></p>
           <div class="teams">
             <div class="team">
               <h3>TEAM 1 — OFFICERS</h3>

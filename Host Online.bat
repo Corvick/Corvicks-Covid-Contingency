@@ -109,7 +109,23 @@ if errorlevel 1 (
 
 echo Waiting for the server to come up...
 timeout /t 4 /nobreak >nul
-start "" "http://localhost:%PORT%"
+
+REM Open the game on this PC's LAN address rather than localhost. The lobby
+REM builds its COPY INVITE LINK button out of the address the page was served
+REM from, so opening on localhost would produce a link meaning "your own PC" to
+REM everybody it was sent to. The lobby refuses to hand out such a link at all,
+REM which is correct and also unhelpful if it is the only address you ever open.
+REM Playing through a tunnel? Open the https URL from the tunnel window instead,
+REM and the invite link will carry that.
+set "LANIP="
+for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4 Address"') do (
+  for /f "tokens=* delims= " %%B in ("%%A") do if not defined LANIP set "LANIP=%%B"
+)
+if defined LANIP (
+  start "" "http://!LANIP!:%PORT%"
+) else (
+  start "" "http://localhost:%PORT%"
+)
 
 echo.
 echo   Close the server window (and the tunnel window, if open) to stop hosting.

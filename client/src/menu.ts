@@ -62,6 +62,48 @@ export function setupMenu(hooks: MenuHooks): Menu {
   let name = '';
   let view: LobbyView | null = null;
 
+  /**
+   * A code carried in on the URL — `?join=MZGD`.
+   *
+   * Four letters is already short, but it is four letters typed into a box the
+   * guest has to be told how to find. A link is one click out of a chat window,
+   * which is the whole of what "frictionless" means to the person being
+   * invited. Held here until there is a gamertag to join with, and cleared once
+   * spent so that leaving the lobby cannot silently rejoin it.
+   */
+  let pendingJoin = (() => {
+    const raw = new URLSearchParams(location.search).get('join') ?? '';
+    const code = raw.toUpperCase().replace(/[^A-Z]/g, '').slice(0, LOBBY_CODE_LENGTH);
+    return code.length === LOBBY_CODE_LENGTH ? code : '';
+  })();
+
+  /**
+   * Whether the socket is actually up.
+   *
+   * `net.ts` drops a send on the floor when the socket is still connecting —
+   * silently, with no error and no queue — so an invite spent at page load goes
+   * nowhere at all and the guest is left sitting on the JOIN screen with the
+   * right code in the box and no idea why nothing happened. `welcome` is the
+   * first thing the server says, so it is the honest "you may talk now" signal.
+   */
+  let connected = false;
+
+  /**
+   * Spend the invite, once there is one, a name to spend it under, and a socket
+   * to spend it down. Called from all three of those becoming true, in whatever
+   * order they do; the first call that finds all three wins and clears it.
+   *
+   * Returns the code it sent, so the caller can put it in the box — a refusal
+   * has to land somewhere with something to correct.
+   */
+  const takeInvite = (): string => {
+    if (!pendingJoin || !name || !connected) return '';
+    const code = pendingJoin;
+    pendingJoin = '';
+    hooks.send({ type: 'lobbyJoin', code, gamertag: name });
+    return code;
+  };
+
   // ---- gamertag ----
   const nameInput = el<HTMLInputElement>('name-input');
   const nameOk = el<HTMLButtonElement>('btn-name-ok');
@@ -77,6 +119,16 @@ export function setupMenu(hooks: MenuHooks): Menu {
       localStorage.setItem(NAME_KEY, name);
     } catch {
       /* not remembered, still usable this session */
+    }
+    // Arriving on an invite, the name screen is the only thing between the
+    // click and the lobby — so answering it goes straight there rather than
+    // dropping them on a menu to find JOIN for themselves.
+    const sent = takeInvite();
+    if (sent) {
+      codeInput.value = sent;
+      refreshJoinButton();
+      show('join');
+      return;
     }
     show('online');
   };
@@ -161,7 +213,28 @@ export function setupMenu(hooks: MenuHooks): Menu {
   const codeWrap = el<HTMLDivElement>('lobby-code-wrap');
   const codeText = el<HTMLSpanElement>('lobby-code');
   const copyBtn = el<HTMLButtonElement>('btn-copy-code');
+  const copyLinkBtn = el<HTMLButtonElement>('btn-copy-link');
+  const inviteHint = el<HTMLParagraphElement>('invite-hint');
   let copiedTimer = 0;
+  let linkTimer = 0;
+
+  /**
+   * The link a guest can click.
+   *
+   * Built from the address *this page was served from*, which is the only
+   * address known to actually reach this server — a tunnel hostname, a LAN IP,
+   * a forwarded public one, whatever the host opened the game on.
+   *
+   * Which is also why it is refused on localhost: a host playing at
+   * `http://localhost:8080` would otherwise copy a link to their own machine
+   * and paste it to four people, for whom it means "your own PC". A button that
+   * hands out a broken link is worse than no button, so it says so instead.
+   */
+  const inviteLink = (code: string) => `${location.origin}/?join=${code}`;
+  const linkIsLocal =
+    location.hostname === 'localhost' ||
+    location.hostname === '::1' ||
+    location.hostname.startsWith('127.');
 
   /**
    * Put the code on the clipboard.
@@ -194,6 +267,18 @@ export function setupMenu(hooks: MenuHooks): Menu {
     scratch.remove();
     return ok;
   };
+
+  copyLinkBtn.addEventListener('click', () => {
+    if (!view || linkIsLocal) return;
+    const ok = copyToClipboard(inviteLink(view.code));
+    copyLinkBtn.textContent = ok ? 'LINK COPIED' : 'PRESS CTRL+C';
+    copyLinkBtn.classList.toggle('done', ok);
+    clearTimeout(linkTimer);
+    linkTimer = window.setTimeout(() => {
+      copyLinkBtn.textContent = 'COPY INVITE LINK';
+      copyLinkBtn.classList.remove('done');
+    }, COPIED_SHOWN_MS);
+  });
 
   copyBtn.addEventListener('click', () => {
     if (!view) return;
@@ -281,6 +366,13 @@ export function setupMenu(hooks: MenuHooks): Menu {
     // A solo room has nobody to hand a code to, so it doesn't show one.
     codeWrap.classList.toggle('hidden', view.offline);
     codeText.textContent = view.code;
+    copyLinkBtn.disabled = linkIsLocal;
+    inviteHint.textContent = view.offline
+      ? ''
+      : linkIsLocal
+        ? 'you opened the game on localhost, so there is no link worth sharing — ' +
+          'send the code, or reopen the game on the address your friends use'
+        : inviteLink(view.code);
     renderSlots('humans', view.humans, view.isHost);
     renderSlots('dogs', view.dogs, view.isHost);
     startBtn.style.display = view.isHost ? '' : 'none';
@@ -369,6 +461,27 @@ export function setupMenu(hooks: MenuHooks): Menu {
     show(solo ? 'title' : 'online');
   });
 
+  // An invite skips the title: the guest asked for a specific lobby, so the
+  // first thing they see should be the shortest path into it. With a gamertag
+  // already remembered that is the lobby itself; without one it is the single
+  // field standing in the way.
+  if (pendingJoin) {
+    try {
+      name = (localStorage.getItem(NAME_KEY) ?? '').trim().slice(0, NAME_MAX);
+    } catch {
+      /* nothing remembered — they get asked */
+    }
+    if (name) {
+      // Put the code where a refusal can land and wait for the socket; the
+      // `welcome` handler below is what actually spends it.
+      codeInput.value = pendingJoin;
+      refreshJoinButton();
+      show('join');
+    } else {
+      askName();
+    }
+  }
+
   return {
     reopen() {
       view = null;
@@ -377,7 +490,15 @@ export function setupMenu(hooks: MenuHooks): Menu {
     },
 
     handle(msg) {
-      if (msg.type === 'lobby') {
+      if (msg.type === 'welcome') {
+        connected = true;
+        const sent = takeInvite();
+        if (sent) {
+          codeInput.value = sent;
+          refreshJoinButton();
+          show('join');
+        }
+      } else if (msg.type === 'lobby') {
         view = msg.lobby;
         renderLobby();
         if (current !== 'lobby') show('lobby');
