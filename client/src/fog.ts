@@ -9,6 +9,19 @@ export interface Point {
   atRadius: boolean;
 }
 
+/**
+ * Straight-line distance from a point to the nearest edge of a rect, 0 inside.
+ *
+ * A lower bound on any ray hit: no ray from this point can strike this rect
+ * nearer than this. That is what lets the ray loop stop early — see the note
+ * beside `wallOrder`.
+ */
+function rectDistance(px: number, py: number, r: Wall): number {
+  const dx = Math.max(r.x - px, 0, px - (r.x + r.w));
+  const dy = Math.max(r.y - py, 0, py - (r.y + r.h));
+  return Math.hypot(dx, dy);
+}
+
 /** Distance along a ray to a rect, or Infinity. Slab method. */
 function rayRect(ox: number, oy: number, dx: number, dy: number, r: Wall): number {
   let tmin = 0;
@@ -187,18 +200,41 @@ export function visibilityPolygon(
 
   angles.sort((a, b) => a - b);
 
+  /**
+   * **Nearest first, so a ray can stop looking.**
+   *
+   * Every wall contributes twelve rays and every ray was then tested against
+   * every wall, which is the square in "cost is roughly the square of the
+   * occluder count" — a hundred walls is a hundred and twenty thousand
+   * ray-rect tests, and that is the 20ms+ tail that blows a frame outright.
+   *
+   * A wall cannot be hit nearer than its own closest point. So with the walls
+   * ordered by that distance, the moment one is further off than the best hit
+   * so far, every wall after it is too and the loop is finished. It is exact —
+   * the same polygon, and usually after testing a handful of the nearest few,
+   * because in a city the first thing a ray meets is close.
+   */
+  const wallOrder = nearWalls
+    .map((w) => ({ w, d: rectDistance(px, py, w) }))
+    .sort((a, b) => a.d - b.d);
+  const bushOrder = nearBushes
+    .map((b) => ({ b, d: Math.hypot(b.x - px, b.y - py) - b.r }))
+    .sort((a, b) => a.d - b.d);
+
   const points: Point[] = [];
   for (const angle of angles) {
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
 
     let best = radius;
-    for (const w of nearWalls) {
-      const t = rayRect(px, py, dx, dy, w);
+    for (let i = 0; i < wallOrder.length; i++) {
+      if (wallOrder[i].d >= best) break;
+      const t = rayRect(px, py, dx, dy, wallOrder[i].w);
       if (t < best) best = t;
     }
-    for (const b of nearBushes) {
-      const t = rayCircle(px, py, dx, dy, b);
+    for (let i = 0; i < bushOrder.length; i++) {
+      if (bushOrder[i].d >= best) break;
+      const t = rayCircle(px, py, dx, dy, bushOrder[i].b);
       if (t < best) best = t;
     }
     points.push({

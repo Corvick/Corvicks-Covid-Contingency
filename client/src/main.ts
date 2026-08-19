@@ -3,6 +3,7 @@ import {
   VIEWPORT_HEIGHT,
   WORLD_WIDTH,
   WORLD_HEIGHT,
+  setWorldSize,
   TRACER_LIFETIME_MS,
   FLAME_TRACER_MS,
   PLAYER_SIGHT_RADIUS,
@@ -266,9 +267,15 @@ const { send } = connect((msg) => {
   if (msg.type === 'welcome') {
     selfId = msg.selfId;
     map = msg.map;
+    setWorldSize(map.width, map.height);
     if (startSpectating) send({ type: 'spectate', restart: spectateParam === 'new' });
   } else if (msg.type === 'map') {
     map = msg.map;
+    // **Before anything below reads a world dimension.** The city is sized by
+    // the host's population slider, so the map that just arrived is the only
+    // thing that knows how big this one is — and the spectator camera two
+    // dozen lines down recentres on the middle of it.
+    setWorldSize(map.width, map.height);
     tracers = [];
     // Drop the old snapshot too: keeping it would compute one frame of fog
     // from stale positions against the new map's walls.
@@ -627,7 +634,7 @@ function applyZoom(): void {
   spectateZoom = next;
 
   // Hold whatever was under the cursor where it was.
-  const scale = SPECTATE_FIT * spectateZoom;
+  const scale = spectateFit() * spectateZoom;
   spectateX = worldX - at.x / scale + VIEWPORT_WIDTH / scale / 2;
   spectateY = worldY - at.y / scale + VIEWPORT_HEIGHT / scale / 2;
 }
@@ -768,14 +775,21 @@ function self(): EntityState | undefined {
  */
 const SPECTATE_ZOOM_MIN = 1;
 const SPECTATE_ZOOM_MAX = 7;
-const SPECTATE_FIT = Math.min(VIEWPORT_WIDTH / WORLD_WIDTH, VIEWPORT_HEIGHT / WORLD_HEIGHT);
+/**
+ * A function, not a constant. The city is not one size any more — the lobby's
+ * population slider sets it, and `setWorldSize` writes it out of whatever map
+ * arrives — so a fit worked out at import time would frame the *launch* size
+ * forever and leave a smaller city drawn as a postage stamp in the corner of
+ * the screen with no way to zoom in on it.
+ */
+const spectateFit = () => Math.min(VIEWPORT_WIDTH / WORLD_WIDTH, VIEWPORT_HEIGHT / WORLD_HEIGHT);
 let spectateZoom = 1;
 let spectateX = WORLD_WIDTH / 2;
 let spectateY = WORLD_HEIGHT / 2;
 
 function cameraFor(view: EntityState | undefined): { view: Viewport; scale: number } {
   if (spectating || !view) {
-    const scale = SPECTATE_FIT * spectateZoom;
+    const scale = spectateFit() * spectateZoom;
     const w = VIEWPORT_WIDTH / scale;
     const h = VIEWPORT_HEIGHT / scale;
     // Centre on wherever they've zoomed to, but never past the map's edges.
@@ -968,7 +982,7 @@ function panSpectator(dt: number): void {
   if (input.state.left) dx -= 1;
   if (input.state.right) dx += 1;
 
-  const scale = SPECTATE_FIT * spectateZoom;
+  const scale = spectateFit() * spectateZoom;
   const w = VIEWPORT_WIDTH / scale;
   const h = VIEWPORT_HEIGHT / scale;
 
@@ -1043,6 +1057,8 @@ let cachedX = Number.NaN;
 let cachedY = Number.NaN;
 /** Raising a scope changes how far the polygon reaches, so it can't be reused. */
 let cachedRadius = -1;
+/** The `doorEpoch` the cached polygon was built against — see `visibilityFor`. */
+let cachedEpoch = -1;
 let fogComputeMs = 0;
 /** Latches the fog fault so only its edges are logged, not every frame. */
 let fogFailing = false;
@@ -1077,11 +1093,26 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   if (!map) return [];
   const radius = fogRadius();
   const moved = Math.hypot(me.x - cachedX, me.y - cachedY);
+  /**
+   * **The polygon has exactly three inputs, and the clock is not one of them.**
+   *
+   * Where the viewer is, how far they see, and what is standing in the way. The
+   * occluders are walls plus every shut door, and a door opening or shutting
+   * already bumps `doorEpoch` — so those three cover it completely. The old
+   * cache threw itself away every `FOG_UPDATE_MS` on top, which bought nothing
+   * and cost a full rebuild 12.5 times a second: standing still in a doorway,
+   * looking at a scene that could not change, was costing 3ms of median and a
+   * 20ms tail for an identical answer.
+   *
+   * Walking is unaffected — `FOG_MOVE_EPSILON` is 21px and an officer covers
+   * that in about 77ms, so a moving player rebuilds at much the cadence they
+   * always did. It is standing still that becomes free.
+   */
   if (
     cachedPoly.length > 0 &&
     radius === cachedRadius &&
-    moved < FOG_MOVE_EPSILON &&
-    now - cachedAt < FOG_UPDATE_MS
+    cachedEpoch === doorEpoch &&
+    moved < FOG_MOVE_EPSILON
   ) {
     return cachedPoly;
   }
@@ -1103,6 +1134,7 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   cachedX = me.x;
   cachedY = me.y;
   cachedRadius = radius;
+  cachedEpoch = doorEpoch;
 
   // Watchdog: if the visible region covers nearly the whole sight circle while
   // walls are standing right next to us, occlusion has failed. Log it with

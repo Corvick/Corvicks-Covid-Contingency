@@ -10,6 +10,12 @@ hundreds of civilian and zombie NPCs. Server-authoritative.
 - `client/` — Vite + raw Canvas 2D. Renders snapshots, sends input only.
 - `shared/` — types, constants, item registry. Imported by both sides.
 - **No root `package.json`.** Install and run in `server/` and `client/` separately.
+- **`shared/package.json` exists for one reason: `{ "type": "module" }`.** It has
+  no dependencies and nothing is ever installed in it. With no root package.json
+  and none in `shared/`, node walks all the way up, finds nothing, and treats
+  `shared/*.ts` as **CommonJS** — where an exported binding is a *snapshot taken
+  at import time*, not a live view. That is invisible while every export is a
+  `const` and fatal the moment one is not: see **The city is not one size**.
 
 ## Commands
 
@@ -124,6 +130,19 @@ you are *already* in benches you. `START GAME` sends nothing but the command —
 the server owns the layout, counts `bot` officer slots into
 `world.botOfficerCount`, and `populate` reads it. The gamertag lives in
 `localStorage`, prefilled and pre-selected.
+
+**The OPTIONS box beside the bench is the host's, and its one control is the
+population slider** — see **The city is not one size**. Everybody in the room
+sees the number and the size it implies; only the host's slider moves, and it
+disables itself for anyone else rather than being clicked and refused. It is
+sent live as it is dragged, the way a seat pushes on every click, with one
+exception to the "the client holds no lobby state" rule: **while the slider is
+being held, it is the authority on its own position.** The server pushes the
+whole lobby back on every change and `renderLobby` writes what arrived into the
+controls, which for a slider mid-drag means the value being *left* is written
+back over the value being moved to, one round trip behind the mouse — the thumb
+sticks and fights the drag. `draggingPop` is that, and it only ever suppresses
+the position; the text beside it still updates from whatever arrives.
 
 **Spectating is a lobby state, not a URL.** A spectator holds no seat and gets
 no entity; `startLobby` puts them into `world.spectators` *after* `resetWorld`,
@@ -316,6 +335,119 @@ address may open. A public tunnel URL handed to friends is not the same as a
 server advertised to strangers, and nothing enumerates lobbies, so the exposure
 is "somebody guessed or was given your URL". Worth revisiting before this is
 ever left running unattended.
+
+### The city is not one size
+
+The host's lobby slider: **100 to 500 civilians, and the city shrinks with the
+crowd.** It exists because one of the two machines this is developed on cannot
+run a full round, and it is the only setting in the game.
+
+- **The number is civilians only.** The garrison, the players, their bots and
+  the five zombies that walk in from the edge are all on top of it — which is
+  what the slider says, and what `HUMAN_COUNT` has always meant.
+- **Area scales with population**, so the streets stay as busy as they are now.
+  A quieter round is meant to be a *smaller city*, not the same city with the
+  people thinned out of it; walking four blocks to find anybody is not the game.
+  That is `sqrt(pop / 500)` on each axis.
+- **`CITY_SCALE_MIN` (0.6) is where it stops, and the floor is not a round
+  number picked by eye.** Blocks, roads and the gaps between buildings keep
+  their **absolute** sizes at every setting — that is precisely what keeps a van
+  able to drive in and a SWAT team able to get out of it — so shrinking the map
+  removes blocks rather than tightening them. What does not shrink on its own is
+  the landmark set, and below about 0.6 the corner complex stops being a corner
+  of a city and starts being the city. The floor is 3000x2220, which still holds
+  an 8x6 street grid around all of it. Below the floor the crowd genuinely
+  thins, which is the trade at the bottom of the slider.
+- **Counts scale; sizes do not.** `scaledCount` in `mapgen` is the whole of it:
+  big buildings and loose bushes by *area*, edge buildings by one axis since
+  they line a perimeter. Landmarks that are absolute — the corner complex, the
+  big buildings — are additionally capped as a *share* of the shorter side
+  (`CORNER_COMPLEX_MAX_SHARE`, `BIG_BUILDING_MAX_SHARE`), which is a no-op at
+  full size and is what stops one swallowing a small map.
+- **The garrison scales by area, not linearly.** The figure that matters is the
+  furthest any spot can be from the nearest officer, and it goes as
+  `sqrt(area / count)` — so holding officers-per-square-pixel fixed holds that
+  distance fixed. Scaled linearly a small city would come out *better* garrisoned
+  than a full one, which is a difficulty change smuggled in under a performance
+  setting. Floored at four.
+- **The slider is refused while a round is up**, and the control says so rather
+  than being clicked and ignored. There is nothing left for it to size: the nav
+  grid, the room map and every broadphase grid are already built to the city on
+  screen. Restart is what applies a change.
+
+**`WORLD_WIDTH` and `WORLD_HEIGHT` are `let`, and that is the whole mechanism.**
+ES module exports are live bindings, so the hundred-odd places that read them
+see whatever `setCityPopulation` last wrote without any of them being handed a
+size. The cost is one rule: **nothing may derive a module-level constant from
+them.** `TRACKER_RANGE` became `trackerRange()` and the client's `SPECTATE_FIT`
+became `spectateFit()` for exactly that reason — computed at import they would
+freeze the launch size in and then quietly disagree with the map forever.
+
+- **The client is never told a population.** It is told a `MapData`, which
+  carries the width and height the server actually built, and `setWorldSize`
+  takes its word for it — on `welcome` and on `map`, **before** anything below
+  reads a dimension (the spectator camera recentres on the middle of the city a
+  few lines further down). Deriving the size from a population on both ends
+  would be the same arithmetic written twice, and the day they disagree the fog,
+  the camera clamp and the minimap all frame a city that is not the one on the
+  wire.
+- **`resizeGrids` in `resetWorld` is not optional.** A `SpatialGrid` takes its
+  column count in its constructor. *Shrinking* leaves an oversized grid, which
+  is merely wasteful — it is a sparse `Map`. **Growing is the one that breaks**,
+  and quietly: `col`/`row` clamp to the last index, so everything past the old
+  city's edge lands in one cell. Measured on the real case, a host who plays a
+  quiet round and then restarts at full size: **85 bodies in a single cell
+  against 6** with the resize in.
+- **The trap that cost the most time is not in this code at all.** `shared/` had
+  no `package.json` and there is no root one, so node treated those files as
+  CommonJS and every importer got a *snapshot* of `WORLD_WIDTH`. Every round
+  came out 5000x3700 with 500 people in it wherever the slider was, and nothing
+  errored — the giveaway was that functions *inside* `constants.ts` saw 0.36
+  while `WORLD_WIDTH` read 5000 in every importer. `shared/package.json` fixes
+  it. `startLobby` now compares the generated `map.width` against
+  `citySizeFor(lobby.population)` and logs loudly if they disagree, so losing
+  that file again is noisy rather than silent.
+
+`server/citysize.ts` is the harness — headless, no socket, no port, so it leaves
+a game on 8080 alone. Measured over six cities at each of five settings:
+
+| pop | city | buildings | street clearance p5/p50 | narrowest doorway | van parks | crew out | garrison |
+|---|---|---|---|---|---|---|---|
+| 500 | 5000x3700 | 84-89 | 8 / 74 | 46 | 36/36 | 36/36 | 12 |
+| 400 | 4472x3309 | 63-65 | 8 / 80 | 46 | 36/36 | 36/36 | 9-10 |
+| 300 | 3873x2866 | 53-55 | 8 / 80 | 46 | 36/36 | 36/36 | 7-8 |
+| 200 | 3162x2340 | 34-38 | 8 / 80-86 | 46 | 36/36 | 36/36 | 5-6 |
+| 100 | 3000x2220 | 24-26 | 8 / 86-90 | 46 | 36/36 | 36/36 | 4-5 |
+
+Garrison is the city's own officers, not counting the bots standing in for
+absent players. Ranges are across repeated runs — the map is not seeded, so
+quote a range and never compare two single runs.
+
+**A smaller city is a more open one, never a tighter one** — the median street
+clearance goes *up* as it shrinks, the narrowest doorway is 46px at every
+setting (the dog's collision circle is 38), and the van found a spot its whole
+footprint fits and got its crew out on every one of 180 calls. The park and the
+pond were on the map in 30/30 cities.
+
+**What it buys**, on the same world resized under itself, 300 ticks each with a
+clock that actually advances: entities **521 → 113**, nav cells 94,870 →
+34,185, `generateMap` 8.1 → 2.0ms, and the tick roughly **3x** — 6.28 → 2.01ms
+median on a quiet run, 13.25 → 3.48ms on a busy one, so take the ratio and not
+the absolute figures. Live in a real round with one bot: 519 entities and
+`updateAi` 5.2ms at 500, **111 entities and 2.1ms** at 100.
+
+**A city at 500 is byte-for-byte the one it was.** Every scaled count and every
+share cap is a no-op at full size, and none of them consume an extra `rand()`,
+so the seeded map is unchanged: five seeds hashed against `HEAD` before the
+change and after it, **5/5 identical** down to the wall, door and bush counts.
+
+*Note the measurement of "space between buildings" went through a wrong version
+first.* The smallest gap between any two footprints anywhere in a city is an
+outlier of two rects that happen to nearly touch, and it bounces between 0 and
+28px from seed to seed at **every** setting — it says nothing. The question is
+whether a small city is a *tighter* one, which is a question about the
+distribution, so the harness walks the walkable ground instead and records how
+far each open spot is from the nearest blocked one.
 
 ### Civilian traits
 
@@ -752,6 +884,13 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
   excluded because you always have one. That is 9 guns and 15 utilities.
   Measured over six cities: 96-117 items, **0** guns and **0** utilities
   missing in any of them.
+  - **It survives a small city, which is the case that could have broken it.**
+    Loot follows the buildings, so it scales on its own — but the floor needs
+    somewhere to *put* what a smaller roll missed, and `placeSomewhere` only
+    gets twelve tries at a house of its own before falling back to a takeover.
+    Measured over four cities at each of three settings: 113 / 75 / 46 pickups
+    at 500 / 300 / 100 population, **0** guns and **0** utilities missing at any
+    of them, and the one-offs still exactly one each.
   - **The floor adds loot rather than displacing it.** It used to take an
     ordinary spot over, which was fine when it was four rare guns and is not
     when it is two dozen items — a third of the city's loot would have been the
@@ -1017,6 +1156,23 @@ camera at 1:1 the polygon cost **6.4-16ms indoors with 15ms frame spikes**,
 against 0.5ms at 960×600 — a rebuild at 12.5Hz costing 12-16ms blows a 144Hz
 frame budget every time it fires.
 
+- **Nearest occluder first, so a ray can stop looking.** Every wall contributes
+  twelve rays and every ray was then tested against every wall — which is the
+  square in "cost is roughly the square of the occluder count", and at a hundred
+  walls it is 120,000 ray-rect tests and a **20ms+ tail that blows a frame
+  outright**. A wall cannot be hit nearer than its own closest point, so with
+  the walls ordered by that distance the loop finishes the moment one is further
+  off than the best hit so far. Exact, not approximate: verified over **316,356
+  polygon points with 0 mismatches and 0.00px drift** against the same file with
+  the early-out removed. Measured head to head in one process: median **1.87 →
+  0.57ms**, p99 **6.66 → 1.70**, worst **7.74 → 2.66**.
+- **The fog cache has three inputs and the clock is not one of them.** Where the
+  viewer is, how far they see, and what is in the way — and a door opening or
+  shutting already bumps `doorEpoch`. The cache also expired every
+  `FOG_UPDATE_MS` on top of that, which bought nothing and cost a full rebuild
+  12.5 times a second: standing still, looking at a scene that could not have
+  changed, was paying for an identical answer. Walking is unaffected, since
+  `FOG_MOVE_EPSILON` is 21px and an officer covers that in about 77ms anyway.
 - **Indoors is no longer the worst case, and that figure above is history.**
   The occluder clip is what fixed it: a room's walls and a street's walls are
   both culled to the same viewport box, so the polygon no longer cares much
