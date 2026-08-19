@@ -51,6 +51,26 @@ export function setupMenu(hooks: MenuHooks): Menu {
   const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
   const shell = el<HTMLDivElement>('shell');
 
+  /**
+   * The build stamp, bottom right of the shell.
+   *
+   * Two questions, and the second is the one worth the pixels: what is this
+   * client, and is the server the same thing? Ours is `__BUILD__`, baked in by
+   * Vite at compile time; the server's arrives in `welcome`.
+   *
+   * While they agree there is one grey line — printing a matching stamp twice
+   * is noise. When they differ both are shown and it goes amber, because that
+   * is the whole reason this exists: running the game across two machines, the
+   * thing that has gone wrong is almost always that one of them did not pull.
+   */
+  const stamp = el<HTMLDivElement>('build-stamp');
+  const showBuild = (server?: string) => {
+    const differs = server !== undefined && server !== __BUILD__;
+    stamp.classList.toggle('mismatch', differs);
+    stamp.textContent = differs ? `client ${__BUILD__}\nserver ${server}` : `build ${__BUILD__}`;
+  };
+  showBuild();
+
   const screens = {
     title: el<HTMLDivElement>('screen-title'),
     name: el<HTMLDivElement>('screen-name'),
@@ -572,6 +592,7 @@ export function setupMenu(hooks: MenuHooks): Menu {
     handle(msg) {
       if (msg.type === 'welcome') {
         connected = true;
+        showBuild(msg.build);
         const sent = takeInvite();
         if (sent) {
           codeInput.value = sent;

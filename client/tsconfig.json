@@ -7,5 +7,9 @@
     "lib": ["ES2022", "DOM"],
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "../shared/**/*.ts"]
+  "include": ["src/**/*.ts", "../shared/**/*.ts"],
+  // `buildstamp.ts` shells out to git, so it is node-only. No client file
+  // imports it — Vite runs it at build time and bakes the result in as
+  // `__BUILD__` — and typechecking it here would fail on `node:child_process`.
+  "exclude": ["../shared/buildstamp.ts"]
 }

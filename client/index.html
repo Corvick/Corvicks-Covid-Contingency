@@ -64,6 +64,17 @@
       /* ---- front end: title, mode, lobby ---- */
       #shell { position: absolute; inset: 0; background: #0b0d10; }
       #shell.hidden { display: none; }
+      /* Build stamp. On the shell rather than on the title screen, so it is
+         still there in a lobby — which is exactly where you want it, with
+         somebody else's server on the other end of the socket. Dim enough to
+         ignore until it goes amber, which it only does on a mismatch. */
+      #build-stamp {
+        position: absolute; right: 14px; bottom: 11px; z-index: 2;
+        color: #4b5563; font-size: 11px; letter-spacing: 0.05em;
+        text-align: right; line-height: 1.55; pointer-events: none;
+        white-space: pre;
+      }
+      #build-stamp.mismatch { color: #fbbf24; }
       .screen { display: none; height: 100%; flex-direction: column;
                 align-items: center; justify-content: center; color: #e5e7eb; }
       .screen.active { display: flex; }
@@ -281,6 +292,10 @@
     <div id="stage">
       <!-- Front end. Sits over the canvas until a game is actually started. -->
       <div id="shell">
+        <!-- Filled in by menu.ts: this client's build, and the server's beside
+             it as soon as one has said hello. -->
+        <div id="build-stamp"></div>
+
         <div id="screen-title" class="screen active">
           <h1>CORVICK'S COVID CONTINGENCY</h1>
           <p>five officers · one outbreak</p>

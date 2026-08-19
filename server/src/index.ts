@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { buildStamp } from '../../shared/buildstamp.js';
 import type {
   ClientMessage,
   EntityState,
@@ -116,6 +117,18 @@ import { clientIsBuilt, serveClient } from './serve.js';
 
 /** 8080 unless told otherwise, so a second server can be run alongside a game. */
 const PORT = Number(process.env.PORT) || 8080;
+
+/**
+ * Which build this server is, read once at startup and handed to every client
+ * in its `welcome`. Once rather than per connection: it cannot change while the
+ * process is up, and shelling out to git on every socket would be three
+ * subprocesses for an answer that is already known.
+ *
+ * `process.cwd()` is good enough to find the checkout — git walks up looking
+ * for `.git`, and every way this is started (npm from `server/`, the launcher
+ * from the repo root) begins inside it. Outside one it answers `unknown`.
+ */
+const SERVER_BUILD = buildStamp(process.cwd());
 
 /**
  * Whether an anonymous socket may wipe the running world.
@@ -338,7 +351,7 @@ wss.on('connection', (socket) => {
   const id = randomUUID();
   sockets.set(id, socket);
 
-  send(socket, { type: 'welcome', selfId: id, map: world.map });
+  send(socket, { type: 'welcome', selfId: id, map: world.map, build: SERVER_BUILD });
   console.log(`[server] ${id} connected (${sockets.size} at the front end or playing)`);
 
   socket.on('message', (raw) => {

@@ -653,7 +653,13 @@ export type ClientMessage =
 export type LobbyTeam = 'humans' | 'dogs';
 
 export type ServerMessage =
-  | { type: 'welcome'; selfId: string; map: MapData }
+  /**
+   * `build` is the *server's* stamp. The client bakes in its own at compile
+   * time and shows the two against each other on the title screen, so a box
+   * that forgot to pull is visible before anybody presses START rather than
+   * through whatever goes wrong an hour later.
+   */
+  | { type: 'welcome'; selfId: string; map: MapData; build: string }
   | { type: 'map'; map: MapData }
   /** `t` exactly as it arrived, echoed the moment it did. */
   | { type: 'pong'; t: number }
