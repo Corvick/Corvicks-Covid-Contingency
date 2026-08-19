@@ -313,7 +313,14 @@ wss.on('connection', (socket) => {
   socket.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString()) as ClientMessage;
-      if (msg.type === 'input') {
+      if (msg.type === 'ping') {
+        // Answered here, in the message handler, rather than anywhere near the
+        // tick — the point of the number is to measure the *network*, and a
+        // reply that waited for the next tick would fold up to 33ms of server
+        // cadence into it and report the wire as slower than it is. What the
+        // cadence costs is added back on the client, where it can be labelled.
+        send(socket, { type: 'pong', t: msg.t });
+      } else if (msg.type === 'input') {
         world.commands.set(id, {
           input: msg.input,
           aim: msg.aim,

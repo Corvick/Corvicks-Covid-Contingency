@@ -276,6 +276,40 @@ round. Only `?spectate=new` needs the flag.
   here to actual peer-to-peer, with no forwarding. Needs admin to install on
   Windows, so it is out on the work box.
 
+#### The HUD says what the connection costs
+
+`ping 10ms (p90 22) · input ~43ms` on the perf readout, so "it feels laggy"
+becomes a number and the tunnel-versus-forwarded-port question can be settled
+with a measurement rather than an impression.
+
+- **Two figures, because they answer different questions.** `ping` is the wire
+  alone. `input` is what a player actually feels, and it is the one that
+  decides anything: between a keypress and the officer moving there are two
+  waits at 30Hz — one for the next `sendInputLoop`, one for the next server
+  tick — averaging half a period each, so the felt figure is the round trip
+  plus roughly a whole tick period. A frame to draw it is small next to that
+  and is left out rather than guessed at.
+- **p90 rather than a max, because jitter is what ruins the feel**, not the
+  average. A steady 80ms is far more playable than one swinging between 20 and
+  200, and only the spread shows that.
+- **The server answers in the message handler, nowhere near the tick.** A reply
+  that waited for the next tick would fold up to 33ms of server cadence into
+  the wire figure and report the network as slower than it is. Measured: 12/12
+  probes answered, `t` echoed untouched, worst 29.6ms — under one tick period,
+  which is what says it is not tick-bound. Note the figure *does* include time
+  the server spends blocked inside its own tick, which is correct: that is real
+  latency a player pays.
+- **The window is per-connection.** Carrying it across a reconnect would average
+  the old route's timings into the new one's. Verified: 20 samples, zeroed the
+  moment the server went away, rebuilt from the new connection only.
+- **Thresholds are set for driving a body**, not for commanding a unit — green
+  under 70ms of input latency, amber to 120, red past it. There is no
+  client-side prediction anywhere in this game, which is the whole reason the
+  number matters: nothing hides it.
+
+It is drawn with the rest of the perf readout, so it only shows **in a round**,
+not at the menu or in the lobby.
+
 Two things this does *not* do, and both are fine until they aren't: there is no
 rate limit on connections or messages, and no cap on how many sockets one
 address may open. A public tunnel URL handed to friends is not the same as a

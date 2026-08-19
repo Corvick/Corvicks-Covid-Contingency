@@ -2,6 +2,14 @@
 import type { ClientMessage, ServerMessage } from '../../shared/types.js';
 
 const RECONNECT_DELAY_MS = 800;
+/**
+ * How often to probe. Once a second is plenty: this is a number somebody reads
+ * off a HUD to decide whether a tunnel is costing them anything, not a control
+ * loop, and a rolling window of these already smooths it.
+ */
+const PING_INTERVAL_MS = 1000;
+/** Twenty seconds of history — long enough for a p90 to mean something. */
+const PING_WINDOW = 20;
 
 export interface Connection {
   send: (msg: ClientMessage) => void;
@@ -14,6 +22,28 @@ export interface Connection {
  * receives every entity on the map thirty times a second.
  */
 export const netStats = { parseMs: 0, applyMs: 0, bytes: 0, messages: 0 };
+
+/**
+ * Round-trip time to the server.
+ *
+ * `median` rather than the last sample because a single probe that happened to
+ * land behind a garbage collection says nothing, and `p90` because **jitter is
+ * what actually ruins the feel**, not the average — a steady 80ms is far more
+ * playable than one that swings between 20 and 200. Both are 0 until the first
+ * reply lands.
+ */
+export const pingStats = { median: 0, p90: 0, samples: 0 };
+
+const pings: number[] = [];
+
+function recordPing(rtt: number): void {
+  pings.push(rtt);
+  if (pings.length > PING_WINDOW) pings.shift();
+  const sorted = [...pings].sort((a, b) => a - b);
+  pingStats.median = sorted[Math.floor(sorted.length / 2)];
+  pingStats.p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  pingStats.samples = sorted.length;
+}
 
 export function takeNetStats(): { parseMs: number; applyMs: number; bytes: number; messages: number } {
   const snapshot = { ...netStats };
@@ -79,6 +109,15 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
       const t0 = performance.now();
       const msg = JSON.parse(raw) as ServerMessage;
       const t1 = performance.now();
+      // Swallowed here rather than forwarded: nothing above this layer has any
+      // use for a pong, and letting one through would mean every consumer of
+      // `ServerMessage` growing a branch to ignore it.
+      if (msg.type === 'pong') {
+        recordPing(performance.now() - msg.t);
+        netStats.bytes += raw.length;
+        netStats.messages++;
+        return;
+      }
       onMessage(msg);
 
       netStats.parseMs += t1 - t0;
@@ -90,12 +129,26 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
     socket.addEventListener('close', () => {
       console.log('[net] disconnected — retrying');
       if (ws === socket) ws = null;
+      // The window is about *this* connection. Carrying it across a reconnect
+      // would average the old route's timings into the new one's.
+      pings.length = 0;
+      pingStats.median = 0;
+      pingStats.p90 = 0;
+      pingStats.samples = 0;
       setTimeout(open, RECONNECT_DELAY_MS);
     });
     socket.addEventListener('error', () => socket.close());
   }
 
   open();
+
+  // One timer for the life of the page, not one per connection — `open` runs
+  // again on every reconnect, and a timer started there would multiply.
+  setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping', t: performance.now() } satisfies ClientMessage));
+    }
+  }, PING_INTERVAL_MS);
 
   return {
     send(msg: ClientMessage) {

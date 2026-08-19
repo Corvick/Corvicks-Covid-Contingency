@@ -598,6 +598,12 @@ export type ClientMessage =
   | { type: 'spectate'; restart?: boolean }
   | { type: 'restart' }
   // ---- front end. None of these touch the running world except `lobbyStart`.
+  /**
+   * Round-trip probe. `t` is the client's own clock and the server hands it
+   * straight back untouched, so the two never have to agree on what time it is
+   * — the only reading taken is `now - t` on the machine that sent it.
+   */
+  | { type: 'ping'; t: number }
   | { type: 'lobbyCreate'; name: string; gamertag: string; offline?: boolean }
   /** Sit out and watch, or come back off the bench. */
   | { type: 'lobbySpectate'; on: boolean }
@@ -628,6 +634,8 @@ export type LobbyTeam = 'humans' | 'dogs';
 export type ServerMessage =
   | { type: 'welcome'; selfId: string; map: MapData }
   | { type: 'map'; map: MapData }
+  /** `t` exactly as it arrived, echoed the moment it did. */
+  | { type: 'pong'; t: number }
   /** The lobby you're in. Sent on every change, so the client just redraws. */
   | { type: 'lobby'; lobby: LobbyView }
   /** You are no longer in a lobby — you left, or it went away under you. */

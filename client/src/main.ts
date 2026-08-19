@@ -21,6 +21,7 @@ import {
   CAMERA_PAN_Y,
   CAMERA_ZOOM,
   SCOPE_EASE_MS,
+  TICK_RATE,
 } from '../../shared/constants.js';
 import type {
   DoorPrompt,
@@ -44,7 +45,7 @@ import type {
   DogHud,
   Wall,
 } from '../../shared/types.js';
-import { connect, takeNetStats } from './net.js';
+import { connect, takeNetStats, pingStats } from './net.js';
 import { trackInput } from './input.js';
 import {
   drawBeacons,
@@ -1598,6 +1599,30 @@ function render() {
     // than render means the cost is not in drawing at all, and the phase split
     // says which part of drawing it is when it is.
     const renderClass = lastRenderMs < 8 ? '' : lastRenderMs < 14 ? 'warn' : 'bad';
+
+    /**
+     * What the round trip costs, and what it costs *you*.
+     *
+     * `ping` is the wire alone — the server answers a probe in its message
+     * handler, nowhere near the tick. But the wire is not what a player feels.
+     * Between pressing a key and seeing the officer move there are two waits at
+     * 30Hz, one for the next `sendInputLoop` and one for the next server tick,
+     * averaging half a period each, so the felt figure is roughly the round
+     * trip plus a whole tick period — plus a frame to draw it, which is small
+     * next to the rest and left out rather than guessed at.
+     *
+     * There is no client-side prediction anywhere in this game, which is the
+     * whole reason this number matters: nothing hides it. Thresholds are set
+     * for driving a body with WASD, which is far less forgiving than the
+     * command-a-unit latency an RTS gets away with.
+     */
+    const rtt = pingStats.median;
+    const inputMs = rtt + 1000 / TICK_RATE;
+    const pingClass = pingStats.samples === 0 ? '' : inputMs < 70 ? '' : inputMs < 120 ? 'warn' : 'bad';
+    const pingText =
+      pingStats.samples === 0
+        ? 'ping —'
+        : `ping ${rtt.toFixed(0)}ms (p90 ${pingStats.p90.toFixed(0)}) · input ~${inputMs.toFixed(0)}ms`;
     perfHud.innerHTML =
       `<span class="${fpsClass}">${Math.round(fps)} fps</span> · spike ${worstFrameMs.toFixed(0)}ms<br>` +
       `<span class="${tickClass}">tick ${serverTickMs.toFixed(2)}ms</span> / 33.3ms<br>` +
@@ -1606,6 +1631,7 @@ function render() {
       // chase; `else` large means it is not this client's doing at all.
       `gap ${smoothGap.toFixed(1)} = <span class="${renderClass}">render ${lastRenderMs.toFixed(1)}</span>` +
       ` + net ${smoothNet.toFixed(1)} + else ${smoothElse.toFixed(1)}<br>` +
+      `<span class="${pingClass}">${pingText}</span><br>` +
       `${kbPerSec.toFixed(0)}KB/s in<br>` +
       phases.map(([l, c]) => `${l} ${c.toFixed(1)}`).join(' · ');
   }
