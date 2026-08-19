@@ -16,7 +16,7 @@ import {
   RADIO_USES,
   BACKPACK_SLOTS,
   GUNSLING_SLOTS,
-  TRACKER_RANGE,
+  trackerRange,
   TEST_DROP_ALL_ITEMS,
   TEST_DROP_RADIUS,
   ONE_OFF_ITEMS,
@@ -668,7 +668,7 @@ export function nearestZombieBearing(
   y: number,
 ): { bearing: number; dist: number } | null {
   let best: { bearing: number; dist: number } | null = null;
-  let bestDist = TRACKER_RANGE;
+  let bestDist = trackerRange();
   for (const e of world.entities.values()) {
     if (e.type !== 'zombie') continue;
     const d = Math.hypot(e.x - x, e.y - y);

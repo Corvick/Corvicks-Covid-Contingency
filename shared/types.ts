@@ -423,6 +423,20 @@ export interface LobbyView {
   spectating: boolean;
   /** Everyone watching, yourself included. */
   spectators: string[];
+  /**
+   * Civilians the next round is built for — the host's slider, and the one
+   * thing that decides how big the city comes out. Pushed to everybody, not
+   * just the host: how big a round is going to be is worth knowing before you
+   * take a seat in it.
+   */
+  population: number;
+  /**
+   * Its round is under way. Only reachable from the lobby screen by joining a
+   * lobby that is already playing, which is exactly when a host's settings
+   * would be refused — so the controls that size the *next* city say so instead
+   * of being clicked and ignored.
+   */
+  running: boolean;
 }
 
 export type AbilityId = 'rally' | 'follow' | 'wait' | 'beacon';
@@ -617,6 +631,13 @@ export type ClientMessage =
   | { type: 'lobbySit'; team: LobbyTeam; index: number }
   /** Host only: walk a slot through closed → open → bot. */
   | { type: 'lobbyCycle'; team: LobbyTeam; index: number }
+  /**
+   * Host only: how many civilians the next round gets, and with it how big a
+   * city. Sent live as the slider is dragged, so everyone in the room watches
+   * it move; the server clamps and steps it, so an out-of-range number off a
+   * hand-crafted message is a value in range rather than a broken city.
+   */
+  | { type: 'lobbyPopulation'; population: number }
   | { type: 'lobbyChat'; text: string }
   | { type: 'lobbyLeave' }
   /** Host only. Also what the host's "go" in chat resolves to. */

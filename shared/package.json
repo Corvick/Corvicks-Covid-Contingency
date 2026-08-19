@@ -1,0 +1,5 @@
+{
+  "name": "zombie-sim-shared",
+  "private": true,
+  "type": "module"
+}

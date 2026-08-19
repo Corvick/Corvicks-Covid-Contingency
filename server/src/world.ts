@@ -24,6 +24,7 @@ import {
   ENTITY_MAX_HEALTH,
   TURNING_TELL_MS,
   HUMAN_COUNT,
+  cityAreaScale,
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
   BOT_OFFICER_COUNT,
@@ -989,6 +990,31 @@ export function newAiState(now: number, x: number, y: number): AiState {
   };
 }
 
+/**
+ * Give every broadphase grid the dimensions of the map it is about to index.
+ *
+ * **The city changes size between rounds now** — the lobby's population slider
+ * — and a `SpatialGrid` takes its column and row count once, in its
+ * constructor. Grown, the old grid is merely wasteful: it is a sparse `Map`, so
+ * the extra cells cost nothing and every query still lands in the right one.
+ * *Shrunk* is the dangerous direction, and it fails quietly: `col`/`row` clamp
+ * to the last index, so everything past the new map's edge would pile into one
+ * cell and every query out there would walk the lot. Cheap to rebuild, and only
+ * ever once a round.
+ *
+ * Sized off `map`, not off `WORLD_WIDTH`, so a grid cannot disagree with the
+ * geometry it holds even if the two ever drift.
+ */
+function resizeGrids(world: World): void {
+  const { width, height } = world.map;
+  world.doorGrid = new SpatialGrid<number>(STATIC_CELL, width, height);
+  world.entityGrid = new SpatialGrid<Entity>(ENTITY_CELL, width, height);
+  world.zombieGrid = new SpatialGrid<Entity>(ENTITY_CELL, width, height);
+  world.wallGrid = new SpatialGrid<Wall>(STATIC_CELL, width, height);
+  world.bushGrid = new SpatialGrid<Bush>(STATIC_CELL, width, height);
+  world.windowGrid = new SpatialGrid<number>(STATIC_CELL, width, height);
+}
+
 function buildStaticGrids(world: World): void {
   world.wallGrid.clear();
   world.bushGrid.clear();
@@ -1328,6 +1354,7 @@ export function createWorld(): World {
 /** Fresh map, fresh crowd; connected players are respawned as officers. */
 export function resetWorld(world: World): void {
   world.map = generateMap();
+  resizeGrids(world);
   world.nav = new NavGrid(world.map);
   world.danger = new DangerField(world.map, world.nav);
   // Rooms come from walls and doorways, so a fresh city needs a fresh map of
@@ -1662,8 +1689,28 @@ function populate(world: World): void {
    * The grid is sized to the count rather than the other way round, so changing
    * `NPC_OFFICER_MIN`/`MAX` needs nothing here.
    */
-  const officerCount =
-    NPC_OFFICER_MIN + Math.floor(Math.random() * (NPC_OFFICER_MAX - NPC_OFFICER_MIN + 1));
+  /*
+   * The count scales with the **area** of the city, which is what holds the
+   * property the count exists for. The figure that matters is the furthest any
+   * spot can be from the nearest officer, and that goes as `sqrt(area / count)`
+   * — so keeping officers-per-square-pixel fixed keeps that distance fixed, and
+   * a quarter of a small city is no likelier to be unguarded than a quarter of
+   * a big one. Scaled linearly instead, a 0.6 city would come out *better*
+   * garrisoned than a full one, which is a difficulty change smuggled in under
+   * a performance setting.
+   *
+   * Floored at four, which is what the city had before the count was raised:
+   * below that the grid below has more empty cells than filled ones and the
+   * spreading stops meaning anything.
+   */
+  const garrison = cityAreaScale();
+  const officerCount = Math.max(
+    4,
+    Math.round(
+      (NPC_OFFICER_MIN + Math.floor(Math.random() * (NPC_OFFICER_MAX - NPC_OFFICER_MIN + 1))) *
+        garrison,
+    ),
+  );
   // Cells shaped to the map rather than square, so a wide city gets a wide
   // grid and no cell is a long thin strip.
   const cols = Math.max(1, Math.round(Math.sqrt((officerCount * WORLD_WIDTH) / WORLD_HEIGHT)));

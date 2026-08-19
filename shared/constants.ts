@@ -1,8 +1,31 @@
 import type { EntityType } from './types.js';
 
 // ---------------------------------------------------------------- world
-export const WORLD_WIDTH = 5000;
-export const WORLD_HEIGHT = 3700;
+/**
+ * The full-size city, and the yardstick everything below is measured against.
+ * A round at `CITY_POP_MAX` civilians is played in exactly this.
+ */
+export const WORLD_BASE_WIDTH = 5000;
+export const WORLD_BASE_HEIGHT = 3700;
+
+/**
+ * The city this round is actually being played in.
+ *
+ * **These are `let`, not `const`, and that is the whole of how the lobby's
+ * population slider works.** ES module exports are live bindings, so the
+ * hundred-odd places that read `WORLD_WIDTH` see whatever `setCityPopulation`
+ * last wrote, without any of them having to be handed a size. The cost of that
+ * is one rule: **nothing may derive a module-level constant from them.** A
+ * value computed at import time freezes the launch size into itself and then
+ * quietly disagrees with the map for the rest of the process — which is why
+ * `trackerRange()` is a function, and the client's spectator fit is one too.
+ *
+ * Anything *sized* off the world has to be rebuilt when the world is: the
+ * spatial grids, in `resetWorld`, and `NavGrid`/`DangerField`/`RoomMap`/
+ * `RumourField`, which already take their dimensions from `map.width`.
+ */
+export let WORLD_WIDTH = WORLD_BASE_WIDTH;
+export let WORLD_HEIGHT = WORLD_BASE_HEIGHT;
 /**
  * The backbuffer. The page scales it to fit the window keeping 16:9, so this is
  * how much *world* you see rather than how big the window is.
@@ -208,7 +231,110 @@ export const FOG_BLUR_PX = 9;
 export const ENTITY_FADE_MS = 160;
 
 export const HUMAN_RADIUS = 13;
-export const HUMAN_COUNT = 500;
+
+// ------------------------------------------------------- how big a city is
+/**
+ * How many civilians a city is built for. The lobby's host sets it; everything
+ * else about the round's size is derived from it.
+ *
+ * `HUMAN_COUNT` is **civilians only**, which is what the slider says: the
+ * garrison, the players, their bots and the five zombies that walk in from the
+ * edge are all on top of it.
+ */
+export const CITY_POP_MAX = 500;
+export const CITY_POP_MIN = 100;
+/** The slider's granularity. Nobody is choosing between 337 and 338 people. */
+export const CITY_POP_STEP = 25;
+
+/**
+ * How far the city shrinks with the crowd.
+ *
+ * **Area scales with population, so the streets stay as busy as they are now.**
+ * A quieter round is meant to be a smaller city, not the same city with the
+ * people thinned out of it — walking four blocks to find anybody is not the
+ * game, and the point of the setting is to have *less of everything* to
+ * simulate and to draw.
+ *
+ * That is `sqrt(pop / CITY_POP_MAX)` on each axis, and it holds until
+ * `CITY_SCALE_MIN`, where it stops. **The floor is not a round number picked by
+ * eye — it is what the city needs to still be one.** Blocks, roads and the gaps
+ * between buildings keep their absolute sizes at every setting (that is what
+ * keeps a van able to drive in and a SWAT team able to get out of it), so
+ * shrinking the map removes blocks rather than tightening them. What does *not*
+ * shrink on its own is the landmark set — the corner complex, the park, the
+ * pond — and below about 0.6 those stop being landmarks in a city and start
+ * being the city. At 0.6 the smallest map is 3000x2220, which still holds an
+ * 8x6 street grid around all of them.
+ *
+ * Below the floor the crowd genuinely thins, which is the trade: 100 people in
+ * 3000x2220 is a quiet city, and quiet is what was asked for.
+ */
+export const CITY_SCALE_MIN = 0.6;
+
+/** Civilians in the city. A `let`, and written by `setCityPopulation` alone. */
+export let HUMAN_COUNT = CITY_POP_MAX;
+
+/** The slider's value, as the server will read it: on a step, and in range. */
+export function clampCityPopulation(pop: number): number {
+  const stepped = Math.round(pop / CITY_POP_STEP) * CITY_POP_STEP;
+  return Math.max(CITY_POP_MIN, Math.min(CITY_POP_MAX, stepped));
+}
+
+/** Linear scale on each axis for a given crowd. See `CITY_SCALE_MIN`. */
+export function cityScaleFor(pop: number): number {
+  return Math.max(CITY_SCALE_MIN, Math.sqrt(clampCityPopulation(pop) / CITY_POP_MAX));
+}
+
+/** The city that crowd gets, without setting it — for the lobby's readout. */
+export function citySizeFor(pop: number): { width: number; height: number } {
+  const s = cityScaleFor(pop);
+  return {
+    width: Math.round(WORLD_BASE_WIDTH * s),
+    height: Math.round(WORLD_BASE_HEIGHT * s),
+  };
+}
+
+/**
+ * How much smaller this city is than a full one, as an area fraction. What
+ * `mapgen` scales its landmark and scatter *counts* by, so a small city gets
+ * proportionally as much in it rather than the same amount crammed in.
+ */
+export function cityAreaScale(): number {
+  return (WORLD_WIDTH * WORLD_HEIGHT) / (WORLD_BASE_WIDTH * WORLD_BASE_HEIGHT);
+}
+
+/** The same, on one axis — for things that line the perimeter rather than fill. */
+export function cityLinearScale(): number {
+  return WORLD_WIDTH / WORLD_BASE_WIDTH;
+}
+
+/**
+ * Set the size of the next city. Called from `startLobby` **before**
+ * `resetWorld`, which is what makes a fresh `generateMap` come out at the new
+ * size; nothing may call it while a round is running, since the live nav grid,
+ * room map and spatial grids are all sized to the city that is already there.
+ */
+export function setCityPopulation(pop: number): void {
+  HUMAN_COUNT = clampCityPopulation(pop);
+  const size = citySizeFor(HUMAN_COUNT);
+  setWorldSize(size.width, size.height);
+}
+
+/**
+ * The size on its own, without the crowd that implies it.
+ *
+ * **This is the client's way in, and it is the only honest one.** The client is
+ * never told a population — what it is told is a `MapData`, which carries the
+ * width and height the server actually built. Deriving the size from a
+ * population on both ends would be the same arithmetic written twice, and the
+ * day they disagree the fog, the camera clamp and the minimap all quietly
+ * frame a city that is not the one on the wire. So the map is the authority and
+ * this takes its word for it.
+ */
+export function setWorldSize(width: number, height: number): void {
+  WORLD_WIDTH = width;
+  WORLD_HEIGHT = height;
+}
 /**
  * NPC footspeeds are scaled down together by 0.8 from their original values,
  * so every human/zombie ratio — chase closing rate, escape bursts, lunges —
@@ -1721,6 +1847,20 @@ export const BIG_BUILDING_MAX = 4;
 export const BIG_BUILDING_MIN_TILES = 17;
 export const BIG_BUILDING_MAX_TILES = 24;
 
+/**
+ * The most of the *shorter* side of the map a single landmark may take.
+ *
+ * The tile counts above are absolute, and on a full-size city they are already
+ * well inside these — a 34-tile complex is 952px against a 3700px side, 26% of
+ * it, so at `CITY_POP_MAX` these caps change nothing at all. They exist for the
+ * small end of the slider, where the same 952px would be 43% of a 2220px side
+ * and the corner complex would stop being a landmark in a city and start being
+ * the city. Capped as a *share* rather than a second set of numbers, so there
+ * is one place the sizes live and the small cities are the big one, scaled.
+ */
+export const CORNER_COMPLEX_MAX_SHARE = 0.3;
+export const BIG_BUILDING_MAX_SHARE = 0.25;
+
 // ---------------------------------------------------------------- abilities
 /** Everyone on screen hears the shout. */
 export const RALLY_RADIUS = 560;
@@ -1801,8 +1941,15 @@ export const BINOCULAR_SIGHT_RADIUS = 1015;
  * that sees past the fog went blank in exactly the situation it exists for:
  * out in a quiet quarter with no idea which way the outbreak is. A compass
  * that only works when you can nearly see the thing is not a compass.
+ *
+ * **A function rather than a constant, because the city resizes now.** Computed
+ * once at import it would hold the launch size's diagonal forever, which on a
+ * *smaller* city is merely generous and on a larger one is short — the exact
+ * failure the derivation was written to rule out. See `WORLD_WIDTH`.
  */
-export const TRACKER_RANGE = Math.hypot(WORLD_WIDTH, WORLD_HEIGHT) + 100;
+export function trackerRange(): number {
+  return Math.hypot(WORLD_WIDTH, WORLD_HEIGHT) + 100;
+}
 
 /**
  * The charge rifle reads the infected.

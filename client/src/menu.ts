@@ -5,7 +5,15 @@ import type {
   ServerMessage,
   SlotWire,
 } from '../../shared/types.js';
-import { LOBBY_CODE_LENGTH } from '../../shared/constants.js';
+import {
+  CITY_POP_MAX,
+  CITY_POP_MIN,
+  CITY_POP_STEP,
+  WORLD_BASE_WIDTH,
+  WORLD_BASE_HEIGHT,
+  LOBBY_CODE_LENGTH,
+  citySizeFor,
+} from '../../shared/constants.js';
 
 /**
  * The front end: title, gamertag, create or browse, lobby. It owns no game
@@ -300,6 +308,70 @@ export function setupMenu(hooks: MenuHooks): Menu {
     }, COPIED_SHOWN_MS);
   });
 
+  // ---- options ----
+  /**
+   * The host's one setting: how many civilians the round is built for, and
+   * with it how big a city they get.
+   *
+   * It is sent **live as the slider moves**, so the room watches the number
+   * change rather than being told about it once the host lets go — which is
+   * the same reason seats push on every click. The server clamps and steps
+   * whatever arrives, so the range here is a courtesy to the person dragging
+   * rather than the rule.
+   */
+  const popSlider = el<HTMLInputElement>('pop-slider');
+  const popValue = el<HTMLSpanElement>('pop-value');
+  const popNote = el<HTMLParagraphElement>('pop-note');
+  popSlider.min = String(CITY_POP_MIN);
+  popSlider.max = String(CITY_POP_MAX);
+  popSlider.step = String(CITY_POP_STEP);
+
+  /**
+   * Whether the host has hold of it.
+   *
+   * The server owns the lobby and pushes the whole thing back on every change,
+   * and `renderLobby` writes what arrived into the controls — which for a
+   * slider being dragged means the value the host is *leaving* gets written
+   * back over the value they are moving to, one round trip behind the mouse.
+   * The thumb sticks, jumps and fights the drag. So while it is being held, the
+   * slider is the authority on its own position and the push is only allowed to
+   * update the text beside it.
+   */
+  let draggingPop = false;
+
+  const popCaption = (pop: number) => {
+    const { width, height } = citySizeFor(pop);
+    if (pop >= CITY_POP_MAX) return `${width}x${height} — the full city`;
+    const share = Math.round((width * height * 100) / (WORLD_BASE_WIDTH * WORLD_BASE_HEIGHT));
+    return `${width}x${height} city · ${share}% of a full one`;
+  };
+
+  /** Draw the number and the caption for a value, wherever it came from. */
+  const showPop = (pop: number) => {
+    popValue.textContent = String(pop);
+    popNote.textContent = popCaption(pop);
+  };
+
+  const sendPop = () => {
+    const pop = Number(popSlider.value);
+    showPop(pop);
+    hooks.send({ type: 'lobbyPopulation', population: pop });
+  };
+
+  popSlider.addEventListener('input', sendPop);
+  // Both ends of the hold. `pointerdown` catches a drag, `keydown` the arrow
+  // keys — a slider is focusable, and holding Right walks it the same way.
+  popSlider.addEventListener('pointerdown', () => { draggingPop = true; });
+  popSlider.addEventListener('keydown', () => { draggingPop = true; });
+  // Letting go simply hands the control back. There is nothing to correct: the
+  // pushes ignored during the drag were echoes of values this client sent, and
+  // the last one either changed something — in which case a push is on its way
+  // and `renderLobby` will write it — or it did not, in which case what is on
+  // screen is already what the server holds.
+  for (const done of ['pointerup', 'pointercancel', 'blur', 'keyup'] as const) {
+    popSlider.addEventListener(done, () => { draggingPop = false; });
+  }
+
   const chatLog = el<HTMLDivElement>('chat-log');
   const chatInput = el<HTMLInputElement>('chat-input');
   const startBtn = el<HTMLButtonElement>('lobby-start');
@@ -382,6 +454,14 @@ export function setupMenu(hooks: MenuHooks): Menu {
     el('lobby-hint').textContent = view.offline
       ? 'click a slot to cycle it CLOSED → BOT · click your own to watch instead'
       : 'click a slot to take it · click its tag to cycle CLOSED → OPEN → BOT';
+
+    // The setting sizes the city that a round *generates*, so once one is up
+    // there is nothing left for it to size — the nav grid, the room map and
+    // every broadphase grid are already built to the city on screen. The server
+    // refuses it while running; the control says so rather than being refused.
+    popSlider.disabled = !view.isHost || view.running;
+    if (!draggingPop) popSlider.value = String(view.population);
+    showPop(draggingPop ? Number(popSlider.value) : view.population);
 
     el('lobby-notice').textContent = view.notice;
     spectatorRow.dataset.state = view.spectating ? 'spectating' : 'closed';

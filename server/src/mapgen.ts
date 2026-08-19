@@ -42,6 +42,10 @@ import {
   CORNER_COMPLEX_MAX_CUTS,
   POND_MIN_RADIUS,
   POND_MAX_RADIUS,
+  CORNER_COMPLEX_MAX_SHARE,
+  BIG_BUILDING_MAX_SHARE,
+  cityAreaScale,
+  cityLinearScale,
 } from '../../shared/constants.js';
 import { NavGrid } from './navgrid.js';
 
@@ -52,6 +56,32 @@ const GAP = 2;
 
 function clampTo(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+/**
+ * How many of something a city this size gets, given the full-size figure.
+ *
+ * **Counts scale; sizes do not.** A block is 300px and a road is 88px at every
+ * setting of the population slider, because those two numbers are what a van
+ * driving in and a SWAT team getting out of it are measured against — squeeze
+ * them and backup stops being able to arrive. So a smaller city is made by
+ * having *fewer* of everything at the same spacing, which is what this is for.
+ *
+ * `fill` for anything scattered over the ground (big buildings, loose bushes),
+ * `edge` for anything that lines the perimeter, which grows on one axis rather
+ * than two.
+ */
+function scaledCount(full: number, how: 'fill' | 'edge', least = 1): number {
+  const s = how === 'fill' ? cityAreaScale() : cityLinearScale();
+  return Math.max(least, Math.round(full * s));
+}
+
+/**
+ * The most tiles a landmark may be given, so it cannot swallow a small city.
+ * A no-op at full size — see `CORNER_COMPLEX_MAX_SHARE`.
+ */
+function tileCapFor(share: number): number {
+  return Math.floor((Math.min(WORLD_WIDTH, WORLD_HEIGHT) * share) / TILE);
 }
 
 /** Small deterministic PRNG so a seed reproduces an exact city. */
@@ -614,9 +644,15 @@ function cornerComplexAt(
   doors: Door[],
   rand: Rng,
 ): { building: Building; box: Wall } {
-  const span = CORNER_COMPLEX_MAX_TILES - CORNER_COMPLEX_MIN_TILES + 1;
-  const w = CORNER_COMPLEX_MIN_TILES + Math.floor(rand() * span);
-  const h = CORNER_COMPLEX_MIN_TILES + Math.floor(rand() * span);
+  // Capped against the map's shorter side, which does nothing at full size and
+  // is what keeps the complex a corner of a small city rather than a third of
+  // one. `ROOM_MIN_TILES * 2` is the floor: below that there is nothing to cut
+  // rooms out of and it stops being the many-roomed building it exists to be.
+  const cap = Math.max(ROOM_MIN_TILES * 2, tileCapFor(CORNER_COMPLEX_MAX_SHARE));
+  const lo = Math.min(CORNER_COMPLEX_MIN_TILES, cap);
+  const span = Math.min(CORNER_COMPLEX_MAX_TILES, cap) - lo + 1;
+  const w = lo + Math.floor(rand() * span);
+  const h = lo + Math.floor(rand() * span);
 
   const right = rand() < 0.5;
   const bottom = rand() < 0.5;
@@ -1018,8 +1054,12 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   const parkH = BLOCK_SIZE * 2 + ROAD_SIZE;
   const park: Park = { x: 0, y: 0, w: parkW, h: parkH, path: [], pathWidth: PARK_PATH_WIDTH };
   for (let attempt = 0; attempt < 90; attempt++) {
-    const px = MAP_MARGIN + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - parkW);
-    const py = MAP_MARGIN + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - parkH);
+    // Floored at zero so a city smaller than its own park would stack it in the
+    // corner rather than place it off the map. Never fires at the sizes the
+    // slider can reach; it is here so lowering `CITY_SCALE_MIN` cannot fail
+    // silently, which is exactly how it would fail.
+    const px = MAP_MARGIN + rand() * Math.max(0, WORLD_WIDTH - MAP_MARGIN * 2 - parkW);
+    const py = MAP_MARGIN + rand() * Math.max(0, WORLD_HEIGHT - MAP_MARGIN * 2 - parkH);
     const box = { x: px, y: py, w: parkW, h: parkH };
     const clashes = landmarks.some(
       (b) =>
@@ -1051,8 +1091,10 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   ];
   const pond: Pond = { x: 0, y: 0, r: pondR, wobble, pads: [] };
   for (let attempt = 0; attempt < 80; attempt++) {
-    const px = MAP_MARGIN + pondR + 80 + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - pondR * 2 - 160);
-    const py = MAP_MARGIN + pondR + 80 + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - pondR * 2 - 160);
+    const spanX = Math.max(0, WORLD_WIDTH - MAP_MARGIN * 2 - pondR * 2 - 160);
+    const spanY = Math.max(0, WORLD_HEIGHT - MAP_MARGIN * 2 - pondR * 2 - 160);
+    const px = MAP_MARGIN + pondR + 80 + rand() * spanX;
+    const py = MAP_MARGIN + pondR + 80 + rand() * spanY;
     const box = { x: px - pondR, y: py - pondR, w: pondR * 2, h: pondR * 2 };
     const clashes = landmarks.some(
       (b) =>
@@ -1079,10 +1121,18 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     });
   }
 
-  const bigCount = BIG_BUILDING_MIN + Math.floor(rand() * (BIG_BUILDING_MAX - BIG_BUILDING_MIN + 1));
+  // Fewer of them in a smaller city, rather than the same four crammed in —
+  // but never none, or a small map has no landmark building to fight over.
+  const bigLo = scaledCount(BIG_BUILDING_MIN, 'fill');
+  const bigHi = Math.max(bigLo, scaledCount(BIG_BUILDING_MAX, 'fill'));
+  const bigTileCap = Math.max(ROOM_MIN_TILES * 2, tileCapFor(BIG_BUILDING_MAX_SHARE));
+  const bigTileLo = Math.min(BIG_BUILDING_MIN_TILES, bigTileCap);
+  const bigTileSpan = Math.max(1, Math.min(BIG_BUILDING_MAX_TILES, bigTileCap) - bigTileLo);
+
+  const bigCount = bigLo + Math.floor(rand() * (bigHi - bigLo + 1));
   for (let i = 0; i < bigCount; i++) {
-    const tw = BIG_BUILDING_MIN_TILES + Math.floor(rand() * (BIG_BUILDING_MAX_TILES - BIG_BUILDING_MIN_TILES));
-    const th = BIG_BUILDING_MIN_TILES + Math.floor(rand() * (BIG_BUILDING_MAX_TILES - BIG_BUILDING_MIN_TILES));
+    const tw = bigTileLo + Math.floor(rand() * bigTileSpan);
+    const th = bigTileLo + Math.floor(rand() * bigTileSpan);
     for (let attempt = 0; attempt < 60; attempt++) {
       const ox = MAP_MARGIN + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - tw * TILE);
       const oy = MAP_MARGIN + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - th * TILE);
@@ -1104,7 +1154,12 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   // Rectangular blocks built onto the perimeter wall, so the map edge reads as
   // more city rather than a bare running track.
   const B = BOUNDARY_THICKNESS;
-  for (let i = 0; i < EDGE_BUILDING_COUNT; i++) {
+  // These line the perimeter, which grows on one axis rather than two, so they
+  // scale linearly — a small city keeps the same *fraction* of its edge built
+  // on. Scaled by area instead, a 0.6 city would get six of them and read as a
+  // running track with the odd shop on it.
+  const edgeCount = scaledCount(EDGE_BUILDING_COUNT, 'edge', 4);
+  for (let i = 0; i < edgeCount; i++) {
     const tw = EDGE_BUILDING_MIN_TILES + Math.floor(rand() * (EDGE_BUILDING_MAX_TILES - EDGE_BUILDING_MIN_TILES));
     const th = EDGE_BUILDING_MIN_TILES + Math.floor(rand() * (EDGE_BUILDING_MAX_TILES - EDGE_BUILDING_MIN_TILES));
 
@@ -1181,7 +1236,7 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     MAP_MARGIN,
     WORLD_WIDTH - MAP_MARGIN * 2,
     WORLD_HEIGHT - MAP_MARGIN * 2,
-    SCATTER_BUSH_COUNT,
+    scaledCount(SCATTER_BUSH_COUNT, 'fill'),
     buildings,
     park,
   );

@@ -7,10 +7,12 @@ import type {
   SlotWire,
 } from '../../shared/types.js';
 import {
+  CITY_POP_MAX,
   LOBBY_CODE_ALPHABET,
   LOBBY_CODE_LENGTH,
   LOBBY_DOG_SLOTS,
   LOBBY_HUMAN_SLOTS,
+  clampCityPopulation,
 } from '../../shared/constants.js';
 
 /**
@@ -61,6 +63,17 @@ export interface Lobby {
   notice: string;
   /** True once its round has been started. */
   running: boolean;
+  /**
+   * How many civilians the round is built for, and — through
+   * `setCityPopulation` — how big a city they get. The host's only setting.
+   *
+   * It lives on the lobby rather than in the world because the world it sizes
+   * does not exist yet: `startLobby` reads it and sets the globals immediately
+   * before `resetWorld` generates the map. Everyone in the room sees it, since
+   * "how big is this going to be" is a thing you want to know before you sit
+   * down in a seat.
+   */
+  population: number;
 }
 
 /** Chat kept short — it's a waiting room, not a log. */
@@ -162,6 +175,10 @@ export function createLobby(
     offline,
     notice: '',
     running: false,
+    // A new room is a full city until the host says otherwise. The setting is
+    // for the machine that cannot manage one, and it should be the choice
+    // somebody makes rather than the one they inherit.
+    population: CITY_POP_MAX,
   };
   // The host takes the first officer seat rather than standing about in a
   // lobby they own — one fewer click to get to a startable state.
@@ -304,6 +321,23 @@ export function cycle(connId: string, team: LobbyTeam, index: number): boolean {
   return true;
 }
 
+/**
+ * Host only: how many civilians the next round gets.
+ *
+ * Refused while a round is up, because the city it would size has already been
+ * generated — the nav grid, the room map and every broadphase grid are all
+ * built to it. Restart is what applies a changed setting, and `startLobby` is
+ * the one place that reads this.
+ */
+export function setPopulation(connId: string, pop: number): boolean {
+  const lobby = lobbyOf(connId);
+  if (!lobby || lobby.hostId !== connId || lobby.running) return false;
+  const next = clampCityPopulation(pop);
+  if (next === lobby.population) return false;
+  lobby.population = next;
+  return true;
+}
+
 export function say(lobby: Lobby, from: string, text: string): void {
   const clean = tidy(text, CHAT_MAX_LEN);
   // A solo room draws no chat box, so a notice posted into one would never be
@@ -378,6 +412,8 @@ export function viewFor(lobby: Lobby, viewer: string): LobbyView {
     notice: lobby.notice,
     spectating: lobby.spectators.has(viewer),
     spectators: [...lobby.spectators].map((id) => lobby.members.get(id) ?? '???'),
+    population: lobby.population,
+    running: lobby.running,
   };
 }
 

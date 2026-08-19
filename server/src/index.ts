@@ -57,6 +57,8 @@ import {
   BOOTS_SPEED_MUL,
   BOOTS_STAMINA_MUL,
   GUNSLING_SLOTS,
+  setCityPopulation,
+  citySizeFor,
 } from '../../shared/constants.js';
 import {
   countSurvivors,
@@ -104,6 +106,7 @@ import {
   say,
   seatedDogs,
   seatedPlayers,
+  setPopulation,
   setSpectating,
   sit,
   viewFor,
@@ -280,7 +283,34 @@ function startLobby(lobby: Lobby): void {
   world.corpses.length = 0;
   world.dogDeaths.clear();
   for (const connId of dogs) world.dogs.add(connId);
+  // The host's slider. **Immediately before `resetWorld` and nowhere else** —
+  // it writes `WORLD_WIDTH`/`WORLD_HEIGHT`/`HUMAN_COUNT`, and everything sized
+  // to a city (the nav grid, the room map, the broadphase grids) is rebuilt on
+  // the far side of this line rather than the near one.
+  setCityPopulation(lobby.population);
   resetWorld(world);
+
+  /*
+   * Did the size actually reach `mapgen`?
+   *
+   * `WORLD_WIDTH` is a live ES module binding, and **a live binding is exactly
+   * as live as the module format underneath it**. `shared/` had no
+   * `package.json` and there is no root one, so node treated those files as
+   * CommonJS — where an exported binding is a snapshot taken at import time —
+   * and every round came out 5000x3700 with 500 people in it no matter where
+   * the slider was. Nothing errored. `shared/package.json` is what fixes it,
+   * and this is what makes losing it again loud instead of silent: the map
+   * carries what `mapgen` believed, and `citySizeFor` is an independent oracle
+   * for what it was told.
+   */
+  const want = citySizeFor(lobby.population);
+  if (world.map.width !== want.width || world.map.height !== want.height) {
+    console.error(
+      `[server] the population setting did not reach mapgen — asked for ` +
+        `${want.width}x${want.height}, generated ${world.map.width}x${world.map.height}. ` +
+        `Check that shared/package.json exists and says { "type": "module" }.`,
+    );
+  }
   for (const connId of seated) spawnPlayer(connId, dogs.has(connId));
   // resetWorld clears the watchers, so they go back in afterwards. A spectator
   // has no entity at all — they see the whole city instead of a fogged slice.
@@ -288,7 +318,8 @@ function startLobby(lobby: Lobby): void {
 
   console.log(
     `[server] "${lobby.name}" started — ${seated.length - dogs.size} officers, ` +
-      `${dogs.size} dogs, ${bots} bot officers, ${lobby.spectators.size} watching`,
+      `${dogs.size} dogs, ${bots} bot officers, ${lobby.spectators.size} watching, ` +
+      `${lobby.population} civilians in a ${world.map.width}x${world.map.height} city`,
   );
 
   // Chat gets told; a solo room doesn't need telling, since the game is about
@@ -463,6 +494,15 @@ wss.on('connection', (socket) => {
         }
       } else if (msg.type === 'lobbyCycle') {
         if (cycle(id, msg.team, msg.index)) {
+          const lobby = lobbyOf(id);
+          if (lobby) pushLobby(lobby);
+        }
+      } else if (msg.type === 'lobbyPopulation') {
+        // Sent live as the host drags, so the room watches the number move.
+        // `setPopulation` answers false for a value that did not change, which
+        // is most of the messages a drag produces — pushing the lobby back for
+        // every pixel of travel is a broadcast per pixel for no new news.
+        if (setPopulation(id, msg.population)) {
           const lobby = lobbyOf(id);
           if (lobby) pushLobby(lobby);
         }
