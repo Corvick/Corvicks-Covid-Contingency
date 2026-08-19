@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type {
   ClientMessage,
@@ -97,7 +98,6 @@ import {
   clearNotice,
   createLobby,
   cycle,
-  inALobby,
   joinLobby,
   leaveLobby,
   lobbyOf,
@@ -106,13 +106,32 @@ import {
   seatedPlayers,
   setSpectating,
   sit,
-  summaries,
   viewFor,
   type Lobby,
 } from './lobby.js';
+import { clientIsBuilt, serveClient } from './serve.js';
 
 /** 8080 unless told otherwise, so a second server can be run alongside a game. */
 const PORT = Number(process.env.PORT) || 8080;
+
+/**
+ * Whether an anonymous socket may wipe the running world.
+ *
+ * `restart`, and `spectate` with `restart` set, both call `resetWorld` — from
+ * *any* connection, in or out of a lobby. That was harmless while the only way
+ * to reach this server was to be on the same LAN. It is not harmless once it is
+ * behind a tunnel or a forwarded port, where the address is all anybody needs:
+ * one hand-crafted message resets the round everybody is playing, and the
+ * four-letter code does not cover it, because neither message goes anywhere
+ * near a lobby.
+ *
+ * Off by default, so the thing you expose to the internet is safe as it stands.
+ * Set `ALLOW_WORLD_RESET=1` for headless work and for `?spectate=new`.
+ *
+ * Plain `?spectate` is deliberately unaffected — it sends `restart: false` and
+ * only watches, which is the documented way to observe a live round.
+ */
+const ALLOW_WORLD_RESET = process.env.ALLOW_WORLD_RESET === '1';
 const TICK_MS = 1000 / TICK_RATE;
 
 const world = createWorld();
@@ -120,7 +139,17 @@ const sockets = new Map<string, WebSocket>();
 
 console.log(`[server] city generated with seed ${world.map.seed}`);
 
-const wss = new WebSocketServer({ port: PORT });
+/**
+ * One port carries both the game and the page that plays it.
+ *
+ * The WebSocket rides the same HTTP server the client is served from, which is
+ * what makes internet play a single thing to forward or tunnel rather than
+ * two. It also means the client can find the server by simply looking at the
+ * address bar — see `net.ts` — so there is no `?server=` for a guest to be
+ * given, and no way for them to be handed a URL with the wrong one in it.
+ */
+const http = createServer(serveClient);
+const wss = new WebSocketServer({ server: http });
 
 function send(socket: WebSocket, message: ServerMessage): void {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -193,14 +222,6 @@ function despawnPlayer(id: string): void {
   world.dogDeaths.delete(id);
 }
 
-/** Push the browse list to everyone still choosing where to go. */
-function broadcastLobbies(): void {
-  const list = summaries();
-  for (const [connId, socket] of sockets) {
-    if (!inALobby(connId)) send(socket, { type: 'lobbies', lobbies: list });
-  }
-}
-
 /** Redraw a lobby for everyone in it. Each viewer sees their own 'self' flags. */
 function pushLobby(lobby: Lobby): void {
   for (const connId of lobby.members.keys()) {
@@ -209,7 +230,7 @@ function pushLobby(lobby: Lobby): void {
   }
 }
 
-/** Tell everyone in a lobby it has gone, and drop them back to the browse list. */
+/** Tell everyone in a lobby it has gone, and drop them back to the front end. */
 function closeLobby(lobby: Lobby, reason: string): void {
   for (const connId of lobby.members.keys()) {
     const socket = sockets.get(connId);
@@ -274,7 +295,6 @@ function startLobby(lobby: Lobby): void {
   // to take the screen — and it would sit there as a stale notice.
   if (!lobby.offline) say(lobby, '', 'the round has begun');
   pushLobby(lobby);
-  broadcastLobbies();
   for (const connId of lobby.members.keys()) {
     const socket = sockets.get(connId);
     if (!socket) continue;
@@ -288,7 +308,6 @@ wss.on('connection', (socket) => {
   sockets.set(id, socket);
 
   send(socket, { type: 'welcome', selfId: id, map: world.map });
-  send(socket, { type: 'lobbies', lobbies: summaries() });
   console.log(`[server] ${id} connected (${sockets.size} at the front end or playing)`);
 
   socket.on('message', (raw) => {
@@ -389,7 +408,9 @@ wss.on('connection', (socket) => {
       } else if (msg.type === 'spectate') {
         // Normally a fresh game to watch; `restart: false` drops into the one
         // already running, so a round can be observed as it actually plays out.
-        const restart = msg.restart !== false;
+        // Resetting is gated: watching is harmless, wiping everyone's city is
+        // not, and this server is reachable from the internet now.
+        const restart = msg.restart !== false && ALLOW_WORLD_RESET;
         if (restart) resetWorld(world);
         world.spectators.add(id);
         world.entities.delete(id);
@@ -399,44 +420,39 @@ wss.on('connection', (socket) => {
         );
         if (restart) broadcast({ type: 'map', map: world.map });
         else send(socket, { type: 'map', map: world.map });
-      } else if (msg.type === 'lobbyList') {
-        send(socket, { type: 'lobbies', lobbies: summaries() });
       } else if (msg.type === 'lobbyCreate') {
         world.names.set(id, msg.gamertag);
         const lobby = createLobby(id, msg.name, msg.gamertag, msg.offline === true);
         console.log(
           `[server] ${msg.gamertag} created ${lobby.offline ? 'an offline' : 'lobby'}` +
-            ` "${lobby.name}" (${lobby.id})`,
+            ` "${lobby.name}" (${lobby.code})`,
         );
         pushLobby(lobby);
-        broadcastLobbies();
       } else if (msg.type === 'lobbyJoin') {
         world.names.set(id, msg.gamertag);
-        const lobby = joinLobby(id, msg.id, msg.gamertag);
-        if (!lobby) {
-          // Someone clicked a lobby that closed while the list sat on screen.
-          send(socket, { type: 'lobbyLeft', reason: 'that lobby is gone' });
-          send(socket, { type: 'lobbies', lobbies: summaries() });
+        const joined = joinLobby(id, msg.code, msg.gamertag);
+        if (!joined.ok) {
+          // A mistyped code, or a lobby that closed while they were typing it.
+          // `lobbyError` rather than `lobbyLeft` because they have not left
+          // anywhere — they are still stood on the JOIN screen, which is where
+          // the answer has to appear if they are to try again.
+          console.log(`[server] ${msg.gamertag} could not join: ${joined.reason}`);
+          send(socket, { type: 'lobbyError', message: joined.reason });
         } else {
-          console.log(`[server] ${msg.gamertag} joined lobby "${lobby.name}"`);
-          pushLobby(lobby);
-          broadcastLobbies();
+          console.log(
+            `[server] ${msg.gamertag} joined "${joined.lobby.name}" (${joined.lobby.code})`,
+          );
+          pushLobby(joined.lobby);
         }
       } else if (msg.type === 'lobbySit') {
         if (sit(id, msg.team, msg.index)) {
           const lobby = lobbyOf(id);
-          if (lobby) {
-            pushLobby(lobby);
-            broadcastLobbies();
-          }
+          if (lobby) pushLobby(lobby);
         }
       } else if (msg.type === 'lobbySpectate') {
         if (setSpectating(id, msg.on)) {
           const lobby = lobbyOf(id);
-          if (lobby) {
-            pushLobby(lobby);
-            broadcastLobbies();
-          }
+          if (lobby) pushLobby(lobby);
         }
       } else if (msg.type === 'lobbyCycle') {
         if (cycle(id, msg.team, msg.index)) {
@@ -475,10 +491,12 @@ wss.on('connection', (socket) => {
         if (left) {
           if (left.closed) closeLobby(left.lobby, 'the host closed the lobby');
           else pushLobby(left.lobby);
-          broadcastLobbies();
         }
-        send(socket, { type: 'lobbies', lobbies: summaries() });
-      } else if (msg.type === 'restart') {
+      } else if (msg.type === 'restart' && ALLOW_WORLD_RESET) {
+        // Nothing in the client sends this any more — the pause panel's Restart
+        // is `lobbyRestart`, which checks you are the host of the round it is
+        // replacing. This is the bare version, kept for headless work, and it
+        // trusts whoever sends it, which is why it is gated.
         // Someone watching stays watching: resetWorld gives every connection a
         // fresh officer, which dropped a spectator back into first person.
         const watching = world.spectators.has(id);
@@ -994,4 +1012,17 @@ function tick(): void {
 
 setInterval(tick, TICK_MS);
 
-console.log(`[server] listening on ws://localhost:${PORT}`);
+http.listen(PORT, () => {
+  console.log(`[server] listening on http://localhost:${PORT} (game and client, one port)`);
+  if (ALLOW_WORLD_RESET) {
+    console.log('[server] ALLOW_WORLD_RESET=1 — any socket may reset the world. Local use only.');
+  }
+  if (clientIsBuilt()) {
+    console.log('[server] serving the built client — this URL is the whole game');
+  } else {
+    console.log(
+      '[server] no built client yet (cd client && npm run build) — ' +
+        'until then use the Vite dev server on 5173 with ?server=' + PORT,
+    );
+  }
+});

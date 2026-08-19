@@ -20,6 +20,10 @@ cd client && npm install && npm run dev     # http://localhost:5173 (vite)
 
 Or double-click `Launch Zombie Game.bat` — starts both and opens the browser.
 
+To play with people **over the internet**, double-click `Host Online.bat`
+instead. It builds the client and serves it off the game server, so the whole
+game is one port — see **Playing over the internet** below.
+
 **Always typecheck both after a change** (there is no test suite):
 ```
 cd server && npx tsc --noEmit
@@ -69,8 +73,12 @@ Server modules and what each owns:
   trigger both players and bots pull
 - `dog.ts` — the playable zombie dog: its neck, its legs, its jaws, and what
   shaking does to whoever is in them
-- `lobby.ts` — the rooms people wait in: create/join/sit/chat, and the browse
-  list. Nobody has an entity until their lobby starts a round
+- `lobby.ts` — the rooms people wait in: create/join/sit/chat, and the four
+  letter code that is the only way into one. Nobody has an entity until their
+  lobby starts a round
+- `serve.ts` — serves the built client off the game server, so the game is one
+  port. Dependency-free on purpose; `ws` is still the only thing this server
+  needs
 - `emplacement.ts` — the pocket gunner: its crew, its sandbags, its arc
 - `fire.ts` — the flamethrower stream, burning ground, and who is alight
 - `inventory.ts` — loot spawning, slots, pickup/drop
@@ -85,7 +93,7 @@ Server modules and what each owns:
 ### The front end
 
 `client/src/menu.ts` owns the whole shell — title, gamertag, offline, create and
-browse — and knows nothing about the game. It holds **no lobby state either**:
+join — and knows nothing about the game. It holds **no lobby state either**:
 the server owns the lobby and pushes the whole thing back on every change, so
 the client draws whatever arrived and forwards clicks.
 
@@ -101,7 +109,14 @@ also somebody else's game. Both endings go back to the front end either way; a
 new round is a new lobby. Restart clears `lobby.running` first, since
 `startLobby` refuses while a round is up — which is exactly what it replaces.
 
-A lobby slot is `closed | open | bot | player`. Clicking a **row** seats you in
+A lobby slot is `closed | open | bot | player`. Online a fresh lobby opens with
+every seat **open** — which is the same resting state `vacate` puts one back to
+when somebody stands up, and `emptySeats` used to disagree with it by starting
+everything `closed`. That mattered little while the host arranged the room
+before telling anyone; it matters now the code *is* the invitation, because a
+friend who has been sent one and arrives to a room with nowhere to sit has to
+wait for the host to notice. Offline still starts shut — there is nobody it
+could be open to. Clicking a **row** seats you in
 it (leaving `open` behind you, and taking a bot's place if it had one);
 clicking its **tag** cycles closed/open/bot. Two controls, because one click
 can't both move you and cycle the thing you're moving into. Clicking the row
@@ -117,10 +132,127 @@ round of nothing but bots is the whole point of watching one. `?spectate` still
 exists for headless work and bypasses the front end entirely.
 
 **PLAY OFFLINE is the same lobby with `offline: true`**, which is why it needed
-almost no code: never listed in `summaries`, no chat, seats cycle closed→bot
-only, and a vacated seat goes back to `closed` rather than `open`. The one
-thing it genuinely needed was `notice` — with no chat box drawn, a refusal from
-START had nowhere to be read.
+almost no code: no chat, seats cycle closed→bot only, seats start `closed`, and
+a vacated seat goes back to `closed` rather than `open`. The one thing it
+genuinely needed was `notice` — with no chat box drawn, a refusal from START had
+nowhere to be read.
+
+### Four letters are the only way into a lobby
+
+Creating one draws a code; JOIN asks for it. That is the whole of matchmaking,
+and it is deliberately the whole of the *access control* as well.
+
+- **The browse list is gone, and its absence is the feature.** `summaries`, the
+  `lobbies` message and `lobbyList` were removed outright rather than left
+  unused: an endpoint that still listed the lobbies on a server would hand out
+  every code on it and quietly turn the code into a formality. Nothing
+  enumerates lobbies now, so the client has no way to ask what exists — which is
+  what makes "only the people I sent it to" true rather than merely intended.
+- **The code is the lobby's identity, not a label on it.** `lobbies` is keyed by
+  code and there is no second internal id, because with nothing to list there
+  would be no way to ever hold such a handle.
+- **No vowels** (`LOBBY_CODE_ALPHABET`). Four letters from the full alphabet
+  spell a word often enough to matter, and the once it does is the once it is a
+  rude one on a stranger's screen. Twenty letters at four places is 160,000
+  codes against a handful live, so a collision is a formality to retry rather
+  than a pressure on the length. `randomInt` rather than `Math.random` scaled by
+  hand — a guessed code is a stranger in your game.
+- **An offline room refuses its own code, and refuses it in the exact words a
+  code that never existed gets.** Solo is a promise, and a distinguishable
+  refusal would confirm the room is there.
+- **A refusal must not move you.** `lobbyError` exists alongside `lobbyLeft` for
+  this: mistyping is the ordinary case now, and `lobbyLeft` sends you back a
+  screen, so a typo would cost you your place in the flow. The message lands on
+  the JOIN screen with the code still in the box and selected.
+- **Short and wrong are different refusals**, because they are different things
+  to the person typing — a half-finished paste against a code that found
+  nothing. Answering both with "no" has them retyping something that was never
+  going to work.
+
+Two things bit during this and neither is guessable from the code:
+
+- **`maxlength` on the code box has to be far longer than a code.** The browser
+  applies it to a *paste* before any script sees the text, so at `maxlength="4"`
+  a pasted `"  bwkg  "` arrives already truncated to `"  bw"` and the handler
+  strips it to two letters — a code silently half-eaten, which is exactly what
+  copying one out of a chat message looks like. Measured before the fix:
+  `"  bwkg  "` → `BW`. It is 32 now and the input handler does the clamping,
+  which it was doing anyway. Verified after: `"  bwkg  "`, `"bwkg\n"`,
+  `"b-w-k-g"` and `'"BWKG"'` all land as `BWKG`.
+- **`navigator.clipboard` does not exist for the people this feature is for.**
+  It needs a secure context — HTTPS or localhost — and the guests are the ones
+  reaching the dev server at `http://192.168.x.x:5173`. So the `execCommand`
+  path in `copyToClipboard` is not a legacy fallback, it is the one that runs
+  for everybody but the host, and the scratch textarea it needs must be off
+  screen rather than `display:none` (a hidden element cannot be selected).
+  Failing even that, COPY reads `CTRL+C` and selects the code on screen, and
+  `#lobby-code` carries `user-select: all` so one click takes the lot.
+
+`server/codecheck.ts` is the harness — headless, no socket, no port, so it
+leaves a game on 8080 alone. It covers the shape and alphabet of 4000 codes,
+that no two live lobbies collide, that every letter gets drawn, six ways of
+mistyping or pasting one, and the four refusals.
+
+### Playing over the internet
+
+The codes say *which room*; they say nothing about *which machine*, and that
+second half is what actually stopped people playing together. Three things had
+to change and none of them is the lobby.
+
+- **One port, because two cannot be tunnelled sensibly.** In development the
+  client is Vite on 5173 and the server is `ws` on 8080, so a guest needs both
+  reachable and a URL with `?server=` stapling them together — two forwards or
+  two tunnels, and a URL nobody can retype. The `WebSocketServer` now rides an
+  `http.Server` that also serves `client/dist` (`serve.ts`), so the address bar
+  and the game are the same thing.
+- **Which is what lets the client find the server by looking at the address
+  bar.** A built client defaults to `location.host`; a dev build still reaches
+  for `:8080` on whatever host served it, gated on `import.meta.env.DEV` and
+  tree-shaken out of the production bundle. So there is no `?server=` for a
+  guest to be given, and therefore no way to hand somebody one pointing at the
+  wrong machine. `?server=` still overrides both, for LAN and dev.
+- **`wss:` when the page is https, and it is not optional.** Every tunnel worth
+  using terminates TLS, and a browser blocks a `ws://` socket opened from an
+  https page as mixed content. Hardcoding `ws://` is what would have made this
+  work perfectly on the LAN and fail the moment it went out to the internet,
+  with a console error nobody would think to look for. Derived from
+  `location.protocol`.
+
+**`ALLOW_WORLD_RESET` exists because exposing this server made two old messages
+dangerous.** `restart`, and `spectate` with `restart` set, both call
+`resetWorld` from *any* socket, in or out of a lobby — so anybody who has the
+address can wipe the round everyone is playing, and the four-letter code does
+not cover it because neither message goes near a lobby. Nothing in the client
+sends `restart` at all any more; the pause panel's Restart is `lobbyRestart`,
+which checks you are the host. Both are off unless `ALLOW_WORLD_RESET=1`.
+Measured both ways against a live server: with the flag off, `{"type":"restart"}`
+and `{"type":"spectate","restart":true}` leave the seed untouched; with it on,
+both change it. **Plain `?spectate` is deliberately unaffected** — it sends
+`restart: false`, only watches, and is the documented way to observe a live
+round. Only `?spectate=new` needs the flag.
+
+**How to actually host**, in the order worth trying:
+
+- **A tunnel** (`Host Online.bat` uses this if `cloudflared` is on PATH):
+  `cloudflared tunnel --url http://localhost:8080` prints an
+  `https://….trycloudflare.com` URL that *is* the game. No router access, no
+  account, works behind CGNAT, and it is a single portable `.exe` — the only
+  kind of install that works on the machine without admin rights. Costs some
+  latency through Cloudflare's edge, and the URL changes every run.
+- **A forwarded port** — lowest latency and the right answer if the router is
+  yours: forward 8080/TCP and hand out `http://your-public-ip:8080`. Impossible
+  behind CGNAT, which is most mobile and some fibre ISPs.
+- **Tailscale** if everyone will install it: WireGuard hole-punching gives a
+  genuinely direct machine-to-machine connection, which is the closest thing
+  here to actual peer-to-peer, with no forwarding. Needs admin to install on
+  Windows, so it is out on the work box.
+
+Two things this does *not* do, and both are fine until they aren't: there is no
+rate limit on connections or messages, and no cap on how many sockets one
+address may open. A public tunnel URL handed to friends is not the same as a
+server advertised to strangers, and nothing enumerates lobbies, so the exposure
+is "somebody guessed or was given your URL". Worth revisiting before this is
+ever left running unattended.
 
 ### Civilian traits
 
@@ -2934,9 +3066,11 @@ in the city was told to walk past it by name. Nothing else read the mark.
 ## How the user likes to work
 
 - **Verify behaviour from a spectator socket**, not a player one — a player
-  connection is fog-limited and gives misleading counts. Note that `spectate`
-  restarts the round, so to observe a live game use two sockets (one player, one
-  spectator) or read the global counters in the state message.
+  connection is fog-limited and gives misleading counts. `spectate` no longer
+  restarts the round: resetting is gated behind `ALLOW_WORLD_RESET=1` now that
+  the server is something you can expose to the internet, so a plain `spectate`
+  just watches whatever is already running and is safe to point at a live game.
+  `?spectate=new` and the bare `restart` message need the flag.
 - **Two ways to test without touching his game**, and they cover almost
   everything:
   - *Headless.* Import `createWorld` and run the tick order above in a loop
@@ -2944,7 +3078,8 @@ in the city was told to walk past it by name. Nothing else read the mark.
     for anything about behaviour, and it can measure what a spectator can't.
   - *A second server.* `PORT=8090 npx tsx src/index.ts`, then open the client
     with `?server=8090`. That's the only way to exercise lobbies, chat, pausing
-    and the front end, and it leaves 8080 alone.
+    and the front end, and it leaves 8080 alone. Add `ALLOW_WORLD_RESET=1` if
+    the thing under test needs to reset the world.
 - **Measure the thing you actually claim.** Two harnesses in this project
   reported nonsense before they were fixed: one counted civilians *standing
   still* beside a wall as "grinding into" it, and one picked a "clear lane"
@@ -2962,8 +3097,10 @@ in the city was told to walk past it by name. Nothing else read the mark.
   temporary env var and running the same harness both ways turned "the grey
   officers look wrong" into "0 shots and 155° off target, versus 6 shots and
   under 10°". Delete the gate afterwards.
-- **He usually has a server already running on 8080.** Don't kill it and don't
-  send it `spectate` — that resets the round he's playing. To check crowd
+- **He usually has a server already running on 8080.** Don't kill it. Sending
+  it `spectate` is safe now — it only watches unless `ALLOW_WORLD_RESET=1` was
+  set on that server — but `restart` and `?spectate=new` would still take his
+  round out from under him if it was. To check crowd
   behaviour, drive the world headlessly instead: import `createWorld` and run
   the tick order above in a loop under `npx tsx`. No socket, no port, no
   disturbance, and it can measure things a spectator can't (who is pressed

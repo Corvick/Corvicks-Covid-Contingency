@@ -85,7 +85,7 @@
       }
       .back-btn:hover { color: #9ca3af; }
 
-      #lobby { justify-content: flex-start; padding-top: 46px; box-sizing: border-box; }
+      #lobby { justify-content: flex-start; padding-top: 30px; box-sizing: border-box; }
       .teams { display: flex; gap: 40px; }
       .team { min-width: 250px; }
       .team h3, .chat h3 { margin: 0 0 2px; font-size: 15px; letter-spacing: 0.06em; }
@@ -136,19 +136,52 @@
       }
       #chat-input:focus { border-color: #4b5c73; }
 
-      /* ---- browse list ---- */
-      #lobby-list { width: 380px; min-height: 120px; margin-bottom: 12px; }
-      .lobby-row {
-        display: flex; justify-content: space-between; align-items: center;
-        width: 100%; margin: 5px 0; padding: 10px 12px; box-sizing: border-box;
-        font-size: 12px; letter-spacing: 0.05em; cursor: pointer; text-align: left;
-        border: 1px solid #2b3441; border-radius: 3px;
-        background: #161b22; color: #d8e0ea;
+      /* ---- join codes ----
+         Four letters is the only way into a lobby, so both ends of it are
+         drawn large and monospaced: what the host reads off, and what the
+         guest types in. The trailing letter-space of a tracked string pushes
+         centred text off to the left, which `text-indent` puts back. */
+      .code-input {
+        width: 260px; padding: 13px 12px; margin: 0 0 10px; box-sizing: border-box;
+        font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+        font-size: 32px; font-weight: bold; text-align: center;
+        letter-spacing: 0.4em; text-indent: 0.4em; text-transform: uppercase;
+        border: 1px solid #374151; border-radius: 4px;
+        background: #11161d; color: #fbbf24; outline: none;
       }
-      .lobby-row:hover { border-color: #4b5c73; background: #1b222c; }
-      .lobby-row .meta { color: #6b7280; font-size: 11px; }
-      .lobby-row .meta .running { color: #fbbf24; }
-      .empty { color: #4b5563; font-size: 12px; text-align: center; padding: 40px 0; }
+      .code-input:focus { border-color: #b45309; }
+      .code-input::placeholder { color: #333d4a; font-weight: normal; }
+      .screen-sub { margin: -8px 0 20px; color: #6b7280; font-size: 12px;
+                    letter-spacing: 0.05em; }
+      /* The server's refusal, answered on the screen you are already on. */
+      .form-error {
+        margin: 10px 0 0; min-height: 15px; max-width: 300px; text-align: center;
+        color: #f87171; font-size: 12px; letter-spacing: 0.04em;
+      }
+
+      /* The host's copy of it, sat under the lobby title. */
+      #lobby-code-wrap {
+        display: flex; align-items: center; gap: 16px; margin: 0 0 20px;
+        padding: 7px 9px 7px 16px; border: 1px solid #b45309; border-radius: 4px;
+        background: #1d1a15;
+      }
+      #lobby-code-wrap.hidden { display: none; }
+      #lobby-code-wrap .label { color: #a1794a; font-size: 10px; letter-spacing: 0.16em; }
+      #lobby-code {
+        font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+        font-size: 25px; font-weight: bold; color: #fbbf24;
+        letter-spacing: 0.3em; text-indent: 0.3em;
+        /* One click selects the whole code, so Ctrl+C still works on a page
+           served over plain http, where the clipboard API does not exist. */
+        user-select: all; cursor: text;
+      }
+      #btn-copy-code {
+        padding: 8px 14px; font: inherit; font-size: 11px; letter-spacing: 0.1em;
+        cursor: pointer; border: 1px solid #b45309; border-radius: 3px;
+        background: #2a2115; color: #fbbf24;
+      }
+      #btn-copy-code:hover { background: #3a2d1c; }
+      #btn-copy-code.done { border-color: #1c9a49; background: #14301f; color: #4ade80; }
 
       .name-input {
         width: 260px; padding: 11px 12px; margin: 0 0 10px; box-sizing: border-box;
@@ -215,13 +248,29 @@
 
         <div id="screen-join" class="screen">
           <h2>JOIN LOBBY</h2>
-          <div id="lobby-list"></div>
-          <button class="menu-btn" id="btn-refresh">REFRESH</button>
+          <p class="screen-sub">enter the four-letter code your friend sent you</p>
+          <!-- maxlength is deliberately far longer than a code. The browser
+               applies it to a *paste* before any script sees the text, so at 4
+               a pasted "  bwkg  " arrives truncated to "  bw" and the handler
+               strips it down to two letters — a code silently half-eaten,
+               which is exactly what copying one out of a chat message looks
+               like. Let the whole paste land; the input handler clamps it. -->
+          <input id="code-input" class="code-input" maxlength="32" spellcheck="false"
+                 autocomplete="off" autocapitalize="characters" placeholder="CODE" />
+          <button class="menu-btn dim" id="btn-join-go">JOIN</button>
+          <p class="form-error" id="join-error"></p>
           <button class="back-btn" id="btn-join-back">← BACK</button>
         </div>
 
         <div id="lobby" class="screen">
           <h2 id="lobby-title">LOBBY</h2>
+          <!-- The whole of how anybody else gets in here. Hidden offline,
+               where there is nobody to give it to. -->
+          <div id="lobby-code-wrap">
+            <span class="label">JOIN CODE</span>
+            <span id="lobby-code">····</span>
+            <button id="btn-copy-code">COPY</button>
+          </div>
           <div class="teams">
             <div class="team">
               <h3>TEAM 1 — OFFICERS</h3>

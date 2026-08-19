@@ -743,6 +743,21 @@ export const SHELTER_FURTHEST_CHANCE = 0.07;
 export const LOBBY_HUMAN_SLOTS = 5;
 export const LOBBY_DOG_SLOTS = 2;
 
+/**
+ * A lobby's join code. Four letters is the whole of getting into somebody
+ * else's game: it is what they read out or paste to you and, since there is no
+ * browse list any more, the only way in at all.
+ */
+export const LOBBY_CODE_LENGTH = 4;
+/**
+ * Vowels are deliberately left out. Four letters drawn from the whole alphabet
+ * spell a word often enough to matter, and the time it does is the time it is a
+ * rude one on a stranger's screen — with no vowels it cannot happen. Twenty
+ * letters at four places is 160,000 codes against a handful ever live at once,
+ * so a collision is a formality to retry rather than a pressure on the length.
+ */
+export const LOBBY_CODE_ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ';
+
 /** Fallback when a round starts without a lobby behind it. */
 export const BOT_OFFICER_COUNT = 4;
 export const BOT_LOOT_RANGE = 1400;

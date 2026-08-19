@@ -396,22 +396,14 @@ export interface ChatLine {
   text: string;
 }
 
-/** A lobby as it appears in the browse list. */
-export interface LobbySummary {
-  id: string;
-  name: string;
-  /** The host's gamertag. */
-  host: string;
-  /** People sitting in slots, and how many seats exist in total. */
-  players: number;
-  capacity: number;
-  /** Its round is already under way — you can still join, but not play yet. */
-  running: boolean;
-}
-
 /** The lobby you are actually in, pushed whenever anything about it changes. */
 export interface LobbyView {
-  id: string;
+  /**
+   * The four letters that get somebody else in here. This is the lobby's whole
+   * public identity — there is no browse list and no other handle on it — so it
+   * is what the room draws large and what JOIN asks for.
+   */
+  code: string;
   name: string;
   isHost: boolean;
   humans: SlotWire[];
@@ -606,12 +598,15 @@ export type ClientMessage =
   | { type: 'spectate'; restart?: boolean }
   | { type: 'restart' }
   // ---- front end. None of these touch the running world except `lobbyStart`.
-  /** Send me the browse list, and keep sending it as it changes. */
-  | { type: 'lobbyList' }
   | { type: 'lobbyCreate'; name: string; gamertag: string; offline?: boolean }
   /** Sit out and watch, or come back off the bench. */
   | { type: 'lobbySpectate'; on: boolean }
-  | { type: 'lobbyJoin'; id: string; gamertag: string }
+  /**
+   * Get me into the lobby with this code. Sent raw as typed — the server tidies
+   * it, because it is the one that has to agree with itself about what a code
+   * is, and a client that trimmed differently would refuse codes that are fine.
+   */
+  | { type: 'lobbyJoin'; code: string; gamertag: string }
   /** Take a seat. Only 'open' and 'bot' seats can be taken. */
   | { type: 'lobbySit'; team: LobbyTeam; index: number }
   /** Host only: walk a slot through closed → open → bot. */
@@ -633,12 +628,17 @@ export type LobbyTeam = 'humans' | 'dogs';
 export type ServerMessage =
   | { type: 'welcome'; selfId: string; map: MapData }
   | { type: 'map'; map: MapData }
-  /** The browse list, pushed to everyone who isn't in a lobby yet. */
-  | { type: 'lobbies'; lobbies: LobbySummary[] }
   /** The lobby you're in. Sent on every change, so the client just redraws. */
   | { type: 'lobby'; lobby: LobbyView }
   /** You are no longer in a lobby — you left, or it went away under you. */
   | { type: 'lobbyLeft'; reason: string }
+  /**
+   * A refusal that leaves you exactly where you are, unlike `lobbyLeft`, which
+   * moves you. Mistyping a code is the ordinary case now, and it has to answer
+   * on the screen you are already looking at rather than throwing you back a
+   * step and making you find your way to it again.
+   */
+  | { type: 'lobbyError'; message: string }
   /** Your lobby's round is beginning. The map follows. */
   | { type: 'start' }
   | {

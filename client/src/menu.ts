@@ -1,11 +1,11 @@
 import type {
   ClientMessage,
-  LobbySummary,
   LobbyTeam,
   LobbyView,
   ServerMessage,
   SlotWire,
 } from '../../shared/types.js';
+import { LOBBY_CODE_LENGTH } from '../../shared/constants.js';
 
 /**
  * The front end: title, gamertag, create or browse, lobby. It owns no game
@@ -36,6 +36,8 @@ export interface Menu {
 
 const NAME_KEY = 'gamertag';
 const NAME_MAX = 16;
+/** How long COPY stays ticked before going back to offering itself. */
+const COPIED_SHOWN_MS = 1400;
 
 export function setupMenu(hooks: MenuHooks): Menu {
   const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -58,7 +60,6 @@ export function setupMenu(hooks: MenuHooks): Menu {
   };
 
   let name = '';
-  let lobbies: LobbySummary[] = [];
   let view: LobbyView | null = null;
 
   // ---- gamertag ----
@@ -114,46 +115,106 @@ export function setupMenu(hooks: MenuHooks): Menu {
   });
   el('btn-create-go').addEventListener('click', doCreate);
 
-  // ---- browse ----
-  const listHost = el<HTMLDivElement>('lobby-list');
+  // ---- join by code ----
+  // There is no browse list any more: nothing enumerates the lobbies on a
+  // server, so the four letters are the only handle on one. That is the whole
+  // of the "only my friends get in" property, and it costs nothing to keep —
+  // the client simply has no way to ask what exists.
+  const codeInput = el<HTMLInputElement>('code-input');
+  const joinGo = el<HTMLButtonElement>('btn-join-go');
+  const joinError = el<HTMLParagraphElement>('join-error');
 
-  const renderList = () => {
-    listHost.replaceChildren();
-    if (lobbies.length === 0) {
-      const empty = document.createElement('p');
-      empty.className = 'empty';
-      empty.textContent = 'no lobbies yet — create one';
-      listHost.appendChild(empty);
+  /** What is in the box, as the server will read it: letters only, uppercase. */
+  const typedCode = () =>
+    codeInput.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, LOBBY_CODE_LENGTH);
+
+  const refreshJoinButton = () =>
+    joinGo.classList.toggle('dim', typedCode().length < LOBBY_CODE_LENGTH);
+
+  const doJoin = () => {
+    const code = typedCode();
+    // Refuse a short code here rather than sending it: the server would answer
+    // the same thing, and a round trip to be told you have not finished typing
+    // reads as the code being wrong.
+    if (code.length < LOBBY_CODE_LENGTH) {
+      joinError.textContent = `a code is ${LOBBY_CODE_LENGTH} letters`;
       return;
     }
-    for (const lobby of lobbies) {
-      const row = document.createElement('div');
-      row.className = 'lobby-row';
-
-      const title = document.createElement('span');
-      title.textContent = lobby.name;
-
-      const meta = document.createElement('span');
-      meta.className = 'meta';
-      meta.textContent = `${lobby.host} · ${lobby.players}/${lobby.capacity}`;
-      if (lobby.running) {
-        const running = document.createElement('span');
-        running.className = 'running';
-        running.textContent = ' · IN PROGRESS';
-        meta.appendChild(running);
-      }
-
-      row.append(title, meta);
-      row.addEventListener('click', () =>
-        hooks.send({ type: 'lobbyJoin', id: lobby.id, gamertag: name }),
-      );
-      listHost.appendChild(row);
-    }
+    joinError.textContent = '';
+    hooks.send({ type: 'lobbyJoin', code, gamertag: name });
   };
 
-  el('btn-refresh').addEventListener('click', () => hooks.send({ type: 'lobbyList' }));
+  // Normalise as they type, so a pasted " abcd " or "A-B-C-D" lands as ABCD and
+  // the box always shows exactly what will be sent.
+  codeInput.addEventListener('input', () => {
+    const clean = typedCode();
+    if (codeInput.value !== clean) codeInput.value = clean;
+    joinError.textContent = '';
+    refreshJoinButton();
+  });
+  codeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doJoin();
+  });
+  joinGo.addEventListener('click', doJoin);
 
   // ---- lobby ----
+  const codeWrap = el<HTMLDivElement>('lobby-code-wrap');
+  const codeText = el<HTMLSpanElement>('lobby-code');
+  const copyBtn = el<HTMLButtonElement>('btn-copy-code');
+  let copiedTimer = 0;
+
+  /**
+   * Put the code on the clipboard.
+   *
+   * `navigator.clipboard` only exists in a secure context — HTTPS or
+   * localhost — and the whole point of this feature is the *other* players,
+   * who reach the dev server at `http://192.168.x.x:5173` and therefore do not
+   * have it. So the deprecated `execCommand` path is not a legacy fallback
+   * here, it is the one that actually runs for everybody but the host.
+   */
+  const copyToClipboard = (text: string): boolean => {
+    if (navigator.clipboard?.writeText) {
+      // Fire and forget: it resolves after this returns, and a rejection just
+      // means the tick was optimistic — the code is still on screen to read.
+      navigator.clipboard.writeText(text).catch(() => {});
+      return true;
+    }
+    const scratch = document.createElement('textarea');
+    scratch.value = text;
+    // Off screen rather than hidden — a display:none element cannot be selected.
+    scratch.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.appendChild(scratch);
+    scratch.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      /* no clipboard at all — the code is selectable on screen instead */
+    }
+    scratch.remove();
+    return ok;
+  };
+
+  copyBtn.addEventListener('click', () => {
+    if (!view) return;
+    const ok = copyToClipboard(view.code);
+    copyBtn.textContent = ok ? 'COPIED' : 'CTRL+C';
+    copyBtn.classList.toggle('done', ok);
+    // Failing that, select it for them so one Ctrl+C finishes the job.
+    if (!ok) {
+      const range = document.createRange();
+      range.selectNodeContents(codeText);
+      const sel = getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    clearTimeout(copiedTimer);
+    copiedTimer = window.setTimeout(() => {
+      copyBtn.textContent = 'COPY';
+      copyBtn.classList.remove('done');
+    }, COPIED_SHOWN_MS);
+  });
+
   const chatLog = el<HTMLDivElement>('chat-log');
   const chatInput = el<HTMLInputElement>('chat-input');
   const startBtn = el<HTMLButtonElement>('lobby-start');
@@ -217,6 +278,9 @@ export function setupMenu(hooks: MenuHooks): Menu {
   const renderLobby = () => {
     if (!view) return;
     el('lobby-title').textContent = view.name.toUpperCase();
+    // A solo room has nobody to hand a code to, so it doesn't show one.
+    codeWrap.classList.toggle('hidden', view.offline);
+    codeText.textContent = view.code;
     renderSlots('humans', view.humans, view.isHost);
     renderSlots('dogs', view.dogs, view.isHost);
     startBtn.style.display = view.isHost ? '' : 'none';
@@ -288,15 +352,17 @@ export function setupMenu(hooks: MenuHooks): Menu {
   });
   el('btn-create-back').addEventListener('click', () => show('online'));
   el('btn-join').addEventListener('click', () => {
-    hooks.send({ type: 'lobbyList' });
-    renderList();
+    codeInput.value = '';
+    joinError.textContent = '';
+    refreshJoinButton();
     show('join');
+    codeInput.focus();
   });
   el('btn-join-back').addEventListener('click', () => show('online'));
   el('lobby-back').addEventListener('click', () => {
-    // The server answers a leave with the browse list rather than a lobbyLeft
-    // — you already know you left — so the screen change happens here. An
-    // offline room came from the title, so that's where LEAVE goes back to.
+    // The server sends nothing back for a leave — you already know you left —
+    // so the screen change happens here. An offline room came from the title,
+    // so that's where LEAVE goes back to.
     const solo = view?.offline === true;
     hooks.send({ type: 'lobbyLeave' });
     view = null;
@@ -311,13 +377,18 @@ export function setupMenu(hooks: MenuHooks): Menu {
     },
 
     handle(msg) {
-      if (msg.type === 'lobbies') {
-        lobbies = msg.lobbies;
-        if (current === 'join') renderList();
-      } else if (msg.type === 'lobby') {
+      if (msg.type === 'lobby') {
         view = msg.lobby;
         renderLobby();
         if (current !== 'lobby') show('lobby');
+      } else if (msg.type === 'lobbyError') {
+        // A code that found nothing. Stay put and say so — being bounced to
+        // another screen for a typo is what makes a code box infuriating.
+        joinError.textContent = msg.message;
+        if (current === 'join') {
+          codeInput.focus();
+          codeInput.select();
+        }
       } else if (msg.type === 'lobbyLeft') {
         view = null;
         show('online');
