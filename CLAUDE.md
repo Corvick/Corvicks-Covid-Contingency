@@ -1898,9 +1898,13 @@ shot by swat I cant see"*, and the complaint was exact.
   with 0 samples past 720**, against **889.6px with 1092 past 720 and 0 past
   890**. `DOG_SIGHT_RADIUS` is 890 against the 869 that 1.6 demands, and
   `server/zoomderive.ts` now checks both that and the SWAT rule.
-- **The client half is unverified.** rAF is throttled to nothing in a
-  non-compositing browser pane, so no frame was ever put on screen at 1.6; the
-  arithmetic and the server half are measured, the picture is not.
+- **The client half was checked by eye, not by rig.** rAF is throttled to
+  nothing in a non-compositing browser pane, so no frame could be put on screen
+  at 1.6 offline and the five zoom sites were confirmed by arithmetic alone.
+  Driving a real dog in a real client afterwards, the picture is right — no dark
+  band, no offset fog hole, which is what a mismatched `FOG_MASK_SCALE *
+  cameraZoom()` would have produced. The server half is measured; this half is
+  somebody looking at it.
 
 **Sprint is free, because a dog is a player.** `world.stamina` and
 `world.exhausted` are per-id and the HUD bar already reads them; `dog.ts` just
@@ -3387,3 +3391,25 @@ in the city was told to walk past it by name. Nothing else read the mark.
 Remote: `https://github.com/Corvick/Corvicks-Covid-Contingency.git` (branch `main`).
 `git pull` before starting, `git add -A && git commit && git push` when done —
 he works across two machines.
+
+**Bump `GAME_VERSION` when shipping an update.** Patch for a fix or a tuning
+pass, minor for a new mechanic or anything that changes how a round plays, major
+when it is a different game. It is the `v0.0.5` on the menu, and it is the half
+of the stamp a person can actually read.
+
+**The rest of that stamp derives itself** — `shared/buildstamp.ts` shells out to
+git for the short commit, the date, and a `*` when the tree is dirty. Vite bakes
+the client's in at build time as `__BUILD__`; the server works its own out once
+at startup and sends it in `welcome`. The menu prints one grey line while they
+agree and goes amber with both when they do not, which across two machines
+almost always means one of them did not pull.
+
+- **A constant, not a git tag, and that was the decision.** Tags are the
+  conventional answer and the wrong one here: they need their own
+  `git push --tags`, so the box that forgot would report a stale version over
+  perfectly current code — exactly the failure the stamp exists to catch. A
+  constant travels inside the commit that changed it.
+- **The hash is not redundant with the version.** The version says which update
+  you meant to be on; the hash says which code you are on, and only the hash
+  notices uncommitted edits. Both machines can read `v0.0.5` and be running
+  different code.

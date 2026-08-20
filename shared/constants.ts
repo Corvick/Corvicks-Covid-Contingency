@@ -1,5 +1,26 @@
 import type { EntityType } from './types.js';
 
+// ---------------------------------------------------------------- version
+/**
+ * Which update this is. Shown on the menu, ahead of the commit.
+ *
+ * **Bumped by hand, and deliberately a constant rather than a git tag.** A tag
+ * is the conventional answer and it is the wrong one here: tags need their own
+ * `git push --tags`, so the machine that forgot would sit there reporting a
+ * stale version with perfectly current code — which is precisely the failure
+ * this stamp exists to catch. A constant travels in the commit that changed it
+ * and cannot disagree with the code around it.
+ *
+ * The commit is still printed beside it and is what actually settles whether
+ * two boxes match: a version says which update you meant to be on, a hash says
+ * which code you are on, and only the second of those can tell you somebody has
+ * uncommitted edits.
+ *
+ * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
+ * anything that changes how a round plays, major when it is a different game.
+ */
+export const GAME_VERSION = '0.0.5';
+
 // ---------------------------------------------------------------- world
 /**
  * The full-size city, and the yardstick everything below is measured against.

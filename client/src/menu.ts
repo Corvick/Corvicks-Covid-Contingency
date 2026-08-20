@@ -67,7 +67,9 @@ export function setupMenu(hooks: MenuHooks): Menu {
   const showBuild = (server?: string) => {
     const differs = server !== undefined && server !== __BUILD__;
     stamp.classList.toggle('mismatch', differs);
-    stamp.textContent = differs ? `client ${__BUILD__}\nserver ${server}` : `build ${__BUILD__}`;
+    // No "build" label on the matching line: the stamp now leads with `v0.0.5`,
+    // which says what it is without being told.
+    stamp.textContent = differs ? `client ${__BUILD__}\nserver ${server}` : __BUILD__;
   };
   showBuild();
 
