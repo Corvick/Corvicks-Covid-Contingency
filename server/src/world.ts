@@ -38,6 +38,7 @@ import {
   PLAYER_ONE_SPAWN_RANGE,
   WINDOW_HEALTH,
   INITIAL_ZOMBIES,
+  DOG_ROAR_SUMMON_SPREAD,
   MATERIALIZE_MS,
   BOUNDARY_THICKNESS,
   BUSH_HIDER_CHANCE,
@@ -646,6 +647,42 @@ export interface World {
    * killed again on the very next round. Keyed by id here, it always exists.
    */
   dogDeaths: Map<string, number>;
+  /**
+   * How many people each dog has *turned*, banked as charges for the roar and
+   * spent all at once when it is used.
+   *
+   * **Turned, not bitten.** Somebody incubating is not a zombie yet and may
+   * never be one — the cure gun exists, and a charge rifle takes carriers off
+   * the map before they come up. So the credit lands in `convert`, the one
+   * place a body actually becomes a zombie, whether that is a grab that turned
+   * on the spot or one that took a minute to.
+   *
+   * On the world rather than on `DogState`, and for the same reason
+   * `dogDeaths` is: that state is deleted on every respawn, and a tally that
+   * reset itself each time the dog was shot would be a tally of nothing.
+   */
+  dogConversions: Map<string, number>;
+  /**
+   * Officers the horde has made contact with, for the dog's corner map, and
+   * when to work the list out again.
+   *
+   * **Shared rather than per dog**, because the answer does not depend on who
+   * is looking: it is a fact about where the outbreak is touching the garrison.
+   * Two dogs in a lobby read the same array, and with no dog in the round it is
+   * never built at all.
+   */
+  dogContacts: Array<{ x: number; y: number }>;
+  nextDogContactScan: number;
+  /**
+   * Which dog's teeth started the infection somebody is carrying, victim id to
+   * dog id. Only ever written for a bite a dog caused, so it is a handful of
+   * entries rather than one per infection.
+   *
+   * It has to be cleared wherever a pending infection is — a cure gun, most of
+   * all. Left behind, somebody a dog bit, a medic saved, and a shambler later
+   * finished off would still credit the dog.
+   */
+  infectedByDog: Map<string, string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
   /**
@@ -1321,6 +1358,10 @@ export function createWorld(): World {
     dogsOut: new Set(),
     corpses: [],
     dogDeaths: new Map(),
+    dogConversions: new Map(),
+    dogContacts: [],
+    nextDogContactScan: 0,
+    infectedByDog: new Map(),
     botOfficerCount: BOT_OFFICER_COUNT,
     towers: [],
     beacon: null,
@@ -1398,6 +1439,12 @@ export function resetWorld(world: World): void {
   world.grapples.clear();
   world.grappleImmune.clear();
   world.pendingInfections.clear();
+  world.infectedByDog.clear();
+  // Which *seat* somebody took outlives a restart; what they did with it does
+  // not. A fresh city has bitten nobody.
+  world.dogConversions.clear();
+  world.dogContacts.length = 0;
+  world.nextDogContactScan = 0;
   world.grappleCounts.clear();
   world.speedBoosts.clear();
   world.lastShotAt.clear();
@@ -1473,6 +1520,9 @@ function releaseGrapples(world: World, id: string): void {
 function removeEntity(world: World, id: string): void {
   world.entities.delete(id);
   world.ai.delete(id);
+  // Shot, burned or blown up before it took. Whoever bit them gets nothing —
+  // the tally counts bodies that stood up again, and this one never did.
+  world.infectedByDog.delete(id);
   world.burning.delete(id);
   world.stunned.delete(id);
   world.materializeUntil.delete(id);
@@ -1526,6 +1576,23 @@ export function killEntity(world: World, e: Entity, now: number): void {
     // Already down and waiting to rise. Rounds keep landing on the body — the
     // entity is still here, which is the point — and none of them kill it twice.
     if (world.dogDeaths.has(e.id)) return;
+
+    /**
+     * **Shot mid-roar: the roar dies with it.**
+     *
+     * `updateDogs` bails out before `dogTick` for a dog that is down, so
+     * nothing was left to notice the two seconds running out — the clock stayed
+     * set, the hexagon reported it running for the rest of the round, and the
+     * `roaring` flag stayed on the wire. Worse, had the animal risen with its
+     * state intact it would have unleashed the roar on the first tick back, at
+     * a spot the player picked before they were killed and half a map from
+     * where they now stand.
+     *
+     * Found by driving a real dog over a socket rather than headlessly: the
+     * garrison shot it while it was standing still, which is precisely what
+     * standing still for two seconds is for.
+     */
+    if (dog) dog.roarStartedAt = 0;
 
     // It goes down **where it stands and stays there to be looked at**. The
     // body it leaves is permanent; whether it gets back up at all is settled
@@ -1837,6 +1904,75 @@ function populate(world: World): void {
   world.outbreakOrigin = { x: originX, y: originY };
 }
 
+/**
+ * A spot on the edge the outbreak walked in from, `along` pixels off the
+ * breach, walked inward until it is somewhere a body could actually stand.
+ *
+ * Pulled out of `populate` when the roar needed to put bodies in at the same
+ * place. The walk inward is the part worth keeping in one piece: the perimeter
+ * has buildings built onto it, so an edge point lands in somebody's front room
+ * often enough to matter, and an outbreak — or a summons — starts in the
+ * street.
+ */
+export function breachSpawnPoint(world: World, along: number): { x: number; y: number } {
+  const side = world.outbreakSide;
+  const inset = BOUNDARY_THICKNESS + ENTITY_RADIUS.zombie + 24;
+  const origin = world.outbreakOrigin;
+  let x: number;
+  let y: number;
+  if (side === 0) {
+    x = clamp(origin.x + along, inset, WORLD_WIDTH - inset);
+    y = inset;
+  } else if (side === 1) {
+    x = WORLD_WIDTH - inset;
+    y = clamp(origin.y + along, inset, WORLD_HEIGHT - inset);
+  } else if (side === 2) {
+    x = clamp(origin.x + along, inset, WORLD_WIDTH - inset);
+    y = WORLD_HEIGHT - inset;
+  } else {
+    x = inset;
+    y = clamp(origin.y + along, inset, WORLD_HEIGHT - inset);
+  }
+
+  const inward = side === 0 ? [0, 1] : side === 1 ? [-1, 0] : side === 2 ? [0, -1] : [1, 0];
+  for (let step = 0; step < 40; step++) {
+    if (buildingIndexAt(world, x, y) < 0 && !world.nav.isBlocked(x, y)) break;
+    x = clamp(x + inward[0] * 20, inset, WORLD_WIDTH - inset);
+    y = clamp(y + inward[1] * 20, inset, WORLD_HEIGHT - inset);
+  }
+  return { x, y };
+}
+
+/** Ids for anything walked in off the edge afterwards, so nothing collides. */
+let hordeCounter = 0;
+
+/**
+ * Walk `count` more zombies in at the breach — the roar's second half.
+ *
+ * They arrive on the same edge the outbreak did, which is the edge the dog
+ * itself came in at, spread along it rather than stacked on one pixel: a column
+ * of bodies on one spot is a pile collision then spends a second sorting out.
+ *
+ * Handed back rather than merely made, because the caller has an order to give
+ * them and there is no other way to find out which ones are new.
+ */
+export function spawnAtBreach(world: World, count: number, now: number): Entity[] {
+  const made: Entity[] = [];
+  for (let i = 0; i < count; i++) {
+    // Centred on the breach and fanned either side of it, so a big summons is
+    // a wide front rather than a longer queue out of the same doorway.
+    const spread = count > 1 ? (i / (count - 1) - 0.5) * DOG_ROAR_SUMMON_SPREAD : 0;
+    const spot = breachSpawnPoint(world, spread + (Math.random() - 0.5) * 24);
+    const id = `horde-${hordeCounter++}`;
+    const e = makeEntity(id, 'zombie', spot.x, spot.y);
+    world.entities.set(id, e);
+    world.ai.set(id, newAiState(now, spot.x, spot.y));
+    world.materializeUntil.set(id, now + MATERIALIZE_MS);
+    made.push(e);
+  }
+  return made;
+}
+
 /** Where player one starts: town centre while testing, otherwise the outbreak. */
 export function playerOneStart(world: World): { x: number; y: number } {
   return PLAYER_ONE_SPAWN_AT_CENTER
@@ -2028,6 +2164,10 @@ export function toWire(
     const dog = world.dogState.get(e.id);
     state.head = Math.round((dog ? dog.head : e.facing) * 100) / 100;
     if (dog && dog.jawsOpenedAt > 0) state.lunging = true;
+    // Sent to everyone who can see it, not only to whoever is driving. Two
+    // seconds of a rooted animal with its mouth open is the tell the officers
+    // across the street are meant to read, and a private one would do nothing.
+    if (dog && dog.roarStartedAt > 0) state.roaring = true;
     if (world.dogDeaths.has(e.id)) state.dead = true;
   }
   if (world.burning.has(e.id)) state.burning = true;

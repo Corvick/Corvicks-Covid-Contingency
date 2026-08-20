@@ -51,6 +51,7 @@ import type {
 } from '../../shared/types.js';
 import { connect, takeNetStats, pingStats } from './net.js';
 import { trackInput } from './input.js';
+import { playRoar } from './sound.js';
 import {
   drawBeacons,
   drawBushes,
@@ -85,6 +86,7 @@ import {
   drawBloodSpray,
   spawnBlood,
   clearBlood,
+  clearDogMap,
   clearDogPoses,
   drawDogHud,
   drawCorpses,
@@ -92,7 +94,9 @@ import {
   drawVignette,
   drawPond,
   drawSmoke,
+  drawDogMap,
   drawStamina,
+  DOG_HUD_STAMINA_LIFT,
   drawTracers,
   drawTracker,
   drawThermal,
@@ -294,6 +298,11 @@ const { send } = connect((msg) => {
     // half way through a stride they took in a street that no longer exists.
     clearBlood();
     clearDogPoses();
+    // The corner map is baked from the city it was built for, and the identity
+    // check in `dogMapBaseFor` would catch this on its own — dropping it here
+    // as well is what stops a whole city's worth of canvas being held alive by
+    // a module-level reference for the rest of the session.
+    clearDogMap();
     // A new city starts framed on the whole thing again.
     spectateZoom = 1;
     spectateX = WORLD_WIDTH / 2;
@@ -304,6 +313,7 @@ const { send } = connect((msg) => {
     victoryPanel.classList.add('hidden');
   } else if (msg.type === 'state') {
     syncTracked(msg.entities);
+    hearRoars(msg.entities);
     spectating = msg.spectating;
     survivors = msg.survivors;
     infectedCount = msg.infected;
@@ -411,6 +421,7 @@ function standDown(): void {
   pushX = 0;
   pushY = 0;
   dogHud = null;
+  roaringDogs.clear();
   tracked.clear();
   tracers = [];
   gameOverPanel.classList.add('hidden');
@@ -431,6 +442,27 @@ function quitToMenu(): void {
   frontEnd.reopen();
 }
 
+/**
+ * The dog's four ability slots, left to right.
+ *
+ * **Q, E, R, F — not Q, W, E, R, and the reason is WASD.** `KeyW` walks the dog
+ * north, so a row starting Q/W would fire slot 2 every single time the animal
+ * ran forward. It cost nothing while slot 2 was empty and would have been
+ * unplayable the day anything went in it, which is exactly the kind of thing
+ * that is cheap to move now and expensive to move later.
+ *
+ * The row moved down one rather than dropping W and closing the gap: the
+ * hexagons are a fixed row and the value of one is that a key is always in the
+ * same place, so shifting the whole thing keeps left-to-right reading order and
+ * keeps the roar on Q where it already was.
+ *
+ * **`KeyE` is free for a dog, and that is not an accident of layout.**
+ * `processInteractions` walks `world.playerIds` and bails on anything without
+ * an inventory — a dog has none — so E never reaches a door or a pickup for
+ * one. `input.ts` still latches `interact`; nothing on the dog's side reads it.
+ */
+const DOG_ABILITY_KEYS = ['KeyQ', 'KeyE', 'KeyR', 'KeyF'];
+
 window.addEventListener('keydown', (e) => {
   // The front end has its own back buttons; this all belongs to a round.
   if (!started) return;
@@ -441,6 +473,18 @@ window.addEventListener('keydown', (e) => {
     // it cannot, so Escape there is still the way out.
     else if (solo) setPaused(!paused);
     else quitToMenu();
+  }
+  // The dog's bar. Fired on the press, once — `e.repeat` is the auto-repeat a
+  // held key produces, and without the guard a finger left on Q sends thirty
+  // messages a second to be refused thirty times a second.
+  //
+  // Nothing here decides whether the ability *may* run: the server owns that
+  // (`startDogAbility`), and an empty slot is refused there rather than by the
+  // client knowing which of the four are filled. All the client honestly knows
+  // is which key went down.
+  if (dogHud && !e.repeat && !spectating) {
+    const slot = DOG_ABILITY_KEYS.indexOf(e.code);
+    if (slot >= 0) send({ type: 'dogAbility', slot });
   }
   // Hold Q to open the ability wheel, always centred on the viewport. A dog
   // has nobody to shout at.
@@ -722,6 +766,11 @@ const ENTITY_FIELDS = [
   'dog',
   'head',
   'lunging',
+  // A dog is always already tracked by the time it roars — you have been
+  // driving it — so left out of this list the flag could never arrive at all
+  // and the animal would roar with its mouth shut and no sound. Exactly the
+  // shape of the `dead` bug below.
+  'roaring',
   // Missing here once already, with exactly the consequence the note below
   // describes: a dog that died had been tracked since it spawned, so `dead`
   // never reached it and it went on drawing as a live animal — eyes lit, health
@@ -737,6 +786,58 @@ function copyInto(into: EntityState, from: EntityState): void {
   const target = into as unknown as Record<string, unknown>;
   const source = from as unknown as Record<string, unknown>;
   for (const key of ENTITY_FIELDS) target[key] = source[key];
+}
+
+/**
+ * How far a roar carries to the ear, for the drop-off alone.
+ *
+ * Deliberately *not* `DOG_ROAR_RANGE`: that is how far the sound reaches the
+ * horde, which is a rule about the game, and this is how loud it is in your
+ * headphones, which is a rule about the mix. Tying them together would mean a
+ * balance change to one silently rewriting the other.
+ */
+const ROAR_EARSHOT = 1400;
+
+/**
+ * Which dogs were roaring last snapshot.
+ *
+ * The wire carries a flag that is true for two solid seconds at 30Hz, so the
+ * sound has to fire on the *edge* — played off the flag directly it would start
+ * sixty overlapping copies of itself.
+ */
+let roaringDogs = new Set<string>();
+
+/**
+ * Hear anything that started roaring since the last snapshot.
+ *
+ * Driven off the entities rather than off `dogHud`, so somebody else's dog is
+ * heard too — which is the point of a two-second tell. The falloff is measured
+ * from whatever the camera is on: your own body if you have one, the middle of
+ * the view if you are spectating.
+ */
+function hearRoars(incoming: EntityState[]): void {
+  const started: string[] = [];
+  const nowRoaring = new Set<string>();
+  for (const e of incoming) {
+    if (!e.dog || !e.roaring) continue;
+    nowRoaring.add(e.id);
+    if (!roaringDogs.has(e.id)) started.push(e.id);
+  }
+  roaringDogs = nowRoaring;
+  if (started.length === 0) return;
+
+  const me = self();
+  const ear = me ?? { x: spectateX, y: spectateY };
+  for (const id of started) {
+    const dog = tracked.get(id)?.state;
+    // Your own animal is in your own head and is not subject to the falloff.
+    if (id === selfId || !dog) {
+      playRoar(1);
+      continue;
+    }
+    const away = Math.hypot(dog.x - ear.x, dog.y - ear.y);
+    playRoar(Math.max(0, 1 - away / ROAR_EARSHOT));
+  }
 }
 
 function syncTracked(incoming: EntityState[]): void {
@@ -1517,7 +1618,11 @@ function render() {
     // Nothing to read off a bar while you are lying on the road being greyed
     // out — the jaws and the bite clock belong to a dog that is up.
     if (dogHud && dogHud.dying < 0) {
-      drawDogHud(ctx, dogHud, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+      drawDogHud(ctx, dogHud, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, now);
+      // The corner map, and only for a dog that is up: there is nothing to
+      // read off it while you are lying in the road being greyed out, and the
+      // `me` it wants does not exist once the animal is out of the round.
+      if (map) drawDogMap(ctx, map, me ?? null, dogHud.contacts, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     } else if (inventory && me && !dogHud) {
       // A door under your nose owns the E key, so it owns the prompt too.
       if (doorPrompt) {
@@ -1527,7 +1632,18 @@ function render() {
       }
       drawInventory(ctx, inventory, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, now);
     }
-    drawStamina(ctx, stamina, STAMINA_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, exhausted);
+    drawStamina(
+      ctx,
+      stamina,
+      STAMINA_MAX,
+      VIEWPORT_WIDTH,
+      VIEWPORT_HEIGHT,
+      exhausted,
+      // A dog's bar has a row of hexagons under it where an officer's has a
+      // row of slots, and the hexagons are taller. Everything moves up
+      // together rather than the row being squeezed into the gap.
+      dogHud ? DOG_HUD_STAMINA_LIFT : 0,
+    );
     // Aiming hard up or down runs the camera off a screen that is only 600
     // tall. Rather than shorten the vertical reach to keep the officer in
     // frame — which is the very thing the scope is for — he goes off the edge

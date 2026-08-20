@@ -1920,7 +1920,258 @@ indistinguishable from waiting. Beside them is how many shamblers are left to
 rise out of, which is the only number on the screen that only ever goes down,
 so it sits *next to* the bar rather than in it: it is not a thing that fills.
 Everything an officer's HUD does — the slot bar, the E prompt, the Q wheel, the
-scroll — is simply not drawn for a dog.
+scroll — is simply not drawn for a dog. In the opposite corner is the one thing
+an officer does *not* get: the corner map, below.
+
+**Above them is the ability bar: four hexagons on Q, E, R and F.** Three of them
+are empty outlines and are drawn anyway — a bar that grew a hexagon at a time
+would shift the keys already on it every time one was filled, and the whole
+value of a fixed row is that a key is always in the same place. An outline says
+"there will be something here"; a gap says nothing at all.
+
+- **The three rows are stacked, not squeezed.** An officer's stamina bar sits
+  just above their slot row; a dog's has a taller row of hexagons under it, so
+  the whole stack goes up together — `DOG_HUD_STAMINA_LIFT`, passed *into*
+  `drawStamina`, which is shared with the officers and has no business knowing
+  what a hexagon is. Measured off the canvas, in pixels up from the bottom:
+  stamina **103-113**, hexagons **54-90** (down to 45 with a charge badge on
+  one), jaws **20-36**. That is 13px and 9px of daylight, and `DOG_HEX_UP` is
+  set against the *badge* rather than the hexagon because the badge hangs below
+  it and cleared the jaws bar by two pixels at the first value tried.
+- **Three readings per hexagon, and they are deliberately separate.** The key
+  letter is what you press; the recharge fills it from the bottom in amber;
+  running fills it the same way in red. Same direction, different colours,
+  because "the two seconds are passing" and "it is recharging" are opposite
+  states and one treatment for both is read wrong in the moment that matters.
+- **The charge count is a badge, not a bar.** It is the only number on a dog's
+  HUD that goes *up*, and a bar implies a ceiling it does not have. It is drawn
+  only when there are charges: a nought on every hexagon every round is noise,
+  and the badge appearing is itself the news that the ability now does more.
+- **`client/roarrig.html` is the rig for all of that** — it imports the real
+  `drawDogHud`, `drawStamina` and `drawEntity` at the true 1920x1080 and hands
+  back row occupancy, so "the rows clear each other" is a measurement. Driven
+  off `setInterval`, like `dogpose.ts`, because rAF is throttled to nothing
+  while the browser pane is not compositing.
+
+#### The roar (Q)
+
+Two seconds of standing still with the head tracking the cursor, and then the
+street comes. `server/src/dog.ts` owns it; `server/roarcheck.ts` is the harness
+— headless, no socket, no port, so it leaves a game on 8080 alone.
+
+- **Two halves, and they cost different things.** The **nearest twenty**
+  shamblers are told to go where the cursor is pointing, and they cost nothing:
+  the price of that half is the two seconds of a rooted animal in a city with a
+  garrison in it. The **summons** walks one body in at the breach per person
+  this dog has personally turned, and it spends the lot.
+- **The order rides `lastSeen`, and that is the whole of the implementation.**
+  The branch that walks a zombie to a place it saw somebody already exists, sits
+  *below* the live chase and drops the order on arrival — so an order is an
+  **attack move for free**: anything met on the way is chased instead. Exactly
+  the trick `followTheChase` uses. Not one line of the zombie AI mentions
+  roaring.
+- **`targetId` is deliberately left alone.** Pulling a zombie off prey it can
+  see would be undone by its own next perception tick a tenth of a second later,
+  so it is churn that buys nothing — and a zombie already eating somebody is
+  doing what the roar wanted anyway.
+- **`DOG_ROAR_ORDER_MS` is 30s against `ZOMBIE_LAST_SEEN_MS`'s 9**, because a
+  body summoned at the map edge may have four thousand pixels to cover. The cost
+  of a long one is real and is already written down under `lastSeen`: that
+  branch sits above every check that would notice a zombie getting nowhere. So
+  `roarTarget` spirals out from the cursor until it finds a cell that is both
+  unblocked *and* in the map's main walkable component, and orders that instead
+  — measured, an aim into a wall comes out 26px away on open ground.
+- **Two things here were added rather than asked for**, and both are one
+  constant: `DOG_ROAR_COOLDOWN_MS` (8s) and `DOG_ROAR_RANGE` (2000). Without a
+  cooldown the nearest-twenty half is free and a held Q herds the whole horde on
+  a two-second loop, and the hexagon has nothing to fill. Without a range,
+  "the nearest twenty" is a summons the whole city hears, which makes the horde
+  one object with no geography and makes the summons pointless. Set either to 0
+  / `Infinity` for the ability exactly as it was described.
+- **The tally is *turned*, not *bitten*.** `world.dogConversions` is banked in
+  `convert` — the one place a body actually becomes a zombie — so the grab that
+  turns on the spot and the one that takes a minute both credit through one
+  line. `world.infectedByDog` carries the claim across an incubation and is
+  cleared by a cure, by death, and by the victim leaving the round; without that
+  last part, somebody a dog bit, a medic saved and a shambler later finished off
+  would still bank a charge. It lives on the world rather than on `DogState` for
+  the same reason `dogDeaths` does — that state is deleted on every respawn, and
+  a tally that reset itself each time the dog was shot would be a tally of
+  nothing.
+- **A mine cancels it.** Being dropped is meant to stop you doing anything at
+  all, and a roar carrying on out of a body lying stunned in the road would be
+  the loudest possible statement that the stun did nothing.
+- **The tell is sent to everybody** (`roaring` on the wire, and it is in
+  `ENTITY_FIELDS` — a dog is always already tracked by the time it roars, so
+  left out of that list the flag could never arrive at all). The mouth rides the
+  same `split` the jaws use, because a roaring dog's mouth is open and it is the
+  same mouth. The rings are **arcs, not circles**: a closed circle expanding out
+  of an animal is a blast, where nested open arcs facing one way is the shape
+  everything from a speaker icon to a comic book uses for a noise going in a
+  direction — and the ability is aimed, so the drawing has to be aimed. No
+  per-frame state: each arc's position is its index plus the clock, modulo its
+  own life, hashed off the id so two dogs roaring side by side do not pulse in
+  lockstep.
+- **It is the only sound in the game, and it is synthesised.** There is no audio
+  anywhere else in the project, so a sample would have meant an asset pipeline,
+  a loader, a preload and a format question for one two-second noise.
+  `client/src/sound.ts` is oscillators and a noise buffer: two detuned sawtooths
+  through a low-pass for the growl (detuned rather than one, because two close
+  frequencies beat against each other and that beating is what stops a
+  synthesised note sounding like a note), an LFO on a gain node for the guttural
+  rattle, and a band-passed slice of noise swept down for the hiss. It ends on a
+  downward pitch bend — everything alive runs out of air. The context is made
+  **lazily**, inside the keypress, because a browser will not start one before a
+  gesture. It is heard off the entities rather than off `dogHud`, so somebody
+  else's dog is heard too, and on the *edge* of the flag — the wire carries it
+  true for two seconds at 30Hz, so played off the flag directly it would start
+  sixty overlapping copies of itself.
+- **`ROAR_EARSHOT` is deliberately not `DOG_ROAR_RANGE`.** One is how far the
+  sound reaches the horde, which is a rule about the game; the other is how loud
+  it is in your headphones, which is a rule about the mix. Tied together, a
+  balance change to one silently rewrites the other.
+
+**A dog shot mid-roar kept the roar, and only a live socket found it.**
+`updateDogs` bails out before `dogTick` for a dog that is down, so nothing was
+left to notice the two seconds running out: the clock stayed set, the hexagon
+reported it running for the rest of the round, and `roaring` stayed on the wire.
+It is cleared in `killEntity` now, beside the corpse. Two things about it are
+worth keeping:
+
+- **The headless harness could not have found it**, because it calls
+  `startDogAbility` and ticks — it never had a garrison shooting at anything.
+  What found it was `server/roarlive.ts` driving a real dog over a real socket,
+  where the city killed the animal *because it was standing still for two
+  seconds*, which is the entire cost of the ability. It reproduces in roughly
+  one live run in five.
+- **It is now checked deterministically** rather than by chance: `roarcheck.ts`
+  starts a roar, calls `killEntity`, and asserts the bar and the wire both come
+  off it, that it rises again, and that no order is ever given. Gated back in
+  behind a temporary env var, that is **2 FAILED against 0**.
+
+**`server/roarlive.ts` is the socket harness**, and it exists for exactly the
+gap above: it makes an offline lobby, sits in a dog seat, starts the round, and
+sends `{"type":"dogAbility","slot":0}` as the keydown handler does. Point it at
+a **second** server (`PORT=8090 npx tsx src/index.ts`), never the one somebody
+is playing on. Two things it got wrong first, both the harness lying rather than
+the code failing:
+
+- **Counting snapshots measures the snapshot rate, not the roar.** It expected
+  60 broadcasts at 30Hz and got 43 at ~21.7Hz — the two seconds are a fact about
+  the server's clock, so it is measured as the longest unbroken wall-time spell
+  the bar spent claiming to be running. Live: **1947-1957ms of a 2000ms window**.
+- **Rooted means its legs stop, not that nothing can move it.** `moveDog` is
+  skipped for the whole roar but `resolveCollisions` is not, so a shambler
+  walking into a stationary dog shoves it a pixel — exactly as it shoves a
+  planted bipod. Measured over five live runs: **0.00px on four and 1.64px on
+  the one where something bumped into it**, against ~6px a step walking.
+
+**The row is Q, E, R, F — not Q, W, E, R — because `KeyW` walks the dog north.**
+It was built as Q/W/E/R and moved before anything went in slot 2, which is the
+only cheap moment to move it: with W bound, every stride forward would have
+fired the second ability, and that is unplayable rather than merely untidy.
+
+- **It moved down one rather than dropping W and closing up.** The hexagons are
+  a fixed row and the whole value of one is that a key is always in the same
+  place, so shifting the lot keeps left-to-right reading order and keeps the
+  roar on Q where it already was.
+- **`KeyE` is free for a dog, and not by luck of layout.**
+  `processInteractions` walks `world.playerIds` and bails on anything with no
+  inventory — a dog has none — so E never reaches a door or a pickup for one.
+  `input.ts` still latches `interact` on it; nothing on the dog's side reads it.
+- **Which keys they are is the client's business.** The wire carries a slot
+  *index* and nothing else — no key name, no cap — so a rebind is one array in
+  `main.ts` and its twin in `render.ts`, and the server never learns about it.
+
+Measured by `roarcheck.ts`, 65 checks: rooted **0.00px over the full 60 ticks**
+with W held down (against 48.5px of free walking either side of it), the HUD
+running on 60/60 of them; **20 of 40** shamblers in earshot sent and **0 of 6**
+out of it, and the twenty are the nearest twenty; one body per charge walked in,
+all on the outbreak's own edge, none in geometry, 270px apart at the widest; and
+on the tally, **111 charged against 111 turned of 120 bitten** by a dog, against
+**0 charged of 114 turned** by a shambler — which is the check that says it
+counts bodies rather than bites.
+
+#### The corner map, and what it refuses to show
+
+A dog has no radio, no beacon handset and no binoculars — it is the one seat in
+the game with nothing in its hands — so it had no way at all to know where the
+city was defended from. That is a balance problem rather than a comfort one: an
+animal that outruns everything will always find the empty quarter, and it should
+be *choosing* to rather than stumbling into it. Bottom left, 190px on the longer
+axis, drawn only for a dog that is up. `server/dogmapcheck.ts` is the harness.
+
+**The rule is that the horde sees for you, and nothing else does.** An officer
+appears only while a zombie is within `DOG_MAP_CONTACT_RANGE` of them — which is
+`ZOMBIE_SIGHT_RADIUS`, not a number picked for the map, because the rule *is*
+"something of yours could have laid eyes on them". So the map shows where your
+outbreak is making contact. It rewards having sent the horde somewhere and it is
+useless for finding a quiet officer in a quiet street, which is exactly the
+cheating a map must not enable.
+
+- **What is refused is refused on the server.** An officer out of range is not
+  greyed out or filtered client-side — they are never put on the wire at all, so
+  there is no flag to ignore and no position to leak however the client is read.
+  `DogHud.contacts` is the whole of what the map knows beyond the dog itself.
+- **It is geodesic, off the danger field.** A shambler on the other side of a
+  wall has not seen anybody, and straight-line distance says it has. That is the
+  same reason `danger.ts` exists at all — and it makes the check one array
+  lookup per officer against a spatial query per officer. Measured with a pair
+  either side of a building wall: **60px apart in a straight line, over 900px to
+  walk, and not listed.**
+- **The list is live, not latched.** Kill the zombie and the contact goes with
+  it on the next scan. A map that remembered where somebody *was* would be the
+  cheating this exists to stop, arriving a few seconds late.
+- **Officers only.** Not civilians, not the horde, not loot. Measured with all
+  three stood together: the list is exactly one long.
+- **It is built four times a second and shared by every dog**, cached on the
+  world — the answer does not depend on who is looking, and a round with no dog
+  in it never builds one at all. Rebuilding faster than the danger field under
+  it (160ms) would buy a fresher copy of the same answer.
+- **So it is up to `DOG_MAP_REFRESH_MS` stale, and that is a property rather
+  than a bug.** A contact can read a little past the range by the time it is
+  checked again — the officer walked, or the zombie did. The harness bounds the
+  *overshoot* rather than counting "leaks", which is the difference between a
+  check that says how stale the answer gets and one that fails on its own clock.
+  Measured over a real round, 35 samples: **0 contacts even a pixel over.**
+
+**The city is painted once and blitted after that.** Drawn live it is ~90
+building footprints, a park, a pond and a border — a couple of hundred
+`fillRect`s and a 48-segment path — every frame, on the one connection that
+already pays the most per frame. Baked into an offscreen canvas the per-frame
+cost is one `drawImage` and a few two-pixel dots. Same trick as `grimeTile` and
+the vignette, and the same reason: nothing in it moves. It is keyed on the
+`MapData` object itself rather than its seed, because a restart hands the client
+a new object and identity catches that for free.
+
+- **Contacts go into one path filled once**, not a fill and a stroke per dot —
+  the lesson `drawBushes` and the blood decals both learned, in blue.
+- **You are a ring, not a dot.** At this size a second blue-ish blob among the
+  contacts is one more thing to pick out rather than *the* thing to pick out.
+
+Measured, 90 footprints at 1920x1080, three runs: bake **0.36-0.84ms once**,
+then **0.031-0.096ms a frame** against **0.48-0.59ms** with the bake thrown away
+each frame — 5-16x. Against a fog polygon at 0.8-2.5ms and walls at 2.15ms, the
+map is under 1% of a frame. Server side, at 522 entities: a forced rebuild is
+**0.014ms** and a snapshot pays **0.006ms**. Over a live round it shows **4-12%
+of the garrison** on average, which is the balance property stated as a number.
+
+*The first cost figure taken read 39ms for the bake and was nonsense* — that is
+the `getImageData` readback's own fixed cost plus a cold canvas, counted as if
+it were the drawing. It is the exact trap `paintbench.ts` documents: batch the
+work behind one readback and divide, or measure the readback.
+
+Layout measured off the canvas: the map occupies **x 14-203, y 925-1065**, and
+the leftmost ink of the rest of the dog's HUD is at **x 722** — a 519px gap, so
+nothing overlaps. Projection checked at three world positions: a contact lands
+blue ink on the predicted map pixel every time, and those pixels are empty
+without it.
+
+**The horde is deliberately not on it.** Three hundred dots would be the
+expensive part on both the wire and the frame — the thing that was asked to be
+avoided — and it is a bigger design question than a readout: knowing where every
+one of your zombies is at all times is a different game from commanding them by
+roaring. Easy to add as a coarse density layer if it turns out to be wanted.
 
 **Its ending is its own, not the city's.** `#dog-out` is a separate panel from
 `#game-over`: the round carries on around a dog that is out, and with no entity

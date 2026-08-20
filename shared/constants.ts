@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.0.5';
+export const GAME_VERSION = '0.2.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -671,6 +671,139 @@ export const DOG_WIGGLE_MIN_RAD = 0.12;
  */
 export const DOG_DRAG_PULL = 0.5;
 export const DOG_SHAKE_THROW = 26;
+
+// ------------------------------------------------------------- the dog's belt
+
+/**
+ * How many ability slots the dog's HUD draws, left to right on Q, E, R and F.
+ *
+ * The number is the *bar*, not how many are filled: three of them are empty
+ * outlines today. Drawing the empty ones is the point — a bar that grew a
+ * hexagon at a time would shift the ones already on it every time one was
+ * added, and the whole value of a fixed row is that a key is always in the
+ * same place.
+ *
+ * **Not Q, W, E, R, because `KeyW` walks the dog north.** The row skips W and
+ * takes F on the end instead. Which keys they are is the client's business —
+ * `DOG_ABILITY_KEYS` in `main.ts` — and the wire deliberately carries only the
+ * slot index, so moving them is a one-line change on one side.
+ */
+export const DOG_ABILITY_SLOTS = 4;
+
+/**
+ * The roar: two seconds of standing still, and then the street comes.
+ *
+ * Rooted for the whole of it — the head still tracks the cursor, because what
+ * is being aimed is the *direction the horde is sent in*, and an ability that
+ * made you commit to a bearing before you had seen what happened would be a
+ * poor one. The legs are what is given up, and two seconds of a dog not moving
+ * in a city with a garrison in it is the whole cost of the nearest-twenty half.
+ */
+export const DOG_ROAR_MS = 2000;
+
+/**
+ * How long before it can be roared again.
+ *
+ * **Not part of the ability as it was asked for**, and the one thing here that
+ * was added rather than specified. Without it the nearest-twenty half is free —
+ * it costs no charges — so a dog holding Q would herd the whole horde on a
+ * two-second loop, and a hexagon with nothing to fill would have nothing to
+ * say. Short enough to be a rhythm rather than a resource; set it to 0 to get
+ * the ability exactly as it was described.
+ */
+export const DOG_ROAR_COOLDOWN_MS = 8000;
+
+/**
+ * How many shamblers already on the map answer it, and how far a roar carries.
+ *
+ * The count is the number that was asked for. The **range** is the other thing
+ * added: "the nearest twenty" with no distance on it is a summons the whole
+ * city can hear, which makes the horde one object with no geography to it and
+ * makes the second half of the ability — walking bodies in from the edge —
+ * pointless. It is deliberately generous, well past `DOG_SIGHT_RADIUS`, so
+ * what it excludes is the far side of the map rather than the next street.
+ */
+export const DOG_ROAR_CALL_COUNT = 20;
+export const DOG_ROAR_RANGE = 2000;
+
+/**
+ * How long an order given by a roar stands before they go back to their own
+ * business.
+ *
+ * It rides `lastSeen`, which is the field `followTheChase` borrows and the
+ * branch that already walks a zombie to a place it saw somebody at — so the
+ * order is an *attack move* for free: prey spotted on the way is chased
+ * instead, and arriving drops it. `ZOMBIE_LAST_SEEN_MS` (9s) is nowhere near
+ * enough for a body summoned at the map edge, which may have four thousand
+ * pixels to cover.
+ *
+ * **The cost of a long one is real and is written down under `lastSeen`**:
+ * that branch sits above every check that would notice a zombie getting
+ * nowhere, so an order at an unreachable spot is a stall for exactly this long.
+ * Which is why `roarTarget` refuses to issue one at a spot off the walkable
+ * map and walks it to the nearest place a body could actually stand.
+ */
+export const DOG_ROAR_ORDER_MS = 30000;
+
+/**
+ * Where the summoned come in, along the edge the outbreak walked in from.
+ *
+ * Spread rather than stacked: a column of bodies arriving on one pixel is a
+ * pile collision then spends a second sorting out, and a breach is a breach
+ * rather than a door.
+ */
+export const DOG_ROAR_SUMMON_SPREAD = 260;
+
+/** The rings thrown off the muzzle while it roars, and how far they carry. */
+export const DOG_ROAR_RING_MS = 900;
+export const DOG_ROAR_RING_REACH = 190;
+
+// ------------------------------------------------------- the dog's minimap
+
+/**
+ * The corner map, and what it is allowed to tell you.
+ *
+ * A dog has no radio, no beacon handset and no binoculars — it is the one seat
+ * in the game with nothing in its hands — so it had no way at all to know where
+ * the city was defended from. That is a balance problem rather than a comfort
+ * one: an animal that outruns everything will always find the empty quarter,
+ * and it should be *choosing* to, not stumbling into it.
+ *
+ * **The rule is that the horde sees for you, and nothing else does.** An
+ * officer appears only while a zombie is close enough to have laid eyes on
+ * them, which is why the range is `ZOMBIE_SIGHT_RADIUS` and not a number picked
+ * for the map. So the map is a picture of where your own outbreak is *making
+ * contact* — it rewards having sent the horde somewhere, and it is useless for
+ * finding a quiet officer in a quiet street, which is exactly the cheating the
+ * map must not enable.
+ *
+ * It is **geodesic**, off the danger field, not straight-line: an officer stood
+ * on the other side of a wall from a shambler has not been seen by it. That is
+ * the same reason `danger.ts` exists at all, and it makes the check one array
+ * lookup per officer rather than a spatial query per officer.
+ */
+export const DOG_MAP_CONTACT_RANGE = ZOMBIE_SIGHT_RADIUS;
+
+/**
+ * How often the contact list is rebuilt, against the danger field's own 160ms.
+ *
+ * Deliberately *slower* than the field it reads: recomputing more often than
+ * the source changes buys a fresher copy of the same answer. It is also the
+ * whole of what makes this cheap — the wire carries the cached list every
+ * snapshot because it is a handful of rounded integers, and the walk that
+ * builds it happens four times a second.
+ */
+export const DOG_MAP_REFRESH_MS = 250;
+
+/**
+ * How big the map is drawn, on its longer axis, and how far off the corner.
+ *
+ * One box whatever the city's shape: the aspect is taken from the map the
+ * server actually built, so a small city is drawn smaller rather than stretched
+ * — see **The city is not one size**.
+ */
+export const DOG_MAP_SIZE = 190;
+export const DOG_MAP_MARGIN = 14;
 
 /**
  * Its coat, and what is left of it.

@@ -5643,7 +5643,43 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
 
 // ---------------------------------------------------------------- infection
 
+/**
+ * A dog's tally, banked as a charge for its roar.
+ *
+ * **Turned, not bitten**, which is why it is here and not in `attemptGrab`:
+ * somebody incubating is not a zombie and may never be one. Both routes out of
+ * `resolveGrapple` come through `convert` — the grab that turns on the spot,
+ * and the one that takes a minute — so one line covers both and neither has to
+ * know it is being counted.
+ */
+function creditConversion(world: World, targetId: string): void {
+  const dogId = world.infectedByDog.get(targetId);
+  world.infectedByDog.delete(targetId);
+  if (dogId === undefined || !world.dogs.has(dogId)) return;
+  world.dogConversions.set(dogId, (world.dogConversions.get(dogId) ?? 0) + 1);
+}
+
+/**
+ * Whose bite this was, if a dog's — recorded at the moment the infection is
+ * actually handed over rather than at the moment somebody was grabbed.
+ *
+ * Two things fall out of putting it exactly there. A grab that ends in a clean
+ * escape, or one a vest turns away, credits nobody, because nobody was
+ * infected. And a bite on somebody *already* incubating credits nobody either:
+ * the first set of teeth turned them and there is only one body to count.
+ *
+ * First dog wins where two have hold at once, for the same reason.
+ */
+function markDogBite(world: World, session: GrappleLike, targetId: string): void {
+  for (const grabberId of session.zombieIds) {
+    if (!world.dogs.has(grabberId)) continue;
+    world.infectedByDog.set(targetId, grabberId);
+    return;
+  }
+}
+
 function convert(world: World, target: Entity, now: number): void {
+  creditConversion(world, target.id);
   target.type = 'zombie';
   target.health = ENTITY_MAX_HEALTH.zombie;
   target.maxHealth = ENTITY_MAX_HEALTH.zombie;
@@ -5867,11 +5903,13 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
     priorGrapples * INSTANT_INFECT_PER_PRIOR_GRAPPLE;
 
   if (Math.random() < instantChance) {
+    markDogBite(world, session, target.id);
     convert(world, target, now);
     return;
   }
 
   if (!world.pendingInfections.has(target.id)) {
+    markDogBite(world, session, target.id);
     world.pendingInfections.set(
       target.id,
       now + TURN_DELAY_MIN_MS + Math.random() * (TURN_DELAY_MAX_MS - TURN_DELAY_MIN_MS),
@@ -5939,6 +5977,7 @@ export function processPendingInfections(world: World, now: number): void {
     const entity = world.entities.get(id);
     if (!entity || entity.type === 'zombie') {
       world.pendingInfections.delete(id);
+      world.infectedByDog.delete(id);
       continue;
     }
     if (now < turnAt) {

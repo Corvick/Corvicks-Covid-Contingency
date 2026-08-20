@@ -1,5 +1,6 @@
-import type { DogHud } from '../../shared/types.js';
+import type { DogAbilityHud, DogHud } from '../../shared/types.js';
 import {
+  DOG_ABILITY_SLOTS,
   DOG_ART_RADIUS,
   DOG_BITE_ARC,
   DOG_BITE_COOLDOWN_MS,
@@ -15,7 +16,14 @@ import {
   DOG_HEAD_TURN_RATE,
   DOG_LATCHED_TURN_MUL,
   DOG_JAWS_OPEN_MS,
+  DOG_MAP_CONTACT_RANGE,
+  DOG_MAP_REFRESH_MS,
   DOG_MUZZLE_OUT,
+  DOG_ROAR_CALL_COUNT,
+  DOG_ROAR_COOLDOWN_MS,
+  DOG_ROAR_MS,
+  DOG_ROAR_ORDER_MS,
+  DOG_ROAR_RANGE,
   DOG_SHAKE_THROW,
   DOG_SPEED,
   DOG_SPRINT_MULTIPLIER,
@@ -28,6 +36,8 @@ import {
   STAMINA_MAX,
   STAMINA_RECOVERY_THRESHOLD,
   STAMINA_SPRINT_FLOOR,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, turnToward } from './geometry.js';
 import { attemptGrab } from './ai.js';
@@ -35,6 +45,7 @@ import { damageDoor } from './doors.js';
 import {
   hasLineOfSight,
   respawnDogFromHorde,
+  spawnAtBreach,
   speedAt,
   type Command,
   type Entity,
@@ -94,6 +105,17 @@ export interface DogState {
    */
   slowUntil: number;
   slowMul: number;
+  /**
+   * When the roar began, or 0 while it is not roaring.
+   *
+   * A clock rather than a flag, because three separate things read it: the legs
+   * (rooted), the wire (the mouth is open and the rings are coming off it) and
+   * the HUD (how far through the two seconds it is). One timestamp answers all
+   * three and cannot fall out of step with itself the way three booleans would.
+   */
+  roarStartedAt: number;
+  /** Earliest it may be roared again — see `DOG_ROAR_COOLDOWN_MS`. */
+  roarReadyAt: number;
 }
 
 /**
@@ -137,6 +159,8 @@ function dogStateFor(world: World, id: string, facing: number): DogState {
       wiggleRun: 0,
       slowUntil: 0,
       slowMul: 1,
+      roarStartedAt: 0,
+      roarReadyAt: 0,
     };
     world.dogState.set(id, dog);
   }
@@ -208,6 +232,14 @@ function dogTick(
   }
   const latched = victim !== null;
 
+  // ---- the roar. Two seconds of standing still with the head still tracking
+  // the cursor, and then the street comes. A mine is the one thing that takes
+  // it off you: being dropped is meant to stop you doing anything at all, and
+  // a roar that carried on out of a body lying stunned in the road would be
+  // the loudest possible statement that the stun did nothing.
+  if (dog.roarStartedAt > 0 && world.stunned.has(e.id)) dog.roarStartedAt = 0;
+  const roaring = dog.roarStartedAt > 0;
+
   // ---- the neck. Both ease toward the mouse; the head simply gets there
   // first, and can only lead the spine by so much before the neck runs out.
   const want = command.aim;
@@ -234,14 +266,173 @@ function dogTick(
 
   // ---- legs
   const stunned = world.stunned.has(e.id);
-  moveDog(world, e, dog, command, dt, now, latched || stunned);
+  moveDog(world, e, dog, command, dt, now, latched || stunned || roaring);
 
-  // ---- jaws. Latched or stunned they are already busy, and a latched dog must
-  // not leave them hanging open on the wire while it worries at somebody.
-  if (!latched && !stunned) jawsTick(world, e, dog, command, now);
+  // ---- jaws. Latched, stunned or roaring they are already busy, and a latched
+  // dog must not leave them hanging open on the wire while it worries at
+  // somebody.
+  if (!latched && !stunned && !roaring) jawsTick(world, e, dog, command, now);
   else dog.jawsOpenedAt = 0;
 
+  // The two seconds are up. The aim point is read *now* rather than at the
+  // press: the head has been following the cursor the whole way through, so
+  // where it is pointing at the end is where it is plainly roaring, and a
+  // bearing committed to before anything happened would be a worse ability.
+  if (roaring && now - dog.roarStartedAt >= DOG_ROAR_MS) {
+    dog.roarStartedAt = 0;
+    dog.roarReadyAt = now + DOG_ROAR_COOLDOWN_MS;
+    unleashRoar(world, e, command, now);
+  }
+
   if (victim) shakeVictim(world, e, dog, victim, headStep);
+}
+
+// ----------------------------------------------------------------- the roar
+
+/**
+ * A key on the dog's bar went down.
+ *
+ * Everything about whether it is *allowed* is here rather than in the message
+ * handler, for the same reason `attemptGrab` exists: the client is not to be
+ * trusted about it, and a second caller — a bot driving a dog, say — must get
+ * exactly the same refusals. It answers with what happened only so the server
+ * log can say something useful.
+ */
+export function startDogAbility(
+  world: World,
+  id: string,
+  slot: number,
+  now: number,
+): 'roared' | 'refused' {
+  // Slots 1-3 are drawn and do nothing: there is nothing in them yet. Said out
+  // loud rather than falling through, because "the key did nothing" and "the
+  // key was refused" are different things and only the second is a bug.
+  if (slot !== 0) return 'refused';
+  const e = world.entities.get(id);
+  if (!e || !world.dogs.has(id) || world.dogsOut.has(id)) return 'refused';
+  // Lying in the road waiting to rise, frozen with the round, or dropped by a
+  // mine. None of those is a thing you roar through.
+  if (world.dogDeaths.has(id) || world.paused || world.stunned.has(id)) return 'refused';
+
+  const dog = dogStateFor(world, id, e.facing);
+  if (dog.roarStartedAt > 0 || now < dog.roarReadyAt) return 'refused';
+  // Teeth already in somebody. The head is the thing doing the roaring and it
+  // is otherwise engaged.
+  if (latchedVictim(world, id, dog) !== null) return 'refused';
+
+  dog.roarStartedAt = now;
+  // Whatever the jaws were doing, they are not doing it now — and this must
+  // not go through `shutJaws`, which would take a bite out of the door in
+  // front of the animal on the way past.
+  dog.jawsOpenedAt = 0;
+  return 'roared';
+}
+
+/**
+ * Somewhere a body could actually walk to, near where the cursor was.
+ *
+ * An order rides `lastSeen`, and that branch sits **above** every check that
+ * would notice a zombie getting nowhere — see the note on `ZOMBIE_LAST_SEEN_MS`
+ * in the AI. So a roar aimed into a wall, into the pond, or at a spot cut off
+ * from the map's main walkable region would be a horde grinding at it for the
+ * whole of `DOG_ROAR_ORDER_MS`, which is far longer than the ordinary sighting
+ * this shares a field with. Walking the point out to open ground first is what
+ * keeps the long order safe.
+ *
+ * A spiral rather than a single nudge, because the cursor is very often over a
+ * building — that is where the people are.
+ */
+function roarTarget(world: World, aimX: number, aimY: number): { x: number; y: number } {
+  const x = clamp(aimX, 0, WORLD_WIDTH);
+  const y = clamp(aimY, 0, WORLD_HEIGHT);
+  if (!world.nav.isBlocked(x, y) && world.nav.isReachable(x, y)) return { x, y };
+
+  for (let ring = 1; ring <= 14; ring++) {
+    const radius = ring * 26;
+    const steps = ring * 8;
+    for (let i = 0; i < steps; i++) {
+      const angle = (i / steps) * Math.PI * 2;
+      const px = clamp(x + Math.cos(angle) * radius, 0, WORLD_WIDTH);
+      const py = clamp(y + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
+      if (!world.nav.isBlocked(px, py) && world.nav.isReachable(px, py)) return { x: px, y: py };
+    }
+  }
+  // Nothing walkable anywhere near it. The order still goes out and still
+  // expires on its own; there is nothing better to point them at.
+  return { x, y };
+}
+
+/**
+ * Send one shambler at a place.
+ *
+ * **It goes into `lastSeen`, and that is the whole of it.** The branch that
+ * walks a zombie to somewhere it saw somebody already exists, sits *below* the
+ * live chase, and drops the order on arrival — so an order is an attack move
+ * for free: anything it meets on the way is chased instead, and nothing about
+ * the zombie AI needed a line about roaring. Exactly the trick `followTheChase`
+ * uses, with a far longer clock on it.
+ *
+ * `targetId` is deliberately left alone. Pulling a zombie off prey it can see
+ * would be undone by its own next perception tick a tenth of a second later,
+ * so it is churn that buys nothing — and a zombie already eating somebody is
+ * doing what the roar wanted anyway.
+ */
+function sendToRoar(world: World, z: Entity, x: number, y: number, now: number): void {
+  const state = world.ai.get(z.id);
+  if (!state) return;
+  state.lastSeenX = x;
+  state.lastSeenY = y;
+  state.lastSeenUntil = now + DOG_ROAR_ORDER_MS;
+  state.path = null;
+  state.nextPathAt = 0;
+  // Whatever room it was working through, and whatever door it had decided to
+  // take apart, it has somewhere to be now.
+  state.searchBuilding = -1;
+  state.searchExit = -1;
+  state.doorTarget = -1;
+}
+
+/**
+ * The end of the two seconds: everything that heard it goes that way.
+ *
+ * Two halves, and they are deliberately different things. The **nearest
+ * twenty** are bodies already in the city being pointed somewhere, and they
+ * cost nothing — the price of that half is the two seconds of standing still.
+ * The **summons** is one body per person this dog has personally turned, walked
+ * in at the breach, and it spends the lot.
+ */
+function unleashRoar(world: World, e: Entity, command: Command, now: number): void {
+  const target = roarTarget(world, command.aimX, command.aimY);
+
+  // Nearest first, out to earshot. Collected and sorted rather than taken as
+  // they come: "the nearest twenty" is the whole rule, and a city has three
+  // hundred zombies in it on a bad day.
+  const heard: Array<{ z: Entity; d: number }> = [];
+  for (const other of world.entities.values()) {
+    if (other.type !== 'zombie' || world.dogs.has(other.id)) continue;
+    const d = Math.hypot(other.x - e.x, other.y - e.y);
+    if (d > DOG_ROAR_RANGE) continue;
+    heard.push({ z: other, d });
+  }
+  heard.sort((a, b) => a.d - b.d);
+  const called = Math.min(heard.length, DOG_ROAR_CALL_COUNT);
+  for (let i = 0; i < called; i++) sendToRoar(world, heard[i].z, target.x, target.y, now);
+
+  // And the ones it has earned. Spent whole — the tally is what the roar is
+  // *for*, and a dog that hoarded half of it would simply be a dog that had
+  // not roared yet.
+  const charges = world.dogConversions.get(e.id) ?? 0;
+  if (charges > 0) {
+    world.dogConversions.set(e.id, 0);
+    for (const z of spawnAtBreach(world, charges, now)) {
+      sendToRoar(world, z, target.x, target.y, now);
+    }
+  }
+
+  console.log(
+    `[server] ${e.id} roared at ${target.x | 0},${target.y | 0} — ` +
+      `${called} answered, ${charges} walked in at the breach`,
+  );
 }
 
 /**
@@ -498,6 +689,70 @@ function creditShake(world: World, dog: DogState, radians: number): void {
 }
 
 /**
+ * Who the horde has walked into, for the dog's corner map.
+ *
+ * **The whole balance rule is the one `continue` in the middle of it.** An
+ * officer further from a zombie than `DOG_MAP_CONTACT_RANGE` is not filtered
+ * out on the client or greyed on the map — they are never put on the wire, so
+ * the map cannot be made to give them up however it is read. What it shows is
+ * where the outbreak is *making contact*, which is a thing the dog earned by
+ * sending the horde somewhere.
+ *
+ * **It reads the danger field rather than querying the grid**, which is the
+ * trick this codebase reaches for over and over: one multi-source BFS is
+ * already being paid for at 6Hz on behalf of four hundred civilians, so asking
+ * it "how far is the nearest zombie from here" is an array lookup. A spatial
+ * query per officer would be the obvious way and would cost per officer per
+ * scan. It is also *geodesic*, which is the right answer rather than merely the
+ * cheap one — a shambler on the far side of a wall has not seen anybody.
+ *
+ * Rebuilt on `DOG_MAP_REFRESH_MS` and cached on the world, so the per-snapshot
+ * cost of the map is copying a short array of integers.
+ */
+function refreshDogContacts(world: World, now: number): void {
+  if (now < world.nextDogContactScan) return;
+  world.nextDogContactScan = now + DOG_MAP_REFRESH_MS;
+
+  const found: Array<{ x: number; y: number }> = [];
+  for (const e of world.entities.values()) {
+    if (e.type !== 'officer') continue;
+    if (world.danger.distanceAt(e.x, e.y) > DOG_MAP_CONTACT_RANGE) continue;
+    found.push({ x: Math.round(e.x), y: Math.round(e.y) });
+  }
+  world.dogContacts = found;
+}
+
+/**
+ * The four hexagons, left to right.
+ *
+ * Always `DOG_ABILITY_SLOTS` long with a `null` for each empty one, so the
+ * client never has to work out which hexagon is which — the row is Q, W, E, R
+ * by position and an index is the whole of the mapping. Which key each one is
+ * on is deliberately *not* sent: that is the client's own decision and telling
+ * it would be the server repeating something it does not own.
+ */
+function abilityBar(
+  world: World,
+  id: string,
+  dog: DogState | undefined,
+  now: number,
+): Array<DogAbilityHud | null> {
+  const bar: Array<DogAbilityHud | null> = new Array(DOG_ABILITY_SLOTS).fill(null);
+  const roaring = dog !== undefined && dog.roarStartedAt > 0;
+  bar[0] = {
+    name: 'ROAR',
+    // `max(1, …)` so a cooldown set to zero reads as permanently ready rather
+    // than dividing by it.
+    ready: dog
+      ? clamp(1 - (dog.roarReadyAt - now) / Math.max(1, DOG_ROAR_COOLDOWN_MS), 0, 1)
+      : 1,
+    charges: world.dogConversions.get(id) ?? 0,
+    active: roaring ? clamp((now - dog!.roarStartedAt) / DOG_ROAR_MS, 0, 1) : -1,
+  };
+  return bar;
+}
+
+/**
  * What a dog needs on screen. Null for anyone who isn't one, which is what
  * keeps this off every other player's snapshot.
  */
@@ -513,9 +768,26 @@ export function dogHudFor(world: World, id: string, now: number): DogHud | null 
   }
   const out = world.dogsOut.has(id);
 
+  // Built at most four times a second and shared by every dog in the round,
+  // so the per-viewer cost here is handing back the array it already made.
+  refreshDogContacts(world, now);
+  const contacts = world.dogContacts;
+
   const dog = world.dogState.get(id);
+  const abilities = abilityBar(world, id, dog, now);
   if (!dog) {
-    return { bite: 1, jawsOpen: -1, latched: false, hold: 0, shaken: 0, hosts, out, dying: -1 };
+    return {
+      bite: 1,
+      jawsOpen: -1,
+      latched: false,
+      hold: 0,
+      shaken: 0,
+      abilities,
+      contacts,
+      hosts,
+      out,
+      dying: -1,
+    };
   }
   const downAt = world.dogDeaths.get(id);
   if (downAt !== undefined) {
@@ -525,6 +797,8 @@ export function dogHudFor(world: World, id: string, now: number): DogHud | null 
       latched: false,
       hold: 0,
       shaken: 0,
+      abilities,
+      contacts,
       hosts,
       out,
       dying: clamp((now - downAt) / DOG_DEATH_MS, 0, 1),
@@ -546,6 +820,8 @@ export function dogHudFor(world: World, id: string, now: number): DogHud | null 
     latched,
     hold: clamp(left / total, 0, 1),
     shaken: clamp(dog.shakenMs / total, 0, 1),
+    abilities,
+    contacts,
     hosts,
     out,
     dying: -1,

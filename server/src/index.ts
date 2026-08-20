@@ -81,7 +81,7 @@ import {
   toWire,
   type Entity,
 } from './world.js';
-import { dogHudFor, updateDogs } from './dog.js';
+import { dogHudFor, startDogAbility, updateDogs } from './dog.js';
 import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
 import { processShooting, steerAim } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
@@ -440,6 +440,14 @@ wss.on('connection', (socket) => {
         } else {
           world.speech.set(id, { text: RALLY_NO_CHARGE_LINE, until: now + RALLY_NO_CHARGE_MS });
         }
+      } else if (msg.type === 'dogAbility') {
+        // Everything about whether it is allowed is `startDogAbility`'s, so a
+        // second caller could never get a different set of refusals. The aim
+        // point is not in the message: it is read off the input loop's own
+        // `aimX`/`aimY` when the two seconds are up.
+        if (startDogAbility(world, id, msg.slot, Date.now()) === 'roared') {
+          console.log(`[server] ${id} began a roar`);
+        }
       } else if (msg.type === 'beaconPlace') {
         // A spot picked off the map rather than clicked in the world, so
         // nothing about it has been validated by having walked there.
@@ -593,6 +601,8 @@ wss.on('connection', (socket) => {
     world.ai.delete(id);
     world.grapples.delete(id);
     world.pendingInfections.delete(id);
+    world.infectedByDog.delete(id);
+    world.dogConversions.delete(id);
     world.grappleCounts.delete(id);
     world.speedBoosts.delete(id);
     world.lastShotAt.delete(id);

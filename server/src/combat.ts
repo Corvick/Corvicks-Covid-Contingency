@@ -345,6 +345,10 @@ function cure(world: World, victim: Entity, now: number): void {
   victim.maxHealth = ENTITY_MAX_HEALTH.human;
   victim.speedMul = rollSpeedMul('human');
   world.pendingInfections.delete(victim.id);
+  // And the dog that bit them loses its claim on them. Left behind, somebody a
+  // dog bit, a medic saved and a shambler later finished off would still bank a
+  // charge for the dog — see `markDogBite`.
+  world.infectedByDog.delete(victim.id);
   world.grappleCounts.delete(victim.id);
   world.ai.set(victim.id, newAiState(now, victim.x, victim.y));
 }
@@ -403,6 +407,7 @@ function fireSpecial(world: World, shooter: Entity, aim: number, def: ItemDef, k
     // Caught in time: the infection simply doesn't take. Officers count —
     // grey, bot or player. Only an actual zombie needs turning back.
     world.pendingInfections.delete(victim.id);
+    world.infectedByDog.delete(victim.id);
     world.grappleCounts.delete(victim.id);
   } else if (!world.playerIds.has(victim.id)) {
     cure(world, victim, now);

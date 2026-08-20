@@ -82,7 +82,11 @@ import {
   MINIMAP_MARGIN,
   BEACON_MUSTER_RADIUS,
   DOG_ART_RADIUS,
+  DOG_MAP_MARGIN,
+  DOG_MAP_SIZE,
   DOG_MAX_HEALTH,
+  DOG_ROAR_RING_MS,
+  DOG_ROAR_RING_REACH,
   DOG_BODY_COLOR,
   DOG_FUR_COLOR,
   DOG_HEAD_COLOR,
@@ -1360,11 +1364,17 @@ function dogPoseFor(e: EntityState, now: number): DogPose {
   // open on some frames and shut on others. The mouth is *held* open now, so
   // the opening is a thing you sit inside and the closing is the only beat left
   // with any snap in it.
-  const wantSplit = e.lunging
-    ? DOG_SPLIT_ARC
-    : e.grappling
-      ? DOG_SPLIT_ARC * (0.62 + Math.sin(now * 0.028) * 0.16)
-      : 0.04;
+  // A roaring dog's mouth is open, and it is the same mouth — so the roar
+  // rides the split the jaws already use rather than getting a drawing of its
+  // own. It works the jaw a little as it goes, because a head held rigidly
+  // agape for two full seconds reads as a frozen frame.
+  const wantSplit = e.roaring
+    ? DOG_SPLIT_ARC * (0.86 + Math.sin(now * 0.017) * 0.14)
+    : e.lunging
+      ? DOG_SPLIT_ARC
+      : e.grappling
+        ? DOG_SPLIT_ARC * (0.62 + Math.sin(now * 0.028) * 0.16)
+        : 0.04;
   const jawEase = wantSplit > pose.split ? DOG_JAW_OPEN_MS : DOG_JAW_SHUT_MS;
   pose.split += (wantSplit - pose.split) * (1 - Math.exp(-dtMs / jawEase));
   pose.speed += (instant - pose.speed) * 0.2;
@@ -1666,6 +1676,11 @@ function drawDog(
   // ---- the head, as two halves peeling off the hinge at the neck.
   dogHeadHalves(ctx, hingeX, hingeY, head, split, r, hashId(e.id), now, e.dead === true);
 
+  // ---- the roar coming out of it. Over the head rather than under, because
+  // it is in front of the muzzle and a ring drawn under the skull is a ring
+  // with a bite taken out of it.
+  if (e.roaring) drawRoar(ctx, hingeX, hingeY, head, r, hashId(e.id), now);
+
   // **A corpse has no health to report.** The bar is drawn whenever health is
   // under the maximum, and a body is on zero — so every corpse in the city wore
   // an empty bar over it, which reads as a thing still in the fight.
@@ -1687,6 +1702,64 @@ function drawDog(
   // round, the camera is on yours, and `drawSelfMarker` already puts a chevron
   // where it went if the pan takes it off screen.
   void isSelf;
+}
+
+/**
+ * The roar, drawn as arcs coming off the muzzle.
+ *
+ * **Arcs rather than rings**, and this is the whole of why it reads as a sound
+ * rather than as a shockwave: a closed circle expanding out of an animal is a
+ * blast, where a nested set of open arcs facing one way is the shape everything
+ * from a speaker icon to a comic book uses for a noise going in a direction.
+ * The ability is aimed, so the drawing has to be aimed too.
+ *
+ * There is no per-frame state and nothing is stored: each arc's position is its
+ * index plus the clock, modulo its own life, so the same code draws the same
+ * thing on a spectator's screen, the roaring player's, and anybody else's, with
+ * only the id and the wall clock in common. Hashing the id is what keeps two
+ * dogs roaring side by side from pulsing in lockstep.
+ */
+function drawRoar(
+  ctx: CanvasRenderingContext2D,
+  hingeX: number,
+  hingeY: number,
+  head: number,
+  r: number,
+  seed: number,
+  now: number,
+): void {
+  // Out at the teeth, not at the neck — the same offset the bite is measured
+  // from, so what you see and what the jaws reach agree.
+  const muzzleX = hingeX + Math.cos(head) * r * 0.9;
+  const muzzleY = hingeY + Math.sin(head) * r * 0.9;
+  const phase = (seed % 360) / 360;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  const rings = 4;
+  for (let i = 0; i < rings; i++) {
+    // Each arc runs its own life over and over, offset from its neighbours so
+    // they leave the mouth one after another rather than all at once.
+    const t = (((now / DOG_ROAR_RING_MS) + phase + i / rings) % 1);
+    const reach = r * 0.4 + t * DOG_ROAR_RING_REACH;
+    // Fades out as it goes, and starts faint too — an arc that snapped into
+    // existence at full strength at the teeth would read as a flash.
+    const alpha = Math.sin(t * Math.PI) * 0.5;
+    if (alpha <= 0.01) continue;
+    // The cone widens as it travels, the way a shout does.
+    const spread = 0.42 + t * 0.34;
+    ctx.strokeStyle = 'rgba(190, 40, 46, ' + alpha.toFixed(3) + ')';
+    ctx.lineWidth = r * (0.19 - t * 0.1);
+    ctx.beginPath();
+    ctx.arc(muzzleX, muzzleY, reach, head - spread, head + spread);
+    ctx.stroke();
+    // A paler thread inside the red one, so the arc has an edge to it rather
+    // than being a soft smear at this size.
+    ctx.strokeStyle = 'rgba(255, 214, 170, ' + (alpha * 0.42).toFixed(3) + ')';
+    ctx.lineWidth = r * (0.07 - t * 0.04);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /**
@@ -2149,12 +2222,304 @@ export function drawVignette(ctx: CanvasRenderingContext2D, vw: number, vh: numb
  * torn off, so worrying at somebody visibly eats the bar rather than merely
  * making it run down faster, which nobody could tell apart from waiting.
  */
+/**
+ * The dog's ability row: four hexagons on Q, E, R and F, left to right.
+ *
+ * **The empty ones are drawn.** Three of the four have nothing in them today,
+ * and a bar that grew a hexagon at a time would shift the keys already on it
+ * every time one was filled — the whole value of a fixed row is that a key is
+ * always in the same place, and an outline says "there will be something here"
+ * where a gap says nothing at all.
+ *
+ * Each filled one carries three readings and they are deliberately separate:
+ * the **key letter** is what you press, the **recharge** fills the hexagon from
+ * the bottom, and the **charge count** in the corner is how many bodies the
+ * next press is worth. That last one is the only number on a dog's HUD that
+ * goes *up*, which is why it is a badge rather than a bar — a bar implies a
+ * ceiling and there isn't one.
+ */
+const DOG_HEX_R = 22;
+const DOG_HEX_GAP = 10;
+/**
+ * Centre of the row, measured up from the bottom of the viewport.
+ *
+ * Set against the *charge badge*, not the hexagon: the badge hangs below the
+ * hexagon's bottom vertex, and at 64 it cleared the jaws bar's backdrop by two
+ * pixels — measured, not guessed. The three rows want daylight between them or
+ * they read as one block.
+ */
+const DOG_HEX_UP = 72;
+/**
+ * How far a dog's stamina bar is raised to clear the row.
+ *
+ * The one place the dog's HUD stack is decided — `drawStamina` is shared with
+ * the officers and has no business knowing about hexagons.
+ */
+export const DOG_HUD_STAMINA_LIFT = 54;
+
+/** A flat-top hexagon: a row of them reads as a row, where pointy-top does not. */
+function hexPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number): void {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * TAU;
+    const px = cx + Math.cos(a) * r;
+    const py = cy + Math.sin(a) * r * 0.866;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+/** Kept in step with `DOG_ABILITY_KEYS` in `main.ts` — see the note there. */
+const DOG_ABILITY_KEY_CAPS = ['Q', 'E', 'R', 'F'];
+
+function drawDogAbilities(
+  ctx: CanvasRenderingContext2D,
+  dog: DogHud,
+  vw: number,
+  vh: number,
+  now: number,
+): void {
+  const slots = dog.abilities.length;
+  if (slots === 0) return;
+  const pitch = DOG_HEX_R * 2 + DOG_HEX_GAP;
+  const cy = vh - DOG_HEX_UP;
+  const x0 = vw / 2 - ((slots - 1) * pitch) / 2;
+  /** Half the hexagon's height. Flat-top, so it is shorter than it is wide. */
+  const half = DOG_HEX_R * 0.866;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  for (let i = 0; i < slots; i++) {
+    const cx = x0 + i * pitch;
+    const ability = dog.abilities[i];
+
+    // The well, always. An empty slot is this and an outline, and nothing else.
+    hexPath(ctx, cx, cy, DOG_HEX_R);
+    ctx.fillStyle = ability ? 'rgba(0, 0, 0, 0.66)' : 'rgba(0, 0, 0, 0.42)';
+    ctx.fill();
+
+    if (!ability) {
+      // Nothing in it. A dashed outline and a dim letter: the key exists and
+      // does nothing, which is a different thing from the key not existing.
+      hexPath(ctx, cx, cy, DOG_HEX_R);
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = 'rgba(120, 113, 108, 0.7)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(120, 113, 108, 0.75)';
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.fillText(DOG_ABILITY_KEY_CAPS[i] ?? '', cx, cy);
+      continue;
+    }
+
+    const ready = ability.ready >= 1;
+    const running = ability.active >= 0;
+
+    // Two fills, and they are deliberately different colours running in the
+    // same direction: "the two seconds are passing" and "it is recharging" are
+    // opposite states, and a single treatment for both would be read wrong in
+    // exactly the moment that matters.
+    const fill = running
+      ? Math.max(0, Math.min(1, ability.active))
+      : Math.max(0, Math.min(1, ability.ready));
+    if (running || !ready) {
+      ctx.save();
+      hexPath(ctx, cx, cy, DOG_HEX_R);
+      ctx.clip();
+      ctx.fillStyle = running ? 'rgba(153, 27, 27, 0.9)' : 'rgba(120, 53, 15, 0.75)';
+      ctx.fillRect(cx - DOG_HEX_R, cy + half - half * 2 * fill, DOG_HEX_R * 2, half * 2 * fill);
+      ctx.restore();
+    }
+
+    hexPath(ctx, cx, cy, DOG_HEX_R);
+    ctx.lineWidth = running ? 2.4 : 1.6;
+    if (running) {
+      const pulse = 0.75 + Math.sin(now * 0.02) * 0.25;
+      ctx.strokeStyle = 'rgba(248, 113, 113, ' + pulse.toFixed(2) + ')';
+    } else {
+      ctx.strokeStyle = ready ? '#f87171' : '#57534e';
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = running ? '#fff1f2' : ready ? '#fecaca' : '#a8a29e';
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    ctx.fillText(DOG_ABILITY_KEY_CAPS[i] ?? '', cx, cy - 5);
+    ctx.font = 'bold 7px system-ui, sans-serif';
+    ctx.fillText(ability.name, cx, cy + 9);
+
+    // Charges, in the corner the way a magazine count sits on a slot. Only
+    // when there are any: a nought on every hexagon every round is noise, and
+    // the badge appearing is itself the news that the ability now does more.
+    if (ability.charges > 0) {
+      const bx = cx + DOG_HEX_R * 0.66;
+      const by = cy + half - 1;
+      ctx.beginPath();
+      ctx.arc(bx, by, 8, 0, TAU);
+      ctx.fillStyle = '#7f1d1d';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#fca5a5';
+      ctx.stroke();
+      ctx.fillStyle = '#fee2e2';
+      ctx.font = 'bold 9px system-ui, sans-serif';
+      ctx.fillText(String(Math.min(99, ability.charges)), bx, by + 0.5);
+    }
+  }
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+/**
+ * The dog's corner map.
+ *
+ * **The city is painted once and blitted after that**, which is the whole
+ * reason this can sit on screen every frame of a dog's round. Drawn live it is
+ * ~90 building footprints, a park, a pond and a border — a couple of hundred
+ * `fillRect`s and a 48-segment path — and the animal driving it is the one
+ * connection in the game that already pays the most per frame. Baked, the
+ * per-frame cost is one `drawImage` and a handful of two-pixel dots. Same trick
+ * as `grimeTile` and the vignette, and the same reason: nothing in it moves.
+ *
+ * Keyed on the `MapData` object itself rather than on its seed or its size. A
+ * restart hands the client a brand new object and the identity check catches
+ * that for free, where a seed comparison is a thing that can be forgotten.
+ */
+let dogMapBase: HTMLCanvasElement | null = null;
+let dogMapFor: MapData | null = null;
+let dogMapScale = 1;
+
+function dogMapBaseFor(map: MapData): HTMLCanvasElement | null {
+  if (dogMapBase && dogMapFor === map) return dogMapBase;
+
+  // One box whatever the city's shape — a small city comes out smaller rather
+  // than stretched. See **The city is not one size**.
+  const scale = DOG_MAP_SIZE / Math.max(map.width, map.height);
+  const w = Math.round(map.width * scale);
+  const h = Math.round(map.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const c = canvas.getContext('2d');
+  if (!c) return null;
+
+  const wx = (v: number): number => v * scale;
+  const wy = (v: number): number => v * scale;
+
+  // Ground, then the two landmarks, then the buildings over them — the same
+  // order and the same palette the beacon map uses, darkened, because this one
+  // is read out of the corner of the eye rather than stopped for.
+  c.fillStyle = '#191714';
+  c.fillRect(0, 0, w, h);
+
+  c.fillStyle = '#232b1c';
+  c.fillRect(wx(map.park.x), wy(map.park.y), map.park.w * scale, map.park.h * scale);
+
+  c.fillStyle = '#17273a';
+  c.beginPath();
+  for (let i = 0; i <= 48; i++) {
+    const a = (i / 48) * TAU;
+    const r = pondRadiusAt(map.pond, a) * scale;
+    const px = wx(map.pond.x) + Math.cos(a) * r;
+    const py = wy(map.pond.y) + Math.sin(a) * r;
+    if (i === 0) c.moveTo(px, py);
+    else c.lineTo(px, py);
+  }
+  c.closePath();
+  c.fill();
+
+  // Real footprints, not bounding boxes: about one building in three is L or T
+  // shaped, and it is the *streets between them* that make a map readable.
+  c.fillStyle = '#3b3730';
+  for (const b of map.buildings) {
+    for (const r of b.rects) c.fillRect(wx(r.x), wy(r.y), r.w * scale, r.h * scale);
+  }
+
+  dogMapBase = canvas;
+  dogMapFor = map;
+  dogMapScale = scale;
+  return canvas;
+}
+
+/** Drop the baked map. Called on a new city, beside `clearDogPoses`. */
+export function clearDogMap(): void {
+  dogMapBase = null;
+  dogMapFor = null;
+}
+
+export function drawDogMap(
+  ctx: CanvasRenderingContext2D,
+  map: MapData,
+  self: { x: number; y: number } | null,
+  contacts: Array<{ x: number; y: number }>,
+  vw: number,
+  vh: number,
+): void {
+  const base = dogMapBaseFor(map);
+  if (!base) return;
+
+  // Bottom left: the counts are top left, the perf readout is top right, and
+  // the dog's own bars run up the middle from the bottom.
+  const x = DOG_MAP_MARGIN;
+  const y = vh - DOG_MAP_MARGIN - base.height;
+  const scale = dogMapScale;
+
+  ctx.save();
+  ctx.globalAlpha = 0.82;
+  ctx.drawImage(base, x, y);
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = 'rgba(120, 113, 108, 0.8)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, base.width - 1, base.height - 1);
+
+  // **Contacts, drawn in one path.** A fill and a stroke per dot is two state
+  // changes per officer for a mark two pixels across; one path filled once is
+  // the same lesson `drawBushes` and the blood decals both learned.
+  if (contacts.length > 0) {
+    ctx.beginPath();
+    for (const c of contacts) {
+      const cx = x + c.x * scale;
+      const cy = y + c.y * scale;
+      ctx.moveTo(cx + 2.6, cy);
+      ctx.arc(cx, cy, 2.6, 0, TAU);
+    }
+    ctx.fillStyle = '#60a5fa';
+    ctx.fill();
+  }
+
+  // You, last and largest, so the map is read against where you are standing.
+  // A ring rather than a dot: at this size a second blue-ish blob among the
+  // contacts is one more thing to pick out rather than the thing to pick out.
+  if (self) {
+    const cx = x + self.x * scale;
+    const cy = y + self.y * scale;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3.4, 0, TAU);
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5.6, 0, TAU);
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.65)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 export function drawDogHud(
   ctx: CanvasRenderingContext2D,
   dog: DogHud,
   vw: number,
   vh: number,
+  now: number,
 ): void {
+  drawDogAbilities(ctx, dog, vw, vh, now);
+
   const w = 220;
   const h = 12;
   const x = (vw - w) / 2;
@@ -2205,6 +2570,24 @@ export function drawDogHud(
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('JAWS OPEN — RUN THEM DOWN', vw / 2, y + h / 2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    return;
+  }
+
+  // **Mid-ability, the jaws are not ready whatever the cooldown says.**
+  // `jawsTick` does not run during a roar, so left click does nothing — and a
+  // bar reading "JAWS READY — HOLD LEFT CLICK" while the button is inert is the
+  // HUD telling a lie about the one control it is there to explain.
+  const busy = dog.abilities.find((a) => a !== null && a.active >= 0);
+  if (busy) {
+    ctx.fillStyle = '#57534e';
+    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, busy.active)), h);
+    ctx.fillStyle = 'rgba(254, 226, 226, 0.9)';
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${busy.name}…`, vw / 2, y + h / 2);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     return;
@@ -2584,6 +2967,15 @@ export function drawBeacons(
   }
 }
 
+/**
+ * `lift` is how far to raise the bar off its usual place, in pixels.
+ *
+ * A dog has no inventory row under it but it does have a row of ability
+ * hexagons, which is taller — so the whole stack sits higher on a dog than on
+ * an officer. Passed in rather than worked out here, because this function has
+ * no business knowing what is being driven; `DOG_HUD_STAMINA_LIFT` is the one
+ * place the dog's layout is decided.
+ */
 export function drawStamina(
   ctx: CanvasRenderingContext2D,
   stamina: number,
@@ -2591,13 +2983,14 @@ export function drawStamina(
   vw: number,
   vh: number,
   exhausted = false,
+  lift = 0,
   recoveryThreshold = 75,
 ): void {
   const w = 180;
   const h = 8;
   const x = (vw - w) / 2;
   // Just above the inventory row, which occupies vh-46 upward.
-  const y = vh - 58;
+  const y = vh - 58 - lift;
   const pct = Math.max(0, Math.min(1, stamina / max));
 
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';

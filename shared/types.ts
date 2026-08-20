@@ -79,6 +79,15 @@ export interface EntityState {
   /** Mid-snap: the jaws are thrown open and thrown forward. Dogs only. */
   lunging?: boolean;
   /**
+   * Roaring: rooted, mouth open, throwing rings off the muzzle. Dogs only.
+   *
+   * Sent to everyone who can see it rather than kept on the roaring player's
+   * own HUD, because the whole point of a two-second animal-sized tell is that
+   * the officers across the street get to read it and decide what to do about
+   * it. It is also what the client hangs the sound on.
+   */
+  roaring?: boolean;
+  /**
    * Down. Drawn grey and sprawled, and going nowhere — a dog holds its own
    * body on screen for `DOG_DEATH_MS` before it rises again somewhere else, so
    * that being killed is something you watch rather than a cut.
@@ -450,6 +459,26 @@ export type AbilityId = 'rally' | 'follow' | 'wait' | 'beacon';
  * already taken off. Without the second, worrying at somebody looks exactly
  * like waiting.
  */
+/**
+ * One of the four hexagons on the dog's bar, or `null` for a slot with
+ * nothing in it yet.
+ *
+ * The *key* is not on the wire, only the slot index: which keys the row is on
+ * is the client's decision (`DOG_ABILITY_KEYS`), and sending them would be the
+ * server repeating something it does not own. It is also what made moving the
+ * row off W — where it collided with walking forward — a one-side change.
+ */
+export interface DogAbilityHud {
+  /** Short name in the hexagon, e.g. `ROAR`. */
+  name: string;
+  /** Recharge, 0 to 1. 1 is ready. */
+  ready: number;
+  /** Charges banked, or -1 for an ability that does not use any. */
+  charges: number;
+  /** 0 to 1 while it is actually running, -1 the rest of the time. */
+  active: number;
+}
+
 export interface DogHud {
   /** Jaw recovery since the last bite, 0-1. 1 is ready to open. */
   bite: number;
@@ -472,6 +501,26 @@ export interface DogHud {
    * dog's lives, and the only number on its HUD that goes down for good.
    */
   hosts: number;
+  /**
+   * The ability bar, left to right — always `DOG_ABILITY_SLOTS` long, with a
+   * `null` for each slot still empty. Sent whole rather than only the filled
+   * ones so the client never has to work out which hexagon is which.
+   */
+  abilities: Array<DogAbilityHud | null>;
+  /**
+   * Officers the horde has made contact with — everything the corner map is
+   * allowed to show beyond the dog itself.
+   *
+   * **What is *not* here is the point.** An officer nowhere near a zombie is
+   * simply absent from the list, so the map cannot be used to hunt a quiet
+   * street; there is no flag to ignore and no position to leak, because the
+   * server never sends one. See `DOG_MAP_CONTACT_RANGE`.
+   *
+   * Positions are rounded to whole pixels — the map draws them a couple of
+   * pixels across — and the list is a handful of entries, so it costs less on
+   * the wire than one extra entity would.
+   */
+  contacts: Array<{ x: number; y: number }>;
   /** No horde left and it went down. Out of the round. */
   out: boolean;
   /**
@@ -597,6 +646,15 @@ export type ClientMessage =
       rightDown: boolean;
     }
   | { type: 'ability'; ability: AbilityId; x: number; y: number }
+  /**
+   * Press a hexagon on the dog's bar. Its own message rather than an
+   * `AbilityId`, for the reasons `beaconPlace` is: nothing about it goes near
+   * the officers' Q wheel, it spends no rally charge, and the only thing the
+   * client can honestly say about it is *which key went down*. Where it is
+   * aimed is read off the same `aimX`/`aimY` the input loop is already
+   * sending, so a slow message cannot leave the dog roaring at a stale bearing.
+   */
+  | { type: 'dogAbility'; slot: number }
   /**
    * Where on the map the beacon should go. Deliberately its own message rather
    * than an `AbilityId`: it is not on the Q wheel, it costs no rally charge,
