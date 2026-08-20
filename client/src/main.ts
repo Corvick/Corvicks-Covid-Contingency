@@ -269,7 +269,7 @@ let solo = false;
 let paused = false;
 if (startSpectating) document.getElementById('shell')!.classList.add('hidden');
 
-const { send, goOffline } = connect((msg) => {
+const { send, goOffline, goOnline } = connect((msg) => {
   // The front end reads the lobby traffic; the game below ignores it.
   frontEnd?.handle(msg);
   if (msg.type === 'welcome') {
@@ -397,6 +397,7 @@ const frontEnd = startSpectating
   : setupMenu({
       send,
       goOffline,
+      goOnline,
       onStart: (offline) => {
         started = true;
         solo = offline;

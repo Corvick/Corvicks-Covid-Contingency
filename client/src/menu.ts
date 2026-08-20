@@ -30,6 +30,11 @@ export interface MenuHooks {
    */
   goOffline: (onReady: () => void) => void;
   /**
+   * Put a server back, having played offline. Called when an online path is
+   * chosen, so the socket is up by the time a lobby is asked for.
+   */
+  goOnline: () => void;
+  /**
    * Our lobby's round has begun; the game takes the screen from here. `solo`
    * says whether it can be paused — only an offline round can, since nobody
    * else is in it.
@@ -626,7 +631,11 @@ export function setupMenu(hooks: MenuHooks): Menu {
   });
   el('btn-options-back').addEventListener('click', () => show('title'));
 
-  el('btn-online').addEventListener('click', askName);
+  el('btn-online').addEventListener('click', () => {
+    // Before the name screen, so the socket has the time it takes to type one.
+    hooks.goOnline();
+    askName();
+  });
   el('btn-name-back').addEventListener('click', () => show('title'));
   el('btn-online-back').addEventListener('click', askName);
   el('btn-create').addEventListener('click', () => {

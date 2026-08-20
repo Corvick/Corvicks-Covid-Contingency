@@ -14,10 +14,12 @@ const PING_WINDOW = 20;
 export interface Connection {
   send: (msg: ClientMessage) => void;
   /**
-   * Put the game on a worker thread here and drop the server. One way — see
-   * the implementation for why, and what it costs to go back (a page reload).
+   * Put the game on a worker thread here and drop the server. Reversible with
+   * `goOnline`; calling it again while already offline simply reports ready.
    */
   goOffline: (onReady: () => void) => void;
+  /** Reconnect to a server, having been offline. A no-op if never offline. */
+  goOnline: () => void;
 }
 
 /**
@@ -193,7 +195,20 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
      * knowing the engine is listening.
      */
     goOffline(onReady: () => void) {
-      if (worker) return;
+      /*
+       * Already offline — quit to the menu and pressed PLAY OFFLINE again.
+       *
+       * The engine in the worker is still there and still listening; leaving a
+       * lobby does not disconnect from it. So the only thing to do is say so.
+       * Returning silently here is what made the menu look dead after a quit:
+       * the guard against building a *second* worker was also swallowing the
+       * callback, so the lobby that PLAY OFFLINE exists to create was never
+       * asked for, and nothing happened at all.
+       */
+      if (worker) {
+        onReady();
+        return;
+      }
       const w = new Worker(new URL('./offline.ts', import.meta.url), { type: 'module' });
       worker = w;
       // Drop the socket, and suppress the reconnect its close would schedule.
@@ -225,6 +240,28 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
       // `__BUILD__` is baked in by Vite; a worker cannot ask git either.
       w.postMessage({ type: 'start', build: __BUILD__ });
       console.log('[net] offline — the game is running in a worker, no server');
+    },
+
+    /**
+     * Go back to a server, having been offline.
+     *
+     * `goOffline` closes the socket for good, so without this the second dead
+     * button after quitting an offline round was PLAY ONLINE: the screens still
+     * moved, but CREATE and JOIN sent into a socket that was gone and nothing
+     * ever came back. A menu that changes screens and then does nothing is the
+     * worst of both — it looks like it worked.
+     *
+     * The worker is terminated rather than parked. It owns a whole world, and
+     * an offline round that came back would be the wrong one anyway.
+     */
+    goOnline() {
+      if (!worker) return;
+      worker.terminate();
+      worker = null;
+      // A fresh `welcome` arrives from the server, which the client already
+      // copes with — it is the same path a dropped connection takes.
+      open();
+      console.log('[net] back online — reconnecting to the server');
     },
   };
 }
