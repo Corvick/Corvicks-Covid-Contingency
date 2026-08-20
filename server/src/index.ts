@@ -952,9 +952,23 @@ function tick(): void {
     console.log('[server] victory — the outbreak is contained');
   }
 
-  // Spectators see the whole board, infection markers included.
-  const allEntities: EntityState[] = [];
-  for (const e of world.entities.values()) allEntities.push(toWire(world, e, true, now));
+  /**
+   * Spectators see the whole board, infection markers included — and **only
+   * spectators**, so it is built on the first one who asks and not before.
+   *
+   * This used to run unconditionally: a `toWire` for every entity in the city,
+   * thirty times a second, in every round including a solo offline one where
+   * nobody would ever read it. Lazy rather than gated on a flag so it is still
+   * built at most once a tick however many people are watching.
+   */
+  let allEntities: EntityState[] | null = null;
+  const wholeBoard = (): EntityState[] => {
+    if (!allEntities) {
+      allEntities = [];
+      for (const e of world.entities.values()) allEntities.push(toWire(world, e, true, now));
+    }
+    return allEntities;
+  };
   const infected = world.pendingInfections.size;
 
   // Air support is small enough to send to everyone unfiltered — a helicopter
@@ -995,7 +1009,7 @@ function tick(): void {
 
     send(socket, {
       type: 'state',
-      entities: spectating ? allEntities : visibleTo(viewer, now),
+      entities: spectating ? wholeBoard() : visibleTo(viewer, now),
       shots: spectating ? world.shots : visibleShots(viewer),
       brokenWindows: world.brokenWindows,
       // Doors are static geometry the client already has; only their state
