@@ -1727,7 +1727,19 @@ function render() {
   ctx.restore();
   mark('effects');
 
-  if (!spectating && me) drawFog(me, view, now);
+  /**
+   * NO FOG is gated on `solo` *here*, at the point of use, rather than by
+   * hiding the switch on the options screen.
+   *
+   * A setting the menu declines to offer is still in localStorage and still
+   * read every frame, so anyone who set it offline would carry it into an
+   * online round without touching anything. The rule has to live where the
+   * decision is made — and the whole polygon is skipped, which is where the
+   * saving comes from: it is what a spectator does, and why one is cheaper per
+   * frame than a player despite drawing five hundred bodies.
+   */
+  const fogOff = settings.noFog && solo;
+  if (!spectating && me && !fogOff) drawFog(me, view, now);
   mark('fog');
 
   // Thermal contacts go on *top* of the fog. They are precisely the things you

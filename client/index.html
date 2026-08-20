@@ -110,6 +110,12 @@
       .opt-name { font-size: 13px; letter-spacing: 0.06em; }
       .opt-val { font-size: 13px; letter-spacing: 0.06em; color: #4ade80; text-align: right; }
       .opt-val.off { color: #6b7280; }
+      /* Says where a setting applies, next to its name rather than buried in
+         the explanation under it — the restriction is part of what it is. */
+      .opt-tag {
+        margin-left: 8px; padding: 1px 5px; font-size: 9px; letter-spacing: 0.08em;
+        color: #a78bfa; border: 1px solid #4c3f6b; border-radius: 3px; vertical-align: 1px;
+      }
       .opt-why {
         grid-column: 1 / -1; font-size: 11px; line-height: 1.4;
         color: #6b7280; letter-spacing: 0.02em;
@@ -347,6 +353,11 @@
               <span class="opt-name">FOG DETAIL</span>
               <span class="opt-val"></span>
               <span class="opt-why">the biggest single cost in a frame · LOW rebuilds shadows half as often, so their edges lag near walls while you move</span>
+            </button>
+            <button class="opt" id="opt-nofog">
+              <span class="opt-name">NO FOG <span class="opt-tag">OFFLINE ONLY</span></span>
+              <span class="opt-val"></span>
+              <span class="opt-why">skips the shadow pass entirely — the cheapest frame there is, and what makes spectating fast · shows the city layout, but not one body more: the server never sends what you cannot see</span>
             </button>
             <button class="opt" id="opt-ground">
               <span class="opt-name">GROUND DETAIL</span>

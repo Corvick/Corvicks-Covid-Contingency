@@ -51,6 +51,27 @@ export interface Settings {
    */
   fogDetail: 'full' | 'low';
 
+  /**
+   * Draw no fog at all. **Offline rounds only**, and a development tool rather
+   * than a graphics setting.
+   *
+   * The visibility polygon is the largest single thing in a frame, and skipping
+   * it is why a spectator — who computes none — is cheaper per frame than a
+   * player despite drawing five hundred bodies instead of a dozen.
+   *
+   * **It is not a wallhack, and cannot become one.** Fog is enforced on the
+   * server: an entity outside your sight radius is never put on the wire, so
+   * there is nothing hidden on this machine for the client to reveal. What this
+   * actually uncovers is the *map* — walls, buildings, the park, the pond —
+   * which the client is handed in full at `welcome` and would have drawn
+   * anyway. Bodies stay exactly as visible as they were.
+   *
+   * Restricted to offline for that last reason: knowing the city's layout
+   * before walking it is a real advantage against other people, even though
+   * knowing where they are is not on offer.
+   */
+  noFog: boolean;
+
   /** Grime on the road and the dark corners. Measured at 0.09ms and 0.36ms. */
   groundDetail: boolean;
   vignette: boolean;
@@ -72,6 +93,7 @@ export interface Settings {
 export const DEFAULTS: Settings = {
   smoothMotion: true,
   fogDetail: 'full',
+  noFog: false,
   groundDetail: true,
   vignette: true,
   blood: true,
@@ -81,6 +103,9 @@ export const DEFAULTS: Settings = {
 export const LOW: Settings = {
   smoothMotion: true, // kept: it costs nothing to draw and is what smooths a slow machine
   fogDetail: 'low',
+  // Deliberately *not* part of the preset. LOW is about how the game is drawn;
+  // this changes what a round shows you, and is a tool rather than a quality.
+  noFog: false,
   groundDetail: false,
   vignette: false,
   blood: false,
