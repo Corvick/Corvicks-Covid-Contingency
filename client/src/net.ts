@@ -13,6 +13,11 @@ const PING_WINDOW = 20;
 
 export interface Connection {
   send: (msg: ClientMessage) => void;
+  /**
+   * Put the game on a worker thread here and drop the server. One way — see
+   * the implementation for why, and what it costs to go back (a page reload).
+   */
+  goOffline: (onReady: () => void) => void;
 }
 
 /**
@@ -57,6 +62,14 @@ export function takeNetStats(): { parseMs: number; applyMs: number; bytes: numbe
 /** Auto-reconnecting socket — the dev server restarts on every edit. */
 export function connect(onMessage: (msg: ServerMessage) => void): Connection {
   let ws: WebSocket | null = null;
+  /**
+   * The game, running here instead of on a server.
+   *
+   * Once this is set the socket is gone for good and every message goes to a
+   * Web Worker running the same `engine.ts` the Node server does. See
+   * `goOffline` below for why.
+   */
+  let worker: Worker | null = null;
 
   /**
    * Where the server is.
@@ -127,6 +140,9 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
     });
     socket.addEventListener('open', () => console.log('[net] connected'));
     socket.addEventListener('close', () => {
+      // Closed because we moved the game into a worker, not because anything
+      // went wrong. Reconnecting would put a server back in the picture.
+      if (worker) return;
       console.log('[net] disconnected — retrying');
       if (ws === socket) ws = null;
       // The window is about *this* connection. Carrying it across a reconnect
@@ -143,16 +159,72 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
   open();
 
   // One timer for the life of the page, not one per connection — `open` runs
-  // again on every reconnect, and a timer started there would multiply.
+  // again on every reconnect, and a timer started there would multiply. It
+  // follows the game into the worker rather than stopping, so the HUD's latency
+  // figure keeps meaning something: offline it measures how long the worker
+  // took to answer, which is small but real on a loaded machine.
   setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'ping', t: performance.now() } satisfies ClientMessage));
-    }
+    const probe = { type: 'ping', t: performance.now() } satisfies ClientMessage;
+    if (worker) worker.postMessage(probe);
+    else if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(probe));
   }, PING_INTERVAL_MS);
 
   return {
     send(msg: ClientMessage) {
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      if (worker) worker.postMessage(msg);
+      else if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    },
+
+    /**
+     * Stop talking to a server and run the game here instead.
+     *
+     * Offline used to mean a browser talking over a socket to a *separate Node
+     * process*, so playing solo ran two runtimes competing for the same cores.
+     * On a four-core laptop that was most of the stutter: the simulation wanted
+     * a core and so did the renderer. This puts the same `engine.ts` on a
+     * worker thread — no server, no socket, no port — and messages cross as
+     * structured clones, so a snapshot is never serialised to JSON and parsed
+     * back thirty times a second.
+     *
+     * The worker sends its own `welcome`, exactly as a reconnecting socket
+     * would, which is why nothing above this layer needed a new case: the
+     * client has always had to cope with being introduced to a fresh world.
+     * `onReady` fires on that welcome, so the caller can create its lobby
+     * knowing the engine is listening.
+     */
+    goOffline(onReady: () => void) {
+      if (worker) return;
+      const w = new Worker(new URL('./offline.ts', import.meta.url), { type: 'module' });
+      worker = w;
+      // Drop the socket, and suppress the reconnect its close would schedule.
+      ws?.close();
+      ws = null;
+
+      let greeted = false;
+      w.addEventListener('message', (event: MessageEvent<ServerMessage>) => {
+        const t0 = performance.now();
+        const msg = event.data;
+        if (msg.type === 'pong') {
+          recordPing(performance.now() - msg.t);
+          netStats.messages++;
+          return;
+        }
+        onMessage(msg);
+        // Nothing to parse — it arrived as an object rather than as text, so
+        // `parseMs` stays zero. That is the honest reading, and it is the
+        // largest single thing not having a socket buys.
+        netStats.applyMs += performance.now() - t0;
+        netStats.messages++;
+        if (!greeted && msg.type === 'welcome') {
+          greeted = true;
+          onReady();
+        }
+      });
+      w.addEventListener('error', (e) => console.error('[offline] worker failed:', e.message));
+
+      // `__BUILD__` is baked in by Vite; a worker cannot ask git either.
+      w.postMessage({ type: 'start', build: __BUILD__ });
+      console.log('[net] offline — the game is running in a worker, no server');
     },
   };
 }

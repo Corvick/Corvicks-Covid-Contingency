@@ -23,6 +23,12 @@ import {
 export interface MenuHooks {
   send: (msg: ClientMessage) => void;
   /**
+   * Move the game onto a worker in this page and drop the server, then call
+   * back once it is listening. What PLAY OFFLINE does before it creates its
+   * room — see `goOffline` in `net.ts`.
+   */
+  goOffline: (onReady: () => void) => void;
+  /**
    * Our lobby's round has begun; the game takes the screen from here. `solo`
    * says whether it can be paused — only an offline round can, since nobody
    * else is in it.
@@ -532,7 +538,12 @@ export function setupMenu(hooks: MenuHooks): Menu {
       }
       if (!name) name = 'PLAYER';
     }
-    hooks.send({ type: 'lobbyCreate', name: 'OFFLINE', gamertag: name, offline: true });
+    // **Offline means offline.** The game moves onto a worker thread in this
+    // page — no server, no socket, no port — and the lobby is created once it
+    // has said hello, because until then there is nothing listening.
+    hooks.goOffline(() => {
+      hooks.send({ type: 'lobbyCreate', name: 'OFFLINE', gamertag: name, offline: true });
+    });
   });
 
   el('btn-online').addEventListener('click', askName);
