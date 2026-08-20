@@ -1,3 +1,4 @@
+import { DEFAULTS, LOW, apply as applySettings, isDefault, isLow, settings } from './settings.js';
 import type {
   ClientMessage,
   LobbyTeam,
@@ -85,6 +86,7 @@ export function setupMenu(hooks: MenuHooks): Menu {
     online: el<HTMLDivElement>('screen-online'),
     create: el<HTMLDivElement>('screen-create'),
     join: el<HTMLDivElement>('screen-join'),
+    options: el<HTMLDivElement>('screen-options'),
     lobby: el<HTMLDivElement>('lobby'),
   };
   type Screen = keyof typeof screens;
@@ -545,6 +547,76 @@ export function setupMenu(hooks: MenuHooks): Menu {
       hooks.send({ type: 'lobbyCreate', name: 'OFFLINE', gamertag: name, offline: true });
     });
   });
+
+  /**
+   * The options screen.
+   *
+   * Nothing here is sent anywhere — every setting is about how this machine
+   * draws the world, never what is in it, so it takes effect on the next frame
+   * and needs no round trip and no restart. Each row is a button that cycles
+   * its own value; there is no Apply, because there is nothing to apply.
+   */
+  const optRows = {
+    smooth: el<HTMLButtonElement>('opt-smooth'),
+    fog: el<HTMLButtonElement>('opt-fog'),
+    ground: el<HTMLButtonElement>('opt-ground'),
+    vignette: el<HTMLButtonElement>('opt-vignette'),
+    blood: el<HTMLButtonElement>('opt-blood'),
+  };
+
+  const drawOptions = (): void => {
+    const set = (btn: HTMLButtonElement, text: string, on: boolean): void => {
+      const val = btn.querySelector<HTMLSpanElement>('.opt-val');
+      if (!val) return;
+      val.textContent = text;
+      val.classList.toggle('off', !on);
+    };
+    set(optRows.smooth, settings.smoothMotion ? 'ON' : 'OFF', settings.smoothMotion);
+    set(optRows.fog, settings.fogDetail === 'full' ? 'FULL' : 'LOW', settings.fogDetail === 'full');
+    set(optRows.ground, settings.groundDetail ? 'ON' : 'OFF', settings.groundDetail);
+    set(optRows.vignette, settings.vignette ? 'ON' : 'OFF', settings.vignette);
+    set(optRows.blood, settings.blood ? 'ON' : 'OFF', settings.blood);
+
+    // The presets double as a readout: whichever one you are already on says so.
+    el('btn-opt-low').classList.toggle('dim', isLow());
+    el('btn-opt-default').classList.toggle('dim', isDefault());
+  };
+
+  optRows.smooth.addEventListener('click', () => {
+    applySettings({ smoothMotion: !settings.smoothMotion });
+    drawOptions();
+  });
+  optRows.fog.addEventListener('click', () => {
+    applySettings({ fogDetail: settings.fogDetail === 'full' ? 'low' : 'full' });
+    drawOptions();
+  });
+  optRows.ground.addEventListener('click', () => {
+    applySettings({ groundDetail: !settings.groundDetail });
+    drawOptions();
+  });
+  optRows.vignette.addEventListener('click', () => {
+    applySettings({ vignette: !settings.vignette });
+    drawOptions();
+  });
+  optRows.blood.addEventListener('click', () => {
+    applySettings({ blood: !settings.blood });
+    drawOptions();
+  });
+
+  el('btn-opt-low').addEventListener('click', () => {
+    applySettings(LOW);
+    drawOptions();
+  });
+  el('btn-opt-default').addEventListener('click', () => {
+    applySettings(DEFAULTS);
+    drawOptions();
+  });
+
+  el('btn-options').addEventListener('click', () => {
+    drawOptions();
+    show('options');
+  });
+  el('btn-options-back').addEventListener('click', () => show('title'));
 
   el('btn-online').addEventListener('click', askName);
   el('btn-name-back').addEventListener('click', () => show('title'));

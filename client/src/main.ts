@@ -111,6 +111,7 @@ import {
 import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import { setupMenu } from './menu.js';
+import { settings } from './settings.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { AbilityId } from '../../shared/types.js';
 
@@ -958,7 +959,16 @@ function shortestTurn(from: number, to: number): number {
  * one does, by however much of the gap between them has elapsed.
  */
 function advanceInterpolation(now: number): void {
-  const t = Math.min(1, Math.max(0, (now - snapshotAt) / snapshotGap));
+  /*
+   * Always run, even with smoothing off. `x`, `y` and `facing` are no longer
+   * copied by `copyInto`, so this is the only thing that writes them — turning
+   * it off entirely would leave every body frozen where it first appeared.
+   * Off simply means going straight to the newest snapshot instead of walking
+   * there, which is exactly what the client did before any of this.
+   */
+  const t = settings.smoothMotion
+    ? Math.min(1, Math.max(0, (now - snapshotAt) / snapshotGap))
+    : 1;
   for (const entry of tracked.values()) {
     entry.state.x = entry.fromX + (entry.toX - entry.fromX) * t;
     entry.state.y = entry.fromY + (entry.toY - entry.fromY) * t;
@@ -1356,7 +1366,22 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     cachedPoly.length > 0 &&
     radius === cachedRadius &&
     cachedEpoch === doorEpoch &&
-    moved < FOG_MOVE_EPSILON
+    /*
+     * **What LOW GRAPHICS actually buys on the fog is fewer rebuilds, not
+     * cheaper ones**, and that is worth writing down because the obvious lever
+     * turned out to be the wrong one. Casting a coarser fan measured only 9%
+     * off the median — the early-out means a base ray stops after a handful of
+     * walls, so the fan was never where the time went, and the rays that *are*
+     * expensive are the ones at wall corners, which cannot be dropped without
+     * putting shadow edges in the wrong place.
+     *
+     * Letting the viewer walk twice as far before the polygon is rebuilt halves
+     * how often it runs, which is a real halving of what the fog costs per
+     * second. The price is that shadows are cast from a position up to twice as
+     * stale, so their edges visibly lag near walls while moving. That is a fair
+     * thing to sell as low graphics; a blockier fan for 9% was not.
+     */
+    moved < (settings.fogDetail === 'low' ? FOG_MOVE_EPSILON * 2 : FOG_MOVE_EPSILON)
   ) {
     return cachedPoly;
   }
@@ -1372,7 +1397,16 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   const clipW = VIEWPORT_WIDTH / (2 * cameraZoom()) + reach.x + slack;
   const clipH = VIEWPORT_HEIGHT / (2 * cameraZoom()) + reach.y + slack;
   const t0 = performance.now();
-  cachedPoly = visibilityPolygon(me.x, me.y, radius, occludersFor(map), map.bushes, clipW, clipH);
+  cachedPoly = visibilityPolygon(
+    me.x,
+    me.y,
+    radius,
+    occludersFor(map),
+    map.bushes,
+    clipW,
+    clipH,
+    settings.fogDetail === 'low',
+  );
   fogComputeMs = performance.now() - t0;
   cachedAt = now;
   cachedX = me.x;

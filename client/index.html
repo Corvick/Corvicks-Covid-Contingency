@@ -96,6 +96,27 @@
       }
       .back-btn:hover { color: #9ca3af; }
 
+      /* Options. A row is a whole button: the value sits to the right of the
+         name, and the reason it exists sits under both, greyed down so the
+         screen reads as a list of choices rather than a wall of prose. */
+      .options { width: 460px; margin: 4px 0 10px; }
+      .opt {
+        display: grid; grid-template-columns: 1fr auto; gap: 2px 12px;
+        width: 100%; margin: 5px 0; padding: 9px 12px; text-align: left;
+        border: 1px solid #374151; border-radius: 4px;
+        background: #1f2937; color: #e5e7eb; cursor: pointer;
+      }
+      .opt:hover { background: #263242; }
+      .opt-name { font-size: 13px; letter-spacing: 0.06em; }
+      .opt-val { font-size: 13px; letter-spacing: 0.06em; color: #4ade80; text-align: right; }
+      .opt-val.off { color: #6b7280; }
+      .opt-why {
+        grid-column: 1 / -1; font-size: 11px; line-height: 1.4;
+        color: #6b7280; letter-spacing: 0.02em;
+      }
+      .option-presets { display: flex; gap: 8px; }
+      .menu-btn.small { width: 226px; margin: 2px 0; padding: 9px 0; font-size: 13px; }
+
       #lobby { justify-content: flex-start; padding-top: 30px; box-sizing: border-box; }
       .teams { display: flex; gap: 40px; }
       .team { min-width: 250px; }
@@ -301,6 +322,54 @@
           <p>five officers · one outbreak</p>
           <button class="menu-btn" id="btn-offline">PLAY OFFLINE</button>
           <button class="menu-btn" id="btn-online">PLAY ONLINE</button>
+          <button class="menu-btn" id="btn-options">OPTIONS</button>
+        </div>
+
+        <!--
+          Every row says what it costs, because most of them cost almost
+          nothing. Measured at 1920x1080 with a city framed: the whole scene
+          paints in about 5ms and the grime is 0.09ms of it. Without the
+          figures this screen would be a wall of switches to be toggled all
+          evening for no frames; with them, it is obvious that the fog is the
+          only one worth reaching for.
+        -->
+        <div id="screen-options" class="screen">
+          <h2>OPTIONS</h2>
+          <p class="screen-sub">how the game is drawn — none of it changes what you can see</p>
+
+          <div class="options">
+            <button class="opt" id="opt-smooth">
+              <span class="opt-name">MOTION SMOOTHING</span>
+              <span class="opt-val"></span>
+              <span class="opt-why">the world moves 30 times a second and your screen draws 60 · off is sharper input, steppier motion</span>
+            </button>
+            <button class="opt" id="opt-fog">
+              <span class="opt-name">FOG DETAIL</span>
+              <span class="opt-val"></span>
+              <span class="opt-why">the biggest single cost in a frame · LOW rebuilds shadows half as often, so their edges lag near walls while you move</span>
+            </button>
+            <button class="opt" id="opt-ground">
+              <span class="opt-name">GROUND DETAIL</span>
+              <span class="opt-val"></span>
+              <span class="opt-why">grime on the road · costs 0.09ms</span>
+            </button>
+            <button class="opt" id="opt-vignette">
+              <span class="opt-name">VIGNETTE</span>
+              <span class="opt-val"></span>
+              <span class="opt-why">dark corners · costs 0.36ms</span>
+            </button>
+            <button class="opt" id="opt-blood">
+              <span class="opt-name">BLOOD</span>
+              <span class="opt-val"></span>
+              <span class="opt-why">cheap, but the only thing here that builds up over a long round</span>
+            </button>
+          </div>
+
+          <div class="option-presets">
+            <button class="menu-btn small" id="btn-opt-low">LOW GRAPHICS</button>
+            <button class="menu-btn small" id="btn-opt-default">EVERYTHING ON</button>
+          </div>
+          <button class="back-btn" id="btn-options-back">← BACK</button>
         </div>
 
         <div id="screen-name" class="screen">

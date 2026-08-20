@@ -113,6 +113,7 @@ import {
 } from '../../shared/constants.js';
 import type { DogHud } from '../../shared/types.js';
 import { dogSprites, drawSprite } from './dogsprite.js';
+import { settings } from './settings.js';
 
 const TAU = Math.PI * 2;
 
@@ -270,6 +271,7 @@ function grimeTile(ctx: CanvasRenderingContext2D): CanvasPattern | null {
 export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
   ctx.fillStyle = GROUND_COLOR;
   ctx.fillRect(0, 0, map.width, map.height);
+  if (!settings.groundDetail) return;
   const pattern = grimeTile(ctx);
   if (!pattern) return;
   // The pattern is in user space, so it scales and pans with the world — the
@@ -2050,6 +2052,7 @@ const bloodDrops: BloodDrop[] = [];
 const BLOOD_BANDS = 4;
 
 export function spawnBlood(x: number, y: number, angle: number, now: number): void {
+  if (!settings.blood) return;
   const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
   // Marks on the ground, thrown on past the body along the round's line.
   for (let i = 0; i < 4; i++) {
@@ -2194,6 +2197,7 @@ export function drawDeathFade(
 }
 
 export function drawVignette(ctx: CanvasRenderingContext2D, vw: number, vh: number): void {
+  if (!settings.vignette) return;
   if (!vignetteLayer || vignetteLayer.width !== vw || vignetteLayer.height !== vh) {
     const layer = document.createElement('canvas');
     layer.width = vw;

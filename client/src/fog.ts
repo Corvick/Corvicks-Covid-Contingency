@@ -69,6 +69,16 @@ function rayCircle(ox: number, oy: number, dx: number, dy: number, c: Bush): num
 const EPS = 0.0006;
 /** Baseline fan so open ground still reaches the sight radius between corners. */
 const BASE_RAYS = 120;
+/**
+ * The coarser fan LOW GRAPHICS asks for.
+ *
+ * Only the baseline moves. The rays cast at wall corners are what put shadow
+ * edges where the walls actually are, and dropping those would not blur the
+ * fog, it would put the edges in the wrong place — so they stay whatever the
+ * setting is. What thins out is the fill between them, which is why the cost
+ * falls but the shape does not lie.
+ */
+const LOW_BASE_RAYS = 44;
 
 /**
  * Visibility polygon around the viewer. Rays are cast at the silhouette edges
@@ -118,6 +128,8 @@ export function visibilityPolygon(
    */
   clipW = radius,
   clipH = radius,
+  /** Coarser baseline fan — see LOW_BASE_RAYS and the graphics options. */
+  lowDetail = false,
 ): Point[] {
   const nearWalls: Wall[] = [];
   for (const w of walls) {
@@ -169,8 +181,9 @@ export function visibilityPolygon(
   // sorted list doubling back on itself, and the resulting self-overlapping
   // path fills incorrectly — which is what let sight leak into buildings.
   const angles: number[] = [];
-  for (let i = 0; i < BASE_RAYS; i++) {
-    angles.push(-Math.PI + (i / BASE_RAYS) * Math.PI * 2);
+  const baseRays = lowDetail ? LOW_BASE_RAYS : BASE_RAYS;
+  for (let i = 0; i < baseRays; i++) {
+    angles.push(-Math.PI + (i / baseRays) * Math.PI * 2);
   }
 
   for (const w of nearWalls) {
