@@ -2041,6 +2041,26 @@ export function countSurvivors(world: World): number {
  * between, so the pair can overlap again and be pushed a second time. Measured
  * over 11989 body positions, the two versions drifted by up to 17.8px.
  */
+/**
+ * Whether `e` steps aside for `other` outright rather than sharing the shove.
+ *
+ * A squad's shape is one man walking a line and the rest holding a bearing off
+ * his back, so a follower who ends up in front of him is the one that has to
+ * move. Split the overlap evenly and the leader is shoved off his own heading
+ * by the very people following him — with four of them leaning on him from
+ * behind the sweep wanders, and the formation then swings after a bearing
+ * nobody chose.
+ *
+ * Deliberately `squadSlot > 0` and not `escortId` alone. That field does
+ * double duty: a grey officer sticking with whoever has a radio out carries it
+ * too, and that is a man tagging along rather than a man under orders — he has
+ * no standing to be walked through.
+ */
+function defersTo(world: World, e: Entity, other: Entity): boolean {
+  const state = world.ai.get(e.id);
+  return state !== undefined && state.squadSlot > 0 && state.escortId === other.id;
+}
+
 export function resolveCollisions(world: World): void {
   const neighbours = new Set<Entity>();
 
@@ -2062,10 +2082,24 @@ export function resolveCollisions(world: World): void {
       const nx = dx / dist;
       const ny = dy / dist;
 
-      a.x -= nx * (overlap / 2);
-      a.y -= ny * (overlap / 2);
-      b.x += nx * (overlap / 2);
-      b.y += ny * (overlap / 2);
+      // Half each, unless one of them is keeping station on the other — a
+      // squad leader does not give way to his own subordinates, so the
+      // follower takes the whole of it. The shares still sum to 1, so the pair
+      // finish exactly `minDist` apart either way; only *who moved* changes.
+      let aShare = 0.5;
+      let bShare = 0.5;
+      if (defersTo(world, b, a)) {
+        aShare = 0;
+        bShare = 1;
+      } else if (defersTo(world, a, b)) {
+        aShare = 1;
+        bShare = 0;
+      }
+
+      a.x -= nx * overlap * aShare;
+      a.y -= ny * overlap * aShare;
+      b.x += nx * overlap * bShare;
+      b.y += ny * overlap * bShare;
     }
   }
 

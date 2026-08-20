@@ -904,6 +904,37 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
   rare than a scarce one. Both take over an ordinary loot spot, and both skip
   spots already holding a placed item so the second placement can't eat the
   first.
+- **`ITEM_CITY_CAP` is the third of that set: a ceiling.** Currently one entry,
+  `radio: 2`.
+  - **Rarity is a weight, not a scarcity, and the radio is why that matters.**
+    At 2 of the 37 entries in `UTILITY_LOOT` it takes 5.4% of every utility
+    roll, and a city rolls once per building — so the expected count is about
+    *three*. Measured over ten cities before the cap: min 1, median 3, max 6,
+    with five of the ten holding three or more. Each radio is a van, a SWAT
+    team and two patrol cars, so a round with three of them is the garrison's
+    problem being solved out of a pocket. Reported as three vans in one round,
+    which turned out to be the ordinary case rather than a fault.
+  - **Nothing was spawning them.** Checked before changing anything: **0 of 50**
+    bot officers spawn holding a radio, and the debug heap is not the city's
+    loot. 29 of 31 came from the plain building/park roll.
+  - **Lowering the rarity would not have done it.** That makes three unlikely
+    rather than impossible, and it makes the radio scarcer in the ordinary case
+    too — which is not the complaint, one or two is right. A ceiling leaves the
+    common case exactly as it was and cuts only the tail.
+  - **A capped draw is re-rolled, not dropped**, so the house still gets its
+    utility and the amount of loot in a city is untouched — only the mix moves.
+  - **It has to cover every way onto the map or it is not a ceiling.** The
+    building roll, the park stash and the pond bank all draw from a table and
+    all go through one `drawItem` in `spawnPickups`. The every-utility floor
+    needs no telling, since it only fires when the city has none at all.
+  - Counted by **scanning what has actually been placed**, not by a tally.
+    Placement can fail — the park gives a spot 24 tries and may come away with
+    nothing — and a tally incremented at the draw would count items that never
+    landed.
+  - Measured over 12 cities after: radios **min 1, median 2, max 2**, ten cities
+    at 2 and two at 1, **0** over the cap and **0** with none. Guns missing 0,
+    utilities missing 0, one-offs exactly 1 in all 12 — so the floor and the
+    quota still hold underneath the ceiling.
 - **The ammo box can refuse to be picked up.** Utilities report `used`,
   `carry` or `refuse`; holding the pistol or a full gun leaves the box on the
   floor rather than wasting it.
@@ -3200,6 +3231,29 @@ you actually asked for when you picked the handset up.
 - **`SQUAD_SLACK` is what makes it loose.** Held only once they have drifted
   well off station, because correcting to an exact spot is a squad that
   marches. Measured, they settle 53-94px off the leader.
+- **The leader does not give way to his own subordinates.** `resolveCollisions`
+  splits an overlap evenly between any two bodies, which for a squad means the
+  man setting the bearing is shoved off it by the four people whose only job is
+  to follow that bearing — and since the formation is held off *his* facing,
+  nudging him swings all of them after a heading nobody chose. `defersTo` in
+  `world.ts` gives the follower the whole of the push instead. The shares still
+  sum to 1, so the pair finish exactly `minDist` apart and only *who moved*
+  changes; nothing about separation or the order of resolution moves with it.
+  - **It is gated on `squadSlot > 0`, not on `escortId`.** That field does
+    double duty — a grey officer sticking with whoever has a radio out carries
+    it too — and that is a man tagging along rather than a man under orders. He
+    keeps his half of the shove.
+  - Measured on a staged pair overlapping by 10px: unrelated officers 5.00 /
+    5.00 as before, a squad follower **0.00 / 10.00**, and a radio-escort back
+    at 5.00 / 5.00 — so the narrower gate is doing the work rather than
+    `escortId` alone. Live over three real 60s van sweeps the leader was in
+    contact with only his own crew on 442 / 212 / 280 ticks and was moved by
+    them on **0** of them.
+  - *The first live measurement of this read 28 shoves and was the harness's
+    fault, not the code's.* A leader stood against the van he came out of, or a
+    wall, or the pond, is moved by that in the same pass — so "he was touching a
+    follower and he moved" is not the same claim as "a follower moved him".
+    Excluding geometry is what makes the zero mean anything.
 - **The leader carries the pack and the vest.** A radio set drawn on his back
   with an aerial off it, so you can tell which of four identical black figures
   the other three are following, and `KEVLAR_POINTS` of real three-grab denial

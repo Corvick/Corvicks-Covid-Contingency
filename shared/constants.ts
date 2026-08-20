@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.2.1';
+export const GAME_VERSION = '0.2.2';
 
 // ---------------------------------------------------------------- world
 /**
@@ -966,6 +966,37 @@ export const GUARANTEE_EVERY_GUN = true;
  * Rarity 0 stays excluded: the smoke grenade is placed by its own roll.
  */
 export const GUARANTEE_EVERY_UTILITY = true;
+
+/**
+ * A ceiling on how many of one thing a city may hold — the third of the set,
+ * after `ONE_OFF_ITEMS` (a quota, exactly one) and `GUARANTEE_EVERY_*` (a
+ * floor, at least one).
+ *
+ * **The radio is here because rarity is a weight, not a scarcity.** At 2 of 37
+ * entries in `UTILITY_LOOT` it takes 5.4% of every utility roll, and a city
+ * makes that roll once per building — so the expected number is about three
+ * and six is an ordinary run of luck. Measured over ten cities before this
+ * existed: min 1, median 3, max 6, with five of the ten holding three or more.
+ * Each one is a van, a SWAT team and two patrol cars, and three vans arriving
+ * in a round is not a rare event to be enjoyed, it is the garrison's problem
+ * being solved from a pocket.
+ *
+ * **Lowering the rarity would not have done it.** That makes three less
+ * likely without making it impossible, and it also makes the radio scarcer in
+ * the ordinary case, which is not the complaint — one or two is right. A
+ * ceiling leaves the common case exactly as it was and cuts only the tail.
+ *
+ * It has to cover every way onto the map or it leaks: the building roll, the
+ * park stash and the pond bank all draw from a table and are all capped
+ * through one `drawItem` in `spawnPickups`. The every-utility floor is safe
+ * without being told, since it only ever fires when the city has none at all.
+ * The debug heap is deliberately outside it — that is one of everything at a
+ * player's feet and is not the city's loot.
+ */
+export const ITEM_CITY_CAP: Partial<Record<string, number>> = {
+  radio: 2,
+};
+
 /** Its shell detonates where it lands, hurting everything close to it. */
 export const BLAST_RADIUS = 132;
 export const BLAST_DAMAGE_MAX = 140;

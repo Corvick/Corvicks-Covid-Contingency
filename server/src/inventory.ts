@@ -20,6 +20,7 @@ import {
   TEST_DROP_ALL_ITEMS,
   TEST_DROP_RADIUS,
   ONE_OFF_ITEMS,
+  ITEM_CITY_CAP,
   GUARANTEED_ITEMS,
   GUARANTEE_EVERY_GUN,
   GUARANTEE_EVERY_UTILITY,
@@ -194,15 +195,53 @@ export function spawnPickups(world: World): void {
     return false;
   };
 
+  /**
+   * Draw from a loot table, honouring `ITEM_CITY_CAP`.
+   *
+   * Every way loot reaches the map goes through here — the building roll, the
+   * park stash, the pond bank — because a ceiling enforced at two of the three
+   * is not a ceiling. A capped draw is **re-rolled rather than dropped**: the
+   * house still gets its utility, it just isn't a third radio, so the amount of
+   * loot in a city is untouched and only the mix moves.
+   *
+   * Counted by scanning what has actually been placed rather than by keeping a
+   * tally, because placement can fail — the park gives a spot 24 tries and may
+   * come away with nothing — and a tally incremented at the draw would count
+   * items that never landed. The scan is ~100 pickups against ~100 draws, which
+   * is nothing, and it cannot drift out of step with the map.
+   *
+   * The debug heap is excluded on the same test the every-gun floor uses: that
+   * is one of everything at a player's feet, and is not the city's loot.
+   */
+  const cityCount = (item: ItemId): number => {
+    let seen = 0;
+    for (const p of world.pickups.values()) {
+      if (p.item === item && !p.id.startsWith('loot-test-')) seen++;
+    }
+    return seen;
+  };
+  const drawItem = (table: ItemId[]): ItemId => {
+    let item = table[Math.floor(Math.random() * table.length)];
+    // A handful of re-rolls rather than a filtered table: rebuilding the
+    // weighted list per draw would cost more than it saves, and at one capped
+    // item in thirty-seven, twelve straight refusals is a vanishing case.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const cap = ITEM_CITY_CAP[item];
+      if (cap === undefined || cityCount(item) < cap) return item;
+      item = table[Math.floor(Math.random() * table.length)];
+    }
+    return item;
+  };
+
   // A house rolls for a gun and, separately, for something to go with it.
   // They used to compete for the single item a building could hold, which is
   // why a house with a rifle in it never also had a vest.
   for (const b of world.map.buildings) {
     if (Math.random() < BUILDING_GUN_CHANCE) {
-      placeIn(b, GUN_LOOT[Math.floor(Math.random() * GUN_LOOT.length)]);
+      placeIn(b, drawItem(GUN_LOOT));
     }
     if (Math.random() < BUILDING_UTILITY_CHANCE) {
-      placeIn(b, UTILITY_LOOT[Math.floor(Math.random() * UTILITY_LOOT.length)]);
+      placeIn(b, drawItem(UTILITY_LOOT));
     }
   }
 
@@ -224,7 +263,7 @@ export function spawnPickups(world: World): void {
     ),
   ];
   for (const table of parkTables) {
-    const item = table[Math.floor(Math.random() * table.length)];
+    const item = drawItem(table);
     for (let attempt = 0; attempt < 24; attempt++) {
       const x = park.x + 30 + Math.random() * Math.max(1, park.w - 60);
       const y = park.y + 30 + Math.random() * Math.max(1, park.h - 60);
@@ -274,7 +313,7 @@ export function spawnPickups(world: World): void {
   const beaconOnABot = TEST_BEACON_ON_A_BOT && world.bots.size > 0;
   if (BEACON_ONE_PER_CITY && !beaconOnABot) bankTables.push(['survivorBeacon']);
   for (const table of bankTables) {
-    const item = table[Math.floor(Math.random() * table.length)];
+    const item = drawItem(table);
     for (let attempt = 0; attempt < 40; attempt++) {
       // A bearing off the pond's centre, then out past the water's edge at
       // that bearing. The edge is a radius-per-bearing rather than a circle,
