@@ -50,6 +50,7 @@ import {
   GRAPPLE_REACH_BONUS,
   INFECTED_TARGET_PENALTY,
   ZOMBIE_SPREAD_PENALTY,
+  ZOMBIE_TARGET_STICK,
   CHARGE_BARS,
   CHARGE_INFECTED_SIGHT,
   BOT_CHARGE_BARS,
@@ -356,6 +357,20 @@ import {
 import { fire, fireHeld } from './combat.js';
 
 import { requestBeacon } from './heli.js';
+
+/**
+ * The A/B gate for `ZOMBIE_TARGET_STICK`: true puts the pre-margin target
+ * selection back, so both behaviours live in one build and `targetchurn.ts`
+ * can alternate them in one process. Deliberately not read from `process.env`:
+ * the client typechecks this file and has no node types, and the harness is the
+ * only caller anyway. Temporary, and deleted with the measurement it exists for.
+ */
+let noTargetStick = false;
+
+/** Temporary, for the A/B harness — flip the gate without a second process. */
+export function setNoTargetStick(v: boolean): void {
+  noTargetStick = v;
+}
 
 function getAi(world: World, e: Entity, now: number): AiState {
   let state = world.ai.get(e.id);
@@ -5032,6 +5047,16 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
       const claims = (world.targetClaims.get(other.id) ?? 0) - (state.targetId === other.id ? 1 : 0);
       if (claims > 0) score *= 1 + claims * ZOMBIE_SPREAD_PENALTY;
     }
+
+    // And the target we already have is cheaper than a fresh one, which is what
+    // stops the line above oscillating. A claim is a discrete jump that appears
+    // and disappears as the neighbours decide, so with the incumbent merely
+    // *neutral* — which is all that discounting our own claim buys — any wobble
+    // flips us, several times a second. A margin means a newcomer has to be
+    // meaningfully better rather than merely better; somebody who has walked
+    // into our face still is. See `ZOMBIE_TARGET_STICK`.
+    if (!noTargetStick && other.id === state.targetId) score *= ZOMBIE_TARGET_STICK;
+
     if (score >= bestScore) continue;
     if (!hasLineOfSight(world, e.x, e.y, other.x, other.y)) continue;
 

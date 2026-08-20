@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.2.0';
+export const GAME_VERSION = '0.2.1';
 
 // ---------------------------------------------------------------- world
 /**
@@ -1205,6 +1205,41 @@ export const INFECTED_TARGET_PENALTY = 3;
  */
 export const ZOMBIE_SPREAD_SHARE = 0.6;
 export const ZOMBIE_SPREAD_PENALTY = 0.85;
+/**
+ * How much cheaper the target you already have is than a fresh one.
+ *
+ * **This is the damping on `ZOMBIE_SPREAD_PENALTY`, and without it the two of
+ * them are an oscillator.** `world.targetClaims` is rebuilt every tick from
+ * everybody's current `targetId` and every zombie re-picks at
+ * `SENSE_INTERVAL_MS`, so each one is playing best-response against a count
+ * its neighbours are changing underneath it: A leaves P for Q, P's claim drops,
+ * P is attractive again, and A comes back. That is the standard congestion-game
+ * loop, and on screen it is a horde that cannot make its mind up — several
+ * target changes a second, sometimes on consecutive perception ticks.
+ *
+ * Discounting your own claim (in `senseTarget`) stops you talking yourself off
+ * your own target, but it only makes the incumbent *neutral*. Neutral flips on
+ * any wobble: two prey drifting past each other in distance, or one neighbour's
+ * decision applying or removing a whole `ZOMBIE_SPREAD_PENALTY` on one of
+ * them. A margin is what makes it *sticky* — a new target has to be meaningfully
+ * better rather than merely better, so claim churn alone stops being enough to
+ * move anybody, while somebody walking into your face still is.
+ *
+ * **A margin rather than a change budget**, which was the other candidate:
+ * capping a zombie to N switches and then locking it out for a few seconds
+ * leaves the oscillator running — it re-enters the loop the moment the lockout
+ * expires — refuses good switches as readily as bad ones, and needs carve-outs
+ * for the target dying, leaving sight, or the pack filling up, which is the tell
+ * that the rule is fighting the code rather than fixing it. Same shape as
+ * `BOT_BOLT_DIST` → `BOT_SAFE_DIST`, as `BOT_SWAP_MARGIN`, and as
+ * `longestGun` killing the gun flip-flop: the cure for dithering on a line is
+ * a margin, three times now.
+ *
+ * It applies to every zombie, not only the `spreadsOut` ones — a dull zombie
+ * dithering between two equidistant people looks exactly the same on screen.
+ */
+export const ZOMBIE_TARGET_STICK = 0.7;
+
 
 /** AI perception runs on its own budget rather than every tick. */
 export const SENSE_INTERVAL_MS = 100;

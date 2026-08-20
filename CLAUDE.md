@@ -615,6 +615,69 @@ the map is not seeded, so how far the outbreak got varies wildly between runs
 and the survivor counts are not comparable; the ratio is, and the two groups
 don't overlap on the median.
 
+#### And a margin is what stops them dithering
+
+Fanning out came with a flaw: zombies changed target erratically, several times
+a second. `ZOMBIE_TARGET_STICK` (0.7) is the fix — the target you already have
+is scored 30% cheaper than a fresh one.
+
+- **The cause is a best-response loop, not a bug in any one line.**
+  `world.targetClaims` is rebuilt every tick from everybody's current
+  `targetId`, and every zombie re-picks at `SENSE_INTERVAL_MS`. So each one is
+  optimising against a number its neighbours are moving underneath it: A leaves
+  P for Q, P's claim drops, P is attractive again, A comes back. That is the
+  standard congestion-game oscillation and it needs damping, not a better
+  score.
+- **Discounting your own claim only makes the incumbent *neutral*.** That line
+  stops a zombie talking itself off its own target, which is a different
+  problem. Neutral flips on any wobble — two prey drifting past each other in
+  distance, or one neighbour applying or removing a whole
+  `ZOMBIE_SPREAD_PENALTY` on one of them.
+- **A margin rather than a change budget**, and the budget was the other
+  candidate: cap a zombie to N switches and lock it out for a few seconds.
+  Rejected because it leaves the oscillator running — it re-enters the loop the
+  moment the lockout expires — refuses good switches as readily as bad ones,
+  and needs carve-outs for the target dying, leaving sight, or the pack filling
+  up. Three carve-outs is the tell that a rule is fighting the code. It is also
+  the same cure as `BOT_BOLT_DIST` → `BOT_SAFE_DIST`, `BOT_SWAP_MARGIN` and
+  `longestGun`: the answer to dithering on a line is a margin, four times now.
+- **It applies to every zombie, not only `spreadsOut` ones.** A dull zombie
+  dithering between two equidistant people looks the same on screen.
+
+`server/targetchurn.ts` is the harness — headless, no socket, no port, so it
+leaves a game on 8080 alone. Both modes run in one process, alternating city by
+city. It has two halves, and the staged one is the important one:
+
+| | OLD | STICK |
+|---|---|---|
+| switches / zombie-second-with-a-target | 0.366-0.533 | **0.206-0.245** |
+| switches within 500ms of the last | 39-57% | **23-26%** |
+| switches within 1s of the last | 51-66% | **31-37%** |
+| median gap between switches | 400ms | **1600ms** |
+| chasers per distinct target, med/p90 | 1.00 / 3.00 | 1.00 / 3.00 |
+
+Three cities each at 120s. **The control is the bottom row** — this is a margin
+laid over the fanning-out, so the thing it could plausibly have undone is
+measured rather than assumed, and it did not move.
+
+**The staged half is what says the margin discriminates rather than being
+merely stubborn.** A zombie holding P at 300px, pinned on open ground, when Q
+appears: at 100px it takes Q, at 200px it takes Q, at 280px it keeps P — where
+the old behaviour took Q in all three. That 280px case *is* the churn, and the
+100px case is the one a change budget would have refused. Pinning matters: left
+free the zombie closes on its target, the geometry stops holding, and a switch
+caused by the distances changing looks exactly like the feature working.
+
+**The extreme tail is unchanged and the reason is worth knowing.** The worst
+single zombie-second is 8 switches in both. A neighbour piling onto your target
+applies `ZOMBIE_SPREAD_PENALTY` — a ×1.85 — which still overwhelms a ×0.7
+margin, so in a dense crowd the claim swing wins. That is *the feature*, not
+noise: a claim landing on your target is supposed to push you off. Fully
+dominating one extra claim needs the stick below 1/1.85 = 0.54, which would
+require a new target to be 46% closer and would start disabling `spreadsOut`
+for anybody who already has a target. 0.7 damps the bulk and leaves the trait
+its say; below ~0.54 is a different trade, not a stronger version of this one.
+
 ### What the crowd knows
 
 **`danger.ts` is omniscient and `rumour.ts` is not, and that distinction is
