@@ -1,6 +1,7 @@
 import type { MapData, Wall } from '../../shared/types.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { NAV_CELL, NAV_INFLATE, PATH_MAX_NODES } from '../../shared/constants.js';
+import type { OrientedBox } from './geometry.js';
 
 export interface Waypoint {
   x: number;
@@ -84,7 +85,11 @@ export class NavGrid {
    * straight through windows, and anyone following one pressed into the pane
    * until something ate them.
    */
-  constructor(map: MapData, broken: ReadonlySet<number> = new Set()) {
+  constructor(
+    map: MapData,
+    broken: ReadonlySet<number> = new Set(),
+    blockers: readonly OrientedBox[] = [],
+  ) {
     this.cols = Math.ceil(map.width / NAV_CELL);
     this.rows = Math.ceil(map.height / NAV_CELL);
     const count = this.cols * this.rows;
@@ -99,6 +104,9 @@ export class NavGrid {
       if (!broken.has(i)) this.markWall(map.windows[i]);
     }
     this.markPond(map);
+    // Solid bodies that are not part of the map: a parked vehicle, in
+    // practice. See `World.navBlockers`.
+    for (const box of blockers) this.markBox(box);
     this.component = new Int32Array(count).fill(-1);
     this.labelComponents();
   }
@@ -177,6 +185,39 @@ export class NavGrid {
         const dy = cy - pond.y;
         const dist = Math.hypot(dx, dy);
         if (dist >= pondRadiusAt(pond, Math.atan2(dy, dx)) + NAV_INFLATE) continue;
+        this.blocked[r * this.cols + c] = 1;
+      }
+    }
+  }
+
+  /**
+   * The same for a body that is not axis-aligned — a van comes to rest across
+   * whatever bearing it drove in on, and snapping it to the compass would
+   * either block a lane it is not in or leave a corner of it walkable.
+   *
+   * Inflated like a wall is, so a route does not shave the paintwork.
+   */
+  private markBox(box: OrientedBox): void {
+    const cos = Math.cos(box.angle);
+    const sin = Math.sin(box.angle);
+    const hw = box.hw + NAV_INFLATE;
+    const hh = box.hh + NAV_INFLATE;
+    // Axis-aligned bounds of the rotated box, to know which cells to test.
+    const reach = Math.hypot(hw, hh);
+    const c0 = Math.max(0, Math.floor((box.x - reach) / NAV_CELL));
+    const c1 = Math.min(this.cols - 1, Math.floor((box.x + reach) / NAV_CELL));
+    const r0 = Math.max(0, Math.floor((box.y - reach) / NAV_CELL));
+    const r1 = Math.min(this.rows - 1, Math.floor((box.y + reach) / NAV_CELL));
+
+    for (let r = r0; r <= r1; r++) {
+      const cy = r * NAV_CELL + NAV_CELL / 2;
+      for (let c = c0; c <= c1; c++) {
+        const cx = c * NAV_CELL + NAV_CELL / 2;
+        const dx = cx - box.x;
+        const dy = cy - box.y;
+        // Into the box's own frame, where it is an ordinary rect.
+        if (Math.abs(dx * cos + dy * sin) > hw) continue;
+        if (Math.abs(-dx * sin + dy * cos) > hh) continue;
         this.blocked[r * this.cols + c] = 1;
       }
     }

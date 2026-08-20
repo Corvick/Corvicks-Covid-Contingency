@@ -71,6 +71,27 @@ export interface OrientedBox {
   angle: number;
 }
 
+/**
+ * How near a point comes to a segment.
+ *
+ * "Is that thing in the way" is a question about the whole walk, not about
+ * where it ends — the same reason `escapeDestination` scores its midpoint.
+ */
+export function pointToSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  const t = lenSq > 0 ? clamp(((px - x1) * dx + (py - y1) * dy) / lenSq, 0, 1) : 0;
+  return Math.hypot(px - (x1 + dx * t), py - (y1 + dy * t));
+}
+
 /** Distance from a point to the box, and the nearest point on it. */
 export function closestOnBox(
   box: OrientedBox,
@@ -91,6 +112,37 @@ export function closestOnBox(
   const wx = box.x + cx * cos - cy * sin;
   const wy = box.y + cx * sin + cy * cos;
   return { x: wx, y: wy, dist: Math.hypot(px - wx, py - wy) };
+}
+
+/**
+ * Does this segment cross the box?
+ *
+ * Both ends into the box's own frame, where it is an ordinary rect about the
+ * origin and `segmentRectT` answers it — rather than a second implementation
+ * of segment-rect clipping that would have to be kept in step with the first.
+ */
+export function segmentHitsBox(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  box: OrientedBox,
+): boolean {
+  const cos = Math.cos(box.angle);
+  const sin = Math.sin(box.angle);
+  const ax = x1 - box.x;
+  const ay = y1 - box.y;
+  const bx = x2 - box.x;
+  const by = y2 - box.y;
+  return (
+    segmentRectT(
+      ax * cos + ay * sin,
+      -ax * sin + ay * cos,
+      bx * cos + by * sin,
+      -bx * sin + by * cos,
+      { x: -box.hw, y: -box.hh, w: box.hw * 2, h: box.hh * 2 },
+    ) !== null
+  );
 }
 
 /** Push a circle out of an oriented box. Mutates the circle. */

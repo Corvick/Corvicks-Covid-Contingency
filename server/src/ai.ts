@@ -43,6 +43,18 @@ import {
   SHELTER_MULTI_EXIT_BONUS,
   ESCAPE_MIDPOINT_WEIGHT,
   BARRICADE_SECOND_EXIT_BONUS,
+  DOORWAY_MOB,
+  DOORWAY_THREAT_COST,
+  DOORWAY_BEATEN_COST,
+  EXIT_LANE_WIDTH,
+  SETTLED_ROOM_SPEED_MUL,
+  SETTLED_PAUSE_MIN_MS,
+  SETTLED_PAUSE_MAX_MS,
+  SETTLED_ARRIVE_DIST,
+  SETTLED_LEG_GIVE_UP_MS,
+  DOOR_GUARD_CHECK_MS,
+  HIDE_DEEPER_MIN_GAIN,
+  HIDE_DEEPER_GIVE_UP_MS,
   FOLLOW_CROWD_CHECK_MS,
   FOLLOW_CROWD_RANGE,
   FOLLOW_CROWD_COMMIT_MS,
@@ -85,8 +97,6 @@ import {
   UNSTICK_COMMIT_MS,
   OFFICER_FLEE_MS,
   INDOOR_EXIT_MARGIN,
-  SKIRT_RANGE,
-  SKIRT_CONE,
   DOOR_BLOCK_RADIUS,
   REFUGE_CANDIDATES,
   SHELTER_SEARCH_RADIUS,
@@ -198,11 +208,11 @@ import {
   CITY_OFFICER_DOG_DAMAGE_MUL,
   GRAPPLED_COOLDOWN_MUL,
   BOT_SPRINT_TRIGGER,
-  BOT_DODGE_RANGE,
-  BOT_DODGE_CONE,
-  BOT_DODGE_PROBE,
-  BOT_DODGE_SWING_MIN,
-  BOT_DODGE_SWING_MAX,
+  DODGE_RANGE,
+  DODGE_CONE,
+  DODGE_PROBE,
+  DODGE_SWING_MIN,
+  DODGE_SWING_MAX,
   BOT_GIVE_GROUND_PROBE,
   BOT_GIVE_GROUND_BIAS,
   BOT_DOOR_LISTEN_RANGE,
@@ -305,7 +315,14 @@ import {
   DOOR_WARN_LINES,
   DOOR_DEFY_LINES,
 } from '../../shared/constants.js';
-import { angleDelta, clamp, segmentCircleT, segmentRectT, turnToward } from './geometry.js';
+import {
+  angleDelta,
+  clamp,
+  pointToSegment,
+  segmentCircleT,
+  segmentRectT,
+  turnToward,
+} from './geometry.js';
 import {
   collect,
   dropHeld,
@@ -318,6 +335,8 @@ import {
 } from './inventory.js';
 import { zombieAtSandbag } from './emplacement.js';
 import { OUTSIDE } from './rooms.js';
+
+
 
 import { ITEMS, type ItemDef, type ItemId } from '../../shared/items.js';
 import type { Bush, PickupState, Wall } from '../../shared/types.js';
@@ -372,6 +391,42 @@ let noTargetStick = false;
 /** Temporary, for the A/B harness — flip the gate without a second process. */
 export function setNoTargetStick(v: boolean): void {
   noTargetStick = v;
+}
+
+/**
+ * The same two for the crowd fixes, so `crowdcheck.ts` can run both
+ * behaviours in one process. Not `process.env`: the client typechecks this
+ * file through the offline engine and has no node types.
+ *
+ * `noDodge` puts `skirtThreat` back. `noDoorwayMob` puts back the doorway test
+ * that could not see a pile, and with it the retreat into the next room.
+ */
+let noDoorwayMob = false;
+let noDodge = false;
+
+/** Puts `skirtThreat` back: one threat, first walkable side. */
+export function setNoDodge(v: boolean): void {
+  noDodge = v;
+}
+
+export function setNoDoorwayMob(v: boolean): void {
+  noDoorwayMob = v;
+}
+
+/**
+ * The same for holing up: true puts back the `return` that `settledTick`
+ * replaced, so somebody who has shut themselves in a room stands on the spot
+ * for the rest of the round.
+ *
+ * Kept rather than deleted, unlike most gates here, because the control is the
+ * most valuable line `settlecheck.ts` prints — a civilian covering 484px of
+ * its own room against **0.0px** is the whole of what says the fix is the fix.
+ * Not `process.env` for the reason above.
+ */
+let settledStandsStill = false;
+
+export function setSettledStandsStill(v: boolean): void {
+  settledStandsStill = v;
 }
 
 function getAi(world: World, e: Entity, now: number): AiState {
@@ -1449,60 +1504,112 @@ function exitPointFor(
   // guessing at points beyond the building's edges.
   const candidates = doorsOf(world, buildingIndex)
     .map((d) => ({ x: d.x, y: d.y, d: Math.hypot(d.x - e.x, d.y - e.y) }))
-    .filter((c) => world.nav.isReachable(c.x, c.y))
-    .sort((a, b) => a.d - b.d);
+    .filter((c) => world.nav.isReachable(c.x, c.y));
 
-  // Never break for a way out that a zombie is standing in or closer to than
-  // we are — that's just running into its arms.
-  for (const c of candidates) {
-    let covered = false;
-    for (const threat of state.threatPoints) {
-      const threatDist = Math.hypot(c.x - threat.x, c.y - threat.y);
-      if (threatDist < DOOR_BLOCK_RADIUS || threatDist < c.d - 20) {
-        covered = true;
-        break;
+  /**
+   * Two passes, and the second is what keeps squeezing past one of them alive.
+   *
+   * The first refuses any exit a zombie would plainly reach before we do,
+   * which is the old rule and a good one when there is somewhere else to go.
+   * The second drops it, so a lone zombie between somebody and the only door
+   * out is a thing to be got round rather than a reason to stand still.
+   *
+   * **A pile is refused in both.** The old test could not see one: a doorway
+   * was "covered" only while a zombie was within `DOOR_BLOCK_RADIUS` of it or
+   * nearer to it than the runner — so the moment eight of them came through
+   * and spread into the room, every one of them was further from the door than
+   * the people at the back of it, the door read as clear, and the whole room
+   * ran at them. That is the reported case exactly.
+   */
+  for (const allowBeaten of [false, true]) {
+    let best: { x: number; y: number } | null = null;
+    let bestScore = -Infinity;
+
+    for (const c of candidates) {
+      let mob = 0;
+      let beaten = false;
+      for (const threat of state.threatPoints) {
+        const threatDist = Math.hypot(c.x - threat.x, c.y - threat.y);
+        // At the door, or on the way to it: both are the same problem, and
+        // scoring only the far end is the mistake `escapeDestination` names.
+        if (
+          threatDist < DOOR_BLOCK_RADIUS ||
+          pointToSegment(threat.x, threat.y, e.x, e.y, c.x, c.y) < EXIT_LANE_WIDTH
+        ) {
+          mob++;
+        }
+        if (threatDist < c.d - 20) beaten = true;
       }
+      if (!noDoorwayMob && mob >= DOORWAY_MOB) continue; // not a way out, whatever else is true
+      if (beaten && !allowBeaten) continue;
+
+      let score = -c.d - mob * DOORWAY_THREAT_COST;
+      if (beaten) score -= DOORWAY_BEATEN_COST;
+      if (score <= bestScore) continue;
+      bestScore = score;
+      best = { x: c.x, y: c.y };
     }
-    if (!covered) return { x: c.x, y: c.y };
+    if (best) return best;
   }
-  return null; // every exit is covered — better to keep our distance inside
+  return null; // every way out is held — see `nextRoomAwayFrom`
 }
 
 /**
- * Somewhere deeper in this building to shut a door on, for somebody who would
- * rather barricade than sprint past the thing between them and the street.
+ * The next room in, away from whatever is coming.
  *
- * The room graph is what makes this possible: "the zombie is in my building"
- * used to be the whole answer, and it is far too coarse a one — it is the
+ * Two callers with the same question and a different reason for asking, so one
+ * function with one flag rather than two that would drift apart.
+ *
+ * `needsDoor` is the barricade: somebody who would rather put a slab between
+ * themselves and the thing than sprint past it, which needs a doorway with
+ * something actually hung in it and is pointless once the zombie is in this
+ * very room. Without it, this is plain retreat — **anybody** backing out of a
+ * room whose ways out are held, which is what the whole city needed and only
+ * the `barricades` third of it had. Reported as *"most civilians will not run
+ * deeper into a building or go out another exit and instead try to run past
+ * zombies"*.
+ *
+ * The room graph is what makes either possible: "the zombie is in my building"
+ * used to be the whole answer, and it is far too coarse a one: it is the
  * difference between being trapped with it and being two rooms and a bolted
- * door away from it. Prefers a room with a second way out, so the barricade is
- * a delay rather than a coffin.
+ * door away from it. Prefers a room with a second way out, so it is a delay
+ * rather than a coffin.
  */
-function barricadeRoom(
+function nextRoomAwayFrom(
   world: World,
   e: Entity,
   state: AiState,
   now: number,
+  needsDoor: boolean,
 ): { x: number; y: number } | null {
   const here = world.rooms.roomAt(e.x, e.y);
   if (here === OUTSIDE) return null;
-  // One in this very room already: there is nothing left to shut on it.
-  if (world.rooms.zombiesIn(here) > 0) return null;
+  // One in this very room already: there is nothing left to shut on it. Only
+  // the barricade cares — being in the room with one is precisely when a plain
+  // retreat wants to leave it.
+  if (needsDoor && world.rooms.zombiesIn(here) > 0) return null;
 
   const exits = world.rooms.rooms[here].exits;
   let best: { x: number; y: number } | null = null;
   let bestScore = -Infinity;
 
   for (const index of exits) {
-    // It has to be a doorway with something actually hung in it, or there is
-    // nothing to shut and the whole plan is just walking into the next room.
-    if (!world.doors[index]) continue;
+    // For a barricade it has to be a doorway with something hung in it, or
+    // there is nothing to shut and the plan is just walking into the next room
+    // — which is exactly what the other caller wants.
+    if (needsDoor && !world.doors[index]) continue;
     const far = world.rooms.farSideOf(index, here);
     if (far === OUTSIDE) continue; // that is the street, and this is not that plan
     if (world.rooms.zombiesIn(far) > 0) continue;
 
     const room = world.rooms.rooms[far];
     const spec = world.map.doors[index];
+
+    // And not through a doorway one of them is standing in, which is the same
+    // mistake as charging the front door with a pile in it.
+    if (state.threatPoints.some((t) => Math.hypot(t.x - spec.x, t.y - spec.y) < DOOR_BLOCK_RADIUS)) {
+      continue;
+    }
 
     // Away from whatever is chasing us, and ideally not into a dead end.
     let score = Math.hypot(room.x - state.threatX, room.y - state.threatY) * 0.5;
@@ -1516,6 +1623,308 @@ function barricadeRoom(
     }
   }
   return best;
+}
+
+/**
+ * The next room in from this one, for anybody who would rather wait it out at
+ * the back of the building than by the front door.
+ *
+ * **One room at a time, through this room's own doorways** — deliberately not
+ * the deepest room in the building, which was the first version and does not
+ * work. Two things go wrong with a distant goal, and the rig found both:
+ * fourteen seconds at 35px/s does not cross a landmark, so every single hider
+ * hit its deadline having arrived nowhere; and the router does not know this
+ * is meant to be an indoor journey, so the shortest nav line from a front room
+ * to a back one runs out of one street door and in at another. Two of eight
+ * ended up **outside the building they were hiding in**.
+ *
+ * Stepping through the adjacent doorway cannot leave the building, is a walk
+ * of one room, and repeated — see `settledTick` — arrives at the back anyway.
+ *
+ * "Deeper" is `Room.depth`, doorways between here and the street, and not
+ * distance: the far end of a long hall is no further from the street than its
+ * near end. That is also what makes this a landmark behaviour without a word
+ * being said about landmarks — an ordinary block is one undivided room, so
+ * there is nowhere deeper in it to go and the trait simply never fires there.
+ */
+function deeperRoom(world: World, e: Entity, now: number): { x: number; y: number } | null {
+  const here = world.rooms.roomAt(e.x, e.y);
+  if (here === OUTSIDE) return null;
+  const from = world.rooms.rooms[here];
+  if (!Number.isFinite(from.depth)) return null;
+
+  // Where to end up, found over the room graph — and then only the first hop
+  // of the way there is walked.
+  //
+  // The choice cannot be made one doorway at a time. Two rooms off the street
+  // side by side is an ordinary shape, and greedily requiring every step to go
+  // deeper strands anybody in the one whose neighbours are all at its own
+  // depth: measured, one hider in eight never moved at all, in a building nine
+  // rooms deep. A search over the graph walks the flat bit to get to the stairs.
+  //
+  // The graph is one building — twenty rooms at the outside — and this runs
+  // once per room walked into, not per tick.
+  const hops = new Map<number, { first: number; steps: number }>();
+  const queue: number[] = [here];
+  hops.set(here, { first: here, steps: 0 });
+  for (let head = 0; head < queue.length; head++) {
+    const id = queue[head];
+    const at = hops.get(id)!;
+    for (const index of world.rooms.rooms[id].exits) {
+      const far = world.rooms.farSideOf(index, id);
+      if (far === OUTSIDE) continue; // the street is the opposite of this plan
+      if (hops.has(far)) continue;
+      if (world.rooms.zombiesIn(far) > 0) continue; // not through that one
+      hops.set(far, { first: id === here ? far : at.first, steps: at.steps + 1 });
+      queue.push(far);
+    }
+  }
+
+  let bestFirst = -1;
+  let bestScore = -Infinity;
+  for (const [id, at] of hops) {
+    if (id === here) continue;
+    const room = world.rooms.rooms[id];
+    if (!Number.isFinite(room.depth)) continue;
+    if (room.depth < from.depth + HIDE_DEEPER_MIN_GAIN) continue;
+
+    // Deeper wins outright; the rest only separates rooms equally far in.
+    // Fewest people already there, so a household fans out through the back of
+    // the house rather than all standing in one room, and then the shorter
+    // walk of what is left.
+    let score = room.depth * 1000;
+    score -= world.rooms.preyIn(id) * 130;
+    score -= at.steps * 150;
+    score -= world.rumour.heatAt(room.x, room.y, now) * RUMOUR_SHELTER_WEIGHT * 0.5;
+    if (score <= bestScore) continue;
+    bestScore = score;
+    bestFirst = at.first;
+  }
+  if (bestFirst < 0) return null;
+
+  // The middle of the next room, deliberately, and not a random spot on its
+  // floor. `randomPoint` is uniform over floor cells and some of those sit
+  // right beside the doorway just come through — arriving on one leaves the
+  // room underfoot ambiguous, since a doorway belongs to whichever room's
+  // floor is nearer, and the next leg is then chosen from the wrong room.
+  // Measured that way, one hider in eight walked back out the way it came.
+  // Spreading a household out is the pacing's job, and it does it in seconds.
+  const room = world.rooms.rooms[bestFirst];
+  return { x: room.x, y: room.y };
+}
+
+/**
+ * Hole up. Everything that decides somebody has stopped running goes through
+ * here rather than assigning the mode, because settling is not one thing: it
+ * is a room to be in, possibly a walk to the back of the building first, and a
+ * clock for the pacing that follows.
+ *
+ * `settleRoom` is latched here rather than read fresh every tick on purpose —
+ * it is what "pace about in *here*" means, and somebody who drifts into their
+ * own doorway must not thereby adopt the room next door.
+ */
+function settleHere(world: World, e: Entity, state: AiState, now: number): void {
+  state.mode = 'settled';
+  state.path = null;
+  state.nextPathAt = 0;
+  state.settleGoalX = null;
+  state.settleGoalY = null;
+  state.settleWalkUntil = 0;
+  state.settlePauseUntil = 0;
+  state.settleRoom = world.rooms.roomAt(e.x, e.y);
+  state.wanderX = e.x;
+  state.wanderY = e.y;
+
+  if (!state.hidesDeeper || state.settleRoom === OUTSIDE) return;
+  const deeper = deeperRoom(world, e, now);
+  if (!deeper) return;
+  state.settleGoalX = deeper.x;
+  state.settleGoalY = deeper.y;
+  // One budget for the whole move in, not one per room. It is never extended
+  // as they go, which is what bounds a ping-pong at a doorway.
+  state.settleWalkUntil = now + HIDE_DEEPER_GIVE_UP_MS;
+}
+
+/**
+ * Stand about for a while, then walk the next lap.
+ *
+ * The deadline on the walk is measured from the *end* of the standing about,
+ * not from now: the pause runs first and is much the longer of the two, so a
+ * deadline set from now is mostly spent motionless and then expires before a
+ * step has been taken — at which point the target is thrown away and another
+ * one picked, and the pacing is a person standing still choosing spots they
+ * never walk to. Measured that way: 168-290px covered in a minute, and a reach
+ * of 30-63px inside rooms a good deal wider than that.
+ */
+function restSettled(state: AiState, now: number): void {
+  state.settlePauseUntil =
+    now + SETTLED_PAUSE_MIN_MS + Math.random() * (SETTLED_PAUSE_MAX_MS - SETTLED_PAUSE_MIN_MS);
+  state.settleWalkUntil = state.settlePauseUntil + SETTLED_LEG_GIVE_UP_MS;
+}
+
+/**
+ * A door on this room's boundary that has come open, or been unbolted, since
+ * whoever holed up in here last saw to it.
+ *
+ * Only the room's own doorways are looked at — `Room.exits` is that list, so
+ * this is a walk of three or four indices rather than a spatial query, which
+ * is what makes it affordable for a city full of people sitting in rooms. A
+ * door somebody else is already working is left to them, and one an officer
+ * bolted is left alone entirely, the same rule everything else here follows.
+ */
+function unsecuredDoorOf(world: World, e: Entity, state: AiState, now: number): number {
+  const room = world.rooms.rooms[state.settleRoom];
+  if (!room) return -1;
+
+  let best = -1;
+  let bestGap = Infinity;
+  for (const index of room.exits) {
+    const door = world.doors[index];
+    if (!door || door.broken) continue;
+    if (!door.open && (door.locked || door.playerLocked)) continue; // already seen to
+    if (index === state.doorIgnore && now < state.doorIgnoreUntil) continue;
+    if (doorBusyForOthers(world, index, e.id, now)) continue;
+    // Bolting one needs the right side of it, and a room you are standing in
+    // is the right side by construction — but the check is cheap, and the day
+    // a room's id bleeds somewhere odd it is the only thing that catches it.
+    if (!canWorkLockFrom(world, index, e.x, e.y)) continue;
+
+    const spec = world.map.doors[index];
+    const gap = Math.hypot(spec.x - e.x, spec.y - e.y);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = index;
+    }
+  }
+  return best;
+}
+
+/**
+ * Waiting it out. Pace the room, and for some of them keep an eye on its
+ * doors.
+ *
+ * Before this, settling was a `return` and nothing else: somebody who ran into
+ * a room, shut the door and threw the bolt then stood on that exact spot,
+ * facing that exact way, for the rest of the round. Every other kind of
+ * standing about in this file — the rally hold, an officer at his post — at
+ * least looks around.
+ */
+function settledTick(world: World, e: Entity, state: AiState, now: number, dt: number): void {
+  if (settledStandsStill) return; // the standing still this replaced — see the gate
+  // Settled behind somebody with a gun, or down inside a bush: those are spots
+  // that are held rather than rooms that are paced, and moving off either one
+  // gives up the only thing it was worth going there for.
+  if (state.settleRoom === OUTSIDE) return;
+
+  // Still on the way in — the back of the building, for a deeper-hider. Doors
+  // on that route are worked normally; see the settled case in `doorTick`.
+  if (state.settleGoalX !== null && state.settleGoalY !== null) {
+    const gap = Math.hypot(state.settleGoalX - e.x, state.settleGoalY - e.y);
+    if (gap > SETTLED_ARRIVE_DIST && now < state.settleWalkUntil) {
+      // Deliberately no `unstickTick` here, and it was tried. It wants
+      // `UNSTICK_MIN_PROGRESS` (16px) in `UNSTICK_CHECK_MS` (420ms) — 38px/s,
+      // which is calibrated for running away and is *above* what a walking
+      // civilian makes at 42px/s the moment it turns a corner or stands at a
+      // handle. Measured, hiders spent 4.5-9.1s of a 20s move in committed to a
+      // blind breakout heading they had no need of. What covers a route that
+      // genuinely will not work is the budget below: they hole up one room
+      // short, which is a perfectly good place to be.
+      const desired = headingToward(world, e, state, state.settleGoalX, state.settleGoalY, now);
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.2, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
+
+    // One room in. If there is another beyond it and time left in the budget,
+    // keep going — the trip to the back of a landmark is a walk of one room
+    // repeated, because that is the only kind of leg that cannot be routed out
+    // into the street on the way.
+    if (gap <= SETTLED_ARRIVE_DIST && now < state.settleWalkUntil && state.hidesDeeper) {
+      const next = deeperRoom(world, e, now);
+      if (next) {
+        state.settleGoalX = next.x;
+        state.settleGoalY = next.y;
+        state.settleRoom = world.rooms.roomAt(e.x, e.y);
+        state.path = null;
+        state.nextPathAt = 0;
+        return;
+      }
+    }
+    // Arrived, or gave it up against a bolted door on the way. Either way,
+    // wherever they have got to is home now — including the pacing target,
+    // which is still the spot they set out from and would walk them straight
+    // back out of the room they have just come into.
+    state.settleGoalX = null;
+    state.settleGoalY = null;
+    state.path = null;
+    state.settleRoom = world.rooms.roomAt(e.x, e.y);
+    state.wanderX = e.x;
+    state.wanderY = e.y;
+    restSettled(state, now);
+    // Shoved out of the building on the way — by a crowd at the doorway, or by
+    // whatever else was pushing past. Settled in the street is worse than the
+    // standing still this replaced, so drop back to ordinary behaviour and let
+    // them find somewhere again.
+    if (state.settleRoom === OUTSIDE) state.mode = 'wander';
+    return;
+  }
+
+  // Doors first: one standing open is worth crossing the room for, where the
+  // next lap of pacing is not. `lockAlso` does the walking and the handle —
+  // all that is added here is somebody looking.
+  if (state.guardsDoors && state.lockAlso < 0 && now >= state.nextDoorGuardAt) {
+    state.nextDoorGuardAt = now + DOOR_GUARD_CHECK_MS;
+    const slipped = unsecuredDoorOf(world, e, state, now);
+    if (slipped >= 0) {
+      state.lockAlso = slipped;
+      return;
+    }
+  }
+
+  // Standing between legs. Long stops and short walks: this is waiting
+  // something out, not strolling. They look about while they wait — somebody
+  // holed up watches the door.
+  if (now < state.settlePauseUntil) {
+    if (now >= state.nextLookAt) {
+      state.nextLookAt = now + RALLY_LOOK_MIN_MS + Math.random() * (RALLY_LOOK_MAX_MS - RALLY_LOOK_MIN_MS);
+      state.lookHeading = Math.random() * Math.PI * 2;
+    }
+    state.heading = turnToward(state.heading, state.lookHeading, RALLY_LOOK_TURN_RATE * dt);
+    e.facing = state.heading;
+    return;
+  }
+
+  const arrived = Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < SETTLED_ARRIVE_DIST;
+  if (arrived || now >= state.settleWalkUntil) {
+    // A leg that ran out of time is a leg that went nowhere, and the likeliest
+    // reason is that the room was latched wrong — settling happens at a door
+    // as often as not, and a doorway belongs to whichever room's floor is
+    // nearer. Re-reading it there repairs that within one leg rather than
+    // leaving somebody pacing at a slab for the rest of the round. Only on the
+    // failure: arriving proves the latch, since the spot came out of it.
+    if (!arrived) {
+      const here = world.rooms.roomAt(e.x, e.y);
+      if (here === OUTSIDE) {
+        state.mode = 'wander';
+        return;
+      }
+      state.settleRoom = here;
+    }
+
+    // Next lap. A spot on this room's own floor, so the walk cannot leave the
+    // room and nothing afterwards has to talk them out of a doorway.
+    const spot = world.rooms.randomPoint(state.settleRoom);
+    if (spot) {
+      state.wanderX = spot.x;
+      state.wanderY = spot.y;
+    }
+    state.path = null;
+    state.nextPathAt = 0;
+    restSettled(state, now);
+    return;
+  }
+
+  const desired = headingToward(world, e, state, state.wanderX, state.wanderY, now);
+  step(world, e, state, desired, HUMAN_WALK_SPEED * SETTLED_ROOM_SPEED_MUL, HUMAN_TURN_RATE, dt, now);
 }
 
 /**
@@ -1565,29 +1974,6 @@ function crowdHeading(world: World, e: Entity, state: AiState, now: number): num
  * Nudge a heading sideways when it would run straight into the zombie, so
  * people squeeze past it toward the door rather than colliding with it.
  */
-function skirtThreat(world: World, e: Entity, state: AiState, desired: number): number {
-  const dx = state.threatX - e.x;
-  const dy = state.threatY - e.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist > SKIRT_RANGE) return desired;
-
-  const toThreat = Math.atan2(dy, dx);
-  if (Math.abs(angleDelta(desired, toThreat)) > SKIRT_CONE) return desired;
-
-  const clearAt = (angle: number) => {
-    const px = e.x + Math.cos(angle) * 90;
-    const py = e.y + Math.sin(angle) * 90;
-    return !world.nav.isBlocked(px, py) && world.nav.lineClear(e.x, e.y, px, py);
-  };
-
-  // Prefer the side that puts more room between us and it.
-  const side = angleDelta(desired, toThreat) > 0 ? -1 : 1;
-  const swing = Math.PI / 2.6;
-  if (clearAt(desired + side * swing)) return desired + side * swing;
-  if (clearAt(desired - side * swing)) return desired - side * swing;
-  return desired;
-}
-
 // ---------------------------------------------------------------- doors
 
 /**
@@ -1721,6 +2107,17 @@ function threatSharesRefuge(world: World, e: Entity, state: AiState): boolean {
   return false;
 }
 
+/**
+ * Holed up, as against still walking to the place they mean to hole up in.
+ *
+ * The two want opposite things from a door — one is finished with them and one
+ * has to get through them — so every door decision asks this rather than the
+ * mode alone.
+ */
+function holedUp(state: AiState): boolean {
+  return state.mode === 'settled' && state.settleGoalX === null;
+}
+
 /** Start working a door. Whatever they were doing is left exactly as it was. */
 function beginDoorWork(
   world: World,
@@ -1833,13 +2230,15 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
     // this they carried on with whatever they were walking toward, which for
     // an interior door meant unbolting it again a moment later to get to the
     // next room — having just shut themselves in on purpose.
-    state.mode = 'settled';
-    state.wanderX = e.x;
-    state.wanderY = e.y;
-    state.path = null;
+    //
+    // It is the end of the *journey*, though, not of the person: `settleHere`
+    // is what gives them a room to wait it out in rather than a spot to stand
+    // on. This is the exact case that was reported — run in, bolt the door,
+    // and then never move again.
     state.shelterBuilding = -1;
     state.shelterX = null;
     state.shelterY = null;
+    settleHere(world, e, state, now);
     warnTheRoom(world, e, state, index, now);
   } else if (action === 'kick') {
     // Straight off its hinges, whatever was left in it — the same thing a
@@ -2048,7 +2447,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // in, does not unbolt the way out; between rooms is another matter.
     if (canWorkLockFrom(world, ahead, e.x, e.y)) {
       const wayOut = door.insideSign !== 0;
-      const stayingPut = state.mode === 'settled' || (wayOut && state.homeBuilding >= 0);
+      const stayingPut = holedUp(state) || (wayOut && state.homeBuilding >= 0);
       if (stayingPut) {
         state.doorIgnore = ahead;
         state.doorIgnoreUntil = now + DOOR_REENGAGE_MS;
@@ -2080,6 +2479,21 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
       state.doorWatch = ahead;
       state.doorWatchUntil = now + BOT_DOOR_WATCH_MS;
     }
+    return false;
+  }
+
+  // Somebody holed up does not open doors. They shut themselves in here on
+  // purpose, and the pacing about that follows must not become a slower way
+  // back out of it — a settled person walking their room and opening whatever
+  // their shoulder brushes empties the room again just as surely as walking
+  // out of it would. Anyone still on their way *to* where they mean to hole up
+  // is exempt, or a shut interior door on that route strands them in the hall.
+  //
+  // It costs one tick at most: a threat sets `flee` further down this same
+  // update, so the refusal cannot survive into the moment it would matter.
+  if (holedUp(state)) {
+    state.doorIgnore = ahead;
+    state.doorIgnoreUntil = now + DOOR_REENGAGE_MS;
     return false;
   }
 
@@ -2584,7 +2998,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
         const gap = Math.hypot(protector.x - e.x, protector.y - e.y);
         if (gap > OFFICER_REFUGE_GAP) {
           const desired = headingToward(world, e, state, protector.x, protector.y, now);
-          step(world, e, state, skirtThreat(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
+          step(world, e, state, dodgeThreats(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
           return;
         }
         // Close enough to feel safe: hold beside them and watch the street,
@@ -2610,7 +3024,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
       const bush = state.bushX !== null && state.bushY !== null ? { x: state.bushX, y: state.bushY } : null;
       if (bush) {
         if (isInBush(world, e.x, e.y)) {
-          state.mode = 'settled';
+          settleHere(world, e, state, now);
           return;
         }
         const desired = headingToward(world, e, state, bush.x, bush.y, now);
@@ -2647,10 +3061,10 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
         // hall. Not when it is in this very room, though: at that point there
         // is nothing left to shut.
         if (state.barricades && world.rooms.rooms[world.rooms.roomAt(e.x, e.y)]?.hasInnerExit) {
-          const deeper = barricadeRoom(world, e, state, now);
+          const deeper = nextRoomAwayFrom(world, e, state, now, true);
           if (deeper) {
             const inward = headingToward(world, e, state, deeper.x, deeper.y, now);
-            step(world, e, state, skirtThreat(world, e, state, inward), speed, HUMAN_TURN_RATE, dt, now);
+            step(world, e, state, dodgeThreats(world, e, state, inward), speed, HUMAN_TURN_RATE, dt, now);
             return;
           }
         }
@@ -2679,7 +3093,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
           state.shelterX = null;
           state.shelterY = null;
           if (state.shelterSeeker) state.homeBuilding = building;
-          state.mode = 'settled';
+          settleHere(world, e, state, now);
           return;
         }
 
@@ -2692,7 +3106,18 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
           const exit = exitPointFor(world, building, e, state);
           if (exit) {
             const toExit = headingToward(world, e, state, exit.x, exit.y, now);
-            step(world, e, state, skirtThreat(world, e, state, toExit), speed, HUMAN_TURN_RATE, dt, now);
+            step(world, e, state, dodgeThreats(world, e, state, toExit), speed, HUMAN_TURN_RATE, dt, now);
+            return;
+          }
+
+          // Every way out of this building is held. Backing into the next room
+          // is what anybody would do; before this only the `barricades` third
+          // ever did, and the rest fell through to the open-ground escape,
+          // which mills about in front of the pile it cannot get past.
+          const back = noDoorwayMob ? null : nextRoomAwayFrom(world, e, state, now, false);
+          if (back) {
+            const inward = headingToward(world, e, state, back.x, back.y, now);
+            step(world, e, state, dodgeThreats(world, e, state, inward), speed, HUMAN_TURN_RATE, dt, now);
             return;
           }
         }
@@ -2719,13 +3144,13 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
             state.shelterVia = -1;
           } else {
             const toVia = headingToward(world, e, state, via.x, via.y, now);
-            step(world, e, state, skirtThreat(world, e, state, toVia), speed, HUMAN_TURN_RATE, dt, now);
+            step(world, e, state, dodgeThreats(world, e, state, toVia), speed, HUMAN_TURN_RATE, dt, now);
             return;
           }
         }
         if (state.shelterX !== null && state.shelterY !== null) {
           const toShelter = headingToward(world, e, state, state.shelterX, state.shelterY, now);
-          step(world, e, state, skirtThreat(world, e, state, toShelter), speed, HUMAN_TURN_RATE, dt, now);
+          step(world, e, state, dodgeThreats(world, e, state, toShelter), speed, HUMAN_TURN_RATE, dt, now);
           return;
         }
       }
@@ -2735,7 +3160,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
       // four hundred people each solving the same problem on their own.
       const crowd = crowdHeading(world, e, state, now);
       if (crowd !== null) {
-        step(world, e, state, skirtThreat(world, e, state, crowd), speed, HUMAN_TURN_RATE, dt, now);
+        step(world, e, state, dodgeThreats(world, e, state, crowd), speed, HUMAN_TURN_RATE, dt, now);
         return;
       }
 
@@ -2745,7 +3170,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
       const escape = escapeDestination(world, e, state, now);
       if (escape) {
         const toEscape = headingToward(world, e, state, escape.x, escape.y, now);
-        step(world, e, state, skirtThreat(world, e, state, toEscape), speed, HUMAN_TURN_RATE, dt, now);
+        step(world, e, state, dodgeThreats(world, e, state, toEscape), speed, HUMAN_TURN_RATE, dt, now);
         return;
       }
     }
@@ -2753,7 +3178,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     const desired =
       state.fleeStyle === 'bolt'
         ? Math.atan2(e.y - state.threatY, e.x - state.threatX) + (Math.random() - 0.5) * 0.25
-        : skirtThreat(world, e, state, safestHeading(world, e, state));
+        : dodgeThreats(world, e, state, safestHeading(world, e, state));
     step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
     return;
   }
@@ -2866,7 +3291,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
     }
     case 'seek': {
       if (hasSettled(world, e, state)) {
-        state.mode = 'settled';
+        settleHere(world, e, state, now);
         // Next scare picks a fresh refuge rather than this same one.
         state.refugeX = null;
         state.refugeY = null;
@@ -2899,6 +3324,7 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
         if (nearestProtector(world, e, PROTECTED_DIST)) protectorChatter(world, e, state, now);
         else state.nextProtectSpeechAt = now + PROTECT_CHATTER_MIN_MS;
       }
+      settledTick(world, e, state, now, dt);
       return;
     default:
       break;
@@ -4245,11 +4671,17 @@ function nearestThreat(e: Entity, state: AiState): number {
  * unchanged when neither way round is walkable, which is exactly when pressing
  * on is right.
  *
- * `skirtThreat` is the civilian version and reads only `threatX/threatY` — the
- * single tracked threat, which for a bot is routinely not the one it is about
- * to run into. This walks `threatPoints`, already built on the perception tick.
+ * It was a bot's alone until now. `skirtThreat` was the civilian version and
+ * read only `threatX/threatY` — the single tracked threat, which is routinely
+ * not the one anybody is about to run into — and then took the first side that
+ * was merely walkable rather than the side with room on it. Running from the
+ * zombie behind you into the one beside it, and then turning round and running
+ * back at the first, both fall straight out of that. Everybody runs this now
+ * and `skirtThreat` is gone. It walks `threatPoints`, already built on the
+ * perception tick, so it costs a fleeing civilian a short list and two probes.
  */
 function dodgeThreats(world: World, e: Entity, state: AiState, desired: number): number {
+  if (noDodge) return skirtThreatOld(world, e, state, desired);
   let blockX = 0;
   let blockY = 0;
   let blockDist = Infinity;
@@ -4258,8 +4690,8 @@ function dodgeThreats(world: World, e: Entity, state: AiState, desired: number):
     const dx = p.x - e.x;
     const dy = p.y - e.y;
     const d = Math.hypot(dx, dy);
-    if (d > BOT_DODGE_RANGE || d >= blockDist) continue;
-    if (Math.abs(angleDelta(desired, Math.atan2(dy, dx))) > BOT_DODGE_CONE) continue;
+    if (d > DODGE_RANGE || d >= blockDist) continue;
+    if (Math.abs(angleDelta(desired, Math.atan2(dy, dx))) > DODGE_CONE) continue;
     blockDist = d;
     blockX = p.x;
     blockY = p.y;
@@ -4268,8 +4700,8 @@ function dodgeThreats(world: World, e: Entity, state: AiState, desired: number):
 
   // How much room a candidate leaves, or -Infinity for one that isn't walkable.
   const roomAt = (angle: number): number => {
-    const px = e.x + Math.cos(angle) * BOT_DODGE_PROBE;
-    const py = e.y + Math.sin(angle) * BOT_DODGE_PROBE;
+    const px = e.x + Math.cos(angle) * DODGE_PROBE;
+    const py = e.y + Math.sin(angle) * DODGE_PROBE;
     if (world.nav.isBlocked(px, py) || !world.nav.lineClear(e.x, e.y, px, py)) return -Infinity;
     let clear = Infinity;
     for (const p of state.threatPoints) {
@@ -4279,8 +4711,8 @@ function dodgeThreats(world: World, e: Entity, state: AiState, desired: number):
     return clear;
   };
 
-  const t = 1 - Math.min(1, blockDist / BOT_DODGE_RANGE);
-  const swing = BOT_DODGE_SWING_MIN + (BOT_DODGE_SWING_MAX - BOT_DODGE_SWING_MIN) * t;
+  const t = 1 - Math.min(1, blockDist / DODGE_RANGE);
+  const swing = DODGE_SWING_MIN + (DODGE_SWING_MAX - DODGE_SWING_MIN) * t;
   // Both ways round are scored rather than taking the first that is open: the
   // near side is often the one with the rest of the pack standing on it.
   const left = desired + swing;
@@ -4289,6 +4721,32 @@ function dodgeThreats(world: World, e: Entity, state: AiState, desired: number):
   const roomRight = roomAt(right);
   if (roomLeft === -Infinity && roomRight === -Infinity) return desired;
   return roomLeft >= roomRight ? left : right;
+}
+
+/**
+ * What civilians used to do instead — kept only so `crowdcheck.ts` can price
+ * the difference. One threat, and the first side that is merely walkable.
+ */
+function skirtThreatOld(world: World, e: Entity, state: AiState, desired: number): number {
+  const dx = state.threatX - e.x;
+  const dy = state.threatY - e.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > 155) return desired;
+
+  const toThreat = Math.atan2(dy, dx);
+  if (Math.abs(angleDelta(desired, toThreat)) > 0.9) return desired;
+
+  const clearAt = (angle: number): boolean => {
+    const px = e.x + Math.cos(angle) * 90;
+    const py = e.y + Math.sin(angle) * 90;
+    return !world.nav.isBlocked(px, py) && world.nav.lineClear(e.x, e.y, px, py);
+  };
+
+  const side = angleDelta(desired, toThreat) > 0 ? -1 : 1;
+  const swing = Math.PI / 2.6;
+  if (clearAt(desired + side * swing)) return desired + side * swing;
+  if (clearAt(desired - side * swing)) return desired - side * swing;
+  return desired;
 }
 
 /**

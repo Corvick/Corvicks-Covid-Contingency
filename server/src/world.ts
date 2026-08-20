@@ -61,6 +61,8 @@ import {
   ZOMBIE_SPREAD_SHARE,
   OFFICER_SEEK_CHANCE,
   BARRICADE_CHANCE,
+  DOOR_GUARD_CHANCE,
+  HIDE_DEEPER_CHANCE,
   FOLLOW_CROWD_CHANCE,
   RALLY_STARTING_CHARGES,
   FOLLOW_STARTING_CHARGES,
@@ -86,7 +88,14 @@ import {
   ZOMBIE_POST_GRAPPLE_SLOW,
 } from '../../shared/constants.js';
 import { SpatialGrid } from './spatial.js';
-import { clamp, resolveCircleRect, segmentCircleT, segmentRectT } from './geometry.js';
+import {
+  clamp,
+  resolveCircleRect,
+  segmentCircleT,
+  segmentHitsBox,
+  segmentRectT,
+  type OrientedBox,
+} from './geometry.js';
 import { generateMap } from './mapgen.js';
 import { dropDebugKit, heldItem, newInventory, spawnPickups } from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
@@ -316,6 +325,13 @@ export interface AiState {
   /** Another door this person is off to bolt as well, or -1. */
   lockAlso: number;
   /**
+   * Holed up, and keeps seeing to the doors of the room they are in — shuts
+   * one that has come open, bolts one somebody unbolted. The noticing only;
+   * the walking and the handle work are `lockAlso`'s.
+   */
+  guardsDoors: boolean;
+  nextDoorGuardAt: number;
+  /**
    * Bots only: a shut door something was heard behind, which is being covered
    * rather than opened, and how long that patience lasts.
    */
@@ -419,6 +435,42 @@ export interface AiState {
    * bolts a door behind rather than running for the street past it.
    */
   barricades: boolean;
+  /**
+   * Holes up at the back of a building rather than in the first room reached.
+   * Only ever fires somewhere partitioned, since `Room.depth` is a hop count
+   * through doorways and an ordinary block is one undivided space.
+   */
+  hidesDeeper: boolean;
+  /**
+   * The room this one has holed up in, or OUTSIDE for anybody settled in a
+   * bush, behind an officer, or otherwise not in a building.
+   *
+   * Latched when they settle rather than read fresh, because it is what
+   * "pace about in *here*" means — reading the room underfoot every tick would
+   * have somebody who drifted into a doorway adopt the next room along.
+   */
+  settleRoom: number;
+  /**
+   * Settled, but still walking to the spot they mean to settle at: the back of
+   * the building for a deeper-hider, or the next leg of ordinary pacing.
+   *
+   * The distinction matters to doors. Somebody holed up does not open one;
+   * somebody still on their way to holing up plainly has to, or a bolted
+   * interior door on the route strands them in the hall.
+   */
+  settleGoalX: number | null;
+  settleGoalY: number | null;
+  /**
+   * Deadline on whatever walk is under way while settled — the move in while
+   * `settleGoalX` is set, and the current lap of pacing once it is not.
+   *
+   * One field, because it answers one question: this walk has taken long
+   * enough. A spot that turned out to be behind a piece of geometry is paced
+   * at forever without it.
+   */
+  settleWalkUntil: number;
+  /** Standing still between legs, and doing nothing about it. */
+  settlePauseUntil: number;
   /** Falls in behind a neighbour who is plainly getting away. */
   followsCrowd: boolean;
   /** The runner being followed right now, and how long that holds. */
@@ -727,6 +779,24 @@ export interface World {
   stunned: Map<string, number>;
   /** Whatever the radio sent, and the crackle back from the handset. */
   vehicles: Map<string, BackupVehicle>;
+  /**
+   * Solid bodies that are not part of the map and are not entities either: a
+   * parked vehicle, and nothing else so far.
+   *
+   * Two readers, and it needs both. `rebuildNav` stamps them into the grid so
+   * a route goes round; `hasWallClearPath` refuses the straight line so the
+   * route is actually asked for. Either alone does nothing — see the note on
+   * `park` in `backup.ts`.
+   *
+   * Deliberately **not** in `wallGrid`, which is what `hasLineOfSight` and
+   * `fire` read: a van is cover you shoot over, and that is the whole trade.
+   *
+   * A plain array of boxes rather than a reach back into `vehicles`, because
+   * `world.ts` holds only a *type* import of `backup.ts` and reading the
+   * geometry out of it would make that a runtime cycle. Whoever puts a body
+   * down fills this in and sets `navDirty`.
+   */
+  navBlockers: OrientedBox[];
   radioReplies: Array<{ id: string; at: number }>;
   /** Next time to check who is holding a radio. Rarely anybody, so it's slow. */
   nextRadioScan: number;
@@ -981,6 +1051,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     doorSlam: -1,
     nextSlamCheck: 0,
     lockAlso: -1,
+    guardsDoors: Math.random() < DOOR_GUARD_CHANCE,
+    nextDoorGuardAt: 0,
     doorWatch: -1,
     doorWatchUntil: 0,
     squadSlot: -1,
@@ -1015,6 +1087,12 @@ export function newAiState(now: number, x: number, y: number): AiState {
     officerSeeker: Math.random() < OFFICER_SEEK_CHANCE,
     escortId: null,
     barricades: Math.random() < BARRICADE_CHANCE,
+    hidesDeeper: Math.random() < HIDE_DEEPER_CHANCE,
+    settleRoom: OUTSIDE,
+    settleGoalX: null,
+    settleGoalY: null,
+    settleWalkUntil: 0,
+    settlePauseUntil: 0,
     followsCrowd: Math.random() < FOLLOW_CROWD_CHANCE,
     crowdHeading: 0,
     crowdUntil: 0,
@@ -1139,7 +1217,7 @@ export function damageWindow(world: World, index: number, amount: number): boole
  * coalesces it to at most one rebuild per tick.
  */
 export function rebuildNav(world: World): void {
-  world.nav = new NavGrid(world.map, new Set(world.brokenWindows));
+  world.nav = new NavGrid(world.map, new Set(world.brokenWindows), world.navBlockers);
   world.danger = new DangerField(world.map, world.nav);
   world.nextDangerRebuild = 0;
   world.navDirty = false;
@@ -1211,6 +1289,16 @@ export function hasLineOfSight(
  * one, and treating them as open steered people face-first into them.
  */
 export function hasWallClearPath(world: World, x1: number, y1: number, x2: number, y2: number): boolean {
+  // Cheapest and almost always empty, so it goes first. A parked vehicle is
+  // not a wall — it must not block sight or gunfire — but it is very much in
+  // the way of a straight walk, and this is the only caller that asks about
+  // walking. Without it `headingToward` takes its shortcut straight through a
+  // van and never asks the router, so putting one in the nav grid changes
+  // nothing at all: measured, **5 of 8** officers still failed to get past.
+  for (const box of world.navBlockers) {
+    if (segmentHitsBox(x1, y1, x2, y2, box)) return false;
+  }
+
   const minX = Math.min(x1, x2);
   const maxX = Math.max(x1, x2);
   const minY = Math.min(y1, y2);
@@ -1379,6 +1467,7 @@ export function createWorld(): World {
     zaps: [],
     stunned: new Map(),
     vehicles: new Map(),
+    navBlockers: [],
     radioReplies: [],
     nextRadioScan: 0,
     emplacements: new Map(),
@@ -1466,6 +1555,7 @@ export function resetWorld(world: World): void {
   world.bashReadyAt.clear();
   world.bashUntil.clear();
   world.vehicles.clear();
+  world.navBlockers.length = 0;
   world.towers.length = 0;
   world.beacon = null;
   world.mines.clear();
@@ -1839,6 +1929,9 @@ function populate(world: World): void {
     state.locksDoors = false;
     state.slamsDoors = false;
     state.barricades = false;
+    // And an officer does not hole up in a back room seeing to its doors.
+    state.guardsDoors = false;
+    state.hidesDeeper = false;
     world.ai.set(id, state);
     world.inventories.set(id, newInventory());
     world.stamina.set(id, STAMINA_MAX);

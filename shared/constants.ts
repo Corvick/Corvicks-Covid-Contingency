@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.3.0';
+export const GAME_VERSION = '0.5.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -1461,6 +1461,25 @@ export const INDOOR_EXIT_MARGIN = 52;
 /** A zombie this near an exit means that way out is not an option. */
 export const DOOR_BLOCK_RADIUS = 115;
 /**
+ * How many of them at a doorway stop it being a way out at all.
+ *
+ * Reported as: *"sometimes 8 zombies will clog the doorway and everyone in the
+ * room will charge them"*, alongside a note that going round one or two is
+ * good and should stay. So this is a threshold on the **pile**, not on the
+ * presence of a zombie — under it a doorway is scored worse and still usable,
+ * at it the doorway does not exist.
+ *
+ * Three, because that is also `MAX_GRAPPLERS` and `GRAPPLE_NO_ESCAPE_AT`: it
+ * is already the number at which being taken hold of stops being a fight.
+ */
+export const DOORWAY_MOB = 3;
+/** How much one of them at a doorway, or on the way to it, costs that exit. */
+export const DOORWAY_THREAT_COST = 260;
+/** And how much it costs to be beaten to the door by one. */
+export const DOORWAY_BEATEN_COST = 420;
+/** How near the line to an exit a zombie has to be to count as in the way. */
+export const EXIT_LANE_WIDTH = 70;
+/**
  * Share of people already indoors who sit tight when the zombie is still
  * outside. Only the remainder panic and run for the door.
  */
@@ -1494,9 +1513,6 @@ export const SHELTER_LARGE_RADIUS = 1500;
 export const SHELTER_CANDIDATES = 8;
 /** Shelter choice is re-evaluated on this cadence, not every tick. */
 export const SHELTER_SCAN_INTERVAL_MS = 600;
-/** Sidestep a zombie only when it's this close and roughly in the way. */
-export const SKIRT_RANGE = 155;
-export const SKIRT_CONE = 0.9; // radians off-heading that still counts as "in the way"
 /** Reactions to spotting someone else running for their life. */
 export const WITNESS_FOLLOW_CHANCE = 0.18;
 export const WITNESS_INVESTIGATE_CHANCE = 0.1;
@@ -1693,23 +1709,33 @@ export const BOT_SPRINT_TRIGGER = 220;
  * `escapeDestination` scores the far end of a bearing and its midpoint on the
  * danger field and *nothing in between*, so a zombie sixty pixels along the
  * chosen line costs that bearing nothing at all — and then `headingToward`
- * routes around walls, which a body is not, and walks the bot into it at a
- * sprint. This is the last hundred and fifty pixels, read off real positions
- * rather than off the coarse field, and it is only ever a steer: the bot is
- * still going where it was going.
+ * routes around walls, which a body is not, and walks whoever is running into
+ * it at a sprint. This is the last hundred and fifty pixels, read off real
+ * positions rather than off the coarse field, and it is only ever a steer:
+ * they are still going where they were going.
+ *
+ * **Everybody gets this, not only bots**, which is why it lost its `BOT_`
+ * prefix. The civilian version was `skirtThreat`, and it read `threatX` — the
+ * *one* tracked nearest threat — then took the first side that was merely
+ * walkable. Two things fall out of that: running from the zombie behind you
+ * straight into the one beside it, and, when you get there, turning round and
+ * running back at the first. That is the reported *"civilians keep running
+ * back towards zombies, see them, run away, and turn around back towards
+ * them"*, and it is an oscillation between two threats rather than anything to
+ * do with losing sight of one.
  */
-export const BOT_DODGE_RANGE = 150;
+export const DODGE_RANGE = 150;
 /** How far off the running line something still counts as being in the way. */
-export const BOT_DODGE_CONE = 0.8;
+export const DODGE_CONE = 0.8;
 /** How far ahead each way round is tested for being walkable. */
-export const BOT_DODGE_PROBE = 110;
+export const DODGE_PROBE = 110;
 /**
  * How hard it swings round. Scaled by how close the body is: one at arm's
  * length has to be gone round, one at the edge of the near field only needs
  * leaning away from, and a fixed swing does one of those two badly.
  */
-export const BOT_DODGE_SWING_MIN = 0.45;
-export const BOT_DODGE_SWING_MAX = 1.3;
+export const DODGE_SWING_MIN = 0.45;
+export const DODGE_SWING_MAX = 1.3;
 
 /** How far a bot probes when picking a bearing to give ground along. */
 export const BOT_GIVE_GROUND_PROBE = 130;
@@ -2950,6 +2976,73 @@ export const BARRICADE_CHANCE = 0.34;
 export const BARRICADE_SECOND_EXIT_BONUS = 240;
 /** A building with only one way in is a trap, and two is a way out. */
 export const SHELTER_MULTI_EXIT_BONUS = 260;
+
+// ---------------------------------------------------------------- holed up
+/**
+ * Somebody who has holed up indoors does not stand on the spot for the rest of
+ * the round. They potter about the room they shut themselves into — up to the
+ * window, back to the far wall — which is what a frightened person waiting
+ * something out actually looks like, and it is the whole difference between a
+ * room with people in it and a room with mannequins in it.
+ *
+ * They move slowly and stop for a long time between legs: this is pacing, not
+ * strolling, and the pauses are what keep it from reading as ordinary wander.
+ * Deliberately *not* a trait — everybody indoors does it. Standing dead still
+ * was never anybody's personality, it was the absence of any behaviour at all.
+ */
+export const SETTLED_ROOM_SPEED_MUL = 0.85;
+export const SETTLED_PAUSE_MIN_MS = 2200;
+export const SETTLED_PAUSE_MAX_MS = 9000;
+/** Close enough to the chosen spot to call it arrived at. */
+export const SETTLED_ARRIVE_DIST = 22;
+/**
+ * How long a leg may take before it is given up on. A room is small and this
+ * is generous; what it is really for is the spot that turned out to be behind
+ * a piece of geometry, which would otherwise be paced at forever.
+ */
+export const SETTLED_LEG_GIVE_UP_MS = 9000;
+
+/**
+ * Share of people who, having holed up, keep seeing to the doors of the room
+ * they are in — shutting one that has come open and bolting one somebody drew
+ * the bolt on.
+ *
+ * This is the other half of locking yourself in: a bolted door that a
+ * neighbour walks through an hour later has bought nothing, and until now
+ * nobody ever looked at it again. It runs on `lockAlso`, which already knows
+ * how to walk to a door and shut and bolt it — so what is added here is only
+ * the noticing.
+ */
+export const DOOR_GUARD_CHANCE = 0.45;
+/** How often one of them looks round the room's doors. Not per tick. */
+export const DOOR_GUARD_CHECK_MS = 1500;
+
+/**
+ * Share of people who, once inside somewhere big enough to have a back to it,
+ * go and hole up at the back rather than in the first room they reach.
+ *
+ * It only ever fires in a partitioned building, because `Room.depth` is a hop
+ * count through doorways and an ordinary block is a single undivided space —
+ * so "if they are in a corner building or larger building" falls out of the
+ * room graph rather than needing a landmark flag to test.
+ */
+export const HIDE_DEEPER_CHANCE = 0.4;
+/** A room has to be this many doorways further in to be worth moving to. */
+export const HIDE_DEEPER_MIN_GAIN = 1;
+/**
+ * The whole move in, however many rooms it takes, before they give it up and
+ * hole up where they have got to.
+ *
+ * It is a budget for the lot rather than a clock per room, so a ping-pong at a
+ * doorway cannot run forever however the room underfoot is read, and one
+ * bolted door does not cost the whole plan — they simply stop one room short,
+ * which is a fine place to be.
+ *
+ * A landmark is nine rooms deep at the outside and a civilian walks at 35px/s,
+ * so this is a handful of rooms and the door work between them, not a crossing
+ * of the whole complex.
+ */
+export const HIDE_DEEPER_GIVE_UP_MS = 20000;
 
 /** Flee destination search. */
 export const ESCAPE_SAMPLES = 16;

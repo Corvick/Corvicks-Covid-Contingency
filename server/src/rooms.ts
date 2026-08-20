@@ -30,6 +30,18 @@ export interface Room {
   y: number;
   /** Floor cells, i.e. roughly how big it is. */
   size: number;
+  /**
+   * Doorways between here and the street. A room with a way straight out is 0,
+   * the room behind that one is 1, and so on.
+   *
+   * This is what "deeper into the building" means, and it is a property of the
+   * room *graph* rather than of distance: the far end of a long hall is no
+   * deeper than its near end, and a cupboard off it is. Static like the rest of
+   * this — doorways don't move — so it costs one BFS per round. A room nothing
+   * can reach from the street keeps `Infinity`, which every caller reads as
+   * "not somewhere to send anybody".
+   */
+  depth: number;
 }
 
 /** Rings of cells a room's id bleeds into, so a doorway still reads as its room. */
@@ -68,6 +80,18 @@ export class RoomMap {
   private readonly doorRooms: Int16Array;
   /** Room ids of each building, so a whole building can be judged at once. */
   private readonly byBuilding: number[][];
+
+  /**
+   * Every floor cell of every room, grouped by room: room `id` owns
+   * `floorCells[floorStart[id] .. floorStart[id + 1])`.
+   *
+   * One flat pair of arrays rather than an array of arrays per room, because
+   * this is built once for the whole city and only ever read at random — which
+   * is exactly what `randomPoint` wants and what a rejection sample around the
+   * centroid cannot honestly give for an L-shaped room.
+   */
+  private readonly floorStart: Int32Array;
+  private readonly floorCells: Int32Array;
 
   private readonly preyCount: Int16Array;
   private readonly zombieCount: Int16Array;
@@ -149,7 +173,16 @@ export class RoomMap {
       if (this.cell[start] !== OUTSIDE) continue;
 
       const id = this.rooms.length;
-      const room: Room = { id, building: owner[start], exits: [], hasInnerExit: false, x: 0, y: 0, size: 0 };
+      const room: Room = {
+        id,
+        building: owner[start],
+        exits: [],
+        hasInnerExit: false,
+        x: 0,
+        y: 0,
+        size: 0,
+        depth: Infinity,
+      };
       this.rooms.push(room);
 
       let head = 0;
@@ -266,6 +299,49 @@ export class RoomMap {
     this.byBuilding = map.buildings.map(() => [] as number[]);
     for (const room of this.rooms) this.byBuilding[room.building]?.push(room.id);
 
+    // How many doorways deep each room is. Anything with a way straight out to
+    // the street is 0; everything else takes the shortest hop count to one.
+    // Doorways rather than doors: whether a slab is hung in the opening is
+    // runtime state, and how deep a room is is not.
+    {
+      let head = 0;
+      let tail = 0;
+      for (const room of this.rooms) {
+        if (!room.exits.some((i) => this.farSideOf(i, room.id) === OUTSIDE)) continue;
+        room.depth = 0;
+        queue[tail++] = room.id;
+      }
+      while (head < tail) {
+        const room = this.rooms[queue[head++]];
+        for (const index of room.exits) {
+          const far = this.farSideOf(index, room.id);
+          if (far === OUTSIDE) continue;
+          const next = this.rooms[far];
+          if (next.depth <= room.depth + 1) continue;
+          next.depth = room.depth + 1;
+          queue[tail++] = far;
+        }
+      }
+    }
+
+    // Floor cells grouped by room, counted first so the run for each is
+    // contiguous. `cell` rather than `near`: a spot inside the doorway padding
+    // is not somewhere to be sent to stand.
+    this.floorStart = new Int32Array(this.rooms.length + 1);
+    for (let idx = 0; idx < count; idx++) {
+      const id = this.cell[idx];
+      if (id >= 0) this.floorStart[id + 1]++;
+    }
+    for (let i = 0; i < this.rooms.length; i++) this.floorStart[i + 1] += this.floorStart[i];
+    this.floorCells = new Int32Array(this.floorStart[this.rooms.length]);
+    {
+      const fill = Int32Array.from(this.floorStart.subarray(0, this.rooms.length));
+      for (let idx = 0; idx < count; idx++) {
+        const id = this.cell[idx];
+        if (id >= 0) this.floorCells[fill[id]++] = idx;
+      }
+    }
+
     this.preyCount = new Int16Array(this.rooms.length);
     this.zombieCount = new Int16Array(this.rooms.length);
     this.swept = new Float64Array(this.rooms.length);
@@ -305,6 +381,27 @@ export class RoomMap {
     return door.horiz
       ? { x: door.x, y: door.y + sign * ROOM_EXIT_AIM }
       : { x: door.x + sign * ROOM_EXIT_AIM, y: door.y };
+  }
+
+  /**
+   * A random spot on this room's own floor, for somebody pottering about
+   * inside it rather than crossing it to get somewhere.
+   *
+   * Uniform over floor cells, so a long room genuinely gets walked end to end.
+   * Jittered inside the cell it lands in, or a room reads as a dozen fixed
+   * standing spots that everybody in it shares.
+   */
+  randomPoint(room: number): { x: number; y: number } | null {
+    if (room < 0 || room >= this.rooms.length) return null;
+    const from = this.floorStart[room];
+    const to = this.floorStart[room + 1];
+    if (to <= from) return null;
+    const idx = this.floorCells[from + Math.floor(Math.random() * (to - from))];
+    const jitter = NAV_CELL * 0.5;
+    return {
+      x: (idx % this.cols) * NAV_CELL + NAV_CELL / 2 + (Math.random() - 0.5) * jitter,
+      y: ((idx / this.cols) | 0) * NAV_CELL + NAV_CELL / 2 + (Math.random() - 0.5) * jitter,
+    };
   }
 
   preyIn(room: number): number {

@@ -465,7 +465,8 @@ list they reach, so crowds fan out instead of funnelling into one doorway ·
 `officerSeeker` runs to whoever has a gun and stands behind them ·
 `barricades` retreats deeper into a building and bolts a door rather than
 running past the thing · `followsCrowd` falls in behind a neighbour who is
-plainly getting away.
+plainly getting away · `hidesDeeper` holes up at the back of a building rather
+than in the first room it reaches.
 
 Zombies roll three of their own: `smartZombie` decides how *well* one searches
 — every zombie leaves an emptied room now, see **Rooms** below — `spreadsOut`
@@ -479,7 +480,8 @@ Door traits sit alongside them: `closesDoors` shuts it behind them when merely
 wandering · `locksDoors` shuts *and* bolts it when getting away from something ·
 `begsAtDoors` hammers on a locked one rather than going elsewhere · `begHolds`
 stays there even with a zombie on them · `opensForStrangers` would let a
-stranger in, which most people would not.
+stranger in, which most people would not · `guardsDoors` keeps seeing to the
+doors of the room it has holed up in.
 
 ### Rooms
 
@@ -506,6 +508,12 @@ any of those three knowing the room map exists. Measured over eight seeds:
   Somebody standing in a doorway stands on no room's floor at all, and reading
   that as "out in the street" made a zombie halfway through a door change its
   mind about where it was.
+- **`Room.depth` is how many doorways deep a room is**, from one BFS out of
+  the street when the map is built. It is what `hidesDeeper` means by "further
+  in", and it is static for the same reason the rest of this is. `randomPoint`
+  sits beside it: every room's floor cells in one flat pair of arrays grouped
+  by room, so a spot inside a given room is a single lookup rather than a
+  rejection sample around a centroid that an L-shaped room would defeat.
 - **Occupancy rides on the loop that already counted survivors.** `preyIn(room)`
   is an array lookup, not a spatial query — which is what makes "is there anyone
   left in here" affordable for three hundred zombies. It is also *exact*: the
@@ -719,6 +727,168 @@ they had just watched a neighbour dragged out of.
   of them say so (`PROTECT_LINES`), on a long interval — a chance re-rolled per
   tick is a person who never stops talking.
 
+### Holing up is something you do, not somewhere you stop
+
+Reported as *"civilians that have run to a room and locked a door after seeing
+a zombie then stand where they are motionless after doing so"*, and the code
+said exactly that: `case 'settled'` was a `return` and nothing else. Somebody
+who ran into a room, shut the door and threw the bolt then stood on that pixel,
+facing that bearing, for the rest of the round. Measured on a rig, sixty
+seconds of being holed up moved them **0.0px** and put them in **1** distinct
+spot. Every other kind of standing about in the file — the rally hold, an
+officer at his post — at least looks around.
+
+`settledTick` is the whole of it, and `settleHere` is the one door into the
+state: everything that decides somebody has stopped running goes through it
+rather than assigning `mode` itself, because settling is three things at once —
+a room to be in, sometimes a walk to the back of the building first, and a
+clock for the pacing that follows.
+
+- **They pace the room they shut themselves into.** Long stops and short legs:
+  `SETTLED_PAUSE_MIN_MS`-`MAX` (2.2-9s) of standing and looking about, then a
+  walk to another spot on the same floor at `SETTLED_ROOM_SPEED_MUL` of a
+  stroll. That is waiting something out rather than strolling, and it is
+  deliberately **not a trait** — standing dead still was never anybody's
+  personality, it was the absence of any behaviour at all.
+- **The target is a floor cell of their own room**, from `RoomMap.randomPoint`,
+  which is what makes "wander in *here*" mean the room and not a radius. A ring
+  sample round the body would put half the targets through the wall, and the
+  router would then walk them out of the front door to reach one. Measured:
+  **0 of 9000 ticks** spent outside the room in the rig, 99.5-99.8% live.
+- **`settleRoom` is latched, not read fresh.** It is what "in here" means, and
+  somebody who drifts into their own doorway must not thereby adopt the room
+  next door — a doorway belongs to whichever room's floor is nearer. What
+  repairs a latch that *was* wrong is the leg deadline: a lap that ran out of
+  time is a lap that went nowhere, so the room is re-read on that failure only.
+  Arriving proves the latch, since the spot came out of it.
+- **Somebody holed up does not open a door** (`holedUp`). They shut themselves
+  in on purpose, and the pacing must not become a slower way back out of it.
+  The existing refusal to unbolt one was already keyed on `mode === 'settled'`;
+  this extends it to shut-but-unlocked doors, and both now ask `holedUp` so
+  they can tell "finished with doors" from "still walking to where I mean to
+  hole up", which want opposite things. It costs at most one tick: a threat
+  sets `flee` further down the same update. Measured: **0 of 6** rigs opened
+  the shut unlocked door in a minute.
+- **The pause runs before the walk, so the walk's deadline starts where the
+  pause ends.** Set from `now` it is mostly spent motionless and then expires
+  before a step is taken, at which point the target is thrown away and another
+  picked — pacing becomes a person standing still choosing spots they never
+  walk to. Measured that way: **168-290px** covered in a minute and a reach of
+  30-63px inside rooms a good deal wider. After: **220-624px** and a reach of
+  ~60-110px.
+
+Live over 180s, three cities: pace **12.6-13.8 px/s** median while settled,
+they get **73-90px** from where they settled (p90 148-164), 55-59% of settled
+ticks are the standing-about half, and **99.5-99.8%** of them are spent in
+their own room. `updateAi` is **+0.02 to +0.04ms** on the median with the old
+behaviour alternated back in every 50 ticks on the same world — which is to say
+free; settled people path within one room, so `hasWallClearPath` answers almost
+all of it and A\* rarely runs.
+
+#### Some of them keep seeing to the doors
+
+`guardsDoors` (`DOOR_GUARD_CHANCE`, 0.45). A bolted door that a neighbour walks
+through five minutes later has bought nothing, and until now nobody ever looked
+at it again.
+
+- **It is the noticing only.** `lockAlso` already knows how to walk to a door,
+  shut it and bolt it — it is what `askForNeighbourDoor` drives — so the whole
+  addition is a scan that sets `state.lockAlso`. Nothing about the walking or
+  the handle work is written twice.
+- **`Room.exits` is the list, so it is three or four indices rather than a
+  spatial query.** That is what makes it affordable for a city full of people
+  sitting in rooms, and it is checked on `DOOR_GUARD_CHECK_MS`, not per tick.
+- **A door is "unsecured" if it is open, or shut and unbolted.** One an officer
+  bolted is left alone entirely and one somebody else is working is left to
+  them, the same rules everything else here follows.
+- Measured on a rig, door thrown wide open and unbolted: **6/6 shut again and
+  6/6 bolted again, median 2.6-2.9s**, against **0/6 and 0/6** with the trait
+  off. Live over 180s: **80-104 doors re-shut and 106-131 re-bolted** per city.
+
+#### And some of them hole up at the back
+
+`hidesDeeper` (`HIDE_DEEPER_CHANCE`, 0.4). `Room.depth` is new and static —
+doorways between a room and the street, one BFS with the room map — and it is
+what "deeper" means. Not distance: the far end of a long hall is no further
+from the street than its near end, and a cupboard off it is.
+
+**That is also what makes it a landmark behaviour with no mention of
+landmarks.** An ordinary block is one undivided room, so there is nowhere
+deeper in it to go and the trait never fires there. Measured over three cities:
+~120 rooms, of which **89-93 are at depth 0** and only 3-5 buildings are
+partitioned at all, reaching depth 8. Same limit as room-to-room barricading,
+and for the same reason.
+
+- **One room at a time, and the first version was not.** Aiming straight at the
+  deepest room in the building fails twice over, and the rig found both:
+  fourteen seconds at 35px/s does not cross a landmark, so **8 of 8** hiders hit
+  their deadline having arrived nowhere; and the router has no idea this is
+  meant to be an indoor journey, so the shortest nav line from a front room to
+  a back one runs out of one street door and in at another — **2 of 8 ended up
+  outside the building they were hiding in.** A hop through the adjacent
+  doorway cannot leave the building, and repeated it arrives at the back anyway.
+- **The choice is a BFS over the room graph even though the walk is one hop.**
+  Greedily requiring every step to go deeper strands anybody whose neighbours
+  are all at their own depth, which is an ordinary shape — two rooms off the
+  street side by side. Measured that way, **1 hider in 8 never moved at all**
+  in a building nine rooms deep. The search walks the flat bit to get to the
+  stairs. It is one building, twenty rooms at the outside, once per room
+  entered.
+- **It aims at the middle of the next room, not a random spot on its floor.**
+  `randomPoint` is uniform over floor cells and some of those sit right beside
+  the doorway just come through; arriving on one leaves the room underfoot
+  ambiguous and the next hop is then chosen from the wrong room. Measured that
+  way, **1 in 8 walked back out the way it came**. Spreading a household out is
+  the pacing's job and it does it in seconds.
+- **One budget for the whole move in** (`HIDE_DEEPER_GIVE_UP_MS`, 20s), never
+  extended as they go, which is what bounds a ping-pong at a doorway however
+  the room underfoot is read. A bolted door on the way costs them one room, not
+  the plan — they hole up where they got to, which is a fine place to be.
+- **No `unstickTick` on that walk, and it was tried.** It wants
+  `UNSTICK_MIN_PROGRESS` (16px) in `UNSTICK_CHECK_MS` (420ms) — **38px/s**,
+  calibrated for running away and *above* what a walking civilian makes at
+  42px/s the moment it turns a corner or stands at a handle. Measured, hiders
+  spent **4.5-9.1s of a 20s move in** committed to a blind breakout heading they
+  had no need of, and two of them were walked out of the building by it. The
+  budget covers a route that genuinely will not work; the breakout was making
+  work. **Anything that walks rather than runs has this trap waiting for it.**
+- Measured on the rig: **6-8 of 8** end deeper in, median gain **3-4 doorways**,
+  deepest 4, and **0 of 8** end up outside the building — against **0 of 8**
+  with the trait off. Live it is 7/19 and 10/22 of the hiders who settled
+  somewhere with a back to it at all, the difference being that a live city
+  scares them back out of it mid-walk.
+
+**`server/settlecheck.ts` is the harness** — headless, no socket, no port, so
+it leaves a game on 8080 alone. Both behaviours run in one process,
+alternating every 50 ticks for the tick cost, and `setSettledStandsStill` is
+the gate. That gate is **kept** rather than deleted with the measurement,
+unlike most here, because the control is the most valuable line it prints:
+484px of a room against **0.0px** is the whole of what says the fix is the fix.
+
+Two things about measuring this are worth not rediscovering:
+
+- **Every harness in this repo sets `world.pathBudget = PATH_BUDGET_PER_TICK`
+  (10) where the real server sets `PATH_NODE_BUDGET_PER_TICK` (12000).** The
+  budget is charged in *nodes* now — see the note under performance — so those
+  harnesses run A\* capped at ten node expansions, which finds nothing at all.
+  It is a leftover from before the budget changed units. `settlecheck.ts`,
+  `crowdcheck.ts` and `vehiclecheck.ts` use the right one; `tickprof.ts`,
+  `targetchurn.ts`, `grapplecheck.ts` and `pathbench.ts` still do not, and any
+  figure they produced that depended on something routing around a wall is
+  suspect.
+- **`server/tsconfig.json` only includes `src/**`, so none of the harnesses at
+  the `server/` root are typechecked.** `npx tsc --noEmit` there passes while
+  `vehiclecheck.ts` is calling `closestOnBox(x, y, box)` on a function whose
+  first parameter is the box — `tsx` strips types without checking them, so it
+  ran and returned `NaN` for every distance, and the rig reported 0% of ticks
+  spent pressed against a van it was in fact pressed against 97% of the time.
+  Check one explicitly:
+  `npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --strict --skipLibCheck --types node crowdcheck.ts`
+- **A "did they move" threshold of 1px measures the pacing speed, not
+  stillness.** A pacing civilian covers 0.99px in a tick, so every single
+  moving tick reported as motionless and the pacing read 90% still. It is not;
+  the threshold was the whole of the difference.
+
 ### Barricading, and why it is rarer than it sounds
 
 `threatSharesRefuge` asks whether a zombie is in this **room**, not this
@@ -738,6 +908,104 @@ how many big buildings the seed drew. If it should be common, the change is in
 it looks — it touches pathing, spawning, feel and cost — so it has not been
 made. What covers the rest of the city instead is the front door: `barricades`
 now also drives the door-slam path, so they shut and bolt the way they came in.
+
+### Running past a pile in the doorway
+
+Reported as *"most civilians will not run deeper into a building or go out
+another exit and instead try to run past zombies that just broke open a door…
+sometimes 8 zombies will clog the doorway and everyone in the room will charge
+them"*, with the note that going round **one or two** is wanted and should stay.
+So the rule is a threshold on the *pile*, never on the presence of a zombie.
+
+- **`DOORWAY_MOB` (3) is that threshold**, and under it a doorway is only
+  scored worse rather than refused. It is the same figure as `MAX_GRAPPLERS`
+  and `GRAPPLE_NO_ESCAPE_AT`, which is already the number at which being taken
+  hold of stops being a fight.
+- **The old test could not see a pile at all.** A doorway counted as "covered"
+  only while a zombie was within `DOOR_BLOCK_RADIUS` of it *or nearer to it
+  than the runner* — so the moment eight of them came through and spread into
+  the room, every one of them was further from the door than the people at the
+  back of it, the door read as clear, and the room ran at them.
+- **Exits are scored now, not taken in distance order**, and threats *on the
+  way* to one count as much as threats at it — scoring only the far end is the
+  mistake `escapeDestination` already names. Two passes: the first refuses any
+  exit a zombie would plainly reach first, and the second drops that, so a lone
+  zombie between somebody and the **only** door is a thing to be got round
+  rather than a reason to stand still.
+- **`nextRoomAwayFrom` is `barricadeRoom` with a flag**, and dropping the flag
+  is what gives the retreat to everybody. Backing into the next room when every
+  way out is held is what anybody would do; before this only the `barricades`
+  third of the city ever did, and the rest fell through to the open-ground
+  escape and milled about in front of the pile.
+
+**What this does not fix is the map, and that is the honest headline.** Staged
+with a pile in the way out and people in the room, both behaviours were measured
+against each other on the same city:
+
+| | with another way out | with no other way out |
+|---|---|---|
+| used another way out | 54-60 of 60 either way | — |
+| reached the pile, 8 in the doorway | 27 → **24** of 60 | 60/60 either way |
+| closest approach, 8 in the doorway | 58 → **74px** | 23 → 22px |
+
+A room with somewhere else to go already used it, and the change buys a little
+more clearance. **A room with one way out has nowhere to send anybody, and no
+AI change can make one** — which is most of the city: only 3-5 buildings a seed
+are partitioned at all and ~90 of ~120 rooms are at depth 0. The lever for
+"most civilians will not run deeper into a building" is `mapgen` partitioning
+ordinary blocks, the same conclusion as **Barricading** above and the same
+reason it has not been done.
+
+### Running from one zombie into another
+
+Reported as *"civilians will sometimes keep running back towards zombies, see
+the zombies, run away, and turn around back towards them"*. It is an
+oscillation **between two threats**, not a hysteresis on losing sight of one,
+and CLAUDE.md had already written down the fix without applying it here:
+`dodgeThreats` existed for bots, and the note beside it said *"`skirtThreat` is
+the civilian version and reads only `threatX/threatY` — the one tracked threat,
+which is routinely not the one it is about to run into."*
+
+`skirtThreat` is gone and everybody runs `dodgeThreats`. Two things change: it
+reads **every** threat in `threatPoints` rather than the single tracked one, and
+it scores **both** ways round against all of them rather than taking the first
+side that is merely walkable — which is how somebody sidesteps out of one
+zombie's path and into the rest of the pack. `BOT_DODGE_*` lost its prefix
+accordingly.
+
+Measured live, alternating the two behaviours every 300 ticks on the same
+evolving city, counting **spells of walking at a zombie the civilian can see**:
+**753 → 656, 288 → 193, 723 → 560** — fewer in 3 of 3 cities, 13-33% — and the
+tick got *cheaper* with it, **4.06 → 3.74, 2.60 → 2.46, 3.41 → 3.15ms**, since
+fewer people are grinding into things.
+
+**A "shun what you just ran from" memory was built for this and thrown away,
+and the reason is worth keeping.** It remembered where the threat was for 15s
+and scored every candidate destination against the walk to it. On the live
+metric it looked fine; on the staged rig it made things **worse — 2 returns
+into sight became 9** — because it is a lockout, and a lockout leaves the
+oscillator running: they turn away, the memory lapses, they turn back, round
+again. That is the same objection already recorded against a change budget
+under **And a margin is what stops them dithering**. Deleted rather than tuned.
+
+*Three measurements of this were wrong before any of them were right*, and all
+three are the same lesson:
+- **`queryCircle` is a bounding box.** It hands back bodies out to 424px on the
+  diagonal against a 300px sight radius, and `senseThreats` re-checks
+  `dist <= sight`. A probe that does not put the "wander" share at 42% on a
+  sample that turns out to be zombies at **359-384px** — people walking at
+  things they cannot possibly see.
+- **The gap between two bodies is not a measure of who is walking where.** A
+  zombie is faster than a fleeing human by design, so the distance closes while
+  they run for their life: measured that way, `flee` reads as "46% of samples
+  spent closing on it", which is the chase working. It has to be the civilian's
+  own step against the bearing to the thing.
+- **Live is the wrong place to look for this at all.** Skirting a wall, going
+  round a doorway and being unstuck flip the sign several times a second, on top
+  of a signal of a few events a minute. `server/crowdcheck.ts` is staged for
+  that reason, pins the zombies, and runs both behaviours on the *same* city
+  back to back — unpaired, it put 31 people in one mode's rooms and 7 in the
+  other's.
 
 ### Doors
 
@@ -787,6 +1055,12 @@ reach it. That is what makes finding one locked a discovery rather than
 something the pathfinder quietly steers around — and it keeps opening a door
 off the "rebuild the grid" path, which flipping cells 30 times a second would
 otherwise demand.
+
+They *are* in `hasWallClearPath`, which is a different question and the one
+that matters for anything solid: that function has exactly one caller — the
+straight-line shortcut in `headingToward` — and what it asks is whether you can
+**walk** there. A parked vehicle is now in both it and the grid, and being in
+only one of the two is the same as being in neither. See **The radio**.
 
 ### The park
 
@@ -2597,12 +2871,12 @@ costing the outbreak, where breaking off sooner bought nothing and cost plenty.
   around walls — which a body is not. So a zombie sixty pixels along the chosen
   line cost that line nothing and the bot sprinted into it with the whole
   street open beside it. `dodgeThreats` is the near field: the closest thing
-  inside `BOT_DODGE_RANGE` that the running line points at, gone round on
+  inside `DODGE_RANGE` that the running line points at, gone round on
   whichever side has more room, swinging wider the closer it is. It returns the
   heading **unchanged** when neither way round is walkable, which is exactly
-  the cornered case — pressing on is right there. `skirtThreat` is the civilian
-  version and reads only the one tracked threat, which for a bot is routinely
-  not the one it is about to run into.
+  the cornered case — pressing on is right there. It was a bot's alone at
+  first; `skirtThreat` was the civilian version, read only the one tracked
+  threat, and is gone — see **Running from one zombie into another**.
 - **Giving ground is scored against every zombie it knows about.** Kiting
   stepped on `atan2(-dy, -dx)` — directly away from the one being shot at, which
   is how you back into the second one or into the wall behind you.
@@ -3510,8 +3784,89 @@ lanes through a building, **0** parked in one.
 
 **The parked van is solid to bodies but not to sight or gunfire**, the same
 trade the sandbags make and for the same reason: it is cover you shoot over.
-Deliberately not in the nav grid — routes are planned as though it weren't
-there and whoever walks into one deals with it — and it can't be destroyed.
+It can't be destroyed.
+
+**A *parked* vehicle goes into the nav grid; a driving one does not.** This
+used to say "deliberately not in the nav grid — routes are planned as though it
+weren't there and whoever walks into one deals with it", which is the sandbags'
+rule inherited wholesale, and the reason for it does not carry over. A wall of
+sandbags is *meant* to be stood at and torn down; a van cannot be destroyed, so
+there is nothing on the far side of walking into one. What it produced was
+reported as an officer moving *"like a roomba"* at a car — step into the body,
+be pushed out by `resolveCircleBox`, re-aim at the same waypoint through it,
+step in again. Measured with an officer given a post on the other side of a
+parked van, **3 of 8** ever reached it; after, **12 of 12**, median 5.1s, and
+the share of ticks spent pressed against the bodywork went 97% → 4%.
+
+- **The nav grid alone changes nothing, and that is the part worth keeping.**
+  `headingToward` only asks the router when `hasWallClearPath` says the straight
+  line is blocked — and a van is not a wall. With the body in the grid and that
+  shortcut untouched it was still **5 of 8** failing. `world.navBlockers` has
+  two readers for exactly that reason: `rebuildNav` stamps the boxes so a route
+  goes round, and `hasWallClearPath` refuses the straight line so a route is
+  asked for at all. Doors already have this shape — in `hasWallClearPath`, out
+  of the grid — and that one caller is the only thing in the game that asks
+  about *walking*, which is why a van belongs in it and not in `wallGrid`.
+- **It is a plain array of boxes on the World, not a reach into
+  `world.vehicles`.** `world.ts` holds only a *type* import of `backup.ts`;
+  reading the geometry back out would make that a runtime cycle.
+- **Set on arrival, on the `navDirty` path a smashed pane already uses** — at
+  most a handful of rebuilds a round. Measured over 120 arrivals, a parked body
+  never cut the city in two: **0 pinched**, worst loss 0.09% of walkable ground.
+- **`markBox` stamps a rotated rect**, because a van comes to rest across
+  whatever bearing it drove in on. Snapping it to the compass would block a lane
+  it is not in and leave a corner of it walkable.
+
+**Nothing drives through a building any more, and the fix was to stop asking
+the question that way.** `laneClear` used to answer yes-or-no about one chosen
+spot, and a refusal had nowhere to go but a fallback — `parkingSpot` had two,
+and **both picked a place the body *fitted* without ever asking whether it
+could be *reached***. `laneReach` sweeps forward instead and reports how far it
+can get, so `stopOnLane` cannot return a spot it could not have driven to and
+there is nothing left to fall back to: it stops where it stops. Pulling up short
+of a blocked street was always the right answer; the old code agreed and then
+reached round its own rule to do it.
+
+- **The braking curve is checked, not just the resting spot.** The last
+  `VAN_BRAKE_DIST` washes `VAN_DRIFT` (52px) sideways and swings
+  `VAN_SLEW_ANGLE` (24°) across — far outside the 15px of slack the lane sweep
+  carries — so a clear lane says nothing about it. It was the last thing left
+  putting a van through a shop.
+- **`brakePose` is the one definition of that curve**, and `updateBackup` reads
+  it too rather than integrating its own copy. Where the body sits and which way
+  it points are a pure function of how much braking distance is left, so the
+  check and the motion are provably the same; written twice they would agree
+  until the day somebody tuned one of them.
+- **The part of the slide still inside the cordon is deliberately not checked.**
+  The brakes bite `VAN_BRAKE_DIST` out and the nearest a van ever parks is
+  `BACKUP_PARK_MIN` in, so braking begins 92px *before* the body is clear of the
+  boundary wall — which is the wall it is supposed to come through. Checked
+  anyway, that wall refuses every slide on every call: measured, **0 of 50** vans
+  kept their skid and every one arrived dead straight.
+- **The breach side is a preference, not a safety rule.** All four sides are
+  tried now — the ones away from the outbreak first, then the one it would
+  rather avoid — because a lane it can actually drive down beats a side it
+  likes. The last resort parks on the cordon itself, where by construction there
+  is nothing to be inside of; measured at 0 uses in 120 calls.
+- **`bodyFits` samples five by five, not five by three.** The gaps in a
+  three-across sample are 34px at the van's clearance, wide enough for the corner
+  of a building to sit between two of them: 1 arrival in 100 came to rest in
+  geometry the coarser sample called a fit.
+
+`server/vehiclecheck.ts` is the harness — headless, no socket, no port. Measured
+over 120 arrivals with callers spread across the map, vans and cars alternating:
+**0 parked with the body in geometry, 0 drove through one on the way, 0 cut the
+map**, and **48 of 60 vans kept their skid**, refused only where it genuinely
+would not fit.
+
+*Two of those figures were the harness lying before they were ever the code
+failing.* Counting from the map edge reports **16/16 driving through geometry**
+whatever the code does, because the perimeter wall is in the wall grid and the
+vehicle is meant to come through it — the cordon is not what it has to miss. And
+clearing `world.vehicles` between staged calls without clearing
+`world.navBlockers` leaves the nav grid holding the ghosts of earlier vans: that
+read **5/80 parked in geometry**, all of it ghosts. A parked body lives in both,
+so a rig has to clear both.
 
 **The crew are SWAT, and every part of that is real rather than drawn.** Black
 gear (`SWAT_COLOR`, with a lighter helmet or the head vanishes into the body),

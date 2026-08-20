@@ -39,7 +39,6 @@ import { newInventory } from './inventory.js';
 import {
   buildingIndexAt,
   findSpawnNear,
-  hasWallClearPath,
   makeEntity,
   newAiState,
   type Entity,
@@ -149,8 +148,12 @@ function bodyFits(world: World, x: number, y: number, facing: number): boolean {
   const hl = VAN_LENGTH / 2;
   const hw = VAN_WIDTH / 2 + BACKUP_LANE_CLEARANCE / 2;
 
+  // Five by five rather than five by three. The gaps in a three-across sample
+  // are 34px wide at the van's clearance, which is enough for the corner of a
+  // building to sit between two samples: measured, 1 arrival in 100 came to
+  // rest with the body in geometry that this reports as fitting.
   for (const along of [-hl, -hl / 2, 0, hl / 2, hl]) {
-    for (const across of [-hw, 0, hw]) {
+    for (const across of [-hw, -hw / 2, 0, hw / 2, hw]) {
       const px = x + cos * along - sin * across;
       const py = y + sin * along + cos * across;
       if (px < 40 || py < 40 || px > WORLD_WIDTH - 40 || py > WORLD_HEIGHT - 40) return false;
@@ -161,58 +164,95 @@ function bodyFits(world: World, x: number, y: number, facing: number): boolean {
   return true;
 }
 
+/** Where the run in actually begins: the first point with the whole body past the cordon. */
+const LANE_START = BACKUP_ENTRY_OFFSET + BOUNDARY_THICKNESS + VAN_LENGTH;
+
 /**
- * Can it drive from the edge to this spot without going through anything?
+ * How far down this lane the body can be driven before something stops it.
  *
- * Walked in steps rather than trusted to one ray: `hasWallClearPath` down the
- * centre line says nothing about the shoulders, and a lane that threads
- * between two buildings with a metre to spare is one it cannot actually take.
- * Both flanks are swept as well as the middle.
+ * **A forward sweep, not a yes/no on a chosen spot, and that is the whole of
+ * the fix for driving through buildings.** Asked as a question about one spot,
+ * a refusal has nowhere to go but a fallback — and `parkingSpot` had two of
+ * them, both of which picked a place the body *fitted* without ever asking
+ * whether it could be reached. Measured over 80 calls with callers spread
+ * across the map: **2 drove through a building** and one **parked inside one**,
+ * with up to 11 of 25 footprint samples in geometry. Asked as "how far can it
+ * get", there is nothing left to fall back to: it stops where it stops.
  *
- * **The run is measured from inside the perimeter, not from off the map.** The
- * boundary wall is in the wall grid, so a ray from an off-map entry point to
- * anywhere at all crosses it and `hasWallClearPath` says no — which rejected
- * every candidate on every lane, and quietly dropped the old patrol car onto
- * its unchecked fallback every single time. It comes through the cordon; the
- * cordon is not what it has to miss.
+ * The cross-section is swept rather than the centre line rayed, because a lane
+ * that threads between two buildings with a metre to spare is one an 82-by-38
+ * body cannot actually take. Consecutive sections overlap — the step is well
+ * under the body length — so everything the body sweeps through is tested.
+ *
+ * `nav.isBlocked` rather than `hasWallClearPath`: it is strictly the wider
+ * test, covering free-standing walls, intact glass and the pond as well as
+ * buildings, and it is the same test `bodyFits` uses, so a lane and a place to
+ * stop on it cannot disagree.
+ *
+ * **The run is measured from inside the perimeter.** The boundary wall is in
+ * the wall grid and the vehicle is meant to come through it; the cordon is not
+ * what it has to miss.
  */
-function laneClear(
+function laneReach(
   world: World,
   entry: { x: number; y: number },
-  spot: { x: number; y: number },
-): boolean {
-  const dx = spot.x - entry.x;
-  const dy = spot.y - entry.y;
-  const full = Math.hypot(dx, dy);
-  if (full < 1) return false;
-  const ux = dx / full;
-  const uy = dy / full;
+  ux: number,
+  uy: number,
+  maxD: number,
+): number {
   const hw = VAN_WIDTH / 2 + BACKUP_LANE_CLEARANCE / 2;
+  let reached = -1;
 
-  // Where the run actually starts: the first point past the perimeter wall.
-  const inset = BACKUP_ENTRY_OFFSET + BOUNDARY_THICKNESS + VAN_WIDTH / 2;
-  if (inset >= full) return false;
-  const fromX = entry.x + ux * inset;
-  const fromY = entry.y + uy * inset;
-  const len = full - inset;
-
-  for (const across of [-hw, 0, hw]) {
-    const ox = -uy * across;
-    const oy = ux * across;
-    if (!hasWallClearPath(world, fromX + ox, fromY + oy, spot.x + ox, spot.y + oy)) return false;
-  }
-
-  for (let d = 0; d <= len; d += BACKUP_LANE_STEP) {
-    const cx = fromX + ux * d;
-    const cy = fromY + uy * d;
+  for (let d = LANE_START; d <= maxD; d += BACKUP_LANE_STEP) {
+    const cx = entry.x + ux * d;
+    const cy = entry.y + uy * d;
+    let clear = true;
     for (const across of [-hw, 0, hw]) {
       const px = cx - uy * across;
       const py = cy + ux * across;
-      if (px < 0 || py < 0 || px > WORLD_WIDTH || py > WORLD_HEIGHT) continue;
-      if (buildingIndexAt(world, px, py) >= 0) return false;
+      if (px < 40 || py < 40 || px > WORLD_WIDTH - 40 || py > WORLD_HEIGHT - 40) {
+        clear = false;
+        break;
+      }
+      if (buildingIndexAt(world, px, py) >= 0 || world.nav.isBlocked(px, py)) {
+        clear = false;
+        break;
+      }
     }
+    if (!clear) break;
+    reached = d;
   }
-  return true;
+  return reached;
+}
+
+/**
+ * Where it comes to rest on this lane: the first spot at or past
+ * `BACKUP_PARK_MIN` that the body fits on, or failing that the deepest spot
+ * short of it that it does.
+ *
+ * Pulling up short of a blocked street is the right answer and always was; the
+ * old code agreed and then reached for a fallback that skipped the lane test
+ * to do it. Nothing here can return a spot the body could not have driven to.
+ */
+function stopOnLane(
+  world: World,
+  entry: { x: number; y: number },
+  ux: number,
+  uy: number,
+  facing: number,
+): { x: number; y: number } | null {
+  const reach = laneReach(world, entry, ux, uy, BACKUP_ENTRY_OFFSET + BACKUP_PARK_MAX);
+  if (reach < 0) return null;
+
+  let best: { x: number; y: number } | null = null;
+  for (let d = LANE_START; d <= reach; d += BACKUP_LANE_STEP) {
+    const px = entry.x + ux * d;
+    const py = entry.y + uy * d;
+    if (!bodyFits(world, px, py, facing)) continue;
+    best = { x: px, y: py };
+    if (d >= BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN) break;
+  }
+  return best;
 }
 
 /**
@@ -235,92 +275,113 @@ function parkingSpot(
   x: number,
   y: number,
 ): { spot: { x: number; y: number }; entry: { x: number; y: number } } {
-  const sides: Side[] = ([0, 1, 2, 3] as Side[])
-    .filter((s) => s !== world.outbreakSide)
-    .sort((a, b) => distanceToSide(a, x, y) - distanceToSide(b, x, y));
+  const near: Side[] = ([0, 1, 2, 3] as Side[]).sort(
+    (a, b) => distanceToSide(a, x, y) - distanceToSide(b, x, y),
+  );
+  // The breach side is a preference, not a safety rule: backup arriving out of
+  // the horde reads as the game putting your reinforcements in the worst place
+  // on the map on purpose, but a lane it can actually drive down beats a side
+  // it likes. So the allowed sides are tried in full first, and only then the
+  // one it would rather avoid.
+  const passes: Side[][] = [near.filter((s) => s !== world.outbreakSide), near];
 
-  let fallback: { spot: { x: number; y: number }; entry: { x: number; y: number } } | null = null;
-
-  for (const side of sides) {
-    const along = side === 0 || side === 2 ? x : y;
-    for (const offset of BACKUP_LANE_OFFSETS) {
-      const entry = entryOn(side, along + offset);
-      const dx = x - entry.x;
-      const dy = y - entry.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const facing = Math.atan2(dy, dx);
-
-      for (
-        let d = BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN;
-        d <= BACKUP_ENTRY_OFFSET + BACKUP_PARK_MAX;
-        d += 24
-      ) {
-        const px = entry.x + (dx / len) * d;
-        const py = entry.y + (dy / len) * d;
-        if (px < 60 || py < 60 || px > WORLD_WIDTH - 60 || py > WORLD_HEIGHT - 60) break;
-        if (!world.nav.isReachable(px, py)) continue;
-        if (!bodyFits(world, px, py, facing)) continue;
-        if (!laneClear(world, entry, { x: px, y: py })) continue;
-        return { spot: { x: px, y: py }, entry };
-      }
-
-      // Nothing on this lane clears the whole way in, but somewhere on it the
-      // body still *fits* — worth remembering, since pulling up short of a
-      // blocked street is far better than parking in a shop. The rule it gives
-      // up on is the lane, never the footprint.
-      if (!fallback) {
-        for (
-          let d = BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN;
-          d <= BACKUP_ENTRY_OFFSET + BACKUP_PARK_MAX;
-          d += 24
-        ) {
-          const px = entry.x + (dx / len) * d;
-          const py = entry.y + (dy / len) * d;
-          if (px < 70 || py < 70 || px > WORLD_WIDTH - 70 || py > WORLD_HEIGHT - 70) break;
-          if (!bodyFits(world, px, py, facing)) continue;
-          fallback = { spot: { x: px, y: py }, entry };
-          break;
-        }
+  for (const sides of passes) {
+    for (const side of sides) {
+      const along = side === 0 || side === 2 ? x : y;
+      for (const offset of BACKUP_LANE_OFFSETS) {
+        const entry = entryOn(side, along + offset);
+        const dx = x - entry.x;
+        const dy = y - entry.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len;
+        const uy = dy / len;
+        const spot = stopOnLane(world, entry, ux, uy, Math.atan2(dy, dx));
+        if (spot) return { spot, entry };
       }
     }
   }
 
-  if (fallback) return fallback;
-
-  // Nowhere on any allowed side has room for a whole vehicle, which takes a
-  // remarkable city. Take the nearest allowed edge and creep in along it until
-  // something is at least walkable — the footprint rule is the one that must
-  // not be broken, so this walks *outwards* from the kerb rather than dropping
-  // it at a fixed distance and hoping.
-  const side = sides[0] ?? 0;
+  // Nowhere on any side of the map has a lane a vehicle could drive down,
+  // which takes a remarkable city — measured at 0 in 80 calls. Park it on the
+  // cordon itself, on the nearest edge, where by construction there is nothing
+  // to be inside of.
+  const side = near[0] ?? 0;
   const entry = entryOn(side, side === 0 || side === 2 ? x : y);
   const dx = x - entry.x;
   const dy = y - entry.y;
   const len = Math.hypot(dx, dy) || 1;
-  const facing = Math.atan2(dy, dx);
-  let best = {
-    x: Math.max(
-      70,
-      Math.min(WORLD_WIDTH - 70, entry.x + (dx / len) * (BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN)),
-    ),
-    y: Math.max(
-      70,
-      Math.min(WORLD_HEIGHT - 70, entry.y + (dy / len) * (BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN)),
-    ),
+  return {
+    spot: { x: entry.x + (dx / len) * LANE_START, y: entry.y + (dy / len) * LANE_START },
+    entry,
   };
-  for (
-    let d = BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN;
-    d <= BACKUP_ENTRY_OFFSET + BACKUP_PARK_MAX;
-    d += 24
-  ) {
-    const px = entry.x + (dx / len) * d;
-    const py = entry.y + (dy / len) * d;
-    if (px < 70 || py < 70 || px > WORLD_WIDTH - 70 || py > WORLD_HEIGHT - 70) break;
-    if (buildingIndexAt(world, px, py) >= 0) continue;
-    best = { x: px, y: py };
-    if (bodyFits(world, px, py, facing)) break;
+}
+
+/**
+ * Where the body is and which way it points with `along` still to run.
+ *
+ * The stop is three things moving at once — how fast it is going, how far it
+ * has slid off the line, and which way it is pointing — and only the last two
+ * are position. Both are a pure function of how much of the braking distance
+ * is left, so the curve can be evaluated anywhere on it rather than only
+ * integrated forward. That is what lets `callBackup` check the whole slide
+ * against the geometry it is about to take place in, using the very same
+ * formula the van will follow: written twice, the check and the motion would
+ * agree until the day somebody tuned one of them.
+ */
+function brakePose(
+  v: Pick<BackupVehicle, 'targetX' | 'targetY' | 'heading' | 'drift' | 'driftDir'>,
+  along: number,
+): { x: number; y: number; facing: number } {
+  const t = Math.max(0, Math.min(1, 1 - along / VAN_BRAKE_DIST));
+  // Smoothstep, so the sideways speed is nearly nothing by the time it stops.
+  // Not only for smoothness: the drawn angle is the travel tangent plus the
+  // slew, and a curve still bending at the stop would leave it resting at some
+  // other angle than it does.
+  const ease = t * t * (3 - 2 * t);
+  const cos = Math.cos(v.heading);
+  const sin = Math.sin(v.heading);
+  const off = v.drift * v.driftDir * ease;
+  return {
+    x: v.targetX - cos * along - sin * off,
+    y: v.targetY - sin * along + cos * off,
+    facing: v.heading + VAN_SLEW_ANGLE * v.driftDir * ease,
+  };
+}
+
+/**
+ * Can it actually perform this stop here?
+ *
+ * The straight run in is `laneReach`'s business. This is the last
+ * `VAN_BRAKE_DIST` of it, where the body washes `VAN_DRIFT` (52px) sideways
+ * and swings `VAN_SLEW_ANGLE` (24°) across — well outside the 15px of slack
+ * the lane sweep carries, so the lane being clear says nothing about it. It
+ * was the one thing left driving a van through a building: measured, 1 arrival
+ * in 80, with 6 of 25 footprint samples in geometry at the worst of it.
+ *
+ * `stopD` is how far the resting spot is from the entry point, and the part of
+ * the curve still short of `LANE_START` is **not** checked. The brakes bite
+ * `VAN_BRAKE_DIST` out and the nearest a van ever parks is
+ * `BACKUP_PARK_MIN` in, so braking begins 92px *before* the body is clear of
+ * the cordon — which is the wall it is supposed to come through. Checked
+ * anyway, the boundary wall refuses every slide on every call: measured,
+ * **0 of 50** vans kept their skid, and every one arrived dead straight.
+ */
+function slideFits(
+  world: World,
+  v: Pick<BackupVehicle, 'targetX' | 'targetY' | 'heading' | 'drift' | 'driftDir'>,
+  stopD: number,
+): boolean {
+  const steps = Math.ceil(VAN_BRAKE_DIST / BACKUP_LANE_STEP);
+  for (let i = 0; i <= steps; i++) {
+    // Down to and including zero, which is where it comes to rest — the end of
+    // the curve is the one point that must not be missed by a step size that
+    // does not divide the distance.
+    const along = VAN_BRAKE_DIST * (1 - i / steps);
+    if (stopD - along < LANE_START) continue; // still coming through the cordon
+    const pose = brakePose(v, along);
+    if (!bodyFits(world, pose.x, pose.y, pose.facing)) return false;
   }
-  return { spot: best, entry };
+  return true;
 }
 
 /**
@@ -346,13 +407,13 @@ export function callBackup(
   let driftDir = Math.random() < 0.5 ? 1 : -1;
   let drift = kind === 'van' ? VAN_DRIFT : 0;
   if (drift > 0) {
-    const nx = -Math.sin(heading);
-    const ny = Math.cos(heading);
-    const rests = (dir: number): boolean =>
-      bodyFits(world, spot.x + nx * drift * dir, spot.y + ny * drift * dir, heading) &&
-      bodyFits(world, spot.x + nx * drift * dir * 0.5, spot.y + ny * drift * dir * 0.5, heading);
-    if (!rests(driftDir)) driftDir = -driftDir;
-    if (!rests(driftDir)) drift = 0;
+    const base = { targetX: spot.x, targetY: spot.y, heading, drift };
+    const stopD = Math.hypot(spot.x - entry.x, spot.y - entry.y);
+    // The whole slide, not the two points it used to check — the resting spot
+    // and its halfway mark say nothing about the swing the body takes to get
+    // there, and the swing is what clips the corner of a shop.
+    if (!slideFits(world, { ...base, driftDir }, stopD)) driftDir = -driftDir;
+    if (!slideFits(world, { ...base, driftDir }, stopD)) drift = 0;
   }
 
   world.vehicles.set(`backup-${counter}`, {
@@ -521,6 +582,34 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
   world.inventories.set(id, inv);
 }
 
+/**
+ * Stop it, and tell the nav grid it is there.
+ *
+ * **A parked vehicle goes into the nav grid; a driving one does not.** The
+ * comment on `vehicleBox` used to say routes are planned as though it weren't
+ * there and whoever walks into one deals with it — which is the sandbags' rule,
+ * inherited wholesale, and the reason for it does not carry over. A wall of
+ * sandbags is *meant* to be stood at and torn down; a van cannot be destroyed,
+ * so there is nothing on the far side of walking into one. What it produced was
+ * an officer stepping into the body, being pushed out by `resolveCircleBox`,
+ * re-aiming at the same waypoint through it and stepping in again — measured,
+ * **5 of 8** officers with somewhere to be on the other side of a parked van
+ * never got there.
+ *
+ * It stays out of `hasLineOfSight` and out of `fire`, which is the trade that
+ * actually matters: cover you shoot over.
+ *
+ * Set on arrival rather than at the call, because until then it is somewhere
+ * else — and it is at most a handful of rebuilds a round, on the same
+ * `navDirty` path a smashed pane already uses.
+ */
+function park(world: World, vehicle: BackupVehicle, now: number): void {
+  vehicle.phase = 'parked';
+  vehicle.nextDropAt = now + 500;
+  world.navBlockers.push(vehicleBox(vehicle));
+  world.navDirty = true;
+}
+
 export function updateBackup(world: World, now: number, dt: number): void {
   // The radio answers a beat after the call, from the caller's own hip.
   for (let i = world.radioReplies.length - 1; i >= 0; i--) {
@@ -585,8 +674,7 @@ export function updateBackup(world: World, now: number, dt: number): void {
     // smaller event than a SWAT team and should read as one.
     if (vehicle.kind === 'car') {
       if (along < BACKUP_ARRIVE_DIST) {
-        vehicle.phase = 'parked';
-        vehicle.nextDropAt = now + 500;
+        park(world, vehicle, now);
         continue;
       }
       vehicle.x += Math.cos(vehicle.heading) * BACKUP_SPEED * dt;
@@ -612,9 +700,8 @@ export function updateBackup(world: World, now: number, dt: number): void {
     }
 
     if (along < BACKUP_ARRIVE_DIST) {
-      vehicle.phase = 'parked';
       vehicle.facing = vehicle.heading + VAN_SLEW_ANGLE * vehicle.driftDir;
-      vehicle.nextDropAt = now + 500;
+      park(world, vehicle, now);
       continue;
     }
 
@@ -625,31 +712,16 @@ export function updateBackup(world: World, now: number, dt: number): void {
     const speed =
       VAN_BRAKE_SPEED_MIN + (VAN_APPROACH_SPEED - VAN_BRAKE_SPEED_MIN) * (1 - t) * (1 - t);
 
-    // Smoothstep, so the sideways speed is nearly nothing by the time it
-    // stops. That is not only for smoothness: the drawn angle is the travel
-    // tangent plus the slew, and a curve still bending at the stop would leave
-    // it resting at some other angle than it does now.
-    const ease = t * t * (3 - 2 * t);
-
-    // Walk the centre line forward, then place the body that far off it. Doing
-    // it this way rather than integrating a turning velocity is what keeps the
-    // arrival exactly on the spot that was checked.
-    const nx = -Math.sin(vehicle.heading);
-    const ny = Math.cos(vehicle.heading);
-    const lineX = vehicle.x - nx * vehicle.drift * vehicle.driftDir * ease;
-    const lineY = vehicle.y - ny * vehicle.drift * vehicle.driftDir * ease;
-    const stepped = speed * dt;
-    const nextLineX = lineX + Math.cos(vehicle.heading) * stepped;
-    const nextLineY = lineY + Math.sin(vehicle.heading) * stepped;
-
-    const nextAlong = Math.max(0, along - stepped);
-    const nt = Math.max(0, Math.min(1, 1 - nextAlong / VAN_BRAKE_DIST));
-    const nextEase = nt * nt * (3 - 2 * nt);
-    vehicle.x = nextLineX + nx * vehicle.drift * vehicle.driftDir * nextEase;
-    vehicle.y = nextLineY + ny * vehicle.drift * vehicle.driftDir * nextEase;
-
-    // The body leads the slide by the slew, swung the way it is washing.
-    vehicle.facing = vehicle.heading + VAN_SLEW_ANGLE * vehicle.driftDir * nextEase;
+    // Only the speed is integrated. Where the body sits and which way it points
+    // are read straight off `brakePose` at the new distance-to-run, which is
+    // the same curve `callBackup` checked the geometry against — and, being a
+    // pure function of `along`, exactly what the old forward-walked version
+    // computed. It cannot drift out of step with the check.
+    const nextAlong = Math.max(0, along - speed * dt);
+    const pose = brakePose(vehicle, nextAlong);
+    vehicle.x = pose.x;
+    vehicle.y = pose.y;
+    vehicle.facing = pose.facing;
   }
 }
 
