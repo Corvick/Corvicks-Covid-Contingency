@@ -21,6 +21,9 @@ import {
   CAMERA_PAN_X,
   CAMERA_PAN_Y,
   CAMERA_ZOOM,
+  DOG_CAMERA_ZOOM,
+  DOG_CAMERA_PAN_Y,
+  DOG_SIGHT_RADIUS,
   SCOPE_EASE_MS,
   TICK_RATE,
 } from '../../shared/constants.js';
@@ -808,8 +811,9 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
   // 1920x1080 and you simply see less ground, larger. Down a scope it slides
   // off the officer toward the reticle rather than zooming out; that is
   // `updateScope`, and it rides on top of this.
-  const w = VIEWPORT_WIDTH / CAMERA_ZOOM;
-  const h = VIEWPORT_HEIGHT / CAMERA_ZOOM;
+  const zoom = cameraZoom();
+  const w = VIEWPORT_WIDTH / zoom;
+  const h = VIEWPORT_HEIGHT / zoom;
   return {
     view: {
       x:
@@ -823,7 +827,7 @@ function cameraFor(view: EntityState | undefined): { view: Viewport; scale: numb
       w,
       h,
     },
-    scale: CAMERA_ZOOM,
+    scale: zoom,
   };
 }
 
@@ -846,6 +850,31 @@ let pushY = 0;
  * The *pan* is not part of this and applies to a dog exactly as it does to an
  * officer: it is a property of the camera, not of what is in your hands.
  */
+/**
+ * How far the camera is pulled in, for whoever is being driven.
+ *
+ * The dog sees more ground than an officer — see `DOG_CAMERA_ZOOM`, which is
+ * where the reasoning lives. **Every use of the zoom has to come through here.**
+ * There are five: the camera itself, the pan, the fog radius, the occluder clip
+ * and the fog mask's world-to-mask scale. Miss one and the halves disagree about
+ * how much world is on screen, which is the shape of every fog bug this file has
+ * ever had — ground lit that has nothing sent for it, or a mask drawn at the
+ * wrong size over a view drawn at the right one.
+ */
+function cameraZoom(): number {
+  return dogHud ? DOG_CAMERA_ZOOM : CAMERA_ZOOM;
+}
+
+/** The vertical pan that goes with it — capped per zoom, so it moves too. */
+function cameraPanY(): number {
+  return dogHud ? DOG_CAMERA_PAN_Y : CAMERA_PAN_Y;
+}
+
+/** The floor under the fog radius: as far as the server will send for us. */
+function baseSightRadius(): number {
+  return dogHud ? DOG_SIGHT_RADIUS : PLAYER_SIGHT_RADIUS;
+}
+
 function scopeReach(): number {
   if (dogHud) return 0;
   const held = heldItemId();
@@ -876,7 +905,7 @@ function scopeReach(): number {
  */
 function cameraReach(): { x: number; y: number } {
   const scope = scopeReach();
-  return { x: scope + CAMERA_PAN_X, y: scope + CAMERA_PAN_Y };
+  return { x: scope + CAMERA_PAN_X, y: scope + cameraPanY() };
 }
 
 function updateScope(dt: number): void {
@@ -927,18 +956,19 @@ function updateScope(dt: number): void {
  */
 function fogRadius(): number {
   const reach = cameraReach();
+  const zoom = cameraZoom();
   let worst = 0;
   for (let i = 0; i <= 8; i++) {
     const a = (i / 8) * (Math.PI / 2);
     // Half the screen in *world* units, which the zoom shrinks — that shrinking
     // is the whole reason zooming in is the fog lever.
     const d = Math.hypot(
-      VIEWPORT_WIDTH / (2 * CAMERA_ZOOM) + Math.cos(a) * reach.x,
-      VIEWPORT_HEIGHT / (2 * CAMERA_ZOOM) + Math.sin(a) * reach.y,
+      VIEWPORT_WIDTH / (2 * zoom) + Math.cos(a) * reach.x,
+      VIEWPORT_HEIGHT / (2 * zoom) + Math.sin(a) * reach.y,
     );
     if (d > worst) worst = d;
   }
-  return Math.max(PLAYER_SIGHT_RADIUS, Math.round(worst) + 24);
+  return Math.max(baseSightRadius(), Math.round(worst) + 24);
 }
 
 /** Whatever is in the active slot, as an item id. */
@@ -1125,8 +1155,8 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   // between rebuilds.
   const reach = cameraReach();
   const slack = FOG_MOVE_EPSILON + 40;
-  const clipW = VIEWPORT_WIDTH / (2 * CAMERA_ZOOM) + reach.x + slack;
-  const clipH = VIEWPORT_HEIGHT / (2 * CAMERA_ZOOM) + reach.y + slack;
+  const clipW = VIEWPORT_WIDTH / (2 * cameraZoom()) + reach.x + slack;
+  const clipH = VIEWPORT_HEIGHT / (2 * cameraZoom()) + reach.y + slack;
   const t0 = performance.now();
   cachedPoly = visibilityPolygon(me.x, me.y, radius, occludersFor(map), map.bushes, clipW, clipH);
   fogComputeMs = performance.now() - t0;
@@ -1196,7 +1226,7 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
   // blur is measured in. `s` additionally carries the camera zoom, because
   // everything else here is converting *world* coordinates onto that mask.
   const m = FOG_MASK_SCALE;
-  const s = FOG_MASK_SCALE * CAMERA_ZOOM;
+  const s = FOG_MASK_SCALE * cameraZoom();
   const mw = fogCanvas.width;
   const mh = fogCanvas.height;
 

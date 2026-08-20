@@ -147,6 +147,17 @@ export const PLAYER_SPEED = 160;
  */
 export const PLAYER_SIGHT_RADIUS = 720;
 /**
+ * The same figure for the dog, whose camera is pulled out to `DOG_CAMERA_ZOOM`
+ * — see the note there for *why* it sees more ground than an officer.
+ *
+ * Derived the same way and subject to the same rule: the server must send
+ * entities as far as the client can light ground, or the dog gets a wider view
+ * of an emptier street, which is worse than no change at all. At zoom 1.6 with
+ * a pan of 80/243 the furthest corner is 869; this is that with the same
+ * headroom the other three carry. `server/zoomderive.ts` checks it.
+ */
+export const DOG_SIGHT_RADIUS = 890;
+/**
  * How far the camera drifts as the cursor nears the edge of the screen.
  * Nothing to do with scopes or equipment, and it applies to **anything a person
  * drives** — an officer or a dog alike, since it is a property of the camera
@@ -207,10 +218,50 @@ export const CAMERA_ZOOM = 2.0;
  */
 const PAN_KEEP_ON_SCREEN = 0.72;
 
-export const CAMERA_PAN_Y = Math.min(
-  CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / (2 * CAMERA_ZOOM),
-  ((VIEWPORT_HEIGHT / 2) * PAN_KEEP_ON_SCREEN) / CAMERA_ZOOM,
-);
+/**
+ * The vertical pan a given zoom asks for, capped so it cannot carry whoever is
+ * driving off the frame.
+ *
+ * A function rather than a number because there are two cameras now — an
+ * officer's and the dog's — and both halves of this depend on the zoom: the
+ * equal-awareness term because it is measured in world pixels, and the cap
+ * because it spends a fraction of the half-screen, which the zoom sets. Derived
+ * once so the two cameras cannot drift apart.
+ */
+function panYFor(zoom: number): number {
+  return Math.min(
+    CAMERA_PAN_X + (VIEWPORT_WIDTH - VIEWPORT_HEIGHT) / (2 * zoom),
+    ((VIEWPORT_HEIGHT / 2) * PAN_KEEP_ON_SCREEN) / zoom,
+  );
+}
+
+export const CAMERA_PAN_Y = panYFor(CAMERA_ZOOM);
+
+/**
+ * The dog's camera sits further out than an officer's, and this is a balance
+ * fix rather than a rendering one.
+ *
+ * A dog has no ranged attack and no inventory, so it cannot carry binoculars or
+ * a scope: it is pinned at the minimum view while the people shooting it are
+ * not. At `CAMERA_ZOOM` the screen holds 540 world px vertically — 270 above
+ * you — and `SWAT_SIGHT` is 560. A SWAT team directly above or below could see
+ * the dog and open fire from 290px beyond the top of its screen, and even with
+ * the mouse pushed fully up they still out-ranged the frame by 96. Being killed
+ * by something that was never on screen is not difficulty, it is an unreadable
+ * death, and it was reported as one.
+ *
+ * 1.6 is the loosest zoom that closes it: 675 world px vertically, 337 above
+ * you at rest and **580 with the pan, against SWAT's 560**. The rule it
+ * satisfies is *anything that can shoot you is something you can look at* —
+ * deliberately not "see it all without moving the mouse", which would need a
+ * zoom below 1.0 and hand the dog the whole street for free.
+ *
+ * It is not free. Ground on screen is what sets both the fog polygon's cost and
+ * how many entities are serialised per viewer, and 1.6 is ~152% of 2.0 on both.
+ * That is one connection, and the dog is the seat where it buys something.
+ */
+export const DOG_CAMERA_ZOOM = 1.6;
+export const DOG_CAMERA_PAN_Y = panYFor(DOG_CAMERA_ZOOM);
 
 // ---------------------------------------------------------------- fog of war
 /** Visibility is recomputed on this cadence rather than every frame. */
@@ -430,9 +481,15 @@ export const DOG_MAX_HEALTH = 90;
  * `STRENGTH` is how much of the weapon's own slow it feels: 0 is none, 1 is a
  * shambler's. The stagger a player can *see* is what matters, so both numbers
  * are deliberately generous rather than token.
+ *
+ * Raised from 0.55/0.5 because a dog in the open was taking fire and simply
+ * leaving. A bolt action drops a shambler to 0.35 of pace and now takes the dog
+ * to **0.545** — it was 0.675, which was close enough to full speed that being
+ * shot was information rather than a cost. Getting away is still the dog's
+ * answer to a gun; it just has to be started before the first round lands.
  */
-export const DOG_STAGGER_TIME_MUL = 0.55;
-export const DOG_STAGGER_STRENGTH = 0.5;
+export const DOG_STAGGER_TIME_MUL = 0.75;
+export const DOG_STAGGER_STRENGTH = 0.7;
 
 /**
  * How long the dog lies where it fell before it rises again somewhere else.
@@ -491,7 +548,7 @@ export const DOG_MUZZLE_OUT = 1.25;
 
 /**
  * What the city's standing garrison does to a dog: never misses it, and hits it
- * 30% harder than it hits anything else.
+ * 60% harder than it hits anything else.
  *
  * A rule about the map rather than about marksmanship. A dog that can outrun
  * everything will always find the quarter with nobody in it and start an
@@ -500,7 +557,7 @@ export const DOG_MUZZLE_OUT = 1.25;
  * you get there is the other half. Only the officers the city *started* with:
  * anyone a radio call sent afterwards is the response, not the deterrent.
  */
-export const CITY_OFFICER_DOG_DAMAGE_MUL = 1.3;
+export const CITY_OFFICER_DOG_DAMAGE_MUL = 1.6;
 
 /**
  * Fire is the flamethrower's answer to an outbreak, and the infected are what

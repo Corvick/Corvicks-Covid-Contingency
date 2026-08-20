@@ -21,6 +21,9 @@ import {
   BINOCULAR_SIGHT_RADIUS,
   SNIPER_SIGHT_RADIUS,
   CAMERA_ZOOM,
+  DOG_CAMERA_ZOOM,
+  DOG_SIGHT_RADIUS,
+  SWAT_SIGHT,
 } from '../shared/constants.js';
 
 /** Straight out of constants.ts — kept in step by hand, so check it. */
@@ -78,4 +81,18 @@ const ok =
   required(CAMERA_ZOOM, 0) <= current.hip &&
   required(CAMERA_ZOOM, BINOCULAR_PUSH) <= current.bino &&
   required(CAMERA_ZOOM, SCOPE_PUSH) <= current.scope;
-console.log(`  ${ok ? 'OK — no dark band on any of the three' : '** SHORT — the far half of the screen would go dark **'}\n`);
+console.log(`  ${ok ? 'OK — no dark band on any of the three' : '** SHORT — the far half of the screen would go dark **'}`);
+
+// The dog has its own camera, so it needs its own row. It carries nothing, so
+// hip fire is the only case it has — but the pan is capped per zoom, so its
+// reach is not the officer's scaled by anything and has to be derived, not
+// guessed. The second line is the reason the zoom was pulled out at all:
+// whatever can shoot the dog must be something the dog can look at.
+const dogNeeds = required(DOG_CAMERA_ZOOM, 0);
+const dogVertical = VIEWPORT_HEIGHT / 2 / DOG_CAMERA_ZOOM + panY(DOG_CAMERA_ZOOM);
+console.log(`\n  dog at ${DOG_CAMERA_ZOOM}: fog needs ${dogNeeds} against DOG_SIGHT_RADIUS ${DOG_SIGHT_RADIUS}`);
+console.log(`  ${dogNeeds <= DOG_SIGHT_RADIUS ? 'OK — no dark band' : '** SHORT — the dog would light ground with nothing sent for it **'}`);
+console.log(
+  `  dog can look ${dogVertical.toFixed(0)}px up/down against SWAT_SIGHT ${SWAT_SIGHT} — ` +
+    `${dogVertical >= SWAT_SIGHT ? 'OK, nothing shoots it from off screen' : '** SHORT — SWAT still out-ranges the frame **'}\n`,
+);

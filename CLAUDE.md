@@ -1838,14 +1838,69 @@ thing that gets away, and a full stagger on a body somebody is *driving* reads
 as the controls being taken off you rather than as being hit. So it takes a
 shorter stagger at part strength (`DOG_STAGGER_TIME_MUL`,
 `DOG_STAGGER_STRENGTH`) — a bolt action drops a shambler to 0.35 of pace and the
-dog to 0.68. Measured over 1.33s of sprinting down a pinned lane: 408px clean
-against 231px staggered. It has no `AiState`, so the pair live on `DogState` and
-`moveDog` reads them; `hit` calls `staggerDog` and needs to know nothing else.
+dog to **0.545**, for **675ms** of a 900ms slow. It has no `AiState`, so the pair
+live on `DogState` and `moveDog` reads them; `hit` calls `staggerDog` and needs
+to know nothing else.
+
+**Both were raised (0.55/0.5 → 0.75/0.7), and the old figures are worth keeping
+for scale.** At 0.5 strength the dog came out at 0.675 of pace — close enough to
+untouched that being shot was information rather than a cost, and a dog stood in
+the open trading fire with the garrison never had to think about where it was.
+The sprint measurement quoted here before (408px clean against 231px staggered
+over 1.33s down a pinned lane) was taken at the *old* constants and has not been
+re-run; the pace and duration figures above are derived from the constants
+themselves, not measured.
 
 **Its health came down to 90.** The dog's real durability is its lives — it
 comes back out of the horde — so the body itself does not also need to soak a
 magazine. One that can stand in the open trading fire with the garrison never
 has to think about where it is.
+
+**The dog's camera is pulled out to `DOG_CAMERA_ZOOM` (1.6), and it is a balance
+fix rather than a rendering one.** Reported as *"dog needs more pov, I am getting
+shot by swat I cant see"*, and the complaint was exact.
+
+- **It was never the fog — it was the viewport.** At `CAMERA_ZOOM` the screen
+  holds 960x540 of world, so **270px above you**, while `SWAT_SIGHT` is **560**.
+  A SWAT team directly above or below could see the dog and open fire from 290px
+  beyond the top of its screen, and even at full vertical pan they still
+  out-ranged the frame by 96. The sight radius of 720 is derived from the screen
+  *corner*; along the vertical axis you see far less than that, and the circle
+  the server serialises has nothing to do with the rectangle you can look at.
+- **An officer has the same geometry and it does not matter to them.** They
+  shoot back at range and can carry binoculars or a scope; a dog has no ranged
+  attack and **no inventory at all**, so it was pinned at the minimum view while
+  everything shooting it was not.
+- **The rule is *anything that can shoot you is something you can look at*** —
+  deliberately not "see it all without moving the mouse", which needs a zoom
+  below 1.0 and hands the dog the whole street. 1.6 is the loosest zoom that
+  clears it: 675 world px vertically, 337 at rest and **580 with the pan against
+  SWAT's 560**.
+- **`panYFor(zoom)` replaced the written-down pan.** Both terms depend on the
+  zoom — the equal-awareness one because it is in world pixels, the
+  `PAN_KEEP_ON_SCREEN` cap because it spends a fraction of the half-screen — so
+  with two cameras it had to become a function or the two would drift.
+- **Every use of the zoom goes through one `cameraZoom()` helper, and there are
+  five**: the camera, the pan, the fog radius, the occluder clip, and the fog
+  mask's world-to-mask scale. Miss one and the halves disagree about how much
+  world is on screen, which is the shape of every fog bug this file has had.
+- **`world.dogs.has(id)`, never `viewer.dog` — and this one compiles.** The
+  server's `Entity extends EntityState`, so the wire's `dog` flag is in the
+  server type and a check on it typechecks perfectly. **Nothing server-side ever
+  sets it**; it is added in `toWire` off `world.dogs`. So the client sees a dog,
+  the server sees `undefined`, and the feature silently does nothing. Measured
+  before the fix: ceiling 719.9px, i.e. no change whatsoever.
+- **It is not free**: ground on screen sets both the fog polygon's cost and how
+  many entities are serialised per viewer, and 1.6 is ~152% of 2.0 on both. That
+  is one connection, and the dog is the seat where it buys something.
+- Measured A/B in one build with the old behaviour env-gated, 900 snapshots each
+  driving a real dog seat over a socket — furthest entity sent: **ceiling 720.1px
+  with 0 samples past 720**, against **889.6px with 1092 past 720 and 0 past
+  890**. `DOG_SIGHT_RADIUS` is 890 against the 869 that 1.6 demands, and
+  `server/zoomderive.ts` now checks both that and the SWAT rule.
+- **The client half is unverified.** rAF is throttled to nothing in a
+  non-compositing browser pane, so no frame was ever put on screen at 1.6; the
+  arithmetic and the server half are measured, the picture is not.
 
 **Sprint is free, because a dog is a player.** `world.stamina` and
 `world.exhausted` are per-id and the HUD bar already reads them; `dog.ts` just

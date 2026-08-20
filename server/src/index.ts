@@ -27,6 +27,7 @@ import {
   TICK_RATE,
   PLAYER_SPEED,
   PLAYER_SIGHT_RADIUS,
+  DOG_SIGHT_RADIUS,
   ENTITY_RADIUS,
   PATH_NODE_BUDGET_PER_TICK,
   STAMINA_MAX,
@@ -669,6 +670,16 @@ function updatePlayers(dt: number, frozen: Set<string>, now: number): void {
  * with nothing drawn on it.
  */
 function sightRadiusFor(viewer: Entity): number {
+  // The dog's camera is pulled out to `DOG_CAMERA_ZOOM`, so its screen reaches
+  // further than an officer's and the fog hole it punches is wider. This is the
+  // other half of that: light ground the server never populated and the dog
+  // gets a broader view of an emptier street, which is worse than not widening
+  // it at all. Checked before the bag, since a dog has no bag to check.
+  // `world.dogs`, not `viewer.dog`. `Entity extends EntityState`, so the wire's
+  // `dog` flag is in the server type and compiles perfectly here — but nothing
+  // server-side ever sets it. It is added in `toWire`, off this same set, which
+  // is why the client sees a dog and a check on the entity sees `undefined`.
+  if (world.dogs.has(viewer.id)) return DOG_SIGHT_RADIUS;
   const inv = world.inventories.get(viewer.id);
   const held = inv ? heldItem(inv) : null;
   if (held && ITEMS[held]?.scope) return SNIPER_SIGHT_RADIUS;
