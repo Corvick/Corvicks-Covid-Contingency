@@ -312,7 +312,7 @@ const { send, goOffline } = connect((msg) => {
     gameOverPanel.classList.add('hidden');
     victoryPanel.classList.add('hidden');
   } else if (msg.type === 'state') {
-    syncTracked(msg.entities);
+    syncTracked(msg.entities, performance.now());
     hearRoars(msg.entities);
     spectating = msg.spectating;
     survivors = msg.survivors;
@@ -719,11 +719,54 @@ document.getElementById('pause-quit')!.addEventListener('click', quitToMenu);
  * opacity, holding the last known pose while it fades out.
  */
 interface Tracked {
+  /**
+   * What is *drawn*. Its position and facing are written by the interpolator
+   * below rather than copied from the snapshot — see `ENTITY_FIELDS`.
+   */
   state: EntityState;
   alpha: number;
   seen: boolean;
+  /** Where the last snapshot put it, and where the newest one does. */
+  fromX: number;
+  fromY: number;
+  fromFacing: number;
+  toX: number;
+  toY: number;
+  toFacing: number;
 }
 const tracked = new Map<string, Tracked>();
+
+/**
+ * **The world simulates at 30Hz and the screen draws at 60.**
+ *
+ * Without this every body — and the camera, which follows one of them — moved
+ * once every second frame and was then shown twice. The frame counter says 60
+ * and the motion is 30, which is exactly what "good frames but constant
+ * stuttering" is: nothing is dropped, the steps are simply too far apart and
+ * too far between. Uneven tick delivery on top of that (see `startClock`) makes
+ * the steps different sizes as well.
+ *
+ * So positions are drawn *between* the last two snapshots rather than at the
+ * latest one. The cost is that the world is shown up to one snapshot behind —
+ * about 17ms on average — and the benefit is that it moves continuously. The
+ * crosshair is client-side and unaffected, so aiming does not feel it.
+ */
+let snapshotAt = 0;
+/**
+ * Measured rather than assumed to be `TICK_MS`. Ticks do not arrive evenly, and
+ * pacing the interpolation to a cadence the snapshots are not actually keeping
+ * is its own stutter — it would arrive early and sit still, or arrive late and
+ * jump. Smoothed hard, because one late snapshot should not restretch
+ * everything.
+ */
+let snapshotGap = 1000 / 30;
+
+/**
+ * Past this, a body did not walk — it was moved. A dog rising out of a shambler
+ * somewhere across the city, or anything respawning, must not be seen to slide
+ * there. At 30Hz nothing on foot covers this in one tick.
+ */
+const TELEPORT_PX = 140;
 
 /** Just the thermal contacts, for the pass that draws them over the fog. */
 function* thermalContacts(): Generator<EntityState> {
@@ -742,11 +785,22 @@ function* thermalContacts(): Generator<EntityState> {
  * die young, where collection is nearly free. The optional flags are assigned
  * unconditionally so an absent one clears rather than lingering.
  */
+/**
+ * **`x`, `y` and `facing` are deliberately absent**, and this is the one
+ * omission from this list that is on purpose.
+ *
+ * Everything else is copied straight off the snapshot, but those three are
+ * driven by `advanceInterpolation` between snapshots — copying them here would
+ * slam the body onto the newest position the instant it arrived, which is the
+ * 30Hz judder this exists to remove. `syncTracked` puts the incoming values on
+ * `toX`/`toY`/`toFacing` instead.
+ *
+ * Anything else added to `EntityState` still belongs in this list. Leaving a
+ * field out by accident means it only ever reaches an entity on the frame it is
+ * first seen, which has caught three flags already.
+ */
 const ENTITY_FIELDS = [
   'type',
-  'x',
-  'y',
-  'facing',
   'health',
   'grappling',
   'infected',
@@ -841,16 +895,74 @@ function hearRoars(incoming: EntityState[]): void {
   }
 }
 
-function syncTracked(incoming: EntityState[]): void {
+function syncTracked(incoming: EntityState[], now: number): void {
+  // How far apart the snapshots are actually arriving, which is what the
+  // interpolation has to be paced to.
+  if (snapshotAt > 0) {
+    const gap = now - snapshotAt;
+    // A pause — tabbed away, a breakpoint — is not a cadence to learn from.
+    if (gap > 4 && gap < 400) snapshotGap = snapshotGap * 0.8 + gap * 0.2;
+  }
+  snapshotAt = now;
+
   for (const entry of tracked.values()) entry.seen = false;
   for (const e of incoming) {
     const entry = tracked.get(e.id);
     if (entry) {
       copyInto(entry.state, e);
       entry.seen = true;
+      // Start the next leg from wherever it is being *drawn*, not from the
+      // previous target — otherwise a snapshot that arrives early leaves a
+      // visible snap back to a position it had already moved past.
+      entry.fromX = entry.state.x;
+      entry.fromY = entry.state.y;
+      entry.fromFacing = entry.state.facing;
+      entry.toX = e.x;
+      entry.toY = e.y;
+      entry.toFacing = e.facing;
+      // Moved rather than walked: put it there outright.
+      if (Math.abs(e.x - entry.fromX) > TELEPORT_PX || Math.abs(e.y - entry.fromY) > TELEPORT_PX) {
+        entry.fromX = e.x;
+        entry.fromY = e.y;
+        entry.fromFacing = e.facing;
+        entry.state.x = e.x;
+        entry.state.y = e.y;
+        entry.state.facing = e.facing;
+      }
     } else {
-      tracked.set(e.id, { state: { ...e }, alpha: 0, seen: true });
+      tracked.set(e.id, {
+        state: { ...e },
+        alpha: 0,
+        seen: true,
+        fromX: e.x,
+        fromY: e.y,
+        fromFacing: e.facing,
+        toX: e.x,
+        toY: e.y,
+        toFacing: e.facing,
+      });
     }
+  }
+}
+
+/** The shorter way round the circle, so a body turning past π doesn't spin. */
+function shortestTurn(from: number, to: number): number {
+  let d = to - from;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+/**
+ * Walk every body from where the last snapshot put it toward where the newest
+ * one does, by however much of the gap between them has elapsed.
+ */
+function advanceInterpolation(now: number): void {
+  const t = Math.min(1, Math.max(0, (now - snapshotAt) / snapshotGap));
+  for (const entry of tracked.values()) {
+    entry.state.x = entry.fromX + (entry.toX - entry.fromX) * t;
+    entry.state.y = entry.fromY + (entry.toY - entry.fromY) * t;
+    entry.state.facing = entry.fromFacing + shortestTurn(entry.fromFacing, entry.toFacing) * t;
   }
 }
 
@@ -1449,6 +1561,8 @@ function render() {
   const now = performance.now();
   const frameDelta = lastFrameAt > 0 ? Math.min(100, now - lastFrameAt) : 16;
   advanceFades(frameDelta);
+  // Between snapshots, not on them — see the note above `snapshotAt`.
+  advanceInterpolation(now);
   updateScope(frameDelta);
 
   // Everything that happened since the last frame started, attributed.

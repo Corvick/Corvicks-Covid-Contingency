@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { buildStamp } from '../../shared/buildstamp.js';
 import { TICK_RATE } from '../../shared/constants.js';
 import type { ClientMessage } from '../../shared/types.js';
-import { configureEngine, connect, disconnect, handle, tick } from './engine.js';
+import { configureEngine, connect, disconnect, handle, startClock } from './engine.js';
 import { clientIsBuilt, serveClient } from './serve.js';
 
 /** 8080 unless told otherwise, so a second server can be run alongside a game. */
@@ -68,7 +68,8 @@ wss.on('connection', (socket) => {
   socket.on('close', () => disconnect(id));
 });
 
-setInterval(tick, TICK_MS);
+// Drift-corrected rather than setInterval — see startClock.
+startClock();
 
 http.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT} (game and client, one port)`);

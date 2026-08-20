@@ -15,7 +15,7 @@
  * tens of kilobytes thirty times a second, and parsing it was measurable on the
  * main thread and worse in the garbage it left behind.
  */
-import { configureEngine, connect, disconnect, handle, tick } from '../../server/src/engine.js';
+import { configureEngine, connect, disconnect, handle, startClock } from '../../server/src/engine.js';
 import { TICK_RATE } from '../../shared/constants.js';
 import type { ClientMessage, ServerMessage } from '../../shared/types.js';
 
@@ -28,7 +28,7 @@ const TICK_MS = 1000 / TICK_RATE;
 const SOLO = 'offline-player';
 
 let started = false;
-let timer: ReturnType<typeof setInterval> | null = null;
+let stopClock: (() => void) | null = null;
 
 self.onmessage = (event: MessageEvent<{ type: 'start'; build: string } | ClientMessage>) => {
   const msg = event.data;
@@ -48,7 +48,7 @@ self.onmessage = (event: MessageEvent<{ type: 'start'; build: string } | ClientM
       // are and arrive as ordinary objects on the other side.
       (self as unknown as Worker).postMessage(out);
     });
-    timer = setInterval(tick, TICK_MS);
+    stopClock = startClock();
     return;
   }
 
@@ -61,6 +61,6 @@ self.onmessage = (event: MessageEvent<{ type: 'start'; build: string } | ClientM
  * document survives — a closing tab takes the worker with it either way.
  */
 self.onclose = () => {
-  if (timer !== null) clearInterval(timer);
+  stopClock?.();
   disconnect(SOLO);
 };
