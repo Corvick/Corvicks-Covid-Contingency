@@ -3413,3 +3413,19 @@ almost always means one of them did not pull.
   you meant to be on; the hash says which code you are on, and only the hash
   notices uncommitted edits. Both machines can read `v0.0.5` and be running
   different code.
+- **A running dev server shows a stale stamp, and this is the sharp edge.**
+  `__BUILD__` is a Vite `define`, evaluated once when the config is loaded —
+  which is when the dev server *starts*. Editing source, pulling, or committing
+  does not re-run it, and HMR will happily hot-reload new code underneath a stamp
+  still reporting the commit that was checked out when Vite came up. **Restart
+  Vite to refresh it.** Only `vite.config.ts` changing reloads the config on its
+  own.
+  - Worth knowing because the failure is the exact inverse of the feature:
+    somebody pulls, sees the old hash on the menu, and concludes the pull did not
+    take. It did; the stamp is stale.
+  - **Production is unaffected**, which is the case that matters — `Host Online
+    .bat` builds the client fresh, so the stamp is derived at build time and is
+    always right for anything anybody else connects to.
+  - It is fixable with a small Vite plugin that recomputes the stamp and serves
+    it as a virtual module, and that was deliberately not built: it is real
+    machinery for a dev-only convenience, where restarting Vite is free.
