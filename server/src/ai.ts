@@ -292,6 +292,8 @@ import {
   ZOMBIE_ROOM_CLEAR_MS,
   ZOMBIE_ABANDON_DOOR_RANGE,
   GRAPPLE_NO_ESCAPE_AT,
+  GRAPPLE_PILE_TURN_MS,
+  ESCAPE_IMMUNE_MS,
   OFFICER_REFUGE_RANGE,
   OFFICER_REFUGE_GAP,
   DOOR_SLAM_CHANCE,
@@ -5850,15 +5852,40 @@ export function attemptGrab(
   if (!session) {
     // A vest turns a grab into a brief scuffle it loses.
     const armoured = inv !== undefined && inv.kevlar > 0;
+    const endsAt = now + (armoured ? KEVLAR_GRAPPLE_MS : holdMs);
+    // Whether this grip breaks in the victim's favour, and *when*, are both
+    // settled here rather than at the deadline. Rolled at the end, every escape
+    // was the same shape: the full struggle, then release. Rolled up front it
+    // lands partway through, at a moment nobody can time.
+    //
+    // The armoured sit it out. A vest already guarantees no infection, and
+    // spending a charge is what one costs — an early escape would hand them the
+    // outcome for free and quietly make kevlar last longer than three grabs.
+    const escapes = !armoured && Math.random() < BASE_ESCAPE_CHANCE;
     session = {
       zombieIds: new Set(),
-      endsAt: now + (armoured ? KEVLAR_GRAPPLE_MS : holdMs),
+      endsAt,
+      escapeAt: escapes ? now + Math.random() * (endsAt - now) : null,
     };
     world.grapples.set(target.id, session);
   }
   // Joining an existing grip inherits its deadline and cannot push it back —
   // see the note on `endsAt` only ever being set inside the `if (!session)`.
   session.zombieIds.add(attacker.id);
+
+  // Once enough of them have hold, the grip is pulled in: a pile is not a
+  // longer grab, it is a quicker end. `Math.min` is doing real work here and
+  // is not defensive — the older rule is that a joining zombie can never
+  // *lengthen* a grip, and writing this as a plain assignment would break it
+  // the moment the third one arrived late to a scuffle already due to end. It
+  // is also what leaves a vest's 500ms exactly as short as it was.
+  if (session.zombieIds.size >= GRAPPLE_NO_ESCAPE_AT) {
+    session.endsAt = Math.min(session.endsAt, now + GRAPPLE_PILE_TURN_MS);
+    // And whatever getaway was coming is off. Swarmed is swarmed, so a break
+    // already rolled has to be revoked rather than left to fire out from under
+    // the pile a moment later.
+    session.escapeAt = null;
+  }
   return 'grabbed';
 }
 
@@ -5867,8 +5894,23 @@ export function attemptGrab(
  * the infection — they run, then turn minutes later. Clean escapes and
  * on-the-spot turns are both uncommon, and pile-ons push toward turning now.
  */
-function resolveGrapple(world: World, targetId: string, session: GrappleLike, now: number): void {
-  // Whoever was wrestling is winded afterwards.
+/**
+ * The victim fights the grip off partway: no infection, and a real head start.
+ *
+ * **`getsClear` is what makes this an escape rather than a formality.**
+ * Nothing used to make a released victim un-grabbable, so a zombie standing on
+ * them took hold again on the very next tick — measured at 100% of releases,
+ * median 33ms. A burst of speed cannot outrun a re-grab that happens before
+ * the first step.
+ */
+function breakFree(world: World, targetId: string, session: GrappleLike, now: number): void {
+  windAfterGrapple(world, session, now);
+  if (!world.entities.has(targetId)) return;
+  getsClear(world, targetId, now);
+}
+
+/** Whoever was wrestling is winded afterwards, however the grip ended. */
+function windAfterGrapple(world: World, session: GrappleLike, now: number): void {
   for (const zombieId of session.zombieIds) {
     const state = world.ai.get(zombieId);
     if (state) {
@@ -5876,6 +5918,22 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
       state.slowMul = ZOMBIE_POST_GRAPPLE_SLOW;
     }
   }
+}
+
+/**
+ * A burst of pace *and* a moment where nothing can lay a hand on you.
+ *
+ * Both halves are needed and the window is the half that was missing. They are
+ * deliberately different lengths: `ESCAPE_IMMUNE_MS` only has to cover breaking
+ * contact, while the burst runs on past it turning that into ground.
+ */
+function getsClear(world: World, targetId: string, now: number): void {
+  world.speedBoosts.set(targetId, now + ESCAPE_BOOST_MS);
+  world.grappleImmune.set(targetId, now + ESCAPE_IMMUNE_MS);
+}
+
+function resolveGrapple(world: World, targetId: string, session: GrappleLike, now: number): void {
+  windAfterGrapple(world, session, now);
 
   const target = world.entities.get(targetId);
   if (!target) return;
@@ -5911,16 +5969,23 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   }
 
   const extra = session.zombieIds.size - 1;
-  // A flat chance of walking away clean, unless three or more have hold of
-  // you, in which case there is simply no getting out of it.
-  const escapeChance = session.zombieIds.size >= GRAPPLE_NO_ESCAPE_AT ? 0 : BASE_ESCAPE_CHANCE;
-  if (escapeChance > 0 && Math.random() < escapeChance) {
-    world.speedBoosts.set(target.id, now + ESCAPE_BOOST_MS);
-    return;
-  }
+  // No escape roll here any more: it was made when the grip was taken, and a
+  // grip that was going to break has already broken through `breakFree`.
+  // Anything still being resolved at its deadline is a grab that ran its course.
 
   const priorGrapples = world.grappleCounts.get(target.id) ?? 0;
   world.grappleCounts.set(target.id, priorGrapples + 1);
+
+  // Swarmed is not a worse roll, it is the end of the rolling. The escape was
+  // already skipped above at this same threshold; this is the other half of
+  // that, and the two are deliberately gated on one constant so a pile cannot
+  // end up unescapable but survivable. Kevlar still wins — it returned long
+  // before this — which keeps "cannot be infected" absolute.
+  if (session.zombieIds.size >= GRAPPLE_NO_ESCAPE_AT) {
+    markDogBite(world, session, target.id);
+    convert(world, target, now);
+    return;
+  }
 
   const instantChance =
     INSTANT_INFECT_BASE +
@@ -5941,8 +6006,12 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
     );
   }
 
-  // Bitten but on their feet: brief burst of speed, then run for it.
-  world.speedBoosts.set(target.id, now + ESCAPE_BOOST_MS);
+  // Bitten but on their feet: brief burst of speed, then run for it — and the
+  // same moment of clearance a clean break gets. Without it this branch was the
+  // common one and it never went anywhere: released at arm's length, re-taken on
+  // the next tick, and every re-grab makes the next likelier to turn them
+  // outright through `INSTANT_INFECT_PER_PRIOR_GRAPPLE`.
+  getsClear(world, target.id, now);
   const state = world.ai.get(target.id);
   if (state) {
     state.mode = 'retreat';
@@ -6089,6 +6158,13 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
   }
 
   for (const [targetId, session] of Array.from(world.grapples)) {
+    // A grip that was always going to break, breaking. Checked ahead of the
+    // deadline because it is by definition the earlier of the two.
+    if (session.escapeAt !== null && now >= session.escapeAt) {
+      breakFree(world, targetId, session, now);
+      world.grapples.delete(targetId);
+      continue;
+    }
     if (now < session.endsAt) continue;
     resolveGrapple(world, targetId, session, now);
     world.grapples.delete(targetId);

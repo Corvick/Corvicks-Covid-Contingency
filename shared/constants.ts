@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.2.2';
+export const GAME_VERSION = '0.3.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -1298,38 +1298,125 @@ export const ENTITY_MAX_HEALTH: Record<EntityType, number> = {
 
 // ---------------------------------------------------------------- infection
 /**
- * How long one grab lasts: 1s at the shortest, 3s at the very longest, and
- * **about two seconds nearly every time**.
+ * How long one grab lasts: 1s at the shortest, **2s at the very longest**.
  *
  * The roll is the average of two randoms rather than one, which makes it
- * triangular — mode and mean both land on 2.0s and the ends are rare. A flat
- * roll across the same range would give the same average while making a 1s
- * scuffle and a 3s pin equally common, and the whole point of the figure is
- * that a grab has a *typical* length you can learn.
+ * triangular — mode and mean both land in the middle of the range and the ends
+ * are rare. A flat roll would give the same average while making the shortest
+ * scuffle and the longest pin equally common, and the whole point of the
+ * figure is that a grab has a *typical* length you can learn.
+ *
+ * The ceiling came down 3s → 2s, so the typical grab is now 1.5s rather than
+ * 2.0s. Note what that does to the rest of this block: a grab is half the
+ * event it was in duration, so the odds attached to one had to go up or the
+ * infection rate would have quietly halved with it.
  */
 export const GRAPPLE_MIN_MS = 1000;
-export const GRAPPLE_MAX_MS = 3000;
+export const GRAPPLE_MAX_MS = 2000;
 /** Once a victim has this many attackers, other zombies go find their own. */
 export const MAX_GRAPPLERS = 3;
 /**
- * Held by this many at once and there is no getting away — the escape roll is
- * skipped entirely rather than merely made unlikely.
+ * Held by this many at once and it is over: the escape roll is skipped
+ * entirely rather than merely made unlikely, the grip is pulled in to
+ * `GRAPPLE_PILE_TURN_MS`, and it ends in a turn rather than in a roll.
+ *
+ * One threshold for all three deliberately, rather than three numbers that
+ * happen to be 3. Being swarmed is a single state — it is the moment the
+ * fight stops being a fight — and split across separate constants they would
+ * drift apart and leave a pile you cannot escape but can survive, or one that
+ * turns you without ever having been unescapable.
+ *
+ * It is the same figure as `MAX_GRAPPLERS`, so in practice "three or more"
+ * is exactly three: nothing lets a fourth get hold.
  */
 export const GRAPPLE_NO_ESCAPE_AT = 3;
+/**
+ * And how long you have once that many have you. A pile is not a longer
+ * version of a grab, it is a different outcome arriving sooner.
+ *
+ * Applied as a **floor pulled in, never a deadline pushed out** — see
+ * `attemptGrab`. The rule that a joining zombie cannot lengthen a grip is
+ * older than this one and still holds; the third one arriving shortens it, and
+ * if the grip was already due to end sooner than a second it is left alone.
+ * That also keeps a vest's brief scuffle (`KEVLAR_GRAPPLE_MS`, 500ms) exactly
+ * as short as it was.
+ */
+export const GRAPPLE_PILE_TURN_MS = 1000;
 
 /** The outbreak arrives as a tight group along one randomly chosen map edge. */
 export const INITIAL_ZOMBIES = 5;
 export const INITIAL_ZOMBIE_SPREAD = 110;
 export const MATERIALIZE_MS = 1400;
-/** Rare clean getaway with no infection at all. */
-export const BASE_ESCAPE_CHANCE = 0.05;
+/**
+ * A clean getaway with no infection at all — **and it is rolled when the grip
+ * is taken, not when it lets go.**
+ *
+ * Deciding it up front is what lets the escape land at a *random moment*
+ * inside the grapple rather than always on the deadline. Resolved at the end,
+ * every escape looked identical: the full struggle, then release. Now the grip
+ * simply breaks partway, at a time nobody can predict, which is what being
+ * fought off actually looks like.
+ *
+ * The armoured are deliberately left out of the roll — a vest already
+ * guarantees no infection, and spending a charge is the designed cost of one.
+ * See `attemptGrab`.
+ */
+export const BASE_ESCAPE_CHANCE = 0.1;
 export const ESCAPE_CHANCE_PER_EXTRA_ZOMBIE = 0;
-/** Slight, and gone quickly — just enough to break contact. */
-export const ESCAPE_SPEED_MULTIPLIER = 1.5;
-export const ESCAPE_BOOST_MS = 1400;
+/**
+ * The burst that turns letting go into getting away.
+ *
+ * **`ESCAPE_IMMUNE_MS` is the one that actually does it, and the speed alone
+ * never could.** Nothing used to make a released victim un-grabbable, so the
+ * zombie standing on them re-grabbed on the very next tick — measured, 100% of
+ * releases were re-taken with a median of 33ms, one tick, and the victim never
+ * got further than 31px against a 32px grab reach. At any multiplier a tick is
+ * a few pixels, so raising the speed on its own would have moved that 31 to 32
+ * and changed nothing anybody could see.
+ *
+ * With a window to run in, the speed is what decides how much ground it buys.
+ * 1.9 puts a fleeing civilian at 158 px/s, which beats even the fastest *fresh*
+ * zombie (133) — and the one that just let go is winded to 47-66 by
+ * `ZOMBIE_POST_GRAPPLE_SLOW` for longer than the burst lasts, so the gap opens
+ * at about 100 px/s and keeps opening after the burst ends.
+ *
+ * The window is longer than `KEVLAR_IMMUNE_MS` on purpose: a vest buys a
+ * breather in a fight that is still going, where this has to break contact.
+ */
+export const ESCAPE_SPEED_MULTIPLIER = 1.9;
+/**
+ * And how long it lasts. 1400 was a *sprint* rather than a flight — reported
+ * as exactly that — and the cliff at the end of it was the problem: the burst
+ * stopped a full second before ZOMBIE_POST_GRAPPLE_MS finished winding the
+ * zombie, so the victim dropped to HUMAN_FLEE_SPEED (below every zombie speed)
+ * while the chase was still on.
+ *
+ * 4000 covers the winding and then keeps going, which is the part that turns a
+ * delay into an escape: the last 1.4s are spent outrunning a *recovered*
+ * zombie rather than a winded one. Measured on open ground with no cover, as
+ * the duration was swept: re-grabbed after 4000ms -> 5600 -> 6467 at 1400 /
+ * 2600 / 4000, ground made 138 -> 238 -> 269px, and clean getaways 4% -> 1% ->
+ * 17%. Past 4000 it goes bimodal — a third get away outright and the rest are
+ * caught early against geometry — so the figure stops meaning one thing.
+ */
+export const ESCAPE_BOOST_MS = 4000;
+export const ESCAPE_IMMUNE_MS = 800;
 
-/** The common outcome is a bite that incubates while the victim runs. */
-export const INSTANT_INFECT_BASE = 0.05;
+/**
+ * The chance a grab turns you **on the spot** rather than leaving you bitten
+ * and running. Anything short of it still infects: the victim gets away,
+ * carries it, and turns minutes later on `TURN_DELAY_MIN_MS`.
+ *
+ * It was 0.05, which made turning on the spot a rarity and the incubated bite
+ * essentially the only outcome. At 0.5 a grab is a coin toss between the two,
+ * which is what makes being caught the event it should be.
+ *
+ * **The 5% clean getaway sits above this and is rolled first**, so the share
+ * of grabs that actually turn somebody is 0.95 x 0.5, not 0.5 — about 47.5%
+ * for a first grab by one zombie. The two modifiers below push it up from
+ * there, and a pile at `GRAPPLE_NO_ESCAPE_AT` skips both rolls entirely.
+ */
+export const INSTANT_INFECT_BASE = 0.5;
 export const INSTANT_INFECT_PER_EXTRA_ZOMBIE = 0.07;
 export const INSTANT_INFECT_PER_PRIOR_GRAPPLE = 0.1;
 export const TURN_DELAY_MIN_MS = 9000;

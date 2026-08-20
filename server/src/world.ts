@@ -455,6 +455,16 @@ export interface AiState {
 export interface GrappleSession {
   zombieIds: Set<string>;
   endsAt: number;
+  /**
+   * When this grip breaks in the victim's favour, or null if it never does.
+   *
+   * Rolled once, as the grip is taken, so an escape lands at an unpredictable
+   * moment *inside* the struggle rather than always on the deadline. Cleared
+   * outright once `GRAPPLE_NO_ESCAPE_AT` of them have hold — being swarmed
+   * means there is no getting away, and a pre-rolled escape has to be revoked
+   * rather than merely out-voted.
+   */
+  escapeAt: number | null;
 }
 
 export interface Command {

@@ -831,27 +831,169 @@ Reserved ground like any other landmark, but with two rules of its own.
   It is drawn under everything as ground, one stroked polyline with a wider
   faint pass beneath for the soft edge.
 
-### A grab is about two seconds
+### A grab is short, and it is a coin toss
 
-`GRAPPLE_MIN_MS` 1s to `GRAPPLE_MAX_MS` 3s, rolled as the **average of two
-randoms** rather than one. That makes it triangular: mode and mean both land on
-2.0s and both ends are rare, where a flat roll over the same range gives the
-same average while making a 1s scuffle and a 3s pin equally likely. A grab
-wants a typical length you can learn. Sampled over 200k rolls: mean 2001ms,
-median 2002ms, p10 1448, p90 2554, **3%** over 2.75s and nothing over 3s.
+`GRAPPLE_MIN_MS` 1s to `GRAPPLE_MAX_MS` **2s**, rolled as the **average of two
+randoms** rather than one. That makes it triangular: mode and mean both land in
+the middle and both ends are rare, where a flat roll over the same range gives
+the same average while making the shortest scuffle and the longest pin equally
+likely. A grab wants a typical length you can learn.
+
+**The ceiling came down 3s → 2s and the odds went up to match**, and the second
+half is not optional. A grab is half the event it was in duration, so leaving
+`INSTANT_INFECT_BASE` where it was would have quietly halved the rate at which
+an outbreak actually converts anybody. It is **0.5** now, against 0.05 — a grab
+is a coin toss between turning on the spot and getting away bitten, where
+before, turning on the spot was a rarity and the incubated bite was very nearly
+the only outcome.
+
+- **The clean getaway takes its 10% off the top**, so the share of grabs that
+  actually turn somebody is 0.90 × 0.5 rather than 0.5. Measured over 600
+  staged grabs: **46.0%** turned by one zombie, 52.7% by two (the
+  `INSTANT_INFECT_PER_EXTRA_ZOMBIE` step), with 9.5% and 8.8% walking away
+  clean. If an exact 50% is ever wanted it is `BASE_ESCAPE_CHANCE` that has to
+  move, not this constant.
+- **Nothing outlasts the ceiling** — 2000ms across those trials. The *floor*
+  is no longer `GRAPPLE_MIN_MS`, because an escape can land at any point inside
+  the grip: held times now start at tens of milliseconds. See below.
 
 A vest is the exception and stays at `KEVLAR_GRAPPLE_MS` — half a second of
 scuffle it loses, which is the point of wearing one.
 
-### A joining zombie does not reset the grapple clock
+**This is the largest balance change in the file and the staged figures do not
+show it.** A grab is a coin toss now rather than a one-in-twenty, so the
+outbreak compounds from the first minute instead of building through incubated
+bites. Measured on the same harness, same machine, same 120s, three cities
+either side of the change: **zombies alive 57 / 27 / 110 → 295 / 168 / 375**,
+and **survivors 456 / 487 / 398 → 219 / 322 / 141**. Roughly three to six times
+the horde and about half the city left alive. The map is not seeded and runs do
+vary wildly, but the ranges do not overlap and the direction is the same in all
+three. `INSTANT_INFECT_BASE` is the knob if that is too far.
 
-`endsAt` is set **only inside `if (!session)`** in `updateZombie` — creating the
-session. Everything after that is `session.zombieIds.add(e.id)`, so a second or
-third zombie piling on inherits the deadline the first one set and cannot push
-it back. Measured with a staged pile, on the older 1.0-2.2s window: the
-deadline was +1805ms when the first grabbed and +1805ms after a second joined,
-moved by **0ms**, and it resolved at +1833ms — one tick past, which is the 30Hz
+*Note the target-churn figures rise in that same run — 0.206-0.245 → 0.349-0.407
+switches per zombie-second — and that is not `ZOMBIE_TARGET_STICK` regressing.*
+There are three times as many zombies with three times as much prey in reach,
+so there is genuinely more worth switching to. The ratio against the gated-off
+behaviour holds at about 2.2x, which is the figure that means anything.
+
+#### Three of them and it is over
+
+`GRAPPLE_NO_ESCAPE_AT` (3) is now one threshold doing three things: the escape
+roll is skipped, the grip is pulled in to `GRAPPLE_PILE_TURN_MS` (1s), and it
+ends in a turn rather than in a roll. Measured over 600 piles: **100% turned,
+every one of them at 1033ms.**
+
+- **One constant for all three, deliberately.** Being swarmed is a single state
+  — the moment the fight stops being a fight — and split across three numbers
+  that happen to be 3 they would drift into a pile you cannot escape but can
+  survive, or one that turns you without ever having been unescapable. It is
+  the same figure as `MAX_GRAPPLERS`, so "three or more" is exactly three in
+  practice: nothing lets a fourth take hold.
+- **The pull-in is a `Math.min`, and that is load-bearing rather than
+  defensive.** The older rule — that a joining zombie can never *lengthen* a
+  grip — still holds, and a plain assignment would have broken it the moment a
+  third arrived late to a scuffle already due to end. Measured both ways: a
+  300ms grip stays **+300ms** when the third joins, and a 1900ms grip is pulled
+  in to **+1000ms**.
+- **Kevlar still wins outright**, because it returns long before any of this.
+  Measured against a full pile of three: **0% turned, 0% bitten, 100% clean**,
+  at the vest's own 533ms. "Cannot be infected" stays absolute.
+
+#### Letting go was not the same as getting away
+
+Reported as *"most do not have enough speed to get away once they get out of a
+grapple and just end up getting grappled again by the same zombie"*. The
+diagnosis was right and the cause was not speed at all.
+
+**Nothing made a released victim un-grabbable.** Only kevlar and the shield
+ever set `world.grappleImmune`, so the zombie standing on them simply took hold
+again on the next tick. Measured before the fix: **100% of releases re-grabbed,
+median 33ms — one tick — and the victim never got further than 31px against a
+32px grab reach.** They were re-taken before they could take a step.
+
+- **Raising `ESCAPE_SPEED_MULTIPLIER` on its own would have done nothing
+  visible**, and that is the point worth keeping. At any multiplier one tick is
+  a few pixels: 1.5 → 1.9 moves the victim 4px instead of 3px in the 33ms
+  before the zombie has them again. The fix had to be a *window*, not a speed.
+- **`ESCAPE_IMMUNE_MS` (800) is that window**, granted by `getsClear` to every
+  release — the clean break *and* the far more common bitten-but-standing one.
+  Longer than `KEVLAR_IMMUNE_MS` on purpose: a vest buys a breather inside a
+  fight that is still going, where this has to break contact outright.
+- **The speed then decides what the window buys.** 1.9 puts a fleeing civilian
+  at 158 px/s, ahead of even the fastest *fresh* zombie (133), while the one
+  that just let go is winded to 47-66 by `ZOMBIE_POST_GRAPPLE_SLOW`.
+- **`ESCAPE_BOOST_MS` went 1400 → 4000, because 1400 was a sprint rather than a
+  flight** — reported as exactly that. The cliff at the end was the problem: the
+  burst stopped a full second *before* the zombie finished winding, so the
+  victim dropped to `HUMAN_FLEE_SPEED` — below every zombie speed — while the
+  chase was still on. At 4000 the last 1.4s are spent outrunning a *recovered*
+  zombie, which is what turns a delay into an escape. Swept on open ground with
+  no cover:
+
+  | burst | re-grabbed after | ground made | clean away |
+  |---|---|---|---|
+  | 1400ms | 4000ms | 138px | 4% |
+  | 2600ms | 5600ms | 238px | 1% |
+  | **4000ms** | **6467ms** | **269px** | **17%** |
+  | 6000ms | — | 225px | 32% |
+
+  Past 4000 it goes bimodal — a third get away outright and the rest are caught
+  early against geometry — so a single figure stops describing it.
+- Measured after, same rig: **0 re-grabbed within a tick, 22% still free after
+  9s, median 5467ms to re-grab among those caught, and 211px of ground**
+  against a 32px reach.
+- **The ones still caught on open ground are correct, not a shortfall.**
+  `HUMAN_FLEE_SPEED` is deliberately below every zombie speed, so once the burst
+  expires the chase resumes and the zombie wins it. Raising *that* is the thing
+  not to do — see **NPC speeds are all scaled together**. What a release buys is
+  five-odd seconds and a couple of hundred pixels, which is time to reach a
+  door, a building or a crowd. The rig has none of those, so it is the floor on
+  how well this works rather than the figure.
+
+**An escape now happens at a random moment inside the grip, not on the
+deadline.** `BASE_ESCAPE_CHANCE` is rolled in `attemptGrab` as the grip is
+taken, and `GrappleSession.escapeAt` is when it will break; the tick loop
+checks it ahead of `endsAt` because it is by definition the earlier of the two.
+Resolved at the end, every escape looked identical — the full struggle, then
+release. Measured over 20,000 grips: **10.0% will break**, spread across the
+window at 19.6 / 20.6 / 19.8 / 19.9 / 20.1% by fifths, reaching both ends.
+
+- **A pile revokes it.** `escapeAt` is cleared once `GRAPPLE_NO_ESCAPE_AT` have
+  hold — a getaway already rolled has to be taken back rather than left to fire
+  out from under the pile a moment later.
+- **The armoured are left out of the roll**, since a vest already guarantees no
+  infection and spending a charge is what one costs. Without that, an early
+  escape would hand them the outcome for free and quietly make kevlar last
+  longer than three grabs.
+
+**At the city level this is a wash, and it was not meant to be one.** Same
+harness, 120s, three cities either side: zombies **295/168/375 → 169/305/309**
+and survivors **219/322/141 → 342/208/182** — medians barely moved and the
+ranges overlap heavily. That is the honest result: only 10% of grabs end clean,
+and the other 90% now get away *while infected* rather than being re-grabbed,
+which changes how a grab plays without changing how fast the outbreak spreads.
+
+`server/grapplecheck.ts` covers all of it, and the release check is the one
+that matters most because **the bug was an absence rather than a line** —
+nothing granted immunity, so there was nothing to read wrong. Put back
+deliberately, it fails 3 checks and reproduces the original 33ms and 28px
+exactly.
+
+### A joining zombie can shorten the grapple clock, never lengthen it
+
+`endsAt` is set **only inside `if (!session)`** in `attemptGrab` — creating the
+session. Everything after that is `session.zombieIds.add(e.id)`, so a second
+zombie piling on inherits the deadline the first one set and cannot push it
+back. Measured with a staged pile, on the older 1.0-2.2s window: the deadline
+was +1805ms when the first grabbed and +1805ms after a second joined, moved by
+**0ms**, and it resolved at +1833ms — one tick past, which is the 30Hz
 granularity.
+
+**The third one is the exception, and it only ever pulls the deadline in** —
+see **Three of them and it is over**. That is written as a `Math.min` precisely
+so this section stays true: the rule was never "the deadline is immutable", it
+was "nobody gets to buy the victim more time by joining". Measured after: a
+300ms grip is still +300ms with three on it, and a 1900ms one becomes +1000ms.
 
 What *can* look like a reset is a fresh grab: `resolveGrapple` deletes the
 session, and a zombie still stood on you starts a new one with a new deadline
