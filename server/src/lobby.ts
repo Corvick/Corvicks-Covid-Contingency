@@ -1,4 +1,27 @@
-import { randomInt } from 'node:crypto';
+/**
+ * An unbiased integer in `[0, max)`, from the platform's CSPRNG.
+ *
+ * This was `randomInt` from `node:crypto`, and it was the one thing standing
+ * between the lobby and a browser worker — everything else the simulation
+ * touches is plain TypeScript. `getRandomValues` is the same generator under
+ * another name and exists in Node and in a worker alike.
+ *
+ * The property worth keeping is the rejection, not the API: sampling and
+ * discarding anything in the ragged top of the range is what makes every letter
+ * equally likely, where `Math.random() * n | 0` quietly favours the low ones. A
+ * guessed code is a stranger in your game, so this is not the place to be
+ * casually uniform.
+ */
+function randomInt(max: number): number {
+  const limit = Math.floor(0x1_0000_0000 / max) * max;
+  const buf = new Uint32Array(1);
+  let n: number;
+  do {
+    globalThis.crypto.getRandomValues(buf);
+    n = buf[0];
+  } while (n >= limit);
+  return n % max;
+}
 import type {
   ChatLine,
   LobbyTeam,
