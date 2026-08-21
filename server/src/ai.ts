@@ -205,6 +205,8 @@ import {
   BOT_BOLT_DIST,
   BOT_SAFE_DIST,
   BOT_SHAKEN_MS,
+  ACID_BLIND_SWEEP_ARC,
+  ACID_BLIND_SWEEP_RATE,
   CITY_OFFICER_DOG_DAMAGE_MUL,
   GRAPPLED_COOLDOWN_MUL,
   BOT_SPRINT_TRIGGER,
@@ -438,6 +440,36 @@ function getAi(world: World, e: Entity, now: number): AiState {
   return state;
 }
 
+/**
+ * Blinded: the legs stop and the head does not.
+ *
+ * A sweep either side of wherever they were facing when it hit them, which is
+ * the whole of it — no pathing, no perception, no doors, no looting. The
+ * bearing is *latched* on the state rather than integrated from the current
+ * facing, so the sweep is a fixed arc about a fixed centre and cannot walk its
+ * own middle round the compass over a couple of seconds.
+ *
+ * It is deliberately not a trait and not a chance: there is nothing to roll.
+ * Somebody who has had acid thrown in their eyes does one thing.
+ */
+function blindedTick(world: World, e: Entity, state: AiState, now: number): void {
+  const until = world.blinded.get(e.id)!;
+  // **Latched against the deadline, not against a flag.** A second gobbet
+  // landing on somebody already blind pushes the deadline out, which is a
+  // different number, which re-centres the sweep on wherever they are facing
+  // now — so it needs no clearing up anywhere when the blindness lifts, and
+  // there is no stale bearing left on the state to be found by the next one.
+  if (state.blindUntil !== until) {
+    state.blindUntil = until;
+    state.blindFrom = e.facing;
+    state.blindAt = now;
+  }
+  // Driven off the clock rather than integrated per tick, so a dropped tick
+  // cannot leave the head lagging behind where the elapsed time says it is.
+  const t = (now - state.blindAt) / 1000;
+  e.facing = state.blindFrom + Math.sin(t * ACID_BLIND_SWEEP_RATE) * ACID_BLIND_SWEEP_ARC;
+}
+
 export function computeFrozen(world: World): Set<string> {
   const frozen = new Set<string>();
   // A zombie a mine has dropped is going nowhere and grabbing nobody. Folding
@@ -451,6 +483,14 @@ export function computeFrozen(world: World): Set<string> {
     frozen.add(targetId);
     for (const zombieId of session.zombieIds) frozen.add(zombieId);
   }
+  // A shambler with a dog coming out of it is going nowhere. Folded in here for
+  // the same reason the stun is: it wants to stop walking, stop pathing, stop
+  // opening doors and stop grabbing people, and one entry in this set is all of
+  // that without a line about births anywhere in the AI. It also keeps the body
+  // under the camera that is pointed at it — the dog's own body is parked on
+  // top of it, and a host that wandered off mid-convulsion would take the
+  // burst, and the animal, out of frame.
+  for (const birth of world.dogBirths.values()) frozen.add(birth.hostId);
   return frozen;
 }
 
@@ -953,7 +993,7 @@ function step(
       speed *= ZOMBIE_HURT_SLOWEST + (1 - ZOMBIE_HURT_SLOWEST) * t;
     }
   }
-  speed = speedAt(world, e.x, e.y, speed);
+  speed = speedAt(world, e.x, e.y, speed, e.type);
   e.x += Math.cos(state.heading) * speed * dt;
   e.y += Math.sin(state.heading) * speed * dt;
   e.facing = state.heading;
@@ -3749,7 +3789,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     // instead of holding ground and shooting.
     if (dist < NPC_OFFICER_RETREAT_DIST) {
       const backward = Math.atan2(-dy, -dx);
-      const speed = speedAt(world, e.x, e.y, HUMAN_WALK_SPEED);
+      const speed = speedAt(world, e.x, e.y, HUMAN_WALK_SPEED, e.type);
       const stepX = Math.cos(backward) * speed * dt;
       const stepY = Math.sin(backward) * speed * dt;
       // Don't reverse into a wall — slide along it instead.
@@ -4863,7 +4903,7 @@ function doorWatchTick(
   // Off the threshold, facing it the whole way back.
   if (Math.hypot(spec.x - e.x, spec.y - e.y) < BOT_DOOR_STANDOFF) {
     const back = aim + Math.PI;
-    const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv) * BOT_KITE_SPEED_MUL);
+    const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv) * BOT_KITE_SPEED_MUL, e.type);
     const stepX = Math.cos(back) * speed * dt;
     const stepY = Math.sin(back) * speed * dt;
     if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
@@ -5332,7 +5372,7 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const pace = state.botGiving
         ? botStaminaTick(state, true, dt, inv)
         : botWalkSpeed(inv);
-      const speed = speedAt(world, e.x, e.y, pace * BOT_KITE_SPEED_MUL);
+      const speed = speedAt(world, e.x, e.y, pace * BOT_KITE_SPEED_MUL, e.type);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
       // Slide along whichever axis is open rather than stopping dead.
@@ -6668,6 +6708,19 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
     }
 
     const state = getAi(world, e, now);
+
+    // Acid went over their face. They look around and they do not move.
+    //
+    // Its own branch rather than an entry in `frozen`, and the difference is
+    // the point: frozen skips an entity outright, where this one still turns.
+    // Somebody stood dead still on a bearing reads as the game having stopped
+    // paying attention to them — which is exactly what standing about used to
+    // look like before `settledTick`, and the same fix applies.
+    if (world.blinded.has(e.id)) {
+      blindedTick(world, e, state, now);
+      continue;
+    }
+
     if (e.type === 'human') updateHuman(world, e, state, now, dt);
     else if (e.type === 'officer') {
       // Bots stand in for the human players; grey NPC officers are separate.

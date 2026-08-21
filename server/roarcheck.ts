@@ -33,6 +33,8 @@ import { dogHudFor, startDogAbility, updateDogs } from './src/dog.js';
 import { fireHeld } from './src/combat.js';
 import { gunSlots, newInventory } from './src/inventory.js';
 import {
+  BASE_ESCAPE_CHANCE,
+  DOG_BIRTH_MS,
   DOG_DEATH_MS,
   DOG_ROAR_CALL_COUNT,
   DOG_ROAR_COOLDOWN_MS,
@@ -129,6 +131,22 @@ function rig(withAi = false): Rig {
   };
 }
 
+/**
+ * The escape roll `attemptGrab` makes, made here instead.
+ *
+ * **A staged `GrappleSession` has to carry `escapeAt` or nothing ever gets
+ * away**, and that is not a detail — it is now the *only* way a grip ends in
+ * the victim's favour. Written without it, the field is `undefined`, the tick
+ * loop's `now >= session.escapeAt` is false forever, and every staged bite
+ * turns somebody. That is what "0 did not turn" was: the control which proves
+ * the tally counts bodies rather than bites had quietly stopped being able to
+ * fail, because the harness was never typechecked (`server/tsconfig.json`
+ * covers `src/**` only — see the note in CLAUDE.md).
+ */
+function escapeRoll(now: number, endsAt: number): number | null {
+  return Math.random() < BASE_ESCAPE_CHANCE ? now + Math.random() * Math.max(1, endsAt - now) : null;
+}
+
 /** Clear the city's own outbreak out, so staged geometry is the only geometry. */
 function emptyTheHorde(world: World): void {
   for (const e of [...world.entities.values()]) {
@@ -189,16 +207,22 @@ function testLock(): void {
 }
 
 function testTheBar(): void {
-  console.log('\nfour hexagons, one of them filled');
+  console.log('\nfour hexagons, two of them filled');
   const r = rig();
   const hud = dogHudFor(r.world, DOG, r.clock)!;
   check('the bar is four long', hud.abilities.length === 4, String(hud.abilities.length));
-  check('exactly one is filled', hud.abilities.filter((a) => a !== null).length === 1);
+  // Two now: the roar on Q and the acid on E. The empty pair are still drawn,
+  // because the whole value of a fixed row is that a key does not move when the
+  // one beside it is filled in — which is exactly what happened here.
+  check('two are filled', hud.abilities.filter((a) => a !== null).length === 2);
   check('and it is slot 0, ROAR', hud.abilities[0]?.name === 'ROAR');
   check('it starts ready', (hud.abilities[0]?.ready ?? 0) >= 1);
   check('with nothing banked', hud.abilities[0]?.charges === 0);
-  for (const slot of [1, 2, 3]) {
-    check(`E/R/F slot ${slot} does nothing`, startDogAbility(r.world, DOG, slot, r.clock) === 'refused');
+  // Slot 1 belongs to `acidcheck.ts` and is only established here as *not
+  // refused*, so that this file's claim about the empty slots stays honest.
+  check('E slot 1 is the acid, and is taken', startDogAbility(r.world, DOG, 1, r.clock) === 'spat');
+  for (const slot of [2, 3]) {
+    check(`R/F slot ${slot} does nothing`, startDogAbility(r.world, DOG, slot, r.clock) === 'refused');
   }
 
   r.world.dogConversions.set(DOG, 5);
@@ -361,7 +385,7 @@ function stageBites(n: number, byDog: boolean): { turned: number; charged: numbe
     // Well out of everybody's way, so nothing else in the city touches them.
     r.human(id, 60 + (i % 20) * 12, 60 + Math.floor(i / 20) * 12);
     victims.push(id);
-    world.grapples.set(id, { zombieIds: new Set([biter]), endsAt: r.clock });
+    world.grapples.set(id, { zombieIds: new Set([biter]), endsAt: r.clock, escapeAt: escapeRoll(r.clock, r.clock) });
   }
 
   // One tick resolves every grapple; then jump the clock past the longest
@@ -440,7 +464,7 @@ function testCureTakesTheCreditBack(): void {
 
   // Now a shambler finishes the job. The dog gets nothing for it.
   r.shambler('finisher', 490, 400);
-  world.grapples.set(patient.id, { zombieIds: new Set(['finisher']), endsAt: r.clock });
+  world.grapples.set(patient.id, { zombieIds: new Set(['finisher']), endsAt: r.clock, escapeAt: null });
   r.run(2);
   r.clock += TURN_DELAY_MAX_MS + 2000;
   r.run(2);
@@ -497,7 +521,13 @@ function testRefusals(): void {
   // Teeth already in somebody: the head is doing something else.
   const busy = rig();
   const bitten = busy.human('in-the-jaws', busy.dog.x + 20, busy.dog.y);
-  busy.world.grapples.set(bitten.id, { zombieIds: new Set([DOG]), endsAt: busy.clock + 5000 });
+  busy.world.grapples.set(bitten.id, {
+    zombieIds: new Set([DOG]),
+    endsAt: busy.clock + 5000,
+    // Deliberately null: this grip exists to have a mouthful in it when the key
+    // is pressed, so it must not break early and let the roar through.
+    escapeAt: null,
+  });
   const st = busy.world.dogState.get(DOG);
   busy.run(1);
   void st;
@@ -524,11 +554,20 @@ function testShotMidRoar(): void {
   check('a round finishes the roar with it', dogHudFor(world, DOG, r.clock)!.abilities[0]!.active < 0);
   check('and the wire stops claiming it', toWire(world, r.dog, true, r.clock).roaring === undefined);
 
-  // Up again on the far side of the death window: the roar must not fire from
-  // the grave, at a spot picked before it was killed and half a map away.
+  // Up again on the far side of the death window *and* the birth after it —
+  // the roar must not fire from the grave, at a spot picked before it was
+  // killed and half a map away.
+  //
+  // Both windows, because being down is two stages now: the body lying in the
+  // road, then the shambler it comes out of convulsing. Advancing only past the
+  // first leaves the animal part-way out of a host that has not been spent yet,
+  // which reads as risen to `dogsOut` and to `entities` and is not.
   r.clock += DOG_DEATH_MS + 200;
   r.run(4);
-  check('it rose again', !world.dogsOut.has(DOG) && world.entities.has(DOG));
+  check('a host was chosen', world.dogBirths.has(DOG));
+  r.clock += DOG_BIRTH_MS + 200;
+  r.run(4);
+  check('it rose again', !world.dogsOut.has(DOG) && world.entities.has(DOG) && !world.dogBirths.has(DOG));
   check(
     'and no order was ever given',
     (world.ai.get('listener')?.lastSeenX ?? null) === null,

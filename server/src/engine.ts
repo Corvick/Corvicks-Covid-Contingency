@@ -101,6 +101,7 @@ import {
   resolveEmplacementCollisions,
   updateEmplacements,
 } from './emplacement.js';
+import { acidToWire, spitsToWire, updateAcid } from './acid.js';
 import { firesToWire, updateFires } from './fire.js';
 import { resolveVehicleCollisions, updateBackup, vehiclesToWire } from './backup.js';
 import { minesToWire, updateMines } from './mines.js';
@@ -451,11 +452,12 @@ export function handle(id: string, msg: ClientMessage): void {
       } else if (msg.type === 'dogAbility') {
         // Everything about whether it is allowed is `startDogAbility`'s, so a
         // second caller could never get a different set of refusals. The aim
-        // point is not in the message: it is read off the input loop's own
-        // `aimX`/`aimY` when the two seconds are up.
-        if (startDogAbility(world, id, msg.slot, Date.now()) === 'roared') {
-          console.log(`[server] ${id} began a roar`);
-        }
+        // point is not in the message either way: the roar reads the input
+        // loop's own `aimX`/`aimY` when its two seconds are up, and the spit
+        // reads the same pair on the tick the key went down.
+        const did = startDogAbility(world, id, msg.slot, Date.now());
+        if (did === 'roared') console.log(`[server] ${id} began a roar`);
+        else if (did === 'spat') console.log(`[server] ${id} spat acid`);
       } else if (msg.type === 'beaconPlace') {
         // A spot picked off the map rather than clicked in the world, so
         // nothing about it has been validated by having walked there.
@@ -677,7 +679,7 @@ function updatePlayers(dt: number, frozen: Set<string>, now: number): void {
 
     const len = Math.hypot(dx, dy);
     const base = PLAYER_SPEED * (wantsSprint ? SPRINT_MULTIPLIER : 1) * (booted ? BOOTS_SPEED_MUL : 1);
-    const speed = speedAt(world, entity.x, entity.y, base);
+    const speed = speedAt(world, entity.x, entity.y, base, entity.type);
     entity.x += (dx / len) * speed * dt;
     entity.y += (dy / len) * speed * dt;
     if (entity.type !== 'officer') entity.facing = Math.atan2(dy, dx);
@@ -948,6 +950,11 @@ function tick(): void {
     updateMines(world, now);
     updateDucks(world, now, dt);
     updateFires(world, now, dt);
+    // After the movers, because a gobbet landing blinds whoever is standing
+    // there *now* rather than where they were at the top of the tick — and
+    // before the serialise below, so a cloud that formed this tick is on the
+    // wire this tick rather than one behind the body it is meant to hide.
+    updateAcid(world, now);
     mark('shooting+world');
   }
 
@@ -986,6 +993,8 @@ function tick(): void {
   // overhead is not something fog should hide.
   const airGrenades = grenadesToWire(world, now);
   const airSmokes = smokesToWire(world, now);
+  const airAcid = acidToWire(world, now);
+  const airSpits = spitsToWire(world, now);
   const airHelis = helicoptersToWire(world, now);
   // Detonations linger only long enough for the ring to be drawn out.
   world.blasts = world.blasts.filter((b) => now - b.at < BLAST_MS);
@@ -1045,6 +1054,12 @@ function tick(): void {
       dog: dogHudFor(world, id, now),
       grenades: airGrenades,
       smokes: airSmokes,
+      // Unfogged like the smoke and the helicopters, and for the same reason:
+      // a cloud is a hundred and thirty pixels of green in the middle of a
+      // street, so a viewer who cannot see the ground it is on can see *it*.
+      // It is also a handful of entries at the very most.
+      acid: airAcid,
+      spits: airSpits,
       blasts: airBlasts,
       ducks: ducksToWire(world),
       emplacements: emplacementsToWire(world),

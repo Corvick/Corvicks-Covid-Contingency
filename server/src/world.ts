@@ -17,6 +17,7 @@ import type { DoorRuntime } from './doors.js';
 export type DoorAction = 'open' | 'close' | 'lock' | 'unlock' | 'kick';
 import type { Inventory } from './inventory.js';
 import type { Grenade, Helicopter, Smoke } from './heli.js';
+import type { AcidCloud, AcidSpit } from './acid.js';
 import {
   WORLD_WIDTH,
   WORLD_HEIGHT,
@@ -67,6 +68,8 @@ import {
   RALLY_STARTING_CHARGES,
   FOLLOW_STARTING_CHARGES,
   PLAYER_ONE_SPAWN_AT_CENTER,
+  ACID_SLOW_MUL,
+  DOG_BIRTH_MS,
   DOG_RADIUS,
   DOG_MAX_HEALTH,
   BOLT_FLEE_CHANCE,
@@ -127,6 +130,17 @@ export type SettleTrait = 'officer' | 'building' | 'bush' | 'group' | 'roam';
 export interface AiState {
   heading: number;
   targetId: string | null;
+  /**
+   * The sweep of somebody with acid in their eyes: which deadline it belongs
+   * to, which way they were facing when it landed, and when that was.
+   *
+   * Keyed on the deadline rather than on a boolean so a second gobbet re-centres
+   * the sweep by itself — see `blindedTick`. Nothing clears these, and nothing
+   * needs to: they mean nothing at all while the id is out of `world.blinded`.
+   */
+  blindUntil: number;
+  blindFrom: number;
+  blindAt: number;
   /** Cached flee direction, refreshed on the perception interval. */
   fleeX: number;
   fleeY: number;
@@ -662,6 +676,27 @@ export interface World {
   inventories: Map<string, Inventory>;
   grenades: Map<string, Grenade>;
   smokes: Map<string, Smoke>;
+  /**
+   * The dog's acid: clouds on the ground and gobbets still in the air.
+   *
+   * Held as plain data on the world rather than reached for through `acid.ts`,
+   * so `hasLineOfSight` and `speedAt` — both of which live here and neither of
+   * which takes a clock — can read a cloud without this file importing that one
+   * at runtime. It is the same shape of arrangement `navBlockers` has with
+   * `backup.ts`, and for the same reason.
+   */
+  acid: Map<string, AcidCloud>;
+  spits: Map<string, AcidSpit>;
+  /**
+   * Who has had a gobbet go over their face, and until when.
+   *
+   * A map of deadlines exactly like `stunned`, and read in the same place — but
+   * deliberately *not* folded into `computeFrozen` beside it. Frozen means an
+   * entity is skipped outright; being blinded means the legs stop and the head
+   * does not, which is a smaller thing and needs its own branch to have
+   * anywhere to put the looking around.
+   */
+  blinded: Map<string, number>;
   /** The flock on the pond. Scenery that reacts, not entities. */
   ducks: Duck[];
   /** Recent detonations, cleared once they have been drawn out. */
@@ -709,6 +744,22 @@ export interface World {
    * killed again on the very next round. Keyed by id here, it always exists.
    */
   dogDeaths: Map<string, number>;
+  /**
+   * Dogs part-way out of a shambler: which body they are coming out of, and
+   * when the birth began. Keyed by dog id, because it is the dog's business.
+   *
+   * **It exists so the birth can be watched.** The host used to be picked and
+   * consumed in the same instant, at the end of the death window, with the
+   * screen still black — so the one moment that explains where a dog comes from
+   * happened where nobody could see it. Choosing it a whole `DOG_BIRTH_MS`
+   * early is what puts the camera on the right body before the fade lifts.
+   *
+   * A birth is *interruptible*: the host is an ordinary zombie standing in an
+   * ordinary street, and the garrison can shoot it out from under you. That is
+   * deliberately not defended against — the horde is the dog's lives, and a
+   * host killed mid-birth costs one exactly as any other shambler does.
+   */
+  dogBirths: Map<string, DogBirth>;
   /**
    * How many people each dog has *turned*, banked as charges for the roar and
    * spent all at once when it is used.
@@ -911,6 +962,7 @@ export function spawnDog(world: World, id: string): void {
   world.dogs.add(id);
   world.dogsOut.delete(id);
   world.dogDeaths.delete(id);
+  world.dogBirths.delete(id);
   world.dogState.delete(id);
   world.stamina.set(id, STAMINA_MAX);
   world.exhausted.delete(id);
@@ -940,6 +992,9 @@ export function newAiState(now: number, x: number, y: number): AiState {
   return {
     heading: Math.random() * Math.PI * 2,
     targetId: null,
+    blindUntil: 0,
+    blindFrom: 0,
+    blindAt: 0,
     fleeX: 0,
     fleeY: 0,
     threatCount: 0,
@@ -1280,6 +1335,31 @@ export function hasLineOfSight(
     if (blockedByBush) return false;
   }
 
+  /**
+   * The dog's acid, which is a bush that also slows you and expires.
+   *
+   * **It carries the bush's standing-in-it rule deliberately, not by
+   * inheritance.** A cloud you are inside does not blind you: its job is to be
+   * something the garrison cannot see *through*, and a version that also
+   * blinded whoever walked into it would blind the dog that spat it, which is
+   * an ability nobody presses twice. Being unable to see is a real effect here
+   * and it is the *splash* that hands it out — to somebody in particular, once,
+   * for a couple of seconds.
+   *
+   * Unlike bushes it is not exempted by `seeThroughBushes`. That flag means "an
+   * officer is trained and looking for this, so foliage does not hide it", and
+   * training does not let anybody see through a chemical cloud.
+   *
+   * Not in a grid, and guarded on `size` for the same reasons as `speedAt`:
+   * single-figure counts, and this is the hottest predicate the server has.
+   */
+  if (world.acid.size > 0) {
+    for (const c of world.acid.values()) {
+      if (Math.hypot(c.x - x1, c.y - y1) <= c.r) continue;
+      if (segmentCircleT(x1, y1, x2, y2, c.x, c.y, c.r) !== null) return false;
+    }
+  }
+
   return true;
 }
 
@@ -1334,8 +1414,44 @@ export function isInBush(world: World, x: number, y: number): boolean {
   return false;
 }
 
-export function speedAt(world: World, x: number, y: number, base: number): number {
-  return isInBush(world, x, y) ? base * BUSH_SPEED_MULTIPLIER : base;
+/**
+ * What this spot does to the pace of whoever is standing on it.
+ *
+ * **The one function every mover in the game goes through** — civilians and
+ * zombies through `ai.ts`, the dog through `moveDog`, and a player through
+ * `updatePlayers` — which is exactly why the acid's slow is here rather than as
+ * a sweep over bodies in `updateAcid`. Written as a sweep it would be a second
+ * place that knows what a cloud is, and the first new kind of mover added
+ * afterwards would silently walk through the stuff at full speed.
+ *
+ * `type` is optional so the ground effects that apply to *everything* still
+ * work for a caller that has only a position. Anything that can be exempt has
+ * to say what it is.
+ */
+export function speedAt(
+  world: World,
+  x: number,
+  y: number,
+  base: number,
+  type?: EntityType,
+): number {
+  let speed = isInBush(world, x, y) ? base * BUSH_SPEED_MULTIPLIER : base;
+  // Guarded on `size` so the ordinary case — no acid anywhere in the city —
+  // is one integer compare in a function called for every body every tick.
+  // Past the guard it is a walk of single figures: clouds are rare and
+  // short-lived, so a broadphase for them would cost more to keep than to skip.
+  //
+  // **Zombies are exempt, and the dog is a zombie.** It comes out of one of
+  // them, and an ability that slows your own horde and yourself is one nobody
+  // spends a cooldown on.
+  if (world.acid.size > 0 && type !== 'zombie') {
+    for (const c of world.acid.values()) {
+      if (Math.hypot(x - c.x, y - c.y) > c.r) continue;
+      speed *= ACID_SLOW_MUL;
+      break;
+    }
+  }
+  return speed;
 }
 
 /** Rejection-sample a point that clears existing entities and walls. */
@@ -1441,6 +1557,9 @@ export function createWorld(): World {
     inventories: new Map(),
     grenades: new Map(),
     smokes: new Map(),
+    acid: new Map(),
+    spits: new Map(),
+    blinded: new Map(),
     blasts: [],
     ducks: [],
     helicopters: new Map(),
@@ -1456,6 +1575,7 @@ export function createWorld(): World {
     dogsOut: new Set(),
     corpses: [],
     dogDeaths: new Map(),
+    dogBirths: new Map(),
     dogConversions: new Map(),
     dogContacts: [],
     nextDogContactScan: 0,
@@ -1527,6 +1647,9 @@ export function resetWorld(world: World): void {
   world.speech.clear();
   world.grenades.clear();
   world.smokes.clear();
+  world.acid.clear();
+  world.spits.clear();
+  world.blinded.clear();
   world.helicopters.clear();
   world.soldiers.clear();
   world.swat.clear();
@@ -1542,6 +1665,20 @@ export function resetWorld(world: World): void {
   // Which *seat* somebody took outlives a restart; what they did with it does
   // not. A fresh city has bitten nobody.
   world.dogConversions.clear();
+  // Nor has anybody killed a dog in it yet.
+  //
+  // **"Permanent" means permanent for the round.** A corpse is the lasting mark
+  // the officers get for having put the animal down, and it is deliberately
+  // never trimmed *within* a round — but the coordinates it holds mean something
+  // only on the map it was made on, and `resetWorld` is about to generate a
+  // different one. Left here they are bodies lying in a street that no longer
+  // exists.
+  //
+  // It is the one piece of dog state neither path caught: the rest —
+  // `dogsOut`, `dogDeaths`, `dogState`, `dogBirths` — is dropped per id by
+  // `spawnDog`, which only runs for a seat somebody is actually in, and this is
+  // a plain array on the world that no seat owns.
+  world.corpses.length = 0;
   world.dogContacts.length = 0;
   world.nextDogContactScan = 0;
   world.grappleCounts.clear();
@@ -1629,18 +1766,41 @@ function removeEntity(world: World, id: string): void {
   releaseGrapples(world, id);
 }
 
+/** A dog part-way out of a shambler. See `World.dogBirths`. */
+export interface DogBirth {
+  /** The body it is coming out of. An ordinary zombie until it bursts. */
+  hostId: string;
+  /** When the convulsing began, so `DOG_BIRTH_MS` can be measured off it. */
+  at: number;
+}
+
 /**
+ * Pick the shambler this dog will come out of, and get in position to be
+ * watched doing it.
+ *
  * The dog comes back **out of the horde**: a shambler somewhere on the map
  * stops being a shambler and stands up as the dog. That is the whole of its
  * lives system — the outbreak is its health bar, and every zombie the officers
- * put down is one fewer body it can come back in.
+ * put down is one fewer body it can come back in. Never out of another dog, and
+ * never out of itself.
  *
- * Never out of another dog, and never out of itself.
+ * **The dog's body is moved onto the host here, a whole birth window before it
+ * is needed, and that is what aims the camera.** There is no camera override
+ * anywhere on the client: it follows the entity you are driving, so putting
+ * that entity on the host's back is the entire mechanism. It costs nothing on
+ * screen because the body is still `dead` and the entity loop skips those — the
+ * corpse it left behind is a separate record and stays where it fell.
+ *
+ * It also means the host is at zero distance from the viewer, so the fog sends
+ * it without a word said about birth anywhere in `visibleTo`.
  */
-export function respawnDogFromHorde(world: World, dog: Entity, now: number): boolean {
+export function beginDogBirth(world: World, dog: Entity, now: number): boolean {
   const hosts: Entity[] = [];
   for (const e of world.entities.values()) {
     if (e.type !== 'zombie' || e.id === dog.id || world.dogs.has(e.id)) continue;
+    // Somebody else's birth is not a body to be born out of. Two dogs in a
+    // lobby cannot come out of the same shambler.
+    if (isBirthHost(world, e.id)) continue;
     hosts.push(e);
   }
   if (hosts.length === 0) return false;
@@ -1650,8 +1810,30 @@ export function respawnDogFromHorde(world: World, dog: Entity, now: number): boo
   // anywhere else has to be rebuilt with it.
   dog.x = host.x;
   dog.y = host.y;
+  world.dogBirths.set(dog.id, { hostId: host.id, at: now });
+  return true;
+}
+
+/**
+ * The host bursts and the animal is standing there.
+ *
+ * Nothing about *this* is new — it is the second half of what used to happen in
+ * one instant, and every line of it was already here. What is new is that the
+ * fifteen hundred milliseconds before it were spent looking at the body it
+ * came out of.
+ */
+export function finishDogBirth(world: World, dog: Entity, birth: DogBirth, now: number): void {
+  const host = world.entities.get(birth.hostId);
+  if (host) {
+    // Come out where the body actually ended up. It is frozen for the birth so
+    // this is almost always where it started, but a shove from a passing crowd
+    // is a shove, and a dog rising a body's width from the thing that burst
+    // would be the one frame of this anybody noticed.
+    dog.x = host.x;
+    dog.y = host.y;
+    removeEntity(world, birth.hostId);
+  }
   dog.health = dog.maxHealth;
-  removeEntity(world, host.id);
 
   world.dogState.delete(dog.id);
   world.stamina.set(dog.id, STAMINA_MAX);
@@ -1659,7 +1841,36 @@ export function respawnDogFromHorde(world: World, dog: Entity, now: number): boo
   // It fades in where the shambler was, so the swap is something you can watch
   // happen rather than a body silently teleporting.
   world.materializeUntil.set(dog.id, now + MATERIALIZE_MS);
-  return true;
+}
+
+/**
+ * Is this body somebody's birth host?
+ *
+ * Guarded on `size` because it is asked once per entity per viewer in `toWire`,
+ * where a map that is empty for all but a second and a half of the round should
+ * cost a single integer compare. Past the guard it is a walk of at most two
+ * entries — there are two seats on team 2 and a dog can only be born once at a
+ * time — which is why this is keyed by dog id rather than carrying a second map
+ * keyed the other way round to keep in step with it.
+ */
+export function isBirthHost(world: World, id: string): boolean {
+  if (world.dogBirths.size === 0) return false;
+  for (const birth of world.dogBirths.values()) {
+    if (birth.hostId === id) return true;
+  }
+  return false;
+}
+
+/**
+ * How far through its convulsion a birth host is, 0 to 1, or -1 for a body that
+ * is not one. What the client draws the shaking and the twisting off.
+ */
+export function birthProgress(world: World, id: string, now: number): number {
+  if (world.dogBirths.size === 0) return -1;
+  for (const birth of world.dogBirths.values()) {
+    if (birth.hostId === id) return clamp((now - birth.at) / DOG_BIRTH_MS, 0, 1);
+  }
+  return -1;
 }
 
 /**
@@ -2305,8 +2516,18 @@ export function toWire(
     // seconds of a rooted animal with its mouth open is the tell the officers
     // across the street are meant to read, and a private one would do nothing.
     if (dog && dog.roarStartedAt > 0) state.roaring = true;
-    if (world.dogDeaths.has(e.id)) state.dead = true;
+    // Down, or lying on the back of the shambler it is about to come out of.
+    // Both are invisible: the entity loop skips anything `dead`, which is what
+    // lets the body be parked on the host to aim the camera without a second
+    // dog appearing on screen a birth window early.
+    if (world.dogDeaths.has(e.id) || world.dogBirths.has(e.id)) state.dead = true;
   }
+  // Something is coming out of this one. Sent to everybody who can see it
+  // rather than only to the dog it belongs to — a shambler shaking itself apart
+  // in the street is a thing the officers across it should get to read, and it
+  // is the only warning they get that a dog they killed is about to be back.
+  const birth = birthProgress(world, e.id, now);
+  if (birth >= 0) state.birthing = Math.round(birth * 100) / 100;
   if (world.burning.has(e.id)) state.burning = true;
   if (world.soldiers.has(e.id)) state.soldier = true;
   if (world.swat.has(e.id)) state.swat = true;

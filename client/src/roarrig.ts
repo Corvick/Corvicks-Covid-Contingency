@@ -49,6 +49,7 @@ function hud(over: Partial<DogHud> = {}): DogHud {
     hosts: 43,
     out: false,
     dying: -1,
+    birth: -1,
     ...over,
   };
 }

@@ -96,3 +96,27 @@ console.log(
   `  dog can look ${dogVertical.toFixed(0)}px up/down against SWAT_SIGHT ${SWAT_SIGHT} — ` +
     `${dogVertical >= SWAT_SIGHT ? 'OK, nothing shoots it from off screen' : '** SHORT — SWAT still out-ranges the frame **'}\n`,
 );
+
+/**
+ * And the same sweep for the dog's own camera, which is the one that actually
+ * moves. Its rule is not the officer's — it carries nothing, so hip fire is its
+ * only case, and what it has to satisfy instead is that **anything which can
+ * shoot it is something it can look at**: the vertical half-screen plus the
+ * capped pan against `SWAT_SIGHT`. Pulling the zoom out buys vision and costs
+ * fog and serialisation on the one connection already paying the most, so the
+ * question is always "what is the tightest zoom that still clears SWAT", and
+ * this is the table that answers it.
+ */
+console.log('  dog zoom   world on screen    panY    up/down   vs SWAT   sight radius needed');
+for (const zoom of [1.4, 1.45, 1.5, 1.55, 1.6, 1.7]) {
+  const w = VIEWPORT_WIDTH / zoom;
+  const h = VIEWPORT_HEIGHT / zoom;
+  const vertical = VIEWPORT_HEIGHT / 2 / zoom + panY(zoom);
+  const needs = required(zoom, 0);
+  console.log(
+    `  ${zoom.toFixed(2).padStart(8)}   ${`${Math.round(w)}x${Math.round(h)}`.padEnd(14)}  ` +
+      `${panY(zoom).toFixed(0).padStart(5)}  ${vertical.toFixed(0).padStart(8)}  ` +
+      `${(vertical >= SWAT_SIGHT ? 'OK' : 'SHORT').padStart(7)}   ${String(needs).padStart(18)}`,
+  );
+}
+console.log('');

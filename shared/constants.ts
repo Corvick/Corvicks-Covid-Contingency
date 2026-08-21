@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.5.0';
+export const GAME_VERSION = '0.6.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -173,11 +173,17 @@ export const PLAYER_SIGHT_RADIUS = 720;
  *
  * Derived the same way and subject to the same rule: the server must send
  * entities as far as the client can light ground, or the dog gets a wider view
- * of an emptier street, which is worse than no change at all. At zoom 1.6 with
- * a pan of 80/243 the furthest corner is 869; this is that with the same
- * headroom the other three carry. `server/zoomderive.ts` checks it.
+ * of an emptier street, which is worse than no change at all. At zoom 1.5 with
+ * a pan of 80/259 the furthest corner is 923; this is that with the same 21px
+ * of headroom the other three carry. `server/zoomderive.ts` checks it.
+ *
+ * **It moves whenever `DOG_CAMERA_ZOOM` does, and it is the half that is easy
+ * to forget.** Pulling the camera out without this is the dog lighting ground
+ * the server sent nobody for — an emptier street, seen further, which is the
+ * exact opposite of what widening the view is for and shows up as nothing at
+ * all rather than as an error.
  */
-export const DOG_SIGHT_RADIUS = 890;
+export const DOG_SIGHT_RADIUS = 945;
 /**
  * How far the camera drifts as the cursor nears the edge of the screen.
  * Nothing to do with scopes or equipment, and it applies to **anything a person
@@ -271,17 +277,26 @@ export const CAMERA_PAN_Y = panYFor(CAMERA_ZOOM);
  * by something that was never on screen is not difficulty, it is an unreadable
  * death, and it was reported as one.
  *
- * 1.6 is the loosest zoom that closes it: 675 world px vertically, 337 above
- * you at rest and **580 with the pan, against SWAT's 560**. The rule it
- * satisfies is *anything that can shoot you is something you can look at* —
- * deliberately not "see it all without moving the mouse", which would need a
- * zoom below 1.0 and hand the dog the whole street for free.
+ * 1.6 was the loosest zoom that closed it: 675 world px vertically, 337 above
+ * you at rest and 580 with the pan, against SWAT's 560. The rule it satisfies
+ * is *anything that can shoot you is something you can look at* — deliberately
+ * not "see it all without moving the mouse", which would need a zoom below 1.0
+ * and hand the dog the whole street for free.
+ *
+ * **1.5 is that rule with room to spare rather than by 21px.** Clearing SWAT by
+ * a hair means a dog that is technically able to look at whatever is shooting
+ * it, provided it happens to be pointing the right way at the time; the extra
+ * ground is what turns "it was on screen if you were already looking" into
+ * seeing it coming. 720 world px vertically, 360 above you at rest and **619
+ * with the pan, against the same 560**.
  *
  * It is not free. Ground on screen is what sets both the fog polygon's cost and
- * how many entities are serialised per viewer, and 1.6 is ~152% of 2.0 on both.
- * That is one connection, and the dog is the seat where it buys something.
+ * how many entities are serialised per viewer, and 1.5 is ~113% of 1.6 on both,
+ * or ~173% of an officer's 2.0. That is one connection, and the dog is the seat
+ * where it buys something. `server/zoomderive.ts` sweeps the candidates and is
+ * what says 1.7 is already short of SWAT.
  */
-export const DOG_CAMERA_ZOOM = 1.6;
+export const DOG_CAMERA_ZOOM = 1.5;
 export const DOG_CAMERA_PAN_Y = panYFor(DOG_CAMERA_ZOOM);
 
 // ---------------------------------------------------------------- fog of war
@@ -527,6 +542,153 @@ export const DOG_RESPAWN_FADE_MS = 520;
 /** Where in the death window the fade to black begins, as a fraction of it. */
 export const DOG_FADE_FROM = 0.42;
 /**
+ * And then the screen comes back up on the shambler you are about to come out
+ * of, and you watch it happen to them.
+ *
+ * `DOG_DEATH_MS` is spent on your own body and ends in black. This is the other
+ * half: the host is picked the moment the screen is dark, the camera is already
+ * on it when the fade lifts, and it spends this window convulsing before it
+ * bursts and the dog is standing there. Being killed used to be a wait; it is
+ * now two things to watch with a black frame between them, which is the only
+ * part of dying that was ever worth the time it took.
+ *
+ * It costs a second and a half on top of the death window, and that is the
+ * whole price. The alternative — folding it *inside* `DOG_DEATH_MS` — buys the
+ * time back by cutting short the part where you watch your own animal go down,
+ * and that part is why the body stays in the world at all.
+ */
+export const DOG_BIRTH_MS = 1500;
+/**
+ * Where in the birth the arms go, as a fraction of it.
+ *
+ * The two halves are doing different jobs. Before it, the body is vibrating and
+ * nothing else — something is wrong with it and you cannot yet see what. After
+ * it the arms twist out of their sockets and the thing stops reading as a
+ * person at all, which is what makes the burst an ending rather than a
+ * surprise. Run them together and the whole window reads as one long shake.
+ */
+export const DOG_BIRTH_TWIST_FROM = 0.42;
+/** What the host's body goes to as the dog comes up through it: raw meat. */
+export const BIRTH_COLOR = '#7f1d1d';
+/** How far the body buzzes at the very end of the birth, in world pixels. */
+export const BIRTH_SHAKE_PX = 4.6;
+/**
+ * How far the arms come out of their sockets, in radians, at full twist.
+ *
+ * Past about 2 they wrap round far enough to read as a body with no arms at
+ * all, which is a different and much less unpleasant picture — the point is
+ * that you can see where they *should* be.
+ */
+export const BIRTH_ARM_TWIST = 1.7;
+/**
+ * How many bearings the burst throws blood along.
+ *
+ * It reuses `spawnBlood`, which is a cone along one angle — that is exactly
+ * right for a round passing through somebody and exactly wrong for a body
+ * coming apart, which has no direction at all. Six cones round the circle is
+ * the whole of the difference, and it means the burst inherits the decals, the
+ * droplet physics, the cap and the `settings.blood` switch without one line of
+ * any of them being written twice.
+ */
+export const BIRTH_BURST_SPOKES = 6;
+/**
+ * How far through a birth a host must be for its disappearance to read as a
+ * burst rather than as having simply gone out of somebody's sight.
+ *
+ * The dog it belongs to cannot lose sight of it — its own body is parked on the
+ * thing — but `birthing` goes to everybody who can see it, and a bystander who
+ * turns a corner mid-convulsion would otherwise be shown a body exploding that
+ * is still standing there.
+ */
+export const BIRTH_BURST_AT = 0.9;
+
+// ------------------------------------------------------------- the dog's acid
+/**
+ * The dog spits, and what it spits is *cover*.
+ *
+ * A dog has no ranged attack and nothing in its hands, so every fight it takes
+ * is a fight it has to cross open ground to reach — and the garrison is spread
+ * evenly across the city precisely so that crossing open ground is expensive.
+ * The roar answers that by bringing the street to you; this answers it by
+ * taking the street's line of sight away.
+ *
+ * How far it can be thrown, and the floor under a crosshair right on top of the
+ * animal. Deliberately shorter than `DOG_SIGHT_RADIUS`: it must not be possible
+ * to lay a cloud on ground you cannot see, or the ability turns into a way of
+ * editing the map at range.
+ */
+export const DOG_SPIT_RANGE = 620;
+export const DOG_SPIT_MIN_THROW = 90;
+/** How long the gobbet is in the air. Enough to read as thrown, not as fired. */
+export const DOG_SPIT_TRAVEL_MS = 420;
+/**
+ * Between spits.
+ *
+ * Long, and for the same reason `DOG_ROAR_COOLDOWN_MS` is: without one, a held
+ * key lays a wall of the stuff across the whole map and there is no decision
+ * left in it. Shorter than the roar's, because a cloud is a piece of ground
+ * rather than the whole horde and it goes out of date on its own.
+ */
+export const DOG_SPIT_COOLDOWN_MS = 11000;
+/**
+ * How long a cloud sits there, and how wide it gets.
+ *
+ * The radius is set against `DOOR_BLOCK_RADIUS` and the width of a street
+ * rather than picked to look right — a cloud that does not span the road it is
+ * laid across blocks nothing, and one that spans two of them is a wall.
+ */
+export const ACID_CLOUD_MS = 9000;
+export const ACID_CLOUD_RADIUS = 130;
+/** How long it takes to boil out to that from the gobbet that landed. */
+export const ACID_GROW_MS = 600;
+/** Where in its life it starts thinning away, as a fraction. */
+export const ACID_FADE_FROM = 0.72;
+/**
+ * What it does to anyone caught in it, as a multiplier on their pace.
+ *
+ * Applied in `speedAt`, which is the one function every mover in the game
+ * already goes through, and it therefore covers civilians, the garrison, bots
+ * and players from a single line. **Zombies and the dog are exempt** — it comes
+ * out of one of them, and a weapon that slows your own horde is a weapon
+ * nobody spends a cooldown on.
+ *
+ * Harsher than a bush (0.65) and about what burning costs, because unlike
+ * either of those it is aimed.
+ */
+export const ACID_SLOW_MUL = 0.55;
+/**
+ * How close to where the gobbet actually lands you have to be for it to go over
+ * you rather than merely near you.
+ *
+ * **Much smaller than the cloud**, and that gap is the whole ability. The cloud
+ * is an area everybody works around; the splash is a wet moment that catches
+ * whoever was standing exactly there, and only it takes somebody out of the
+ * fight. Make them the same number and the ability stops being aimed at
+ * anything — it becomes a stun grenade with a nine-second tail.
+ */
+export const ACID_IMPACT_RADIUS = 62;
+/** How long somebody it went over is left rubbing their eyes. */
+export const ACID_BLIND_MS = 2600;
+/**
+ * They look around and they do not move — so, rarely, they say why.
+ *
+ * Rolled once, at the moment the acid lands, rather than per tick while they
+ * are blind. Everything in this game with a chance on it has to be, or a "rare"
+ * reaction evaluated thirty times a second is one that always happens.
+ */
+export const ACID_BLIND_LINE_CHANCE = 0.22;
+export const ACID_BLIND_LINE = "I can't see!";
+/**
+ * How fast a blinded head sweeps, in radians per second, and how far either
+ * way.
+ *
+ * It is the only thing they do, so it has to read as searching rather than as
+ * scanning: slow enough to look like somebody who has lost something, and well
+ * short of a full turn, because a body spinning on the spot reads as a bug.
+ */
+export const ACID_BLIND_SWEEP_RATE = 1.15;
+export const ACID_BLIND_SWEEP_ARC = 1.25;
+/**
  * Quicker than an officer flat out, and that is the whole chase.
  *
  * A dog that cannot run one down never gets to bite anybody; a dog that can do
@@ -569,7 +731,7 @@ export const DOG_MUZZLE_OUT = 1.25;
 
 /**
  * What the city's standing garrison does to a dog: never misses it, and hits it
- * 60% harder than it hits anything else.
+ * 84% harder than it hits anything else.
  *
  * A rule about the map rather than about marksmanship. A dog that can outrun
  * everything will always find the quarter with nobody in it and start an
@@ -577,8 +739,14 @@ export const DOG_MUZZLE_OUT = 1.25;
  * evenly is half the answer, and each of them being genuinely dangerous when
  * you get there is the other half. Only the officers the city *started* with:
  * anyone a radio call sent afterwards is the response, not the deterrent.
+ *
+ * **It went 1.6 → 1.84, which is 15% more damage rather than 15 points of
+ * multiplier**, alongside the dog's camera being pulled out to 1.5. Those are
+ * one change: the camera hands the dog more warning of the garrison, so the
+ * garrison hits harder when it is reached. Widening the view without this is a
+ * straight buff to the seat that was already winning every flat-out chase.
  */
-export const CITY_OFFICER_DOG_DAMAGE_MUL = 1.6;
+export const CITY_OFFICER_DOG_DAMAGE_MUL = 1.84;
 
 /**
  * Fire is the flamethrower's answer to an outbreak, and the infected are what

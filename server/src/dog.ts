@@ -6,6 +6,7 @@ import {
   DOG_BITE_COOLDOWN_MS,
   DOG_BITE_MIN_MS,
   DOG_BITE_MS,
+  DOG_BIRTH_MS,
   DOG_BITE_REACH,
   DOG_BODY_DEADZONE,
   DOG_BODY_TURN_RATE,
@@ -26,6 +27,7 @@ import {
   DOG_ROAR_RANGE,
   DOG_SHAKE_THROW,
   DOG_SPEED,
+  DOG_SPIT_COOLDOWN_MS,
   DOG_SPRINT_MULTIPLIER,
   DOG_STAGGER_STRENGTH,
   DOG_STAGGER_TIME_MUL,
@@ -40,11 +42,13 @@ import {
   WORLD_WIDTH,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, turnToward } from './geometry.js';
+import { spitAcid } from './acid.js';
 import { attemptGrab } from './ai.js';
 import { damageDoor } from './doors.js';
 import {
+  beginDogBirth,
+  finishDogBirth,
   hasLineOfSight,
-  respawnDogFromHorde,
   spawnAtBreach,
   speedAt,
   type Command,
@@ -116,6 +120,15 @@ export interface DogState {
   roarStartedAt: number;
   /** Earliest it may be roared again — see `DOG_ROAR_COOLDOWN_MS`. */
   roarReadyAt: number;
+  /**
+   * Earliest it may spit again — see `DOG_SPIT_COOLDOWN_MS`.
+   *
+   * A deadline and nothing else, unlike the roar's pair: spitting is over on
+   * the tick the key goes down, so there is no "it is happening now" for the
+   * legs, the wire or the HUD to read. What happens afterwards belongs to the
+   * gobbet and then to the cloud, neither of which is the dog.
+   */
+  spitReadyAt: number;
 }
 
 /**
@@ -161,6 +174,7 @@ function dogStateFor(world: World, id: string, facing: number): DogState {
       slowMul: 1,
       roarStartedAt: 0,
       roarReadyAt: 0,
+      spitReadyAt: 0,
     };
     world.dogState.set(id, dog);
   }
@@ -197,18 +211,52 @@ export function updateDogs(world: World, dt: number, now: number): void {
     if (downAt !== undefined) {
       if (now - downAt < DOG_DEATH_MS) continue;
       world.dogDeaths.delete(id);
-      if (!respawnDogFromHorde(world, e, now)) {
-        // Nothing left on the map to come back as. That is the end of this dog
-        // — it holds no seat in the world from here, and `dogHudFor` says so.
-        world.dogsOut.add(id);
-        world.entities.delete(id);
-        world.ai.delete(id);
+      // The screen is fully black by this point, and what it comes back up on
+      // is the body this animal is about to tear its way out of. Choosing the
+      // host *here* rather than at the moment it is consumed is the whole of
+      // the birth: it gives the camera something to be pointed at and gives the
+      // player something to watch happen.
+      if (!beginDogBirth(world, e, now)) endThisDog(world, id);
+      continue;
+    }
+
+    // Coming out of one. No input, no legs and no jaws — the animal does not
+    // exist yet, and the only thing on screen is the shambler it is doing this
+    // to.
+    const birth = world.dogBirths.get(id);
+    if (birth !== undefined) {
+      // The host is an ordinary zombie in an ordinary street and the garrison
+      // can shoot it out from under you. That costs a life exactly as any other
+      // shambler does, so the answer is to start again on another body rather
+      // than to protect the one chosen — and if there is no other body, that
+      // was the last of them.
+      if (!world.entities.has(birth.hostId)) {
+        world.dogBirths.delete(id);
+        if (!beginDogBirth(world, e, now)) endThisDog(world, id);
+        continue;
       }
+      if (now - birth.at < DOG_BIRTH_MS) continue;
+      world.dogBirths.delete(id);
+      finishDogBirth(world, e, birth, now);
       continue;
     }
 
     dogTick(world, e, dog, command, dt, now);
   }
+}
+
+/**
+ * No horde left to come out of. That is the end of this dog — it holds no seat
+ * in the world from here, and `dogHudFor` says so.
+ *
+ * Its own function because there are two ways to arrive at it now: no body to
+ * begin a birth on, and the body a birth had begun on being shot before it
+ * could finish.
+ */
+function endThisDog(world: World, id: string): void {
+  world.dogsOut.add(id);
+  world.entities.delete(id);
+  world.ai.delete(id);
 }
 
 function dogTick(
@@ -303,27 +351,43 @@ export function startDogAbility(
   id: string,
   slot: number,
   now: number,
-): 'roared' | 'refused' {
-  // Slots 1-3 are drawn and do nothing: there is nothing in them yet. Said out
+): 'roared' | 'spat' | 'refused' {
+  // Slots 2-3 are drawn and do nothing: there is nothing in them yet. Said out
   // loud rather than falling through, because "the key did nothing" and "the
   // key was refused" are different things and only the second is a bug.
-  if (slot !== 0) return 'refused';
+  if (slot !== 0 && slot !== 1) return 'refused';
+
   const e = world.entities.get(id);
   if (!e || !world.dogs.has(id) || world.dogsOut.has(id)) return 'refused';
-  // Lying in the road waiting to rise, frozen with the round, or dropped by a
-  // mine. None of those is a thing you roar through.
-  if (world.dogDeaths.has(id) || world.paused || world.stunned.has(id)) return 'refused';
+  // Lying in the road waiting to rise, part-way out of a shambler, frozen with
+  // the round, or dropped by a mine. None of those is a thing you do anything
+  // through.
+  if (world.dogDeaths.has(id) || world.dogBirths.has(id)) return 'refused';
+  if (world.paused || world.stunned.has(id)) return 'refused';
 
   const dog = dogStateFor(world, id, e.facing);
-  if (dog.roarStartedAt > 0 || now < dog.roarReadyAt) return 'refused';
-  // Teeth already in somebody. The head is the thing doing the roaring and it
-  // is otherwise engaged.
+  // Teeth already in somebody. The head is what does both of these and it is
+  // otherwise engaged.
   if (latchedVictim(world, id, dog) !== null) return 'refused';
+  // Two seconds of roaring is two seconds of the mouth being busy.
+  if (dog.roarStartedAt > 0) return 'refused';
 
+  const command = world.commands.get(id);
+
+  if (slot === 1) {
+    if (now < dog.spitReadyAt) return 'refused';
+    if (!command) return 'refused';
+    dog.spitReadyAt = now + DOG_SPIT_COOLDOWN_MS;
+    // The jaws shut to spit, the same as they shut to roar — and for the same
+    // reason this must not go through `shutJaws`, which would take a bite out
+    // of whatever door happens to be in front of the animal on the way past.
+    dog.jawsOpenedAt = 0;
+    spitAcid(world, e, command.aimX, command.aimY, now);
+    return 'spat';
+  }
+
+  if (now < dog.roarReadyAt) return 'refused';
   dog.roarStartedAt = now;
-  // Whatever the jaws were doing, they are not doing it now — and this must
-  // not go through `shutJaws`, which would take a bite out of the door in
-  // front of the animal on the way past.
   dog.jawsOpenedAt = 0;
   return 'roared';
 }
@@ -481,7 +545,7 @@ function moveDog(
   if (now >= dog.slowUntil) dog.slowMul = 1;
   const stagger = now < dog.slowUntil ? dog.slowMul : 1;
   const base = DOG_SPEED * (sprinting ? DOG_SPRINT_MULTIPLIER : 1) * stagger;
-  const speed = speedAt(world, e.x, e.y, base);
+  const speed = speedAt(world, e.x, e.y, base, e.type);
   e.x += (dx / len) * speed * dt;
   e.y += (dy / len) * speed * dt;
 }
@@ -749,6 +813,20 @@ function abilityBar(
     charges: world.dogConversions.get(id) ?? 0,
     active: roaring ? clamp((now - dog!.roarStartedAt) / DOG_ROAR_MS, 0, 1) : -1,
   };
+  bar[1] = {
+    name: 'SPIT',
+    ready: dog
+      ? clamp(1 - (dog.spitReadyAt - now) / Math.max(1, DOG_SPIT_COOLDOWN_MS), 0, 1)
+      : 1,
+    // **-1, not 0.** The badge is drawn only for an ability that banks
+    // something, and a nought sitting under a hexagon every round is noise —
+    // the badge *appearing* is itself the news that the roar now does more.
+    // Spitting costs nothing and banks nothing, so it has no badge at all.
+    charges: -1,
+    // Nothing to run. It is over on the tick the key went down; what happens
+    // afterwards belongs to the gobbet and then to the cloud.
+    active: -1,
+  };
   return bar;
 }
 
@@ -775,24 +853,15 @@ export function dogHudFor(world: World, id: string, now: number): DogHud | null 
 
   const dog = world.dogState.get(id);
   const abilities = abilityBar(world, id, dog, now);
-  if (!dog) {
-    return {
-      bite: 1,
-      jawsOpen: -1,
-      latched: false,
-      hold: 0,
-      shaken: 0,
-      abilities,
-      contacts,
-      hosts,
-      out,
-      dying: -1,
-    };
-  }
+  // Down or being born: no jaws, no bar, and one of the two clocks running.
+  // They are mutually exclusive by construction — `updateDogs` deletes the
+  // death before it begins the birth — so the order here is only about which
+  // question is asked first, not about which wins.
   const downAt = world.dogDeaths.get(id);
-  if (downAt !== undefined) {
+  const birth = world.dogBirths.get(id);
+  if (!dog || downAt !== undefined || birth !== undefined) {
     return {
-      bite: 0,
+      bite: downAt !== undefined || birth !== undefined ? 0 : 1,
       jawsOpen: -1,
       latched: false,
       hold: 0,
@@ -801,7 +870,8 @@ export function dogHudFor(world: World, id: string, now: number): DogHud | null 
       contacts,
       hosts,
       out,
-      dying: clamp((now - downAt) / DOG_DEATH_MS, 0, 1),
+      dying: downAt === undefined ? -1 : clamp((now - downAt) / DOG_DEATH_MS, 0, 1),
+      birth: birth === undefined ? -1 : clamp((now - birth.at) / DOG_BIRTH_MS, 0, 1),
     };
   }
 
@@ -825,5 +895,6 @@ export function dogHudFor(world: World, id: string, now: number): DogHud | null 
     hosts,
     out,
     dying: -1,
+    birth: -1,
   };
 }

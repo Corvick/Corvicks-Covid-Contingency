@@ -10,7 +10,9 @@ import type {
   MapData,
   Park,
   PickupState,
+  AcidState,
   SmokeState,
+  SpitState,
   SpeechState,
   BlastState,
   Pond,
@@ -100,12 +102,17 @@ import {
   GRIME_GRIT,
   GRIME_CRACKS,
   GROUND_COLOR,
+  BIRTH_ARM_TWIST,
+  BIRTH_BURST_SPOKES,
+  BIRTH_COLOR,
+  BIRTH_SHAKE_PX,
   BLOOD_COLOR,
   BLOOD_DECAL_MAX,
   BLOOD_DECAL_MS,
   BLOOD_SPRAY_MS,
   BLOOD_SPRAY_DROPS,
   BLOOD_SPRAY_SPEED,
+  DOG_BIRTH_TWIST_FROM,
   DOG_FADE_FROM,
   DOG_RESPAWN_FADE_MS,
   VIGNETTE_ALPHA,
@@ -939,7 +946,12 @@ export function drawEntity(
   // zombie red rather than snapping to it, which is the only warning anybody
   // stood next to them gets — see TURNING_TELL_MS. Everything downstream reads
   // `color`, so the head, the limbs and the far-out dot all go with it.
-  const color = e.turning ? mix(base, ENTITY_COLOR.zombie, e.turning) : base;
+  // A dog is coming out of this one. It goes the rest of the way to raw meat as
+  // it does — the same "the body tells you before the thing happens" trick the
+  // turning ramp is, an order of magnitude further along, because there is no
+  // outcome here to be uncertain about.
+  const turned = e.turning ? mix(base, ENTITY_COLOR.zombie, e.turning) : base;
+  const color = e.birthing ? mix(turned, BIRTH_COLOR, e.birthing) : turned;
   // SWAT are the one case where shading the body down for the head produces
   // black on black: their gear is already almost the darkest thing on screen.
   // The helmet goes *lighter* instead, which is also what a helmet does.
@@ -979,6 +991,29 @@ export function drawEntity(
     y += Math.cos(facing) * shake + Math.sin(facing) * lurch;
     facing += Math.sin(phase * 1.7) * 0.32;
   }
+  /**
+   * A body with a dog coming out of it.
+   *
+   * **Vibration, not thrashing**, and the difference is entirely the frequency:
+   * a grapple shakes at 0.028 because two people wrestling is something you can
+   * follow, where this is far too fast to track and reads as a thing failing
+   * rather than a thing struggling. The two axes run at different rates and
+   * neither is a multiple of the other, so it never settles into a line —
+   * something buzzing on the spot rather than rocking.
+   *
+   * It ramps on the *square*, so the first half is a body that looks slightly
+   * wrong and the last quarter is a body coming apart. Linear reads as fully
+   * broken from the first frame and then has nowhere left to go.
+   */
+  const birthing = e.birthing ?? 0;
+  if (birthing > 0) {
+    const amp = BIRTH_SHAKE_PX * birthing * birthing;
+    x += Math.sin(now * 0.091 + hashId(e.id)) * amp;
+    y += Math.cos(now * 0.117 + hashId(e.id)) * amp;
+    // And it cannot hold a bearing either. Small, because the arms are what
+    // carry the second half and a body spinning under them would fight it.
+    facing += Math.sin(now * 0.073) * 0.22 * birthing;
+  }
 
   const dirX = Math.cos(facing);
   const dirY = Math.sin(facing);
@@ -997,10 +1032,47 @@ export function drawEntity(
     // together, so it reads as hammering rather than grabbing.
     const phase = now * 0.03 + hashId(e.id);
     const reach = e.grappling ? 1.75 + Math.sin(phase) * 0.2 : 1.5;
+    /**
+     * **The arms go, and that is the half of the birth that says what it is.**
+     *
+     * Vibration on its own is ambiguous — it could be a fit, a stun, anything.
+     * A pair of arms rotating out of the line of the shoulders and folding
+     * backwards at an angle no elbow makes is the moment the body stops reading
+     * as a person, which is what has to happen before the burst for the burst
+     * to be an ending rather than a surprise.
+     *
+     * The two sides are deliberately *not* mirrored. Equal and opposite reads
+     * as a pose being struck; different rates and a different bend on each is
+     * something being done *to* somebody. They are drawn as two segments rather
+     * than one so there is a joint to put in the wrong place at all — a single
+     * stroke can only ever swing, and swinging arms is what the door-battering
+     * animation already is.
+     */
+    const twist = birthing <= DOG_BIRTH_TWIST_FROM
+      ? 0
+      : (birthing - DOG_BIRTH_TWIST_FROM) / (1 - DOG_BIRTH_TWIST_FROM);
     for (const side of [-1, 1]) {
       const sx = x + perpX * shoulder * side;
       const sy = y + perpY * shoulder * side;
       const swing = e.breaking ? 1.62 + Math.sin(now * 0.045 + (side > 0 ? Math.PI : 0)) * 0.42 : reach;
+      if (twist > 0) {
+        // Out of the socket: the upper arm rotates away from forward and the
+        // forearm carries on round past it, so the limb ends up folded behind
+        // the shoulder it grows out of.
+        const wrench = twist * BIRTH_ARM_TWIST * (side > 0 ? 1 : -0.78);
+        const jitter = Math.sin(now * 0.084 + side * 2.1) * 0.3 * twist;
+        const upper = facing + wrench + jitter;
+        const lower = upper + wrench * 1.35;
+        const uLen = radius * swing * (0.55 + twist * 0.2);
+        const ex = sx + Math.cos(upper) * uLen;
+        const ey = sy + Math.sin(upper) * uLen;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.lineTo(ex + Math.cos(lower) * uLen * 0.95, ey + Math.sin(lower) * uLen * 0.95);
+        ctx.stroke();
+        continue;
+      }
       ctx.beginPath();
       ctx.moveTo(sx, sy);
       ctx.lineTo(sx + dirX * radius * swing, sy + dirY * radius * swing);
@@ -2079,6 +2151,20 @@ export function spawnBlood(x: number, y: number, angle: number, now: number): vo
       vy: Math.sin(spread) * speed,
       born: now,
     });
+  }
+}
+
+/**
+ * A body coming apart, rather than a round passing through one.
+ *
+ * **Nothing about the burst comes down the wire**, the same way nothing about
+ * blood does. The host simply stops being in the snapshot, and the client — who
+ * has been watching it convulse and knows how far through it was — throws the
+ * gore itself. See the note in `syncTracked`.
+ */
+export function spawnBurst(x: number, y: number, now: number): void {
+  for (let i = 0; i < BIRTH_BURST_SPOKES; i++) {
+    spawnBlood(x, y, (i / BIRTH_BURST_SPOKES) * Math.PI * 2, now + i);
   }
 }
 
@@ -3845,6 +3931,80 @@ export function drawBlasts(
 }
 
 /** Billowing red plume that marks the landing zone. */
+/**
+ * The dog's acid: a gobbet in the air, then a cloud sat on the road.
+ *
+ * Built the same way the smoke plume is — a few overlapping radial gradients
+ * drifting against each other — because at this size that is what reads as a
+ * volume rather than as a disc. What is different is the *edge*: smoke fades to
+ * nothing all the way round, and this cannot, because it is an occluder and the
+ * fog stops exactly at `r`. So it carries a defined rim with the churn riding
+ * inside it, and where you cannot see through is where it plainly looks solid.
+ *
+ * Everything is hashed off the cloud's own age (`t` on the wire), so there is no
+ * per-frame state anywhere and two clouds side by side do not boil in lockstep.
+ */
+export function drawAcid(ctx: CanvasRenderingContext2D, clouds: AcidState[]): void {
+  for (const c of clouds) {
+    // The body of it. Drawn first and widest, so the churn above sits inside.
+    const body = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, c.r);
+    body.addColorStop(0, `rgba(132, 204, 22, ${0.5 * c.a})`);
+    body.addColorStop(0.62, `rgba(101, 163, 13, ${0.42 * c.a})`);
+    // Not to zero: the rim is where the fog stops, and a cloud that faded out
+    // before its own occluder edge would have a ring of ground you cannot see
+    // through and cannot see anything in either.
+    body.addColorStop(1, `rgba(63, 98, 18, ${0.3 * c.a})`);
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Boiling. Five blobs on their own slow orbits, well inside the rim.
+    for (let i = 0; i < 5; i++) {
+      const drift = c.t * 0.0006 + i * 1.7;
+      const px = c.x + Math.cos(drift) * (c.r * 0.3);
+      const py = c.y + Math.sin(drift * 1.27) * (c.r * 0.25);
+      const rr = c.r * (0.42 + (i % 3) * 0.14);
+      const grad = ctx.createRadialGradient(px, py, 0, px, py, rr);
+      grad.addColorStop(0, `rgba(190, 242, 100, ${0.34 * c.a})`);
+      grad.addColorStop(0.55, `rgba(132, 204, 22, ${0.2 * c.a})`);
+      grad.addColorStop(1, 'rgba(101, 163, 13, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(px, py, rr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+/**
+ * A gobbet on its way.
+ *
+ * The shadow is drawn on the *unlifted* point and the blob on the lifted one —
+ * the same pair the flame arc needs, and for the same reason: without a shadow
+ * the height reads as the thing being off to one side rather than above the
+ * ground.
+ */
+export function drawSpits(ctx: CanvasRenderingContext2D, spits: SpitState[]): void {
+  for (const s of spits) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y, 7, 3.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const y = s.y - s.h;
+    // Stretched along the throw so it reads as travelling rather than falling.
+    ctx.fillStyle = 'rgba(163, 230, 53, 0.92)';
+    ctx.beginPath();
+    ctx.ellipse(s.x, y, 9, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(217, 249, 157, 0.75)';
+    ctx.beginPath();
+    ctx.arc(s.x - 2, y - 2, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 export function drawSmoke(ctx: CanvasRenderingContext2D, smokes: SmokeState[], now: number): void {
   for (const s of smokes) {
     for (let i = 0; i < 5; i++) {

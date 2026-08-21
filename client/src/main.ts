@@ -13,6 +13,7 @@ import {
   FOG_MASK_SCALE,
   FOG_BLUR_PX,
   ENTITY_FADE_MS,
+  BIRTH_BURST_AT,
   MATERIALIZE_MS,
   GUN_SLOTS,
   UTILITY_SLOTS,
@@ -36,7 +37,9 @@ import type {
   InventoryState,
   MapData,
   PickupState,
+  AcidState,
   SmokeState,
+  SpitState,
   SpeechState,
   BlastState,
   DuckState,
@@ -85,6 +88,7 @@ import {
   drawBlood,
   drawBloodSpray,
   spawnBlood,
+  spawnBurst,
   clearBlood,
   clearDogMap,
   clearDogPoses,
@@ -93,7 +97,9 @@ import {
   drawDeathFade,
   drawVignette,
   drawPond,
+  drawAcid,
   drawSmoke,
+  drawSpits,
   drawDogMap,
   drawStamina,
   DOG_HUD_STAMINA_LIFT,
@@ -169,6 +175,22 @@ let dogHud: DogHud | null = null;
 let dogRoseAt = -1;
 let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
+let acid: AcidState[] = [];
+let spits: SpitState[] = [];
+/**
+ * Bumped whenever the acid on screen changes shape, so the fog cache knows to
+ * throw its polygon away.
+ *
+ * A cloud is an occluder — it goes into `visibilityPolygon` in the same array
+ * as the foliage — so a polygon computed before one boiled out would light
+ * ground straight through it. This is exactly what `doorEpoch` does for a door
+ * swinging, and it is keyed on the *rounded* radius the server sends rather
+ * than on the raw one: a cloud spends most of its life at full width, so the
+ * epoch is stable for most of it and the rebuilds are confined to the half
+ * second it is growing.
+ */
+let acidEpoch = 0;
+let acidShape = '';
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
@@ -337,9 +359,15 @@ const { send, goOffline, goOnline } = connect((msg) => {
     following = msg.following;
     pickups = msg.pickups;
     inventory = msg.inventory;
-    // When it was last on its feet, so the screen can fade back *in* after a
-    // death. The server says "dying 0..1" and then simply stops; how long the
-    // coming-back takes is a drawing decision and lives here.
+    // When the black lifts, so the screen can fade back *in*. The server says
+    // "dying 0..1" and then simply stops; how long the coming-back takes is a
+    // drawing decision and lives here.
+    //
+    // **What it comes back up on is no longer the animal.** `dying` ending and
+    // the birth beginning are the same instant, so this fires exactly where it
+    // always did and now reveals the shambler convulsing rather than a dog
+    // already on its feet — which is the whole of what the birth changed on
+    // this side.
     if ((dogHud?.dying ?? -1) >= 0 && (msg.dog?.dying ?? -1) < 0) {
       dogRoseAt = performance.now();
     }
@@ -349,6 +377,15 @@ const { send, goOffline, goOnline } = connect((msg) => {
     dogOutPanel.classList.toggle('hidden', !(dogHud?.out ?? false));
     grenades = msg.grenades;
     smokes = msg.smokes;
+    acid = msg.acid;
+    spits = msg.spits;
+    // Cheap and exact: the polygon only cares where the circles are and how big
+    // they are, and both are already whole numbers on the wire.
+    const shape = acid.map((c) => `${c.x},${c.y},${c.r}`).join('|');
+    if (shape !== acidShape) {
+      acidShape = shape;
+      acidEpoch++;
+    }
     blasts = msg.blasts;
     ducks = msg.ducks;
     emplacements = msg.emplacements;
@@ -833,6 +870,11 @@ const ENTITY_FIELDS = [
   // never reached it and it went on drawing as a live animal — eyes lit, health
   // bar up — stood on top of its own corpse.
   'dead',
+  // A birth host is a shambler that has been on screen for a while by the time
+  // anything starts happening to it — the third body this list has caught in
+  // exactly that shape. Left out, it would convulse on one frame and then stand
+  // there perfectly still until it vanished.
+  'birthing',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
 
 function copyInto(into: EntityState, from: EntityState): void {
@@ -944,6 +986,29 @@ function syncTracked(incoming: EntityState[], now: number): void {
         toFacing: e.facing,
       });
     }
+  }
+
+  /**
+   * A birth host that has stopped being sent has burst, and the gore is thrown
+   * here rather than sent.
+   *
+   * Same trick as blood off `Shot.hit`: the client already knows everything it
+   * needs — where the body was and how far through its convulsion it had got —
+   * so an event on the wire would be a second source of truth for a thing that
+   * happens once a death. It is also why the entry is deleted outright instead
+   * of being left to `advanceFades`: a body that burst must not then spend
+   * `ENTITY_FADE_MS` politely dissolving where it stood.
+   *
+   * **Gated on it having been nearly finished**, because a host can leave a
+   * snapshot for the ordinary reason as well — some *other* viewer across the
+   * street loses sight of it half way through. The dog it belongs to cannot,
+   * its own body being parked on top of the thing, but the flag is sent to
+   * everybody on purpose and this is the cost of that.
+   */
+  for (const [id, entry] of tracked) {
+    if (entry.seen || (entry.state.birthing ?? 0) < BIRTH_BURST_AT) continue;
+    spawnBurst(entry.state.x, entry.state.y, now);
+    tracked.delete(id);
   }
 }
 
@@ -1314,6 +1379,7 @@ let cachedY = Number.NaN;
 let cachedRadius = -1;
 /** The `doorEpoch` the cached polygon was built against — see `visibilityFor`. */
 let cachedEpoch = -1;
+let cachedAcidEpoch = -1;
 let fogComputeMs = 0;
 /** Latches the fog fault so only its edges are logged, not every frame. */
 let fogFailing = false;
@@ -1367,6 +1433,13 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     cachedPoly.length > 0 &&
     radius === cachedRadius &&
     cachedEpoch === doorEpoch &&
+    // A fourth input, and it belongs to the same list: acid is an occluder, so
+    // a cloud boiling out is a change to what is standing in the way exactly as
+    // a door swinging is. Without this the polygon computed a moment before one
+    // landed would go on lighting ground straight through it for as long as the
+    // viewer stood still — which, being cached, could be the whole nine
+    // seconds.
+    cachedAcidEpoch === acidEpoch &&
     /*
      * **What LOW GRAPHICS actually buys on the fog is fewer rebuilds, not
      * cheaper ones**, and that is worth writing down because the obvious lever
@@ -1403,7 +1476,17 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     me.y,
     radius,
     occludersFor(map),
-    map.bushes,
+    // **A cloud is a bush that also slows you and expires**, which is why it
+    // goes in this array and nowhere else. `AcidState` carries the same
+    // `{x, y, r}` a `Bush` does, so the whole of the client's half of "acid is
+    // a line-of-sight blocker" is this concat — no new occluder kind, no second
+    // code path, and it inherits the near-first ordering and the viewport clip
+    // that make the polygon affordable at all.
+    //
+    // The concat is skipped when there is no acid, which is nearly always: the
+    // fog polygon is rebuilt often enough that allocating a copy of the park's
+    // bush list for nothing would be a real cost.
+    acid.length > 0 ? map.bushes.concat(acid) : map.bushes,
     clipW,
     clipH,
     settings.fogDetail === 'low',
@@ -1414,6 +1497,7 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   cachedY = me.y;
   cachedRadius = radius;
   cachedEpoch = doorEpoch;
+  cachedAcidEpoch = acidEpoch;
 
   // Watchdog: if the visible region covers nearly the whole sight circle while
   // walls are standing right next to us, occlusion has failed. Log it with
@@ -1715,6 +1799,10 @@ function render() {
   // Air support sits above the foliage: smoke, then the grenade, then the
   // aircraft itself over everything on the ground.
   drawSmoke(ctx, smokes, now);
+  // Over the smoke and under the aircraft: it is on the ground, and it is the
+  // one thing on screen that is deliberately hard to see past.
+  drawAcid(ctx, acid);
+  drawSpits(ctx, spits);
   drawBlasts(ctx, blasts, view);
   drawGrenades(ctx, grenades);
   if (helicopters.length > 0) drawHelicopters(ctx, helicopters, now);
@@ -1779,7 +1867,7 @@ function render() {
     // clock go where they were.
     // Nothing to read off a bar while you are lying on the road being greyed
     // out — the jaws and the bite clock belong to a dog that is up.
-    if (dogHud && dogHud.dying < 0) {
+    if (dogHud && dogHud.dying < 0 && dogHud.birth < 0) {
       drawDogHud(ctx, dogHud, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, now);
       // The corner map, and only for a dog that is up: there is nothing to
       // read off it while you are lying in the road being greyed out, and the

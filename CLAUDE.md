@@ -87,6 +87,9 @@ Server modules and what each owns:
   needs
 - `emplacement.ts` — the pocket gunner: its crew, its sandbags, its arc
 - `fire.ts` — the flamethrower stream, burning ground, and who is alight
+- `acid.ts` — what the dog spits: a gobbet in the air, the cloud it leaves, and
+  who cannot see out of it. Imports only *types* from `world.ts`, so a cloud can
+  be read by `hasLineOfSight` and `speedAt` without a cycle
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
 - `backup.ts` — the radio's answer: a van or a car in off the map, and its crew
@@ -2148,17 +2151,107 @@ that body's position, on full health. Run out of shamblers and the next death
 is the end of it — no entity, out of the round, and the HUD says so.
 
 **Dying is something you watch.** The body stays exactly where it fell for
-`DOG_DEATH_MS`, greyed and sprawled, and only then does the animal rise
-somewhere else — cutting straight to the new one gives being killed no weight
-at all, you would simply find yourself elsewhere. The screen holds on the body
-for the first `DOG_FADE_FROM` of that window and then goes to black, and comes
-back off it faster than it went. Measured: flagged dead for **2400ms of a
-2400ms window**, then up on full health 1859px away with the horde one shorter.
+`DOG_DEATH_MS`, greyed and sprawled — cutting straight to the new one gives
+being killed no weight at all, you would simply find yourself elsewhere. The
+screen holds on the body for the first `DOG_FADE_FROM` of that window and then
+goes to black. Measured: flagged dead for **2400ms of a 2400ms window**.
 
-- **The body it leaves is permanent.** `world.corpses` is never trimmed, so
-  four deaths leave four bodies for the rest of the round — the only lasting
-  mark the officers get for having killed one. Sent unfogged: a handful in a
-  whole round, and a corpse should not blink out because you turned round.
+#### And being born is something you watch too
+
+**The screen comes back up on the shambler you are about to come out of.** It
+vibrates, its arms twist out of their sockets, and then it bursts and the animal
+is standing where it was. `DOG_BIRTH_MS` (1.5s) after the death window, and
+`server/birthcheck.ts` is the harness.
+
+The old respawn did all of this in one instant at the end of the death window,
+with the screen still black — so the one moment that explains where a dog comes
+from happened where nobody could see it, and the black frames were dead time
+rather than a held breath.
+
+- **Choosing the host early is the entire mechanism.** `beginDogBirth` picks it
+  when the screen goes dark and `finishDogBirth` spends it a birth window later;
+  everything in the second half was already written, and only the *when* moved.
+- **The camera is aimed by moving the dog's own body onto the host**, and there
+  is no camera override anywhere on the client. It follows the entity you are
+  driving, so parking that entity on the host's back is all of it. It costs
+  nothing on screen because the body is still `dead` and the entity loop skips
+  those — the corpse it left is a separate, permanent record and stays where it
+  fell. Zero distance also puts the host inside the dog's own fog with nothing
+  said about births in `visibleTo`. Measured: **0.0px apart**, against **1857px**
+  from where the body actually died, which is well outside a 945px view — that
+  gap is the control, and it is where this used to happen.
+- **The host is frozen through it**, folded into `computeFrozen` beside the
+  stunned. A body coming apart is not walking anywhere, and one that wandered
+  off mid-convulsion would take the burst — and the animal — out of frame.
+  Measured: **0 ticks moved** across the whole window.
+- **The convulsion is on the wire as `birthing` (0..1) on the *shambler***, not
+  on the dog, because the dog does not exist yet and the thing being drawn is
+  what is happening to somebody else. Sent to everybody who can see it: a body
+  shaking itself apart in the street is the only warning the officers get that
+  a dog they killed is about to be back.
+  - **Vibration, not thrashing**, and the difference is entirely the frequency —
+    a grapple shakes at 0.028 because two people wrestling is something you can
+    follow, where this is too fast to track and reads as a thing failing rather
+    than struggling. The two axes run at rates that are not multiples of each
+    other, so it never settles into a line. It ramps on the *square*: linear
+    reads as fully broken from the first frame and then has nowhere left to go.
+  - **`DOG_BIRTH_TWIST_FROM` (0.42) is where the arms go**, and the two halves
+    do different jobs. Vibration alone is ambiguous — a fit, a stun, anything.
+    Arms rotating out of the line of the shoulders and folding back at an angle
+    no elbow makes is the moment the body stops reading as a person, which is
+    what has to happen before the burst for the burst to be an ending rather
+    than a surprise. The two sides are deliberately **not mirrored**: equal and
+    opposite reads as a pose being struck.
+- **Nothing about the burst comes down the wire.** The host simply stops being
+  in the snapshot and the client — which has been watching it convulse and knows
+  how far through it was — throws the gore itself, exactly as blood is derived
+  from `Shot.hit`. `spawnBurst` is `spawnBlood` called at six bearings round the
+  circle, so it inherits the decals, the droplet physics, the cap and the
+  `settings.blood` switch without a line of any of them being written twice.
+  - Gated on `BIRTH_BURST_AT` (0.9), because a host can leave a snapshot for the
+    ordinary reason too — some *other* viewer across the street losing sight of
+    it half way through. The dog it belongs to cannot, its body being parked on
+    the thing, and that is the cost of sending the flag to everybody.
+- **A birth is interruptible, and deliberately not defended against.** The host
+  is an ordinary zombie in an ordinary street and the garrison can shoot it out
+  from under you; that costs a life exactly as any other shambler does, and the
+  answer is to start again on another body. With none left, that was the last of
+  them and the dog is out. Both paths are checked.
+- **Two dogs cannot come out of the same body**, checked by `isBirthHost`.
+- `dogHudFor` reports `birth` alongside `dying`, and the two are **mutually
+  exclusive by construction** — `updateDogs` deletes the death before it begins
+  the birth. That is what lets the client fade out on one and back in on the
+  other without deciding which half of a single ramp it is looking at. Measured:
+  **0 ticks with both running**.
+
+*One thing about measuring this is worth not rediscovering.* `toWire`'s third
+parameter is **`revealInfected`, not `now`** — passing the clock there leaves
+`now` defaulting to `Date.now()`, which in a headless harness barely moves. That
+read the birth as 0.00 on every tick of it and looked exactly like the ramp
+never starting.
+
+- **The body it leaves is permanent, and "permanent" means for the round.**
+  `world.corpses` is never trimmed, so four deaths leave four bodies for the
+  rest of it — the only lasting mark the officers get for having killed one.
+  Sent unfogged: a handful in a whole round, and a corpse should not blink out
+  because you turned round.
+  - **It is cleared by `resetWorld`, and for a long time it was not.** What a
+    corpse holds is a *coordinate*, and a coordinate means something only on the
+    map it was made on — so a restart drew the last round's bodies onto a
+    freshly generated city, in streets that no longer existed. Measured with the
+    clear gated back out: two bodies survived a restart, one of them at
+    **4767,2959 on a map that need not even be that big**, and the next death
+    stacked to three.
+  - **It was the one piece of dog state neither reset path caught**, which is
+    why it lasted. `dogsOut`, `dogDeaths`, `dogState` and `dogBirths` are all
+    dropped per id by `spawnDog` — which only runs for a seat somebody is
+    actually sitting in — and this is a plain array on the world that no seat
+    owns. Anything else added to the world that is neither keyed by id nor
+    cleared beside its neighbours here has the same trap waiting for it.
+  - **The client needed nothing.** It reassigns `corpses = msg.corpses` on every
+    snapshot and `drawCorpses` holds no state between frames, so an emptied list
+    self-corrects on the next tick. That is *not* true of the blood, which
+    accumulates client-side and is why `clearBlood()` exists on the same path.
 - **`world.dogDeaths` is on the world, not on `DogState`, and that is the whole
   bug.** It started on the dog's own state, which is created lazily on the first
   tick and *deleted* on every respawn — so a dog shot in either of those windows
@@ -2366,7 +2459,7 @@ comes back out of the horde — so the body itself does not also need to soak a
 magazine. One that can stand in the open trading fire with the garrison never
 has to think about where it is.
 
-**The dog's camera is pulled out to `DOG_CAMERA_ZOOM` (1.6), and it is a balance
+**The dog's camera is pulled out to `DOG_CAMERA_ZOOM` (1.5), and it is a balance
 fix rather than a rendering one.** Reported as *"dog needs more pov, I am getting
 shot by swat I cant see"*, and the complaint was exact.
 
@@ -2383,9 +2476,31 @@ shot by swat I cant see"*, and the complaint was exact.
   everything shooting it was not.
 - **The rule is *anything that can shoot you is something you can look at*** —
   deliberately not "see it all without moving the mouse", which needs a zoom
-  below 1.0 and hands the dog the whole street. 1.6 is the loosest zoom that
-  clears it: 675 world px vertically, 337 at rest and **580 with the pan against
-  SWAT's 560**.
+  below 1.0 and hands the dog the whole street. 1.6 was the loosest zoom that
+  cleared it: 675 world px vertically, 337 at rest and 580 with the pan against
+  SWAT's 560.
+- **It went to 1.5, which is that rule with room to spare rather than by 21px.**
+  Asked for as *"slightly more top down vision"*, and the case for it is that
+  clearing SWAT by a hair means a dog that is *technically* able to look at
+  whatever is shooting it, provided it happens to be pointing the right way at
+  the time. **720 world px vertically, 360 at rest and 619 with the pan.** The
+  cost is real and is paid by one connection: ground on screen sets both the fog
+  polygon and how many entities are serialised per viewer, and 1.5 is ~113% of
+  1.6 on both.
+  - **`DOG_SIGHT_RADIUS` went 890 → 945 with it, and that is the half that is
+    easy to forget.** The camera and the radius are one change: pulling the
+    camera out without the radius is a dog lighting ground the server sent
+    nobody for — an emptier street seen further, which is the exact opposite of
+    what widening the view is for, and which shows up as nothing at all rather
+    than as an error. `server/zoomderive.ts` now sweeps candidate *dog* zooms
+    the way it always swept officer ones, and prints what each demands: at 1.5
+    the furthest corner is 923 against the 945 sent, and **1.7 is already short
+    of SWAT**.
+  - **It was paired with the garrison hitting harder** — see
+    `CITY_OFFICER_DOG_DAMAGE_MUL` under **The garrison is spread evenly**. More
+    warning of the deterrent, and a deterrent that costs more when it is
+    reached; widening the view on its own is a straight buff to the seat that
+    already wins every flat-out chase.
 - **`panYFor(zoom)` replaced the written-down pan.** Both terms depend on the
   zoom — the equal-awareness one because it is in world pixels, the
   `PAN_KEEP_ON_SCREEN` cap because it spends a fraction of the half-screen — so
@@ -2433,11 +2548,13 @@ Everything an officer's HUD does — the slot bar, the E prompt, the Q wheel, th
 scroll — is simply not drawn for a dog. In the opposite corner is the one thing
 an officer does *not* get: the corner map, below.
 
-**Above them is the ability bar: four hexagons on Q, E, R and F.** Three of them
-are empty outlines and are drawn anyway — a bar that grew a hexagon at a time
-would shift the keys already on it every time one was filled, and the whole
-value of a fixed row is that a key is always in the same place. An outline says
-"there will be something here"; a gap says nothing at all.
+**Above them is the ability bar: four hexagons on Q, E, R and F.** Two are
+filled — the roar and the acid — and the other two are empty outlines drawn
+anyway, because a bar that grew a hexagon at a time would shift the keys already
+on it every time one was filled, and the whole value of a fixed row is that a key
+is always in the same place. An outline says "there will be something here"; a
+gap says nothing at all. **That claim has now been tested by the thing it exists
+for**: E was filled in after Q, and nothing on the row moved.
 
 - **The three rows are stacked, not squeezed.** An officer's stamina bar sits
   just above their slot row; a dog's has a taller row of hexagons under it, so
@@ -2601,6 +2718,163 @@ all on the outbreak's own edge, none in geometry, 270px apart at the widest; and
 on the tally, **111 charged against 111 turned of 120 bitten** by a dog, against
 **0 charged of 114 turned** by a shambler — which is the check that says it
 counts bodies rather than bites.
+
+#### The acid (E)
+
+**It spits, and what it spits is cover.** A gobbet arcs to the crosshair and
+leaves a cloud that slows anybody caught in it and that nobody can see through.
+`server/src/acid.ts` owns it; `server/acidcheck.ts` is the harness and
+`server/acidlive.ts` drives the message path over a real socket.
+
+It answers the same problem the roar does from the other end. A dog has no
+ranged attack and nothing in its hands, so every fight it takes is one it has to
+cross open ground to reach — and the garrison is spread evenly across the city
+precisely so that crossing open ground is expensive. The roar brings the street
+to you; this takes the street's line of sight away.
+
+**Almost none of it is new code, and that is the design.** The cloud is a
+**circle with a radius**, which is exactly the shape `Bush` has:
+
+- `hasLineOfSight` gets six lines beside the foliage test, and the client hands
+  its clouds to `visibilityPolygon` **in the same array as the bushes** — so
+  "acid is a line-of-sight blocker" is one `concat` on that side, with no new
+  occluder kind, no second code path, and the near-first ordering and viewport
+  clip that make the polygon affordable inherited for free.
+- `AcidState` carries the same `{x, y, r}` a `Bush` does, plus an `a` and a `t`
+  the fog path simply ignores.
+- The flight is `sprayFlame`'s trick: work out where it lands on the tick the key
+  went down, against the geometry as it stood, then wait `DOG_SPIT_TRAVEL_MS`.
+- **It lands where the crosshair is**, clamped to `DOG_SPIT_RANGE` and floored at
+  `DOG_SPIT_MIN_THROW` — the rule the flamethrower needed, for the same reason: a
+  direction with no distance puts every cloud at maximum range.
+
+**The slow is in `speedAt`, which is the one function every mover in the game
+already goes through** — civilians and zombies through `ai.ts`, the dog through
+`moveDog`, a player through `updatePlayers`. Written instead as a sweep over
+bodies in `updateAcid` it would be a *second* place that knows what a cloud is,
+and the first new kind of mover added afterwards would silently walk through the
+stuff at full speed. `speedAt` took an optional `EntityType` for it, so anything
+that can be exempt has to say what it is.
+
+- **Zombies are exempt, and the dog is a zombie.** It comes out of one of them,
+  and an ability that slows your own horde and yourself is one nobody spends a
+  cooldown on. Measured: a human in a cloud does **19.3 px/s against 35**, the
+  garrison the same, and the horde **35.0** — untouched.
+- Guarded on `world.acid.size` so the ordinary case, no acid anywhere, is one
+  integer compare in a function called for every body every tick. Same guard in
+  `hasLineOfSight`, which is the hottest predicate the server has. Neither uses a
+  broadphase: clouds are single figures and short-lived, so one would cost more
+  to keep than to skip.
+
+**A cloud you are standing in does not blind you, and that is the bush rule
+taken deliberately rather than by inheritance.** Its job is to be something the
+garrison cannot see *through*; a version that also blinded whoever walked into it
+would blind the dog that spat it, which is an ability nobody presses twice. It is
+*not* exempted by `seeThroughBushes`, though — that flag means an officer is
+trained and looking for this, and training is not a defence against a chemical.
+Measured: a 600px line across a cloud is broken for an officer as well as a
+civilian, and somebody stood in the middle of it sees out both ways.
+
+**Being unable to see is a real effect, and it is the splash that hands it out.**
+`ACID_IMPACT_RADIUS` (62) is much smaller than `ACID_CLOUD_RADIUS` (130), and
+that gap is the whole ability: the cloud is an area everybody works around, where
+the splash is a wet moment that catches whoever was standing exactly there. Make
+them the same number and it stops being aimed at anything — it becomes a stun
+grenade with a nine-second tail.
+
+- **They look around and they do not move.** `blindedTick`, its own branch in
+  `updateAi` rather than an entry in `frozen`, and the difference is the point:
+  frozen skips an entity outright, where this one still turns. Somebody stood
+  dead still on a bearing reads as the game having stopped paying attention to
+  them, which is exactly what standing about looked like before `settledTick`.
+- **The sweep is latched against the deadline, not against a flag.** A second
+  gobbet landing on somebody already blind pushes the deadline out, which is a
+  different number, which re-centres the sweep on wherever they are facing now —
+  so nothing has to clear anything up when the blindness lifts and there is no
+  stale bearing for the next one to find.
+- **Not zombies, and not players.** Zombies because it comes out of one; players
+  because "looks around but does not move" is a description of an AI, and the
+  honest translation for somebody holding a mouse is having the controls taken
+  away — which a mine already does, and which the dog's own stagger was
+  deliberately softened to avoid being. A player in the splash gets the cloud's
+  slow like everybody else and keeps their legs.
+- **Rarely, they say why** (`ACID_BLIND_LINE`). Rolled once, at the moment the
+  acid lands, rather than per tick while they are blind — everything with a
+  chance on it here has to be, or a "rare" reaction evaluated thirty times a
+  second always happens. Measured over 200 spits: **32 said it**.
+- Measured on the rig: the body under the splash is blinded and moves **0 of 40
+  ticks** while sweeping **0.6-1.2 rad**; a body 141px out, inside the cloud but
+  outside the splash, is not; a zombie under it is not; and the control — a
+  civilian nobody threw acid at, in the same city over the same window — plainly
+  walks.
+
+**`DOG_SPIT_COOLDOWN_MS` (11s) is the cost**, and without one a held key lays a
+wall of the stuff across the map with no decision left in it. The range is
+deliberately shorter than `DOG_SIGHT_RADIUS`: it must not be possible to lay a
+cloud on ground you cannot see, or the ability becomes a way of editing the map
+at a distance.
+
+**The hexagon carries no badge**, unlike the roar's. `charges: -1` rather than 0:
+the badge is for an ability that banks something, and a nought under a hexagon
+every round is noise — the badge *appearing* is itself the news that the roar now
+does more. Nothing runs in it either (`active: -1`), because spitting is over on
+the tick the key goes down; what happens afterwards belongs to the gobbet and
+then to the cloud, neither of which is the dog.
+
+**The fog cache needed a fourth input.** Its three were where the viewer is, how
+far they see, and what is standing in the way — and a cloud boiling out is a
+change to the third exactly as a door swinging is. Without `acidEpoch` beside
+`doorEpoch`, a polygon computed a moment before one landed would go on lighting
+ground straight through it for as long as the viewer stood still, which being
+cached could be the whole nine seconds. It is keyed on the **rounded** radius the
+server sends, so the epoch is stable for the most of a cloud's life it spends at
+full width and the rebuilds are confined to the half second it grows.
+
+**The row is Q, E, R, F, so this needed no keybinding work at all** — `KeyE` was
+already slot 1, and `KeyE` is free for a dog because `processInteractions` bails
+on anything with no inventory. Which keys they are stays the client's business:
+the wire carries a slot *index* and nothing else.
+
+**The drawing has a defined rim, unlike the smoke it is otherwise built like.**
+Smoke fades to nothing all the way round; this cannot, because it is an occluder
+and the fog stops exactly at `r` — so a cloud that faded out before its own
+occluder edge would have a ring of ground you can neither see through nor see
+anything in. The churn rides inside the rim, hashed off the cloud's own age (`t`
+on the wire) so there is no per-frame state and two clouds side by side do not
+boil in lockstep.
+
+**`client/acidrig.html` measures the drawing**, for both this and the birth.
+rAF is throttled to nothing while the browser pane is not compositing, so no
+frame of a live round can be put on screen from here — but `getImageData` needs
+no compositing at all, which is what turns "it looks right" into a number. It
+imports the real `drawAcid`, `drawSpits` and `drawEntity` and is driven off
+`setInterval`, like `dogpose.ts` and `roarrig.ts`. Measured: **ink at the centre
+of a cloud and just inside its rim, none past it** (the rim is where the fog
+stops, so ink beyond it would be a cloud claiming ground it does not occlude),
+green the dominant channel, the gobbet and its shadow both down, **11 of 11
+sampled birth frames rendering differently** with the vibration half plainly
+unlike the arms half — and the control, an ordinary zombie over the same clock
+steps, identical on all 11, so the movement is the birth and not the clock.
+Nothing threw.
+
+*Two things about measuring this were the rig lying rather than the code
+failing*, and both are the staging:
+
+- **Aiming at the dog's own feet does not put a cloud on them.**
+  `DOG_SPIT_MIN_THROW` is a floor as well as `DOG_SPIT_RANGE` being a ceiling, so
+  a crosshair on yourself throws it 90px out on whatever bearing you were facing.
+  The first sight-line test staged its geometry around the dog and was measuring
+  a cloud 90px from where it thought it was.
+- **The splash is 62px across, so everything staged inside it is within arm's
+  reach of everything else staged inside it.** A zombie put under the splash to
+  prove the horde is exempt promptly grabbed the civilian whose stillness was
+  being measured; `frozen` swallowed them a branch *above* the blinded one and
+  the head stopped sweeping. It read as the sweep barely working — 0.28 rad
+  against an expected 1.25 — rather than as a rig feeding one subject to another.
+  The horde check runs in a rig of its own now.
+- And the map is not seeded, so the sight-line test **finds** a clear lane rather
+  than assuming one. Staged at a fixed spot its *control* failed on roughly half
+  of all cities, which is a test reporting the city rather than the code.
 
 #### The corner map, and what it refuses to show
 
@@ -3916,6 +4190,13 @@ map.
   anti-dog rule: no bloom at all against one, and `CITY_OFFICER_DOG_DAMAGE_MUL`
   on top. Anyone a radio call sent afterwards is the response, not the
   deterrent, and shoots a dog like anything else.
+- **That multiplier went 1.6 → 1.84, which is 15% more damage rather than 15
+  points of multiplier.** It is the other half of pulling the dog's camera out
+  to `DOG_CAMERA_ZOOM` 1.5 and the two should be read together: the camera hands
+  the dog more warning of the garrison, so the garrison costs more when it is
+  reached. Widening the view on its own is a straight buff to the seat that
+  already wins every flat-out chase, and this is a rule about the *map* — the
+  point of a deterrent is that walking into one hurts.
 
 **Anybody a call sent carries a real gun and takes `DISPATCHED_DAMAGE_MUL`** —
 a van, a patrol car or a helicopter off a smoke grenade alike. The tier decides
@@ -4208,6 +4489,16 @@ in the city was told to walk past it by name. Nothing else read the mark.
 
 ## How the user likes to work
 
+- **A harness at the `server/` root is not typechecked, and it will lie to
+  you.** `server/tsconfig.json` includes `src/**` only, so `npx tsc --noEmit`
+  passes over every rig in this list, and `tsx` strips types without checking
+  them. `roarcheck.ts` was staging a `GrappleSession` with **no `escapeAt`**
+  after that field became the *only* way a grip ends in the victim's favour —
+  `undefined` is never `>= now`, so no staged bite ever got away, and the check
+  which proves the roar's tally counts bodies rather than bites had quietly
+  stopped being able to fail. It read as 0 of 120 escaping; it is 12 of 120 now.
+  Check one explicitly before trusting it:
+  `npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --strict --skipLibCheck --types node roarcheck.ts`
 - **Verify behaviour from a spectator socket**, not a player one — a player
   connection is fog-limited and gives misleading counts. `spectate` no longer
   restarts the round: resetting is gated behind `ALLOW_WORLD_RESET=1` now that

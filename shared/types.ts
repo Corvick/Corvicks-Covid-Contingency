@@ -88,6 +88,17 @@ export interface EntityState {
    */
   roaring?: boolean;
   /**
+   * A dog is coming out of this body, 0 to 1 across `DOG_BIRTH_MS`.
+   *
+   * It is on the *shambler*, not on the dog — the dog does not exist yet, and
+   * the thing being drawn is what is happening to somebody else. It vibrates
+   * for the first `DOG_BIRTH_TWIST_FROM` of it, the arms go after that, and
+   * then it bursts and is gone from the snapshot, which is the client's cue to
+   * throw the gore: nothing about the burst is sent, in the same way nothing
+   * about blood is.
+   */
+  birthing?: number;
+  /**
    * Down. Drawn grey and sprawled, and going nowhere — a dog holds its own
    * body on screen for `DOG_DEATH_MS` before it rises again somewhere else, so
    * that being killed is something you watch rather than a cut.
@@ -351,6 +362,34 @@ export interface SmokeState {
   a: number;
 }
 
+/**
+ * A cloud of the dog's acid.
+ *
+ * **The same three fields a `Bush` has, and that is on purpose** — the client
+ * hands its clouds to `visibilityPolygon` in the same array as the foliage, so
+ * a cloud is an occluder there without one line of new fog code. `a` and `t`
+ * are for the drawing alone and are simply ignored by that path.
+ */
+export interface AcidState {
+  x: number;
+  y: number;
+  r: number;
+  /** Thins away at the end of its life. */
+  a: number;
+  /** Its age in ms, so the churn can be hashed off it with no per-frame state. */
+  t: number;
+}
+
+/** A gobbet of it still in the air. */
+export interface SpitState {
+  x: number;
+  y: number;
+  /** Height above the ground, for the shadow and the arc. */
+  h: number;
+  /** How far along the throw, 0 to 1. */
+  t: number;
+}
+
 /** Only ever seen as a shadow passing over the ground. */
 export interface HelicopterState {
   x: number;
@@ -523,6 +562,16 @@ export interface DogHud {
   contacts: Array<{ x: number; y: number }>;
   /** No horde left and it went down. Out of the round. */
   out: boolean;
+  /**
+   * Coming out of a shambler, 0 to 1 across `DOG_BIRTH_MS`; -1 otherwise.
+   *
+   * Separate from `dying` rather than an extension of it, because the two are
+   * opposite states that happen to be adjacent: `dying` blacks the screen out
+   * and this one has to bring it back, and a single ramp through both would
+   * have the client guessing which half of it was which. It is also what tells
+   * the HUD to stay off — there is no animal to draw a jaw bar for yet.
+   */
+  birth: number;
   /**
    * Being killed, 0 to 1 across `DOG_DEATH_MS`; -1 while up.
    *
@@ -765,6 +814,8 @@ export type ServerMessage =
       dog: DogHud | null;
       grenades: GrenadeState[];
       smokes: SmokeState[];
+      acid: AcidState[];
+      spits: SpitState[];
       blasts: BlastState[];
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */
