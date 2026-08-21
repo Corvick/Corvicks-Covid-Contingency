@@ -487,7 +487,7 @@ function rigLive(): void {
           const d = Math.hypot(z.x - e.x, z.y - e.y);
           if (d > HUMAN_SIGHT_RADIUS) continue;
           if (near && d >= near.d) continue;
-          if (!hasLineOfSight(world, e.x, e.y, z.x, z.y)) continue;
+          if (!hasLineOfSight(world, e.x, e.y, z.x, z.y, false, e.type)) continue;
           near = { x: z.x, y: z.y, d };
         }
         if (!near || !was) {

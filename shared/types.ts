@@ -373,7 +373,21 @@ export interface SmokeState {
 export interface AcidState {
   x: number;
   y: number;
+  /**
+   * The **bounding** radius. A cloud is a cluster of lobes rather than a disc
+   * and none of them reaches past this, so it is still what the fog cache keys
+   * on and what every cheap rejection test uses.
+   */
   r: number;
+  /**
+   * Which cluster of lumps this cloud is.
+   *
+   * The lobes themselves are derived from it by `shared/acidshape.ts`, on both
+   * sides, rather than being sent — the client needs the identical shape for
+   * the fog polygon *and* for the drawing, and the drawn rim has to sit exactly
+   * where the occluder edge does.
+   */
+  s: number;
   /** Thins away at the end of its life. */
   a: number;
   /** Its age in ms, so the churn can be hashed off it with no per-frame state. */

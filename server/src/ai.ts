@@ -624,7 +624,7 @@ function senseThreats(
     if (other.type !== 'zombie' && !turning) continue;
     const dist = Math.hypot(other.x - e.x, other.y - e.y);
     const seen =
-      dist <= sight && hasLineOfSight(world, e.x, e.y, other.x, other.y, throughBushes);
+      dist <= sight && hasLineOfSight(world, e.x, e.y, other.x, other.y, throughBushes, e.type);
     // Goggles read the dead, not the dying: a body still warm and still human
     // is not a heat contact.
     const felt = !turning && thermal > 0 && dist <= thermal;
@@ -666,7 +666,7 @@ function senseThreats(
     const held = world.entities.get(state.targetId);
     if (held && held.type === 'zombie') {
       const heldDist = Math.hypot(held.x - e.x, held.y - e.y);
-      if (heldDist <= sight && hasLineOfSight(world, e.x, e.y, held.x, held.y, throughBushes)) {
+      if (heldDist <= sight && hasLineOfSight(world, e.x, e.y, held.x, held.y, throughBushes, e.type)) {
         if (nearestDist > heldDist * TARGET_SWITCH_MARGIN) {
           nearest = held;
           nearestDist = heldDist;
@@ -2918,7 +2918,7 @@ function spotRunner(world: World, e: Entity): Entity | null {
     const os = world.ai.get(other.id);
     if (!os || (os.mode !== 'flee' && os.mode !== 'retreat')) continue;
     if (Math.hypot(other.x - e.x, other.y - e.y) > WITNESS_SIGHT_RADIUS) continue;
-    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, false, e.type)) continue;
     return other;
   }
   return null;
@@ -4169,7 +4169,7 @@ function cureTick(
     if (!who || who.type === 'zombie' || who.id === e.id) continue;
     const d = Math.hypot(who.x - e.x, who.y - e.y);
     if (d > reach || d >= best) continue;
-    if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true, e.type)) continue;
     best = d;
     patient = who;
   }
@@ -4245,7 +4245,7 @@ function chargeInfectedTick(
     if (!who || who.type !== 'human') continue;
     const d = Math.hypot(who.x - e.x, who.y - e.y);
     if (d > reach || d >= best) continue;
-    if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, who.x, who.y, true, e.type)) continue;
     best = d;
     target = who;
   }
@@ -5132,7 +5132,7 @@ function nearestDogInSight(world: World, e: Entity): number {
     if (!dog) continue;
     const d = Math.hypot(dog.x - e.x, dog.y - e.y);
     if (d >= best || d > BOT_SAFE_DIST) continue;
-    if (!hasLineOfSight(world, e.x, e.y, dog.x, dog.y, true)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, dog.x, dog.y, true, e.type)) continue;
     best = d;
   }
   return best;
@@ -5558,7 +5558,7 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
     if (!noTargetStick && other.id === state.targetId) score *= ZOMBIE_TARGET_STICK;
 
     if (score >= bestScore) continue;
-    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, false, e.type)) continue;
 
     best = other;
     bestScore = score;
@@ -5613,7 +5613,7 @@ function followTheChase(
 
   // One ray, and only for the nearest candidate — seeing *him* is the whole
   // premise, and the check is why this cannot see round corners.
-  if (!hasLineOfSight(world, e.x, e.y, chaser.x, chaser.y)) return;
+  if (!hasLineOfSight(world, e.x, e.y, chaser.x, chaser.y, false, e.type)) return;
 
   state.lastSeenX = prey.x;
   state.lastSeenY = prey.y;
@@ -5764,7 +5764,7 @@ function reachablePrey(world: World, e: Entity, range: number): boolean {
   for (const other of nearby) {
     if (other.type !== 'human' && other.type !== 'officer') continue;
     if (Math.hypot(other.x - e.x, other.y - e.y) > range) continue;
-    if (hasLineOfSight(world, e.x, e.y, other.x, other.y)) return true;
+    if (hasLineOfSight(world, e.x, e.y, other.x, other.y, false, e.type)) return true;
   }
   return false;
 }

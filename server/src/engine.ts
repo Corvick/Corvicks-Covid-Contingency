@@ -769,7 +769,12 @@ function visibleTo(viewer: Entity, now: number): EntityState[] {
       continue;
     }
     const dist = Math.hypot(other.x - viewer.x, other.y - viewer.y);
-    const seen = dist <= sight && hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y);
+    // `viewer.type`, so a dog — which is a zombie with a flag — sees straight
+    // through its own acid, and an officer standing in a cloud is sent nothing
+    // at all. Server-enforced, so being blind is not something a client can
+    // decline to render.
+    const seen =
+      dist <= sight && hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y, false, viewer.type);
     if (seen) {
       out.push(toWire(world, other, reveal, now));
       continue;
@@ -789,7 +794,7 @@ function visiblePickups(viewer: Entity): PickupState[] {
   const sight = sightRadiusFor(viewer);
   for (const p of world.pickups.values()) {
     if (Math.hypot(p.x - viewer.x, p.y - viewer.y) > sight) continue;
-    if (!hasLineOfSight(world, viewer.x, viewer.y, p.x, p.y)) continue;
+    if (!hasLineOfSight(world, viewer.x, viewer.y, p.x, p.y, false, viewer.type)) continue;
     out.push(p);
   }
   return out;
@@ -800,9 +805,9 @@ function visibleShots(viewer: Entity): Shot[] {
   return world.shots.filter(
     (shot) =>
       (Math.hypot(shot.x1 - viewer.x, shot.y1 - viewer.y) <= sight &&
-        hasLineOfSight(world, viewer.x, viewer.y, shot.x1, shot.y1)) ||
+        hasLineOfSight(world, viewer.x, viewer.y, shot.x1, shot.y1, false, viewer.type)) ||
       (Math.hypot(shot.x2 - viewer.x, shot.y2 - viewer.y) <= sight &&
-        hasLineOfSight(world, viewer.x, viewer.y, shot.x2, shot.y2)),
+        hasLineOfSight(world, viewer.x, viewer.y, shot.x2, shot.y2, false, viewer.type)),
   );
 }
 

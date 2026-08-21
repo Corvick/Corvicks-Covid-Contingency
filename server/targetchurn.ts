@@ -242,8 +242,8 @@ function staged(): void {
       const far = { x: spot.x + Math.cos(th) * 320, y: spot.y + Math.sin(th) * 320 };
       const near = { x: spot.x + Math.cos(th) * 100, y: spot.y + Math.sin(th) * 100 };
       if (world.nav.isBlocked(far.x, far.y) || world.nav.isBlocked(near.x, near.y)) continue;
-      if (!hasLineOfSight(world, spot.x, spot.y, far.x, far.y)) continue;
-      if (!hasLineOfSight(world, spot.x, spot.y, near.x, near.y)) continue;
+      if (!hasLineOfSight(world, spot.x, spot.y, far.x, far.y, false, 'zombie')) continue;
+      if (!hasLineOfSight(world, spot.x, spot.y, near.x, near.y, false, 'zombie')) continue;
       base = spot;
       bearing = th;
       break;

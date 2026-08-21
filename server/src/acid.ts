@@ -1,4 +1,5 @@
-import type { AcidState, SpitState } from '../../shared/types.js';
+import type { AcidState, Bush, SpitState } from '../../shared/types.js';
+import { acidLobes } from '../../shared/acidshape.js';
 import {
   ACID_BLIND_LINE,
   ACID_BLIND_LINE_CHANCE,
@@ -19,12 +20,14 @@ import type { Entity, World } from './world.js';
  * The dog's acid, in two parts: a gobbet in the air and the cloud it leaves.
  *
  * Everything here is deliberately shaped like something that already exists.
- * The cloud is a **circle with a radius**, which is exactly the shape `Bush`
- * has, so it drops into `hasLineOfSight` and into the client's
+ * The cloud is a **cluster of circles**, which is exactly the shape `Bush` has
+ * seven of, so it drops into `hasLineOfSight` and into the client's
  * `visibilityPolygon` beside the foliage with no new kind of occluder on either
- * side of the wire. The slow rides `speedAt`, the one function every mover in
- * the game already goes through. The flight is `sprayFlame`'s trick — work out
- * where it lands on the tick the key went down, then wait for it to get there.
+ * side of the wire — see `shared/acidshape.ts` for why lumpy had to mean *more
+ * circles* rather than a new shape. The slow rides `speedAt`, the one function
+ * every mover in the game already goes through. The flight is `sprayFlame`'s
+ * trick — work out where it lands on the tick the key went down, then wait for
+ * it to get there.
  *
  * What is genuinely new is only the blinding, and even that is a map of
  * deadlines keyed by id, the same as `world.stunned`.
@@ -66,8 +69,23 @@ export interface AcidCloud {
    * `now` through every one of its callers or letting it read a stale one. A
    * number written once a tick is neither, and `speedAt` — which also takes no
    * clock — gets it for free.
+   *
+   * It is the **bounding** radius now that the cloud is lumpy: no lobe reaches
+   * past it, so every cheap rejection in front of the lobe walk still holds.
    */
   r: number;
+  /** Picks this cloud's own lumps out of every other cloud's. */
+  seed: number;
+  /**
+   * The lobes, in world coordinates, as of this tick.
+   *
+   * Rewritten in place by `updateAcid` for the same reason `r` is, and *only*
+   * there: the array is read by `hasLineOfSight` and `speedAt`, neither of
+   * which may allocate. The shape is fixed for the cloud's life and only its
+   * scale grows, which is what keeps the client's fog cache from being thrown
+   * away thirty times a second for nine seconds — see `acidToWire`.
+   */
+  lobes: Bush[];
 }
 
 /**
@@ -121,6 +139,7 @@ export function updateAcid(world: World, now: number): void {
     // Boils out fast and then holds. Written once a tick rather than read per
     // caller — see the note on `AcidCloud.r`.
     c.r = ACID_CLOUD_RADIUS * clamp(0.3 + (age / ACID_GROW_MS) * 0.7, 0.3, 1);
+    acidLobes(c.seed, c.x, c.y, c.r, c.lobes);
   }
 
   // A blinding that has run out is dropped rather than left to be compared
@@ -142,12 +161,19 @@ export function updateAcid(world: World, now: number): void {
  */
 function land(world: World, s: AcidSpit, now: number): void {
   const id = nextId('acid');
+  const r = ACID_CLOUD_RADIUS * 0.3;
+  // A whole number, because it goes on the wire and the client derives the same
+  // lobes from it. A float would survive `JSON.stringify` intact today and is
+  // one rounding away from the two halves drawing different clouds.
+  const seed = Math.floor(Math.random() * 10000);
   world.acid.set(id, {
     id,
     x: s.x,
     y: s.y,
     startedAt: now,
-    r: ACID_CLOUD_RADIUS * 0.3,
+    r,
+    seed,
+    lobes: acidLobes(seed, s.x, s.y, r),
   });
 
   for (const e of world.entities.values()) {
@@ -194,6 +220,10 @@ export function acidToWire(world: World, now: number): AcidState[] {
       // whole life of the cloud, which is precisely the cost `FOG_MOVE_EPSILON`
       // exists to avoid paying for the viewer's own position.
       r: Math.round(c.r),
+      // The client derives the lobes rather than being sent them — see
+      // `shared/acidshape.ts`. One integer against seven circles on the wire,
+      // and the two halves cannot disagree about the shape by construction.
+      s: c.seed,
       // Thins away at the end rather than blinking out, the same shape of curve
       // `FIRE_FADE_FRACTION` gives burning ground and for the same reason.
       a: Math.round(clamp(1 - Math.max(0, age - ACID_FADE_FROM) / (1 - ACID_FADE_FROM), 0, 1) * 100) / 100,

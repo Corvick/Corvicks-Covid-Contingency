@@ -244,7 +244,7 @@ export function alertZombiesToDoor(world: World, index: number, now: number): vo
   for (const zombie of heard) {
     if (zombie.type !== 'zombie' || world.playerIds.has(zombie.id)) continue;
     if (Math.hypot(zombie.x - door.x, zombie.y - door.y) > ZOMBIE_SIGHT_RADIUS) continue;
-    if (!hasLineOfSight(world, zombie.x, zombie.y, door.x, door.y)) continue;
+    if (!hasLineOfSight(world, zombie.x, zombie.y, door.x, door.y, false, zombie.type)) continue;
 
     const state = world.ai.get(zombie.id);
     if (!state) continue;
@@ -337,7 +337,10 @@ export function blastDoors(
     const back = dist > 1 ? Math.min(dist, 10) : 0;
     const ax = nx + ((x - nx) / (dist || 1)) * back;
     const ay = ny + ((y - ny) / (dist || 1)) * back;
-    // Bushes are waved through — a hedge does not stop a blast wave.
+    // Bushes are waved through — a hedge does not stop a blast wave. So is the
+    // dog's acid, by passing no `eyesOf`: a blast is not looking at anything,
+    // and left to the other reading a charge that went off inside a cloud would
+    // fail every one of these tests and quietly take no door off its hinges.
     if (back > 0 && !hasLineOfSight(world, x, y, ax, ay, true)) continue;
 
     const falloff = 1 - dist / radius;

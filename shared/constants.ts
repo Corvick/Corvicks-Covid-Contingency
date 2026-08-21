@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.6.0';
+export const GAME_VERSION = '0.7.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -641,6 +641,47 @@ export const ACID_CLOUD_MS = 9000;
 export const ACID_CLOUD_RADIUS = 130;
 /** How long it takes to boil out to that from the gobbet that landed. */
 export const ACID_GROW_MS = 600;
+/**
+ * **A cloud is a cluster of overlapping circles, not one disc**, and these are
+ * its shape. `shared/acidshape.ts` is the one function that reads them, and the
+ * server's sight lines, the client's fog polygon and the client's drawing all
+ * go through it — so what looks solid is exactly what occludes.
+ *
+ * A lobe is a `Bush`: making the cloud lumpy has exactly one honest form, which
+ * is *more circles*, because a circle is the only occluder shape both halves of
+ * this game already know how to handle. Seven is a core and six petals — fewer
+ * and the notches between them are wide enough to see a street through, more
+ * and the union closes back up into the disc it was.
+ *
+ * The distances and radii are fractions of `ACID_CLOUD_RADIUS`, and the jitter
+ * is how far off its even bearing each petal is knocked. Left even, the notches
+ * are evenly spaced too and the thing reads as a flower — the same lesson the
+ * dog's ribs and the park's edge each had to learn.
+ */
+export const ACID_LOBE_COUNT = 7;
+export const ACID_LOBE_CORE = 0.54;
+export const ACID_LOBE_DIST_MIN = 0.32;
+export const ACID_LOBE_DIST_SPAN = 0.22;
+export const ACID_LOBE_R_MIN = 0.44;
+export const ACID_LOBE_R_SPAN = 0.22;
+export const ACID_LOBE_JITTER = 0.9;
+/**
+ * **Inside a cloud you see nothing**, and this is how far "nothing" is drawn.
+ *
+ * The rule itself lives on the server, in `hasLineOfSight`: anybody who is not
+ * a zombie and whose own position is inside a cloud fails every sight line they
+ * ask about, so they are sent no entities, no loot and no tracers at all. This
+ * number is the client's half of saying so — the fog hole is pulled in to about
+ * an arm's length rather than being closed outright.
+ *
+ * **Closing it outright is the one thing not to do.** A visibility polygon with
+ * nothing in it collapses onto the viewer, and a collapsed polygon is exactly
+ * what the two worst rendering faults in this game's history looked like from
+ * the outside: the whole world at 8% through a fog fill that is 0.92 rather
+ * than opaque. Leaving a small genuine hole makes being blind read as being
+ * blind rather than as the renderer having given up.
+ */
+export const ACID_INSIDE_SIGHT = 46;
 /** Where in its life it starts thinning away, as a fraction. */
 export const ACID_FADE_FROM = 0.72;
 /**

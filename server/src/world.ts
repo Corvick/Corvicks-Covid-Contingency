@@ -107,6 +107,7 @@ import { OUTSIDE, RoomMap } from './rooms.js';
 import { RumourField } from './rumour.js';
 import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
+import { inAcidLobes } from '../../shared/acidshape.js';
 import { initDucks, type Duck } from './ducks.js';
 import type { Emplacement } from './emplacement.js';
 import type { BackupVehicle } from './backup.js';
@@ -1300,6 +1301,33 @@ export function hasLineOfSight(
   y2: number,
   /** Officers are trained and looking for this; foliage doesn't hide it. */
   seeThroughBushes = false,
+  /**
+   * **Whose eyes these are**, and it is the acid that needs to know.
+   *
+   * Walls, doors and bushes are geometry: they stop a sight line whoever is
+   * asking, and they stop a blast wave asking whether it reaches. A chemical
+   * cloud is not geometry — it is something you cannot *see* through — so it
+   * applies only when somebody is actually looking, and only when that somebody
+   * is not the thing it came out of.
+   *
+   * Three cases, and two of them ignore the acid entirely:
+   *
+   * - a zombie's eyes (`'zombie'`, which is what a dog is) — ignored. The dog
+   *   sees in its own cloud and straight through it, and so does the horde. An
+   *   ability that blinds your own side is one nobody presses twice.
+   * - anybody else's eyes — the cloud occludes, and standing *in* one is zero
+   *   vision. See below.
+   * - **no eyes at all** (the default) — ignored. A blast asking whether it
+   *   reaches a body is not looking at it, and left to the other default a
+   *   grenade thrown into a cloud would quietly do nothing at all.
+   *
+   * Every perception and every fog test must therefore pass one. The list is
+   * short and enumerable: `visibleTo`/`visiblePickups`/`visibleShots` in
+   * `engine.ts`, `senseThreats`/`senseTarget` and the handful of scans beside
+   * them in `ai.ts`, the dog's jaws, the pocket gunner, and the zombies who
+   * hear a door.
+   */
+  eyesOf?: EntityType,
 ): boolean {
   const minX = Math.min(x1, x2);
   const maxX = Math.max(x1, x2);
@@ -1336,27 +1364,38 @@ export function hasLineOfSight(
   }
 
   /**
-   * The dog's acid, which is a bush that also slows you and expires.
+   * The dog's acid, which is a thicket that also slows you and expires.
    *
-   * **It carries the bush's standing-in-it rule deliberately, not by
-   * inheritance.** A cloud you are inside does not blind you: its job is to be
-   * something the garrison cannot see *through*, and a version that also
-   * blinded whoever walked into it would blind the dog that spat it, which is
-   * an ability nobody presses twice. Being unable to see is a real effect here
-   * and it is the *splash* that hands it out — to somebody in particular, once,
-   * for a couple of seconds.
+   * **It deliberately breaks the bush's standing-in-it rule.** A bush you are
+   * inside does not blind you — you see out, others cannot see in, and that is
+   * what makes hiding work. A cloud of acid is the opposite of hiding: you are
+   * in the middle of the stuff, your eyes are streaming, and there is nothing
+   * to see in any direction. So a viewer inside one fails every sight line they
+   * ask about, which is zero vision — no entities, no loot and no tracers sent,
+   * and nothing perceived by an NPC standing in it either.
+   *
+   * **What makes that an ability rather than a liability is `eyesOf`.** Zombies
+   * are exempt outright, and the dog is a zombie: it sees in its own cloud and
+   * out through everybody else's, which is the whole point of spitting one.
    *
    * Unlike bushes it is not exempted by `seeThroughBushes`. That flag means "an
    * officer is trained and looking for this, so foliage does not hide it", and
-   * training does not let anybody see through a chemical cloud.
+   * training is not a defence against a chemical.
    *
    * Not in a grid, and guarded on `size` for the same reasons as `speedAt`:
-   * single-figure counts, and this is the hottest predicate the server has.
+   * single-figure counts, and this is the hottest predicate the server has. The
+   * lobe walk past that guard is seven circles a cloud, written once a tick by
+   * `updateAcid` so nothing here allocates or evaluates a growth curve.
    */
-  if (world.acid.size > 0) {
+  if (world.acid.size > 0 && eyesOf !== undefined && eyesOf !== 'zombie') {
     for (const c of world.acid.values()) {
-      if (Math.hypot(c.x - x1, c.y - y1) <= c.r) continue;
-      if (segmentCircleT(x1, y1, x2, y2, c.x, c.y, c.r) !== null) return false;
+      // The bounding radius first: one hypot rejects a cloud across the city
+      // before any of its lobes are looked at.
+      if (Math.hypot(c.x - x1, c.y - y1) > c.r + Math.hypot(x2 - x1, y2 - y1)) continue;
+      for (const l of c.lobes) {
+        if (Math.hypot(l.x - x1, l.y - y1) <= l.r) return false;
+        if (segmentCircleT(x1, y1, x2, y2, l.x, l.y, l.r) !== null) return false;
+      }
     }
   }
 
@@ -1446,7 +1485,11 @@ export function speedAt(
   // spends a cooldown on.
   if (world.acid.size > 0 && type !== 'zombie') {
     for (const c of world.acid.values()) {
+      // Bounding radius first, then the lobes — a cloud is a cluster of circles
+      // rather than a disc, so the notches between its lumps are ground you can
+      // walk at full pace. See `shared/acidshape.ts`.
       if (Math.hypot(x - c.x, y - c.y) > c.r) continue;
+      if (!inAcidLobes(c.lobes, x, y)) continue;
       speed *= ACID_SLOW_MUL;
       break;
     }

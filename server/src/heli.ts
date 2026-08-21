@@ -295,6 +295,9 @@ function detonate(world: World, x: number, y: number, now: number): void {
     if (e.type !== 'zombie') continue;
     const dist = Math.hypot(e.x - x, e.y - y);
     if (dist > BLAST_RADIUS) continue;
+    // No `eyesOf`: a blast wave is not looking at anybody, so the dog's acid
+    // does not stop it. Otherwise a grenade thrown into a cloud would do
+    // nothing at all — see `hasLineOfSight`.
     if (!hasLineOfSight(world, x, y, e.x, e.y)) continue;
 
     const falloff = 1 - dist / BLAST_RADIUS;

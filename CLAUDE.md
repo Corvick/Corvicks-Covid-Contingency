@@ -2722,9 +2722,12 @@ counts bodies rather than bites.
 #### The acid (E)
 
 **It spits, and what it spits is cover.** A gobbet arcs to the crosshair and
-leaves a cloud that slows anybody caught in it and that nobody can see through.
-`server/src/acid.ts` owns it; `server/acidcheck.ts` is the harness and
-`server/acidlive.ts` drives the message path over a real socket.
+leaves a cloud that slows anybody caught in it, that nobody can see through, and
+that anybody standing in it cannot see out of **at all** — while the horde and
+the dog itself see straight through the stuff as though it were not there.
+`server/src/acid.ts` owns it, `shared/acidshape.ts` is its shape;
+`server/acidcheck.ts` is the harness and `server/acidlive.ts` drives the message
+path over a real socket.
 
 It answers the same problem the roar does from the other end. A dog has no
 ranged attack and nothing in its hands, so every fight it takes is one it has to
@@ -2732,21 +2735,73 @@ cross open ground to reach — and the garrison is spread evenly across the city
 precisely so that crossing open ground is expensive. The roar brings the street
 to you; this takes the street's line of sight away.
 
-**Almost none of it is new code, and that is the design.** The cloud is a
-**circle with a radius**, which is exactly the shape `Bush` has:
+**Almost none of it is new code, and that is the design.** A cloud is a
+**cluster of circles**, which is exactly the shape `Bush` has seven of:
 
-- `hasLineOfSight` gets six lines beside the foliage test, and the client hands
-  its clouds to `visibilityPolygon` **in the same array as the bushes** — so
-  "acid is a line-of-sight blocker" is one `concat` on that side, with no new
-  occluder kind, no second code path, and the near-first ordering and viewport
-  clip that make the polygon affordable inherited for free.
-- `AcidState` carries the same `{x, y, r}` a `Bush` does, plus an `a` and a `t`
-  the fog path simply ignores.
+- `hasLineOfSight` gets a dozen lines beside the foliage test, and the client
+  hands its clouds' lobes to `visibilityPolygon` **as `Bush`-shaped circles** —
+  so "acid is a line-of-sight blocker" needs no new occluder kind and no second
+  code path on either side, and inherits the near-first ordering and the
+  viewport clip that make the polygon affordable for free.
+- `AcidState` carries the same `{x, y, r}` a `Bush` does — `r` being the
+  *bounding* radius — plus a seed the lobes are derived from and an `a` and a
+  `t` the fog path simply ignores.
 - The flight is `sprayFlame`'s trick: work out where it lands on the tick the key
   went down, against the geometry as it stood, then wait `DOG_SPIT_TRAVEL_MS`.
 - **It lands where the crosshair is**, clamped to `DOG_SPIT_RANGE` and floored at
   `DOG_SPIT_MIN_THROW` — the rule the flamethrower needed, for the same reason: a
   direction with no distance puts every cloud at maximum range.
+
+**A cloud is a cluster of lobes, not a disc, and lumpy had to mean *more
+circles*.** `shared/acidshape.ts` is the whole of it: seven circles — a core and
+six petals — at bearings, distances and radii hashed off one seed.
+
+- **A circle is the only occluder shape both halves of this game know how to
+  handle.** The server's `segmentCircleT` and the client's `rayCircle` are what
+  a `Bush` already goes through, and a radius-per-bearing outline like the
+  pond's would have needed new ray maths written twice and kept in step. Seven
+  circles needed neither.
+- **It is derived from a seed rather than sent as geometry**, the way the park's
+  lamp posts come off the path polyline and the dog's saliva comes off its id.
+  Three separate places need the identical shape — the server's sight lines and
+  slow, the client's fog polygon, and the client's drawing — and the drawn rim
+  has to sit exactly where the occluder edge does, or there is a ring of ground
+  you can neither see through nor see anything in. A shared pure function is the
+  only arrangement in which those three cannot drift apart. The wire cost is one
+  integer.
+- **No lobe reaches past `r`.** That radius is what the wire carries, what the
+  fog cache keys on and what every cheap rejection in front of the lobe walk
+  uses, so a lobe bulging past it would occlude ground the rest of the code has
+  already decided is outside the cloud. The clamp is on the lobe's own radius,
+  which is what leaves the silhouette *short* of `r` in places — the notches —
+  rather than pulling it in everywhere.
+- **The petals are knocked off their even bearings** (`ACID_LOBE_JITTER`). Left
+  even, the notches between them are evenly spaced too and the thing reads as a
+  flower — the same lesson as five evenly bright ribs on the dog and the park's
+  edge fade.
+- **The lobes are written once a tick by `updateAcid`, into the array the cloud
+  already holds.** Same reasoning as `AcidCloud.r`: `hasLineOfSight` takes no
+  clock and must not allocate, so it reads a number somebody else wrote rather
+  than evaluating a growth curve of its own.
+
+Measured over six seeds, walking in from beyond the rim along 90 bearings: the
+gap between the deepest notch and the furthest bulge is **0.21 to 0.40 of the
+radius** depending on the seed, where a disc's is exactly zero; nothing reaches
+past the bounding radius; two seeds are two different clouds and one seed is the
+same cloud twice. On the client's own canvas, the same sweep against the drawn
+pixels puts the edge at **0.78 to 1.00 of `r`**.
+
+**What it costs is coverage, and the honest figure is 81.7%** — equivalent to a
+disc of 118px against the 130 it replaced. That is the trade a scalloped edge
+makes and it is smaller than it sounds, because occlusion is not an area
+question: what stops somebody seeing across the road is whether *a* lobe sits on
+the line. Swept as parallel chords over the cloud's whole width, **45 of 48** are
+still stopped, and the three that thread a notch are at the very edge; over eight
+seeds and four rotations the worst any of them managed was 88%. If a cloud ever
+plays small, `ACID_CLOUD_RADIUS` is the knob — the shape constants trade
+lumpiness against coverage roughly one for one, and the current values sit at the
+best of both, a sweep of six alternatives putting every lumpier one at 76-79%
+coverage and 81-85% of chords.
 
 **The slow is in `speedAt`, which is the one function every mover in the game
 already goes through** — civilians and zombies through `ai.ts`, the dog through
@@ -2762,18 +2817,72 @@ that can be exempt has to say what it is.
   garrison the same, and the horde **35.0** — untouched.
 - Guarded on `world.acid.size` so the ordinary case, no acid anywhere, is one
   integer compare in a function called for every body every tick. Same guard in
-  `hasLineOfSight`, which is the hottest predicate the server has. Neither uses a
-  broadphase: clouds are single figures and short-lived, so one would cost more
-  to keep than to skip.
+  `hasLineOfSight`, which is the hottest predicate the server has, with the
+  cloud's **bounding radius** in front of the lobe walk so a cloud across the
+  city is rejected by one `hypot`. Neither uses a broadphase: clouds are single
+  figures and short-lived, so one would cost more to keep than to skip.
+  Measured over 4000 sight lines in a 700-wall city, **8 clouds cost nothing
+  measurable** — 1.34us a line against 1.11 with none, where three consecutive
+  no-acid runs in the same process spread 0.93 to 1.24. It is below the noise
+  floor, not merely small.
 
-**A cloud you are standing in does not blind you, and that is the bush rule
-taken deliberately rather than by inheritance.** Its job is to be something the
-garrison cannot see *through*; a version that also blinded whoever walked into it
-would blind the dog that spat it, which is an ability nobody presses twice. It is
-*not* exempted by `seeThroughBushes`, though — that flag means an officer is
-trained and looking for this, and training is not a defence against a chemical.
-Measured: a 600px line across a cloud is broken for an officer as well as a
-civilian, and somebody stood in the middle of it sees out both ways.
+**Gunfire still goes through it, and that is unchanged.** `fire` never asked
+`hasLineOfSight` about walls in the first place — it runs its own hitscan — so
+the acid has never stopped a round and does not now. It is cover you cannot see
+through rather than cover you can hide behind, the same trade the sandbags make
+from the other side. Shooting blind into a cloud works exactly as well as it
+ever did; knowing what to shoot at is the part it takes away.
+
+**A cloud you are standing in blinds you outright, and that is the bush rule
+deliberately broken.** A bush you are inside does not blind you — you see out,
+others cannot see in, and that is what makes hiding work. A cloud of acid is the
+opposite of hiding: you are in the middle of the stuff with your eyes streaming
+and there is nothing to see in any direction. So a viewer inside one fails every
+sight line they ask about — no entities, no loot and no tracers sent, and
+nothing perceived by an NPC standing in it either. It is *not* exempted by
+`seeThroughBushes` either: that flag means an officer is trained and looking for
+this, and training is not a defence against a chemical.
+
+**What keeps that an ability rather than a liability is `eyesOf`, and it is the
+only thing `hasLineOfSight` gained.** Walls, doors and bushes are geometry —
+they stop a sight line whoever is asking, and they stop a blast wave asking
+whether it reaches. A chemical cloud is not geometry; it is something you cannot
+*see* through. So it applies only when somebody is actually looking, and only
+when that somebody is not what it came out of. Three cases, two of which ignore
+the acid:
+
+- **a zombie's eyes** — ignored. The dog is a zombie with a flag on it, so the
+  animal sees in its own cloud and straight out through everybody else's, and so
+  does the horde. One line covers both.
+- **anybody else's eyes** — the cloud occludes, and standing in one is zero
+  vision.
+- **no eyes at all**, which is the default — ignored. A blast asking whether it
+  reaches a body is not looking at it, and under the other default a grenade
+  thrown into a cloud would quietly do nothing at all. That case is what decided
+  which way round the default goes; every perception and every fog test passes
+  one explicitly, and the list is short and enumerable.
+
+Measured on the harness, staged on a lane the rig *finds* rather than assumes: a
+600px line across a cloud is broken for an officer as well as a civilian, a
+zombie has the same line, and somebody stood in the middle of it sees out on **0
+of 32 bearings** — against a dog on the same pixel seeing out on **17 of 17**,
+which is every bearing the city itself left open. That control is load-bearing:
+without it, "the human saw nothing" is satisfied just as well by a rig that
+staged its cloud inside a building. Live over a socket, a dog stood in its own
+cloud for 230-242 snapshots and the city kept arriving on every one.
+
+**Its client half is `ACID_INSIDE_SIGHT` (46), and it is a hole rather than a
+closure.** The rule is enforced on the server, so the screen is genuinely empty
+whatever the client does; this is only how "nothing" is *drawn*. Closing the fog
+outright is the one thing not to do — a visibility polygon with nothing in it
+collapses onto the viewer, and that collapse is exactly what both of this game's
+worst rendering faults looked like from the outside. `drawAcidMurk` puts the gas
+over the top of it, so being blind reads as being blind rather than as the
+renderer having given up. **The fog watchdog is stood down while you are in
+one**: the radius is 46px, so open ground fills nearly all of a very small
+circle and the visible fraction jumps hard on the way in and out — both of its
+tests fire, and both would be crying wolf. This is now the second known cause of
+that, after walking from a street into a room.
 
 **Being unable to see is a real effect, and it is the splash that hands it out.**
 `ACID_IMPACT_RADIUS` (62) is much smaller than `ACID_CLOUD_RADIUS` (130), and
@@ -2828,7 +2937,11 @@ change to the third exactly as a door swinging is. Without `acidEpoch` beside
 ground straight through it for as long as the viewer stood still, which being
 cached could be the whole nine seconds. It is keyed on the **rounded** radius the
 server sends, so the epoch is stable for the most of a cloud's life it spends at
-full width and the rebuilds are confined to the half second it grows.
+full width and the rebuilds are confined to the half second it grows. **The lobe
+offsets do not drift for exactly that reason** — only the scale grows. Written
+the obvious way, with each lump orbiting slowly over the cloud's life, the epoch
+would move every snapshot and the polygon would be thrown away thirty times a
+second for nine seconds. The churn is in the drawing, where it is free.
 
 **The row is Q, E, R, F, so this needed no keybinding work at all** — `KeyE` was
 already slot 1, and `KeyE` is free for a dog because `processInteractions` bails
@@ -2837,25 +2950,81 @@ the wire carries a slot *index* and nothing else.
 
 **The drawing has a defined rim, unlike the smoke it is otherwise built like.**
 Smoke fades to nothing all the way round; this cannot, because it is an occluder
-and the fog stops exactly at `r` — so a cloud that faded out before its own
-occluder edge would have a ring of ground you can neither see through nor see
-anything in. The churn rides inside the rim, hashed off the cloud's own age (`t`
-on the wire) so there is no per-frame state and two clouds side by side do not
-boil in lockstep.
+and the fog stops exactly where the lobes do — so a cloud that faded out before
+its own occluder edge would have a ring of ground you can neither see through
+nor see anything in. The churn rides inside the rim, hashed off the cloud's own
+age (`t` on the wire) and its seed, so there is no per-frame state and two clouds
+side by side do not boil in lockstep.
+
+**Nothing in it is clipped, and everything is drawn inside a lobe.** Clipping to
+the union was the obvious way to guarantee the rim and it measured **1.56ms a
+cloud against 0.54** — the clip itself is nothing (0.006ms), but every fill made
+through one pays, and a whole scene at 1920x1080 paints in about 4.9ms. Filling
+each lobe's own arc gets the same guarantee for free: a fill bounded by a circle
+cannot land outside that circle, and every circle *is* the cloud. The union
+`Path2D` went with it — one flat fill of a seven-arc path measured **dearer than
+all seven gradient fills together** (0.33ms against 0.26), because the cost is
+the path rather than the pixels. Final: **0.31ms for one cloud, 0.85ms for
+three.**
+
+- **One highlight over the core, not one per lobe.** Each lump carrying its own
+  bright centre reads as seven bubbles stuck together rather than as one mass
+  with lumps in it. The highlight is drawn inside the core lobe alone, which is
+  what lets it exist without a clip.
+- **The churn is attached to a lobe** and kept well inside it, which is how it
+  moves without needing to be clipped either.
+
+**`drawAcidMurk` is the picture of standing in one**, and its still half is
+baked once and blitted — the same trick and the same reason as the vignette and
+the grime tile. Two full-screen alpha fills measured **4.6ms**, which is most of
+a frame for something that never changes; baked, with only three drifting blobs
+live, it is **1.9ms**, and it is only ever drawn while somebody is actually
+stood in the stuff, on a frame that by definition has almost nothing else on it.
 
 **`client/acidrig.html` measures the drawing**, for both this and the birth.
 rAF is throttled to nothing while the browser pane is not compositing, so no
 frame of a live round can be put on screen from here — but `getImageData` needs
 no compositing at all, which is what turns "it looks right" into a number. It
-imports the real `drawAcid`, `drawSpits` and `drawEntity` and is driven off
-`setInterval`, like `dogpose.ts` and `roarrig.ts`. Measured: **ink at the centre
-of a cloud and just inside its rim, none past it** (the rim is where the fog
+imports the real `drawAcid`, `drawAcidMurk`, `drawSpits` and `drawEntity` and is
+driven off `setInterval`, like `dogpose.ts` and `roarrig.ts`. Measured: **ink at
+the centre of a cloud and none past its bounding radius** (that is where the fog
 stops, so ink beyond it would be a cloud claiming ground it does not occlude),
-green the dominant channel, the gobbet and its shadow both down, **11 of 11
-sampled birth frames rendering differently** with the vibration half plainly
-unlike the arms half — and the control, an ordinary zombie over the same clock
-steps, identical on all 11, so the movement is the birth and not the clock.
-Nothing threw.
+green the dominant channel, the murk green over the whole frame including the
+corner, the gobbet and its shadow both down, **11 of 11 sampled birth frames
+rendering differently** with the vibration half plainly unlike the arms half —
+and the control, an ordinary zombie over the same clock steps, identical on all
+11, so the movement is the birth and not the clock. Nothing threw.
+
+**How lumpy it is comes off the same canvas as a number**, walked in from beyond
+the rim along 48 bearings: the drawn edge starts anywhere from **0.78 to 1.00 of
+the bounding radius**, where a disc answers the same figure at every bearing.
+Two seeds also have to draw two different clouds, or the shape is a texture
+rather than weather. Note `cloudInkInside` comes off that sweep rather than off
+one sample — a fixed bearing 8px inside the rim is solid on a bulge and empty in
+a notch, and which one it lands in is the seed's business.
+
+**`server/acidlive.ts` throws it at the animal's own feet, and that is the whole
+design of the live run.** `DOG_SPIT_MIN_THROW` is a floor as well as
+`DOG_SPIT_RANGE` being a ceiling, so a crosshair on yourself still puts the
+gobbet 90px out — and the cloud is 130 wide, so the dog is stood *inside* its own
+acid the moment it lands. That is the one claim only a socket can settle: the fog
+is server-enforced, so "a dog sees in the acid" means the entities keep arriving
+on its own snapshots. Walking to a cloud thrown the full 300px was the first
+version and it is the *city's* decision whether that works — measured over three
+runs it arrived once and came up 79 and 120px short on the other two, against a
+garrison shooting at a stationary animal. Two further things the live rig had to
+learn:
+
+- **It throws inwards, toward the middle of the map.** The dog comes in at the
+  breach, which is on an edge, so a fixed bearing put the cloud through the
+  boundary wall as often as not.
+- **The claim is that it does not go blind, not that the count holds up.** "No
+  fewer inside than out" was tried and a live city does not support it: the dog
+  stands still for eight seconds while the crowd walks in and out of an 890px
+  radius, so the figure drifts on its own and it read 13 against 16 and failed on
+  the weather. Going blind is exactly 0. Measured: **230-242 snapshots stood in
+  its own cloud, 8-27 entities still arriving on every run**, and a run where the
+  city had nobody in sight either way is reported rather than passed or failed.
 
 *Two things about measuring this were the rig lying rather than the code
 failing*, and both are the staging:
@@ -2875,6 +3044,16 @@ failing*, and both are the staging:
 - And the map is not seeded, so the sight-line test **finds** a clear lane rather
   than assuming one. Staged at a fixed spot its *control* failed on roughly half
   of all cities, which is a test reporting the city rather than the code.
+- **`speedAt` also knows about bushes, and roughly one city in ten puts one
+  under the landing point.** Every pace in the harness is therefore measured
+  against the *same ground with the cloud lifted off it*, never against
+  `HUMAN_WALK_SPEED`. Measured the flat way it read **10.6 px/s where 19.3 was
+  wanted and a horde "slowed" to 19.3 where 35 was wanted** — a bush multiplier
+  stacked on top of everything, failing five checks at once and none of them
+  about the acid. The one-point version got away with it for as long as it did
+  by only ever sampling due east of the cloud; a 64-bearing sweep walks into a
+  hedge sooner or later and reported **10 of 64 bearings slowed past a rim
+  nothing reaches**.
 
 #### The corner map, and what it refuses to show
 

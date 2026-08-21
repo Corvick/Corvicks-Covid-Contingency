@@ -25,9 +25,11 @@ import {
   DOG_CAMERA_ZOOM,
   DOG_CAMERA_PAN_Y,
   DOG_SIGHT_RADIUS,
+  ACID_INSIDE_SIGHT,
   SCOPE_EASE_MS,
   TICK_RATE,
 } from '../../shared/constants.js';
+import { acidLobes, inAcidLobes } from '../../shared/acidshape.js';
 import type {
   DoorPrompt,
   DoorState,
@@ -35,6 +37,7 @@ import type {
   GrenadeState,
   HelicopterState,
   InventoryState,
+  Bush,
   MapData,
   PickupState,
   AcidState,
@@ -98,6 +101,7 @@ import {
   drawVignette,
   drawPond,
   drawAcid,
+  drawAcidMurk,
   drawSmoke,
   drawSpits,
   drawDogMap,
@@ -191,6 +195,18 @@ let spits: SpitState[] = [];
  */
 let acidEpoch = 0;
 let acidShape = '';
+/**
+ * Every cloud's lobes, flattened — the occluders the fog is actually built
+ * from, and the shape it is actually drawn as.
+ *
+ * Derived from the seed on the wire by `shared/acidshape.ts`, which is the same
+ * function the server's own sight lines go through, so the drawn rim sits
+ * exactly where the occluder edge does. Rebuilt only when `acidEpoch` moves,
+ * which is once as a cloud boils out and then not again — the fog polygon is
+ * rebuilt often enough that deriving this per rebuild would be a real cost for
+ * an answer that has not changed.
+ */
+let acidOccluders: Bush[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
@@ -381,10 +397,12 @@ const { send, goOffline, goOnline } = connect((msg) => {
     spits = msg.spits;
     // Cheap and exact: the polygon only cares where the circles are and how big
     // they are, and both are already whole numbers on the wire.
-    const shape = acid.map((c) => `${c.x},${c.y},${c.r}`).join('|');
+    const shape = acid.map((c) => `${c.x},${c.y},${c.r},${c.s}`).join('|');
     if (shape !== acidShape) {
       acidShape = shape;
       acidEpoch++;
+      acidOccluders = [];
+      for (const c of acid) for (const l of acidLobes(c.s, c.x, c.y, c.r)) acidOccluders.push(l);
     }
     blasts = msg.blasts;
     ducks = msg.ducks;
@@ -1244,7 +1262,18 @@ function updateScope(dt: number): void {
  * be at their maximum at once and the loose bound over-reaches by a fifth —
  * which is a fifth more ground for the polygon to light for no reason.
  */
-function fogRadius(): number {
+function fogRadius(me?: EntityState): number {
+  // **Inside a cloud you see nothing**, and this is the client's half of it.
+  //
+  // The rule is the server's — `hasLineOfSight` fails every line for a viewer
+  // whose own position is inside one, so nothing is sent — and a dog is exempt
+  // there, so it must be exempt here or its screen would go dark over ground
+  // the server is still populating for it.
+  //
+  // Pulled in to an arm's length rather than closed: a polygon with nothing in
+  // it collapses onto the viewer, and that collapse is what both of this game's
+  // worst rendering faults looked like from the outside.
+  if (me && !dogHud && blindInAcid(me)) return ACID_INSIDE_SIGHT;
   const reach = cameraReach();
   const zoom = cameraZoom();
   let worst = 0;
@@ -1410,9 +1439,14 @@ function occludersFor(map: MapData): Wall[] {
   return occluders;
 }
 
+/** True when this body is standing in the dog's acid — in any lobe of any cloud. */
+function blindInAcid(me: EntityState): boolean {
+  return acidOccluders.length > 0 && inAcidLobes(acidOccluders, me.x, me.y);
+}
+
 function visibilityFor(me: EntityState, now: number): FogPoint[] {
   if (!map) return [];
-  const radius = fogRadius();
+  const radius = fogRadius(me);
   const moved = Math.hypot(me.x - cachedX, me.y - cachedY);
   /**
    * **The polygon has exactly three inputs, and the clock is not one of them.**
@@ -1476,20 +1510,25 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     me.y,
     radius,
     occludersFor(map),
-    // **A cloud is a bush that also slows you and expires**, which is why it
-    // goes in this array and nowhere else. `AcidState` carries the same
-    // `{x, y, r}` a `Bush` does, so the whole of the client's half of "acid is
-    // a line-of-sight blocker" is this concat — no new occluder kind, no second
-    // code path, and it inherits the near-first ordering and the viewport clip
-    // that make the polygon affordable at all.
-    //
-    // The concat is skipped when there is no acid, which is nearly always: the
-    // fog polygon is rebuilt often enough that allocating a copy of the park's
-    // bush list for nothing would be a real cost.
-    acid.length > 0 ? map.bushes.concat(acid) : map.bushes,
+    map.bushes,
     clipW,
     clipH,
     settings.fogDetail === 'low',
+    // **A cloud is a thicket that also slows you and expires**, so it goes in as
+    // circles — the lobes of `shared/acidshape.ts`, which is the same function
+    // the server's sight lines use, so what is drawn solid is exactly what
+    // occludes. No new occluder kind and no second code path on this side
+    // either, and it inherits the near-first ordering and the viewport clip
+    // that make the polygon affordable at all.
+    //
+    // Its own argument rather than more entries in the bush list, because
+    // `MAX_BUSH_OCCLUDERS` would happily throw a cloud away in the park; see
+    // the parameter.
+    //
+    // **A dog is handed none of it.** It is a zombie, and zombies see through
+    // their own acid on the server — lighting less ground here than the server
+    // populates is the same fault as lighting more, in the other direction.
+    dogHud ? [] : acidOccluders,
   );
   fogComputeMs = performance.now() - t0;
   cachedAt = now;
@@ -1527,7 +1566,12 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
   const fraction = area / full;
   const jumped = fogLastFraction >= 0 && Math.abs(fraction - fogLastFraction) > 0.3;
   fogLastFraction = fraction;
-  const failed = near > 0 && (fraction > 0.9 || jumped);
+  // Standing in a cloud is a *deliberate* collapse: the radius is 46px, so
+  // open ground fills nearly all of a very small circle and the fraction jumps
+  // hard on the way in and out. Both of the watchdog's tests fire on it and
+  // both would be crying wolf — see the note on it in CLAUDE.md, which this is
+  // now the second known cause of.
+  const failed = near > 0 && (fraction > 0.9 || jumped) && !blindInAcid(me);
 
   // Log the edges of the fault, not every frame inside it: once when occlusion
   // drops out and once when it comes back. Two positions bracketing the spot
@@ -1572,7 +1616,7 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
   if (poly.length > 2) {
     const cx = (me.x - view.x) * s;
     const cy = (me.y - view.y) * s;
-    const r = fogRadius() * s;
+    const r = fogRadius(me) * s;
 
     // Fade only the last sliver of range; the blur handles the rest.
     const gradient = fogCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
@@ -1840,6 +1884,15 @@ function render() {
     ctx.translate(-view.x, -view.y);
     drawThermal(ctx, thermalContacts(), view, now);
     ctx.restore();
+  }
+
+  // Standing in the dog's acid, with the fog already pulled in to an arm's
+  // length and the server sending nothing. Over the fog for the same reason
+  // the thermal contacts are: it is what is in your eyes, so nothing draws
+  // over it and it is not subject to it. A dog is exempt here as everywhere —
+  // zombies see through their own acid.
+  if (!spectating && me && !dogHud && !fogOff && blindInAcid(me)) {
+    drawAcidMurk(ctx, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, now);
   }
 
   // Over the fog, under the HUD: it frames the world without dimming anything

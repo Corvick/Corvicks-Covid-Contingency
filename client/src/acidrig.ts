@@ -8,10 +8,13 @@
  * needs no compositing at all, which is what makes this measurable rather than
  * merely lookable-at.
  *
- * It answers three questions the server-side harnesses cannot:
+ * It answers four questions the server-side harnesses cannot:
  *   - does a cloud actually put ink down, and does it stop at its own radius
  *     (the rim is where the fog stops, so a cloud that faded out early would
  *     leave a ring you can neither see through nor see anything in)
+ *   - **is the cloud lumpy** — how far the drawn edge reaches at one bearing
+ *     against another, which is the whole of what "less of a uniform circle"
+ *     means and the only claim here that a screenshot could not settle
  *   - does a convulsing host actually move and change shape frame to frame
  *   - does any of it throw
  *
@@ -19,7 +22,7 @@
  */
 import type { AcidState, EntityState, SpitState } from '../../shared/types.js';
 import { DOG_BIRTH_TWIST_FROM } from '../../shared/constants.js';
-import { drawAcid, drawEntity, drawSpits } from './render.js';
+import { drawAcid, drawAcidMurk, drawEntity, drawSpits } from './render.js';
 
 const canvas = document.getElementById('rig') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -30,6 +33,12 @@ interface Result {
   cloudInkInside: boolean;
   cloudInkOutside: boolean;
   cloudIsGreen: boolean;
+  /** Furthest drawn ink per bearing, as a fraction of the bounding radius. */
+  edgeMin: number;
+  edgeMax: number;
+  /** Distinct clouds drawn from distinct seeds, by signature. */
+  seedsDiffer: boolean;
+  murkInk: boolean;
   spitInk: boolean;
   /** Distinct rendered positions of a convulsing host across the birth. */
   birthFrames: number;
@@ -44,6 +53,10 @@ const result: Result = {
   cloudInkInside: false,
   cloudInkOutside: false,
   cloudIsGreen: false,
+  edgeMin: 0,
+  edgeMax: 0,
+  seedsDiffer: false,
+  murkInk: false,
   spitInk: false,
   birthFrames: 0,
   birthMoves: 0,
@@ -54,6 +67,12 @@ const result: Result = {
 function px(x: number, y: number): [number, number, number, number] {
   const d = ctx.getImageData(x, y, 1, 1).data;
   return [d[0], d[1], d[2], d[3]];
+}
+
+/** True when this pixel is not the rig's own background. */
+function ink(x: number, y: number): boolean {
+  const d = px(Math.round(x), Math.round(y));
+  return d[0] !== 17 || d[1] !== 17 || d[2] !== 17;
 }
 
 function clear(): void {
@@ -82,21 +101,77 @@ function run(): void {
     const cx = 300;
     const cy = 300;
     const r = 130;
-    const cloud: AcidState[] = [{ x: cx, y: cy, r, a: 1, t: 2000 }];
+    const cloud: AcidState[] = [{ x: cx, y: cy, r, s: 1234, a: 1, t: 2000 }];
     drawAcid(ctx, cloud);
 
     const centre = px(cx, cy);
-    const inside = px(cx + r - 8, cy);
     const outside = px(cx + r + 20, cy);
-    result.cloudInkAtCentre = centre[0] !== 17 || centre[1] !== 17 || centre[2] !== 17;
-    result.cloudInkInside = inside[0] !== 17 || inside[1] !== 17 || inside[2] !== 17;
-    // Past the rim there must be nothing: the fog stops at exactly `r`, so ink
-    // beyond it is a cloud claiming ground it does not occlude.
+    result.cloudInkAtCentre = ink(cx, cy);
+    // Past the bounding radius there must be nothing: no lobe reaches beyond
+    // it, so the fog stops at exactly `r` and ink out there is a cloud claiming
+    // ground it does not occlude.
     result.cloudInkOutside = outside[0] !== 17 || outside[1] !== 17 || outside[2] !== 17;
     // Green, meaning g is the dominant channel — it is acid, not smoke.
     result.cloudIsGreen = centre[1] > centre[0] && centre[1] > centre[2];
+
+    /*
+     * **How lumpy it is, as a number.**
+     *
+     * The whole claim of this change is that a cloud is not a uniform disc, and
+     * that is a claim about the *silhouette* — so walk in from beyond the rim
+     * along many bearings and record where the ink starts. A disc gives the
+     * same answer at every bearing; a cluster of lobes gives bulges out at the
+     * bounding radius and notches well inside it, and the gap between the two
+     * is the measurement.
+     *
+     * `cloudInkInside` comes off the same sweep rather than off one sample.
+     * Taken at a fixed bearing it says nothing now: 8px inside the rim is solid
+     * on a bulge and empty in a notch, and which one it lands in is the seed's
+     * business.
+     */
+    let lo = 2;
+    let hi = 0;
+    for (let i = 0; i < 48; i++) {
+      const a = (i / 48) * Math.PI * 2;
+      let reach = 0;
+      for (let f = 1.06; f > 0.2; f -= 0.01) {
+        if (ink(cx + Math.cos(a) * r * f, cy + Math.sin(a) * r * f)) {
+          reach = f;
+          break;
+        }
+      }
+      if (reach < lo) lo = reach;
+      if (reach > hi) hi = reach;
+    }
+    result.edgeMin = Math.round(lo * 100) / 100;
+    result.edgeMax = Math.round(hi * 100) / 100;
+    result.cloudInkInside = hi > 0.5;
+
+    // Two seeds, two shapes. Without this the sweep above would pass just as
+    // well on a lumpy cloud that is the *same* lumpy cloud every time, which
+    // reads as a texture rather than as weather.
+    clear();
+    drawAcid(ctx, [{ x: cx, y: cy, r, s: 1234, a: 1, t: 2000 }]);
+    const shapeA = signature(cx, cy, 140);
+    clear();
+    drawAcid(ctx, [{ x: cx, y: cy, r, s: 8765, a: 1, t: 2000 }]);
+    result.seedsDiffer = signature(cx, cy, 140) !== shapeA;
   } catch (e) {
     result.errors.push(`drawAcid: ${String(e)}`);
+  }
+
+  // ---- standing in it
+  try {
+    clear();
+    drawAcidMurk(ctx, canvas.width, canvas.height, 4000);
+    // Green over the whole frame, corner included — it is what is in your eyes
+    // rather than something lying on the road.
+    const mid = px(canvas.width / 2, canvas.height / 2);
+    const corner = px(12, 12);
+    result.murkInk =
+      mid[1] > mid[0] && mid[1] > mid[2] && corner[1] > corner[0] && corner[1] > corner[2];
+  } catch (e) {
+    result.errors.push(`drawAcidMurk: ${String(e)}`);
   }
 
   // ---- the gobbet
@@ -159,7 +234,7 @@ function run(): void {
 
   // Leave the last frame something to look at, if anybody ever can.
   clear();
-  drawAcid(ctx, [{ x: 300, y: 400, r: 130, a: 1, t: 2000 }]);
+  drawAcid(ctx, [{ x: 300, y: 400, r: 130, s: 1234, a: 1, t: 2000 }]);
   drawSpits(ctx, [{ x: 700, y: 400, h: 26, t: 0.5 }]);
   drawEntity(ctx, {
     id: 'host',

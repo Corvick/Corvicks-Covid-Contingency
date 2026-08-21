@@ -130,6 +130,25 @@ export function visibilityPolygon(
   clipH = radius,
   /** Coarser baseline fan — see LOW_BASE_RAYS and the graphics options. */
   lowDetail = false,
+  /**
+   * The dog's acid, as circles — the lobes of every cloud on screen.
+   *
+   * **Its own list rather than more entries in `bushes`, and the reason is the
+   * cap.** `MAX_BUSH_OCCLUDERS` exists because the park is a thicket and every
+   * bush costs four rays; dropping the far ones changes nothing, because inside
+   * a thicket they are behind the near ones anyway. Acid is not like that.
+   * There are single figures of it, it is the whole point of an ability
+   * somebody spent a cooldown on, and a cloud that lost seven-of-seven lobes to
+   * a hedge would stop occluding outright — worse, one that lost three of them
+   * would occlude in stripes. So these are added after the cap and are never
+   * subject to it.
+   *
+   * **Nor do they carry the standing-in-it exemption.** A bush you are inside
+   * does not blind you; a cloud of acid is the opposite of hiding and very much
+   * does. The client's half of saying so is `ACID_INSIDE_SIGHT` — see
+   * `fogRadius` — and these rays clamping to the near lobe's far edge.
+   */
+  acid: Bush[] = [],
 ): Point[] {
   const nearWalls: Wall[] = [];
   for (const w of walls) {
@@ -174,6 +193,10 @@ export function visibilityPolygon(
       (a, b) => Math.hypot(a.x - px, a.y - py) - Math.hypot(b.x - px, b.y - py),
     );
     nearBushes.length = MAX_BUSH_OCCLUDERS;
+  }
+  // After the cap, deliberately — see the parameter.
+  for (const c of acid) {
+    if (Math.abs(c.x - px) <= clipW + c.r && Math.abs(c.y - py) <= clipH + c.r) nearBushes.push(c);
   }
 
   // Every other ray angle comes from Math.atan2, so the base fan must live in

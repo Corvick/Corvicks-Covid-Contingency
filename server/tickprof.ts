@@ -75,7 +75,7 @@ function visibleTo(world: World, viewer: Entity, now: number): unknown[] {
       continue;
     }
     const dist = Math.hypot(other.x - viewer.x, other.y - viewer.y);
-    if (dist <= PLAYER_SIGHT_RADIUS && hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y)) {
+    if (dist <= PLAYER_SIGHT_RADIUS && hasLineOfSight(world, viewer.x, viewer.y, other.x, other.y, false, viewer.type)) {
       out.push(toWire(world, other, false, now));
     }
   }
@@ -86,7 +86,7 @@ function visiblePickups(world: World, viewer: Entity): unknown[] {
   const out: unknown[] = [];
   for (const p of world.pickups.values()) {
     if (Math.hypot(p.x - viewer.x, p.y - viewer.y) > PLAYER_SIGHT_RADIUS) continue;
-    if (!hasLineOfSight(world, viewer.x, viewer.y, p.x, p.y)) continue;
+    if (!hasLineOfSight(world, viewer.x, viewer.y, p.x, p.y, false, viewer.type)) continue;
     out.push(p);
   }
   return out;

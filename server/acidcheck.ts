@@ -4,12 +4,16 @@
  *
  *   npx tsx acidcheck.ts
  *
- * Four claims, and each one has a control beside it, because three of the four
- * are about something *not* happening and a check that only ever asserts an
- * absence passes just as well when the feature is missing entirely:
+ * Five claims, and each one has a control beside it, because most of them are
+ * about something *not* happening and a check that only ever asserts an absence
+ * passes just as well when the feature is missing entirely:
  *
  *   - it slows humans inside it, and does not slow the horde or the dog
- *   - it blocks a sight line across it, and does not blind whoever is in it
+ *   - **it is a cluster of lobes rather than a disc**, and none of them reaches
+ *     past the bounding radius the wire carries
+ *   - it blocks a sight line across it, and **blinds whoever is in it outright
+ *     while the horde sees straight through** — which is the half that makes it
+ *     an ability rather than a liability, so the dog is the control
  *   - the splash blinds an NPC, who then looks around and does not move
  *   - the splash misses somebody stood in the cloud but outside the impact
  *
@@ -32,11 +36,14 @@ import {
 import { computeFrozen, updateAi } from './src/ai.js';
 import { startDogAbility, updateDogs, dogHudFor } from './src/dog.js';
 import { updateAcid } from './src/acid.js';
+import { acidLobes, inAcidLobes } from '../shared/acidshape.js';
 import {
   ACID_BLIND_LINE,
   ACID_BLIND_MS,
   ACID_CLOUD_MS,
   ACID_CLOUD_RADIUS,
+  ACID_GROW_MS,
+  ACID_LOBE_COUNT,
   ACID_IMPACT_RADIUS,
   ACID_SLOW_MUL,
   DOG_SPIT_COOLDOWN_MS,
@@ -208,44 +215,89 @@ function testSlow(): void {
   r.run(travelTicks);
   const c = onlyCloud(r.world);
 
-  // Measured through `speedAt`, which is the one function every mover calls.
-  // Asking it directly is the honest test: it is what decides the pace, and a
-  // rig that instead watched a body walk would be measuring the AI's choice of
-  // heading as much as the cloud.
-  const inside = speedAt(r.world, c.x, c.y, HUMAN_WALK_SPEED, 'human');
-  const outside = speedAt(r.world, c.x + ACID_CLOUD_RADIUS + 200, c.y, HUMAN_WALK_SPEED, 'human');
-  check('a human in it is slowed', Math.abs(inside - HUMAN_WALK_SPEED * ACID_SLOW_MUL) < 0.01,
-    `${inside.toFixed(1)} against ${HUMAN_WALK_SPEED}`);
-  check('and one beside it is not', Math.abs(outside - HUMAN_WALK_SPEED) < 0.01,
+  /*
+   * Measured through `speedAt`, which is the one function every mover calls.
+   * Asking it directly is the honest test: it is what decides the pace, and a
+   * rig that instead watched a body walk would be measuring the AI's choice of
+   * heading as much as the cloud.
+   *
+   * **Every figure here is against the same ground with the cloud taken off it,
+   * never against `HUMAN_WALK_SPEED`.** `speedAt` also knows about bushes, and
+   * roughly one city in ten puts one under the landing point — measured that
+   * way it read **10.6 px/s where 19.3 was wanted, and the horde "slowed" to
+   * 19.3 where 35 was wanted**, which is a bush multiplier on top of everything
+   * and nothing to do with the acid. Lifting the cloud for a moment leaves the
+   * ground as the only thing in the answer.
+   */
+  const paceFor = (x: number, y: number, type: 'human' | 'officer' | 'zombie'): number =>
+    speedAt(r.world, x, y, HUMAN_WALK_SPEED, type);
+  /** The same question with no acid anywhere: what this ground alone gives. */
+  const bareFor = (x: number, y: number, type: 'human' | 'officer' | 'zombie'): number => {
+    const held = new Map(r.world.acid);
+    r.world.acid.clear();
+    const pace = paceFor(x, y, type);
+    for (const [k, v] of held) r.world.acid.set(k, v);
+    return pace;
+  };
+
+  const inside = paceFor(c.x, c.y, 'human');
+  const bareInside = bareFor(c.x, c.y, 'human');
+  const outside = paceFor(c.x + ACID_CLOUD_RADIUS + 200, c.y, 'human');
+  const bareOutside = bareFor(c.x + ACID_CLOUD_RADIUS + 200, c.y, 'human');
+  check('a human in it is slowed', Math.abs(inside - bareInside * ACID_SLOW_MUL) < 0.01,
+    `${inside.toFixed(1)} against the ${bareInside.toFixed(1)} this ground gives without it`);
+  check('and one beside it is not', Math.abs(outside - bareOutside) < 0.01,
     `${outside.toFixed(1)}`);
 
-  const officer = speedAt(r.world, c.x, c.y, HUMAN_WALK_SPEED, 'officer');
-  check('the garrison is slowed too', Math.abs(officer - HUMAN_WALK_SPEED * ACID_SLOW_MUL) < 0.01);
+  check('the garrison is slowed too',
+    Math.abs(paceFor(c.x, c.y, 'officer') - bareFor(c.x, c.y, 'officer') * ACID_SLOW_MUL) < 0.01);
 
   // The control, and the one that matters: it comes out of a zombie.
-  const horde = speedAt(r.world, c.x, c.y, HUMAN_WALK_SPEED, 'zombie');
-  check('the horde walks through it untouched', Math.abs(horde - HUMAN_WALK_SPEED) < 0.01,
-    `${horde.toFixed(1)}`);
-  check('and so does the dog, being one', Math.abs(horde - HUMAN_WALK_SPEED) < 0.01);
+  const horde = paceFor(c.x, c.y, 'zombie');
+  check('the horde walks through it untouched',
+    Math.abs(horde - bareFor(c.x, c.y, 'zombie')) < 0.01, `${horde.toFixed(1)}`);
+  check('and so does the dog, being one',
+    Math.abs(horde - bareFor(c.x, c.y, 'zombie')) < 0.01);
 
-  // At the rim rather than at the middle, since the radius is what the wire and
-  // the fog both key on.
-  const rim = speedAt(r.world, c.x + c.r - 2, c.y, HUMAN_WALK_SPEED, 'human');
-  const past = speedAt(r.world, c.x + c.r + 4, c.y, HUMAN_WALK_SPEED, 'human');
-  check('slowed just inside the rim', rim < HUMAN_WALK_SPEED);
-  check('and not just outside it', Math.abs(past - HUMAN_WALK_SPEED) < 0.01);
+  /*
+   * **Just inside the rim is a bearing question now, not a radius one.**
+   *
+   * A cloud is a cluster of lobes rather than a disc, so a spot two pixels
+   * inside the bounding radius is solid on a bulge and open ground in one of
+   * the notches between the lumps — and which one it lands in is the seed's
+   * business. The honest claims are that *some* bearing is slowed right out at
+   * the rim, and that *no* bearing is slowed past it, since nothing may reach
+   * beyond the radius the wire and the fog both key on.
+   */
+  // Same rule as above: a human against the horde on the *same pixel*, so a
+  // bearing that lands in a hedge cannot read as acid. Measured against the
+  // flat walking speed instead, this reported **10 of 64 bearings "slowed" past
+  // the rim** in a city where nothing whatsoever reaches past it.
+  const acidSlowsHere = (x: number, y: number): boolean =>
+    paceFor(x, y, 'human') < paceFor(x, y, 'zombie') - 0.01;
+  let slowedAtRim = 0;
+  let slowedPastRim = 0;
+  for (let i = 0; i < 64; i++) {
+    const a = (i / 64) * Math.PI * 2;
+    if (acidSlowsHere(c.x + Math.cos(a) * (c.r - 2), c.y + Math.sin(a) * (c.r - 2))) slowedAtRim++;
+    if (acidSlowsHere(c.x + Math.cos(a) * (c.r + 4), c.y + Math.sin(a) * (c.r + 4))) slowedPastRim++;
+  }
+  check('some bearings are slowed right out at the rim', slowedAtRim > 0,
+    `${slowedAtRim}/64`);
+  check('and none at all past it', slowedPastRim === 0, `${slowedPastRim}/64`);
 
   // And it lifts when the cloud goes.
   r.run(Math.ceil(ACID_CLOUD_MS / TICK_MS) + 2);
   check('the cloud expires', r.world.acid.size === 0);
   check('and the ground is quick again',
-    Math.abs(speedAt(r.world, c.x, c.y, HUMAN_WALK_SPEED, 'human') - HUMAN_WALK_SPEED) < 0.01);
+    Math.abs(paceFor(c.x, c.y, 'human') - bareInside) < 0.01,
+    `${paceFor(c.x, c.y, 'human').toFixed(1)}`);
 }
 
 // ------------------------------------------------------------ the sight line
 
 function testSight(): void {
-  console.log('\nit blocks a sight line, and does not blind whoever is in it');
+  console.log('\nit blocks a sight line, blinds whoever is in it, and lets the horde see');
   const r = rig();
   /*
    * The cloud goes 300px out and the two observers sit 300px either side of
@@ -277,34 +329,215 @@ function testSight(): void {
   // cloud should not touch — checked before and after rather than asserted
   // clear, because whether a building happens to sit across it is not something
   // this test gets to decide.
-  check('clear before there is any acid', hasLineOfSight(r.world, ax, y, bx, y));
-  const asideBefore = hasLineOfSight(r.world, ax, y - 600, bx, y - 600);
+  check('clear before there is any acid', hasLineOfSight(r.world, ax, y, bx, y, false, 'human'));
+  const asideBefore = hasLineOfSight(r.world, ax, y - 600, bx, y - 600, false, 'human');
+
+  /*
+   * **The baseline for the sweep below, taken before there is any acid.**
+   *
+   * This is a real city with real buildings in it and `clearLane` only
+   * guarantees the one lane. Asserting the dog sees out on all 32 bearings
+   * therefore fails on the geometry rather than on the code — measured that
+   * way it reported 10 of 32, every one of the missing 22 a wall. What the
+   * control has to say is that the acid changed nothing for the dog, so the
+   * comparison is against whatever the city allowed a moment earlier.
+   */
+  const bearings = 32;
+  const baseline: boolean[] = [];
+  for (let i = 0; i < bearings; i++) {
+    const a = (i / bearings) * Math.PI * 2;
+    baseline.push(
+      hasLineOfSight(r.world, landing, y, landing + Math.cos(a) * 240, y + Math.sin(a) * 240,
+        false, 'human'),
+    );
+  }
+  const clearBearings = baseline.filter(Boolean).length;
 
   r.spit();
-  r.run(travelTicks);
+  // Past the travel *and* past `ACID_GROW_MS`, so this is the cloud at full
+  // width rather than the 44px gobbet it is on the tick it lands.
+  r.run(travelTicks + Math.ceil(ACID_GROW_MS / TICK_MS) + 1);
   const c = onlyCloud(r.world);
   check('the cloud sits between the two of them',
     Math.abs(c.x - landing) < 1 && c.r > 0 && landing - ax > c.r && bx - landing > c.r,
     `r=${Math.round(c.r)}, ${Math.round(landing - ax)}px to each`);
-  check('and the line is broken', !hasLineOfSight(r.world, ax, y, bx, y));
+  check('and the line is broken', !hasLineOfSight(r.world, ax, y, bx, y, false, 'human'));
 
   // Trained eyes do not help. `seeThroughBushes` means foliage does not hide a
   // zombie from an officer, and training is not a defence against a chemical.
   check('an officer cannot see through it either',
-    !hasLineOfSight(r.world, ax, y, bx, y, true));
+    !hasLineOfSight(r.world, ax, y, bx, y, true, 'officer'));
 
-  // The bush rule, deliberately inherited: standing in it you see out. This is
-  // what stops the ability blinding the dog that used it.
-  check('somebody stood in it can see out', hasLineOfSight(r.world, c.x, c.y, bx, y));
-  check('and out the other way as well', hasLineOfSight(r.world, c.x, c.y, ax, y));
+  /*
+   * **The horde sees straight through it, and this is the half that makes it an
+   * ability rather than a liability.**
+   *
+   * The dog is a zombie with a flag on it, so one test covers both — and the
+   * `eyesOf` parameter is what carries it. The line is the same line an officer
+   * was just refused.
+   */
+  check('a zombie sees straight through it',
+    hasLineOfSight(r.world, ax, y, bx, y, false, 'zombie'));
+
+  /*
+   * **Standing in it is zero vision**, which is the bush rule deliberately
+   * broken. A bush you are inside does not blind you — you see out and others
+   * cannot see in, and that is what makes hiding work. A cloud of acid is the
+   * opposite of hiding.
+   *
+   * Swept over the compass rather than checked along the lane, because "zero"
+   * is a claim about every direction and a single bearing would pass just as
+   * well against a cloud that merely blocked the way it was measured.
+   */
+  let humanSees = 0;
+  let dogSees = 0;
+  for (let i = 0; i < bearings; i++) {
+    const a = (i / bearings) * Math.PI * 2;
+    const tx = c.x + Math.cos(a) * 240;
+    const ty = c.y + Math.sin(a) * 240;
+    if (hasLineOfSight(r.world, c.x, c.y, tx, ty, false, 'human')) humanSees++;
+    if (hasLineOfSight(r.world, c.x, c.y, tx, ty, false, 'zombie')) dogSees++;
+  }
+  check('somebody stood in it sees nothing at all, any direction', humanSees === 0,
+    `0 of ${bearings} bearings, ${clearBearings} of which the city left open`);
+  /*
+   * **And the control is the dog stood on the same pixel.** Without it, "the
+   * human saw nothing" is satisfied just as well by a rig that staged its cloud
+   * inside a building — the count would be zero because of the walls. Measured
+   * against the baseline rather than against 32, because the walls are real and
+   * the claim is that the *acid* changed nothing for the dog.
+   */
+  check('and a dog on the same pixel sees out, exactly as it did before',
+    dogSees === clearBearings && clearBearings > 0,
+    `${dogSees}/${clearBearings} against the human's ${humanSees}`);
 
   // A line that never goes near it is untouched — whatever it was before.
   check('a line well clear of it is unchanged',
-    hasLineOfSight(r.world, ax, y - 600, bx, y - 600) === asideBefore,
+    hasLineOfSight(r.world, ax, y - 600, bx, y - 600, false, 'human') === asideBefore,
     `was ${asideBefore ? 'clear' : 'blocked by the city'}`);
 
+  // A blast is not a pair of eyes, and passes none: a grenade thrown into a
+  // cloud has to go on working. This is the case that made the default "ignore
+  // the acid" rather than "block on it".
+  check('a blast reaches through it', hasLineOfSight(r.world, c.x, c.y, ax, y, true));
+
   r.run(Math.ceil(ACID_CLOUD_MS / TICK_MS) + 2);
-  check('and the line comes back when it lifts', hasLineOfSight(r.world, ax, y, bx, y));
+  check('and the line comes back when it lifts',
+    hasLineOfSight(r.world, ax, y, bx, y, false, 'human'));
+}
+
+// ----------------------------------------------------------------- the shape
+
+/**
+ * **A cloud is a cluster of lobes, not a disc**, and this is the number that
+ * says so.
+ *
+ * The claim has two halves and they pull against each other: the silhouette has
+ * to be plainly irregular, and nothing may reach past the bounding radius the
+ * wire carries and the fog cache keys on — a lobe bulging past `r` would
+ * occlude ground the client has already decided is outside the cloud.
+ *
+ * So it is measured as a reach per bearing. A disc answers `r` at every one of
+ * them; a cluster answers the bounding radius at its bulges and well inside it
+ * at the notches, and the spread between the two is how lumpy it is. The
+ * covered area is reported alongside because that is the balance figure — what
+ * ground the cloud actually takes away, against the disc it replaced.
+ */
+function testShape(): void {
+  console.log('\nthe cloud is lumpy, and stays inside its own radius');
+  const seeds = [7, 91, 1234, 4242, 8765, 31337];
+  let worstReach = 0;
+  let lumpiest = 0;
+  let flattest = 1;
+  let coverTotal = 0;
+
+  for (const seed of seeds) {
+    const lobes = acidLobes(seed, 0, 0, ACID_CLOUD_RADIUS);
+    if (lobes.length !== ACID_LOBE_COUNT) check(`seed ${seed} has ${ACID_LOBE_COUNT} lobes`, false);
+    for (const l of lobes) {
+      worstReach = Math.max(worstReach, (Math.hypot(l.x, l.y) + l.r) / ACID_CLOUD_RADIUS);
+    }
+
+    // Reach per bearing, walked in from beyond the rim.
+    let lo = 2;
+    let hi = 0;
+    for (let i = 0; i < 90; i++) {
+      const a = (i / 90) * Math.PI * 2;
+      for (let f = 1.02; f > 0.1; f -= 0.005) {
+        const x = Math.cos(a) * ACID_CLOUD_RADIUS * f;
+        const yy = Math.sin(a) * ACID_CLOUD_RADIUS * f;
+        if (inAcidLobes(lobes, x, yy)) {
+          lo = Math.min(lo, f);
+          hi = Math.max(hi, f);
+          break;
+        }
+      }
+    }
+    lumpiest = Math.max(lumpiest, hi - lo);
+    flattest = Math.min(flattest, hi - lo);
+
+    // Covered ground, sampled over the bounding disc — which is what this
+    // replaced, so it is the honest denominator.
+    let hits = 0;
+    let inDisc = 0;
+    const N = 140;
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        const x = (i / (N - 1) - 0.5) * 2 * ACID_CLOUD_RADIUS;
+        const yy = (j / (N - 1) - 0.5) * 2 * ACID_CLOUD_RADIUS;
+        if (Math.hypot(x, yy) > ACID_CLOUD_RADIUS) continue;
+        inDisc++;
+        if (inAcidLobes(lobes, x, yy)) hits++;
+      }
+    }
+    coverTotal += hits / inDisc;
+  }
+
+  const cover = coverTotal / seeds.length;
+  /*
+   * **And it still blocks, which is what it is for.**
+   *
+   * Coverage is an area figure and occlusion is not: what stops somebody seeing
+   * across the road is whether *a* lobe sits on the line, not how much of the
+   * disc is filled. So a family of parallel chords is swept over the whole
+   * width of the cloud and each asked whether anything is in the way. A disc
+   * answers yes for every chord inside `r`; a scalloped one can only lose the
+   * chords that thread a notch, and those are at the very edge.
+   */
+  let chordsBlocked = 0;
+  let chords = 0;
+  const shape = acidLobes(1234, 0, 0, ACID_CLOUD_RADIUS);
+  for (let o = -0.96; o <= 0.96; o += 0.04) {
+    chords++;
+    const yy = o * ACID_CLOUD_RADIUS;
+    for (let t = -1.2; t <= 1.2; t += 0.01) {
+      if (inAcidLobes(shape, t * ACID_CLOUD_RADIUS, yy)) {
+        chordsBlocked++;
+        break;
+      }
+    }
+  }
+
+  check('nothing reaches past the bounding radius', worstReach <= 1.0001,
+    `worst lobe reaches ${worstReach.toFixed(3)} of r`);
+  check('a line across it is still stopped at nearly every offset',
+    chordsBlocked / chords > 0.9, `${chordsBlocked}/${chords} chords`);
+  // A disc would answer 0 here. This is the whole of "less of a uniform circle".
+  check('every seed is plainly irregular', flattest > 0.12,
+    `spread ${flattest.toFixed(2)}-${lumpiest.toFixed(2)} of r between notch and bulge`);
+  console.log(
+    `  ..    covers ${(cover * 100).toFixed(1)}% of the disc it replaced ` +
+      `(equivalent radius ${Math.round(ACID_CLOUD_RADIUS * Math.sqrt(cover))}px ` +
+      `against ${ACID_CLOUD_RADIUS})`,
+  );
+
+  // Two seeds must not be the same cloud, or it is a texture rather than
+  // weather. And the same seed must be the same cloud twice, which is the whole
+  // reason this is derived on both sides rather than sent.
+  const sig = (s: number) =>
+    acidLobes(s, 0, 0, 100).map((l) => `${l.x.toFixed(1)},${l.y.toFixed(1)},${l.r.toFixed(1)}`).join('|');
+  check('two seeds are two different clouds', sig(11) !== sig(12));
+  check('and the same seed is the same cloud twice', sig(11) === sig(11));
 }
 
 // ---------------------------------------------------------------- the splash
@@ -462,6 +695,7 @@ function testRefusals(): void {
 console.log('=== the dog spits, and the street stops being one street ===');
 testThrow();
 testSlow();
+testShape();
 testSight();
 testSplash();
 testLine();

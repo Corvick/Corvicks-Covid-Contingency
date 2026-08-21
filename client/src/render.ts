@@ -29,6 +29,7 @@ import type {
 } from '../../shared/types.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import { pondRadiusAt } from '../../shared/pond.js';
+import { acidLobes } from '../../shared/acidshape.js';
 import {
   ENTITY_COLOR,
   ENTITY_RADIUS,
@@ -3930,50 +3931,155 @@ export function drawBlasts(
   }
 }
 
-/** Billowing red plume that marks the landing zone. */
 /**
  * The dog's acid: a gobbet in the air, then a cloud sat on the road.
  *
- * Built the same way the smoke plume is — a few overlapping radial gradients
- * drifting against each other — because at this size that is what reads as a
- * volume rather than as a disc. What is different is the *edge*: smoke fades to
- * nothing all the way round, and this cannot, because it is an occluder and the
- * fog stops exactly at `r`. So it carries a defined rim with the churn riding
- * inside it, and where you cannot see through is where it plainly looks solid.
+ * **A cloud is a cluster of lobes, not a disc**, and the lobes are derived here
+ * from the seed on the wire by the same `shared/acidshape.ts` the server's own
+ * sight lines go through. That shared function is the whole reason the drawing
+ * can be trusted: the fog stops exactly at the occluder edge, so anything drawn
+ * past it would be a cloud claiming ground it does not block, and anything that
+ * stopped short of it would leave a ring you can neither see through nor see
+ * anything in.
  *
- * Everything is hashed off the cloud's own age (`t` on the wire), so there is no
- * per-frame state anywhere and two clouds side by side do not boil in lockstep.
+ * **Nothing here is clipped, and everything is drawn inside a lobe.** A clip of
+ * the union was the obvious way to guarantee the rim and it measured **1.56ms a
+ * cloud against 0.54** — the clip itself is nothing (0.006ms), but every fill
+ * made through one pays, and a whole scene at 1920x1080 paints in about 4.9ms.
+ * Filling each lobe's own arc gets the same guarantee for free: a fill bounded
+ * by a circle cannot land outside that circle, and every circle is the cloud by
+ * definition. The union `Path2D` went with it — one flat fill of a seven-arc
+ * path measured **dearer than all seven gradient fills together** (0.33 against
+ * 0.26), because the cost is the path rather than the pixels.
+ *
+ * Three passes:
+ *
+ *  1. **The lumps.** One radial gradient per lobe, and the gradients stop at a
+ *     substantial alpha rather than at nothing — the rim is where the fog
+ *     stops, so a lobe that faded out before its own edge would leave a ring of
+ *     ground you can neither see through nor see anything in. Overlaps blend
+ *     twice and thrice and that is wanted: the middle of a cloud is thicker
+ *     than its edges.
+ *  2. **One highlight over the core**, which is what makes it read as a single
+ *     mass with lumps in it rather than as seven bubbles stuck together. It is
+ *     drawn inside the core lobe alone, so it needs no clip either — the same
+ *     mistake as five evenly bright ribs on the dog, and the same fix.
+ *  3. **Churn, riding inside the lumps.** Hashed off the cloud's age (`t` on
+ *     the wire) and its seed, so there is no per-frame state anywhere and two
+ *     clouds side by side do not boil in lockstep. Attached to a lobe and kept
+ *     well inside it, which is what lets it move without being clipped.
  */
 export function drawAcid(ctx: CanvasRenderingContext2D, clouds: AcidState[]): void {
   for (const c of clouds) {
-    // The body of it. Drawn first and widest, so the churn above sits inside.
-    const body = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, c.r);
-    body.addColorStop(0, `rgba(132, 204, 22, ${0.5 * c.a})`);
-    body.addColorStop(0.62, `rgba(101, 163, 13, ${0.42 * c.a})`);
-    // Not to zero: the rim is where the fog stops, and a cloud that faded out
-    // before its own occluder edge would have a ring of ground you cannot see
-    // through and cannot see anything in either.
-    body.addColorStop(1, `rgba(63, 98, 18, ${0.3 * c.a})`);
+    const lobes = acidLobes(c.s, c.x, c.y, c.r);
+
+    for (const l of lobes) {
+      const grad = ctx.createRadialGradient(l.x, l.y, 0, l.x, l.y, l.r);
+      grad.addColorStop(0, `rgba(116, 176, 26, ${0.3 * c.a})`);
+      grad.addColorStop(0.62, `rgba(96, 150, 20, ${0.27 * c.a})`);
+      // Not to nothing — see above.
+      grad.addColorStop(1, `rgba(64, 100, 16, ${0.22 * c.a})`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(l.x, l.y, l.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const core = lobes[0];
+    const body = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, core.r);
+    body.addColorStop(0, `rgba(163, 220, 55, ${0.3 * c.a})`);
+    body.addColorStop(0.5, `rgba(132, 195, 30, ${0.14 * c.a})`);
+    body.addColorStop(1, 'rgba(101, 163, 13, 0)');
     ctx.fillStyle = body;
     ctx.beginPath();
-    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.arc(c.x, c.y, core.r, 0, Math.PI * 2);
     ctx.fill();
 
-    // Boiling. Five blobs on their own slow orbits, well inside the rim.
     for (let i = 0; i < 5; i++) {
-      const drift = c.t * 0.0006 + i * 1.7;
-      const px = c.x + Math.cos(drift) * (c.r * 0.3);
-      const py = c.y + Math.sin(drift * 1.27) * (c.r * 0.25);
-      const rr = c.r * (0.42 + (i % 3) * 0.14);
+      // One lobe each, so a blob can drift without ever leaving the cloud.
+      const l = lobes[1 + (i % (lobes.length - 1))];
+      const drift = c.t * 0.0006 + i * 1.7 + c.s;
+      const px = l.x + Math.cos(drift) * (l.r * 0.3);
+      const py = l.y + Math.sin(drift * 1.27) * (l.r * 0.3);
+      const rr = l.r * 0.6;
       const grad = ctx.createRadialGradient(px, py, 0, px, py, rr);
-      grad.addColorStop(0, `rgba(190, 242, 100, ${0.34 * c.a})`);
-      grad.addColorStop(0.55, `rgba(132, 204, 22, ${0.2 * c.a})`);
-      grad.addColorStop(1, 'rgba(101, 163, 13, 0)');
+      grad.addColorStop(0, `rgba(190, 242, 100, ${0.16 * c.a})`);
+      grad.addColorStop(1, 'rgba(132, 204, 22, 0)');
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(px, py, rr, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+}
+
+/**
+ * Standing in it: the screen full of the stuff.
+ *
+ * **This is the picture of an effect the server has already applied.** Anybody
+ * who is not a zombie and whose own position is inside a cloud fails every
+ * sight line in `hasLineOfSight`, so they are sent no bodies, no loot and no
+ * tracers — the screen is genuinely empty, and `ACID_INSIDE_SIGHT` leaves a
+ * hole barely wider than they are. Without this wash on top, that reads as the
+ * renderer having given up, which is exactly what the two worst fog faults in
+ * this game's history looked like. With it, it reads as being in the gas.
+ *
+ * Screen space, because it is what is in your eyes rather than what is on the
+ * road. **The still half of it is baked once and blitted**, the same trick and
+ * the same reason as the vignette and the grime tile: two full-screen alpha
+ * fills at 1920x1080 measured 4.6ms, which is most of a frame for something
+ * that never changes. Only the drift is live.
+ */
+let murkTile: HTMLCanvasElement | null = null;
+let murkSize = '';
+
+function murkFor(w: number, h: number): HTMLCanvasElement {
+  const key = `${w}x${h}`;
+  if (murkTile && murkSize === key) return murkTile;
+  murkSize = key;
+  murkTile = document.createElement('canvas');
+  murkTile.width = w;
+  murkTile.height = h;
+  const g = murkTile.getContext('2d')!;
+  // Thicker toward the edges: inside a cloud there is more of it between you
+  // and anything off to the side than between you and your own feet, and a flat
+  // wash on its own reads as a colour filter laid over the game. The flat part
+  // is folded into the middle stop rather than being a second full-screen fill.
+  const grad = g.createRadialGradient(
+    w / 2, h / 2, Math.min(w, h) * 0.08,
+    w / 2, h / 2, Math.hypot(w, h) * 0.55,
+  );
+  grad.addColorStop(0, 'rgba(101, 163, 13, 0.3)');
+  grad.addColorStop(0.5, 'rgba(70, 108, 18, 0.62)');
+  grad.addColorStop(1, 'rgba(32, 51, 11, 0.92)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, w, h);
+  return murkTile;
+}
+
+export function drawAcidMurk(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  now: number,
+): void {
+  ctx.drawImage(murkFor(w, h), 0, 0);
+
+  // And it moves, because gas does. Three is enough to be plainly churning and
+  // few enough that the fill rate stays affordable — the park's translucent
+  // overdraw is the standing warning here.
+  for (let i = 0; i < 3; i++) {
+    const drift = now * 0.00035 + i * 2.1;
+    const px = w / 2 + Math.cos(drift) * w * 0.3;
+    const py = h / 2 + Math.sin(drift * 1.31) * h * 0.32;
+    const rr = Math.min(w, h) * (0.22 + (i % 2) * 0.07);
+    const blob = ctx.createRadialGradient(px, py, 0, px, py, rr);
+    blob.addColorStop(0, 'rgba(163, 230, 53, 0.2)');
+    blob.addColorStop(1, 'rgba(132, 204, 22, 0)');
+    ctx.fillStyle = blob;
+    ctx.beginPath();
+    ctx.arc(px, py, rr, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -4005,6 +4111,7 @@ export function drawSpits(ctx: CanvasRenderingContext2D, spits: SpitState[]): vo
   }
 }
 
+/** Billowing red plume that marks the landing zone. */
 export function drawSmoke(ctx: CanvasRenderingContext2D, smokes: SmokeState[], now: number): void {
   for (const s of smokes) {
     for (let i = 0; i < 5; i++) {

@@ -197,7 +197,7 @@ export function updateEmplacements(world: World, now: number, dt: number): void 
       // was planted, and nothing behind it exists as far as it's concerned.
       const bearing = Math.atan2(other.y - gun.y, other.x - gun.x);
       if (Math.abs(angleDelta(gun.arc, bearing)) > EMPLACEMENT_ARC) continue;
-      if (!hasLineOfSight(world, gun.x, gun.y, other.x, other.y, true)) continue;
+      if (!hasLineOfSight(world, gun.x, gun.y, other.x, other.y, true, 'officer')) continue;
       best = dist;
       target = other;
     }

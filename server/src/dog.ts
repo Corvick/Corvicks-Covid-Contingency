@@ -609,7 +609,7 @@ function catchInJaws(
     if (dist > DOG_BITE_REACH || dist >= bestDist) continue;
     const off = Math.abs(angleDelta(dog.head, Math.atan2(other.y - e.y, other.x - e.x)));
     if (off > DOG_BITE_ARC) continue;
-    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, true)) continue;
+    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, true, e.type)) continue;
     bestDist = dist;
     best = other;
   }

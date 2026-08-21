@@ -18,6 +18,7 @@
 import WebSocket from 'ws';
 import type { ClientMessage, ServerMessage } from '../shared/types.js';
 import { ACID_CLOUD_RADIUS, DOG_SPIT_RANGE } from '../shared/constants.js';
+import { acidLobes, inAcidLobes } from '../shared/acidshape.js';
 
 const PORT = process.env.SERVER ?? '8090';
 const socket = new WebSocket(`ws://localhost:${PORT}`);
@@ -43,6 +44,30 @@ let dogAt: { x: number; y: number } | null = null;
 let cloudAt: { x: number; y: number } | null = null;
 /** The hexagon, so the cooldown is read from the same place the HUD reads it. */
 let barReady: number[] = [];
+/**
+ * **Walking into its own cloud**, which is the one claim only a live socket can
+ * settle: the fog is server-enforced, so "the dog sees in the acid" means the
+ * entities keep arriving on *its* snapshots while it is stood in the stuff.
+ * `acidcheck.ts` proves the rule against `hasLineOfSight` directly; this proves
+ * that the rule is what the socket actually delivers.
+ */
+let walkIn = false;
+let ticksInside = 0;
+let seenInside = 0;
+let seenOutside = 0;
+let outsideSamples = 0;
+let seedSeen: number | null = null;
+let closest = Infinity;
+/**
+ * Where the middle of the city is, so the gobbet is thrown *inwards*.
+ *
+ * The dog comes in at the breach, which is on an edge — so throwing it 300px
+ * along a fixed bearing put the cloud through the boundary wall as often as
+ * not, and the animal then spent the whole run leaning on that wall 40px short
+ * of its own acid. Measured that way, 0 snapshots inside on every run.
+ */
+let centre: { x: number; y: number } | null = null;
+let walk = { up: false, down: false, left: false, right: false };
 
 socket.on('open', () => console.log(`acid live check — ws://localhost:${PORT}`));
 
@@ -51,6 +76,7 @@ socket.on('message', (raw: Buffer) => {
 
   if (msg.type === 'welcome') {
     selfId = msg.selfId;
+    centre = { x: msg.map.width / 2, y: msg.map.height / 2 };
     send({ type: 'lobbyCreate', name: 'acid', gamertag: 'ACIDTEST', offline: true });
     return;
   }
@@ -79,11 +105,29 @@ socket.on('message', (raw: Buffer) => {
     // read when the key goes down. Aimed well out in front of the animal.
     setInterval(() => {
       const me = dogAt;
+      /*
+       * **Aimed at its own feet, inwards.**
+       *
+       * `DOG_SPIT_MIN_THROW` is a floor, so a crosshair on yourself still
+       * throws the gobbet 90px out — and the cloud's radius is 130, so the
+       * animal is stood *inside* its own acid the moment it lands. That is the
+       * whole point of this run: the fog is server-enforced, so "a dog sees in
+       * the acid" can only mean the entities keep arriving on its own
+       * snapshots while it is in the stuff.
+       *
+       * Walking to a cloud thrown the full 300px was the first version and it
+       * is the city's decision whether that works: measured over three runs it
+       * arrived once, and came up 79 and 120px short on the other two against
+       * a garrison that shoots at it. Inwards rather than on a fixed bearing
+       * because the dog comes in at the breach, which is on an edge.
+       */
+      const a = me && centre ? Math.atan2(centre.y - me.y, centre.x - me.x) : 0;
       send({
         type: 'input',
-        input: { up: false, down: false, left: false, right: false },
-        aim: 0,
-        aimX: (me?.x ?? 0) + 300,
+        // Straight at where the gobbet went, once it is on the ground.
+        input: walkIn ? walk : { up: false, down: false, left: false, right: false },
+        aim: a,
+        aimX: me?.x ?? 0,
         aimY: me?.y ?? 0,
         shooting: false,
         sprint: false,
@@ -99,6 +143,34 @@ socket.on('message', (raw: Buffer) => {
 
   const me = msg.entities.find((e) => e.id === selfId);
   if (me && spatAt === 0) dogAt = { x: me.x, y: me.y };
+
+  // How much of the city is on this snapshot, either side of walking into the
+  // cloud. Its own body is not evidence of anything — it is always sent.
+  if (me) {
+    const others = msg.entities.length - 1;
+    const cloud = msg.acid[0];
+    if (cloud && inAcidLobes(acidLobes(cloud.s, cloud.x, cloud.y, cloud.r), me.x, me.y)) {
+      ticksInside++;
+      seenInside = Math.max(seenInside, others);
+    } else {
+      // Everything before the spit counts here too, which is what makes this a
+      // baseline worth comparing against rather than the handful of snapshots
+      // the gobbet spends in the air.
+      outsideSamples++;
+      seenOutside = Math.max(seenOutside, others);
+      if (cloud) {
+        closest = Math.min(closest, Math.hypot(me.x - cloud.x, me.y - cloud.y) - cloud.r);
+        // Steered off the live gap, so being shoved out of its own cloud by a
+        // passing body puts it back in rather than ending the measurement.
+        walk = {
+          right: cloud.x - me.x > 6,
+          left: me.x - cloud.x > 6,
+          down: cloud.y - me.y > 6,
+          up: me.y - cloud.y > 6,
+        };
+      }
+    }
+  }
 
   // The two new arrays have to exist on every snapshot, not merely when there
   // is something in them — the client reads them unconditionally.
@@ -126,11 +198,16 @@ socket.on('message', (raw: Buffer) => {
     }
     cloudSeen++;
     maxRadius = Math.max(maxRadius, msg.acid[0].r);
+    seedSeen = msg.acid[0].s;
+    // On the ground now, so start walking into it.
+    walkIn = true;
   }
   const spit = msg.dog?.abilities?.[1];
   if (spit) barReady.push(spit.ready);
 
-  if (snapshots === 150) finish();
+  // Long enough to walk the 170px from where it stands to the near edge of its
+  // own cloud, with room for a kerb or a shambler in the way.
+  if (snapshots === 280) finish();
 });
 
 function finish(): void {
@@ -142,10 +219,46 @@ function finish(): void {
     `${maxRadius} against ${ACID_CLOUD_RADIUS}`);
   if (dogAt && cloudAt) {
     const reach = Math.hypot(cloudAt.x - dogAt.x, cloudAt.y - dogAt.y);
-    check('it came down out in front of the animal', reach > 50 && reach <= DOG_SPIT_RANGE + 2,
-      `${Math.round(reach)}px`);
+    // A crosshair on your own feet still throws it `DOG_SPIT_MIN_THROW` out,
+    // which is what leaves the animal inside its own cloud. Where a *distant*
+    // crosshair puts it is `acidcheck.ts`'s claim, measured at 0px off.
+    check('a crosshair on its own feet still throws it clear of the animal',
+      reach > 50 && reach <= DOG_SPIT_RANGE + 2, `${Math.round(reach)}px`);
   } else {
     check('the animal and the cloud were both seen', false);
+  }
+  check('the cloud carries the seed the client shapes it from',
+    typeof seedSeen === 'number' && Number.isInteger(seedSeen), `${seedSeen}`);
+  /*
+   * **It walked into its own cloud and the city kept arriving.**
+   *
+   * A city is not a rig, so it may fail to get there — a wall, a shambler, a
+   * kerb — and that is reported rather than failed, because "the dog could not
+   * reach it" is a statement about the map. What must never happen is reaching
+   * it and going blind.
+   */
+  if (ticksInside > 0 && seenOutside > 0) {
+    check('the dog stood in its own cloud', true, `${ticksInside} snapshots inside`);
+    /*
+     * **The failure being guarded against is zero**, and the check says so
+     * rather than demanding the count hold up.
+     *
+     * "No fewer inside than out" was tried and is not a claim a live city
+     * supports: the dog stands still for eight seconds with a garrison
+     * shooting at it while the crowd walks in and out of an 890px radius, so
+     * the number drifts on its own. Measured that way it read 13 inside
+     * against 16 out and failed on the weather. Going blind is what a broken
+     * exemption looks like, and going blind is exactly 0.
+     */
+    check('and the city kept arriving while it stood in it', seenInside > 0,
+      `${seenInside} entities inside against ${seenOutside} out of it`);
+  } else if (ticksInside > 0) {
+    console.log(`  ..    it stood in its own cloud for ${ticksInside} snapshots, but there was ` +
+      `nobody in sight either way in this city — nothing to compare`);
+  } else {
+    console.log(`  ..    it never reached its own cloud in this city ` +
+      `(${outsideSamples} snapshots outside, closest ${Math.round(closest)}px short of the rim) ` +
+      `— nothing to say about seeing from inside`);
   }
   // The hexagon empties on the press and climbs back, read off the same field
   // the HUD draws.
