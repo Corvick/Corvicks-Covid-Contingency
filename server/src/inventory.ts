@@ -1,5 +1,13 @@
 import type { GunSlot, InventoryState, PickupState } from '../../shared/types.js';
-import { GUN_LOOT, ITEMS, UTILITY_LOOT, isGun, rarestOf, type ItemId } from '../../shared/items.js';
+import {
+  ALL_LOOT,
+  GUN_LOOT,
+  ITEMS,
+  UTILITY_LOOT,
+  isGun,
+  rarestOf,
+  type ItemId,
+} from '../../shared/items.js';
 import {
   GUN_SLOTS,
   UTILITY_SLOTS,
@@ -146,6 +154,63 @@ export function dropDebugKit(world: World, owner: string, x: number, y: number):
       y: y + Math.sin(angle) * TEST_DROP_RADIUS,
     });
   });
+}
+
+/**
+ * One random item in the bag of everybody who holds a player slot.
+ *
+ * "Blue officers" is the whole rule: a player and a bot are the same blue
+ * figure and the same slot, and the city's grey officers, the SWAT out of a
+ * van and the soldiers off a helicopter get nothing. It is a leg-up for the
+ * five people the round is actually about, and it is the *variety* that is the
+ * point — every round now opens with somebody holding something, and which
+ * something is the first thing that makes one round different from the last.
+ *
+ * **It follows rarity and ignores the map.**
+ *
+ * - Rarity is `ALL_LOOT`, the same weighted tables the buildings roll on, so a
+ *   sniper is as unlikely here as it is in a house and rarity 0 cannot come up
+ *   at all — no grenade launcher, no second beacon.
+ * - The city's limits are deliberately not consulted. `ITEM_CITY_CAP` is a
+ *   ceiling on what is lying on the *floor* — see the radio, where three vans
+ *   in a round was the complaint — and this is not on the floor. Nor does it
+ *   take a loot spot from a building or satisfy the every-gun floor, both of
+ *   which count placed pickups: the pickup made here is collected on the same
+ *   line it is created and is gone before `spawnPickups` ever runs.
+ *
+ * **It is granted by collecting a real pickup rather than by writing into the
+ * bag**, which looks roundabout and is the only version that cannot rot.
+ * `collect` is where a duplicate gun becomes ammunition, a second pistol
+ * becomes `dual`, a sling or a pack becomes a worn flag, a lozenge is spent on
+ * the spot and the shield and the heavy MG refuse each other. Written out
+ * again here, the first of those rules to change would quietly stop applying
+ * to whatever everybody starts the round holding.
+ *
+ * **A draw that cannot be taken is re-rolled**, the same as a capped one is in
+ * `spawnPickups`. In practice that means exactly one item: the ammo box, which
+ * `applyUtility` refuses to anybody holding nothing but a pistol, and a bag at
+ * the start of a round is nothing but a pistol. So the ammo box is the one entry
+ * in the table nobody can ever start with — measured over 20,000 draws — which
+ * is correct rather than a gap: a box of rounds for a gun you do not have yet is
+ * the one draw that would have been no draw at all. Without the re-roll it would
+ * be 4% of officers starting empty-handed, which is indistinguishable from the
+ * feature being broken.
+ *
+ * Success is read off the pickup being gone rather than off `collect`'s
+ * message, which is prose.
+ */
+export function giveStartingItem(world: World, id: string, x: number, y: number): ItemId | null {
+  const inv = world.inventories.get(id);
+  if (!inv) return null;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const item = ALL_LOOT[Math.floor(Math.random() * ALL_LOOT.length)];
+    const pid = `loot-start-${id}`;
+    world.pickups.set(pid, { id: pid, item, x, y });
+    collect(world, id, inv, x, y, pid);
+    if (!world.pickups.has(pid)) return item;
+    world.pickups.delete(pid);
+  }
+  return null;
 }
 
 export function spawnPickups(world: World): void {
@@ -720,11 +785,23 @@ export function nearestZombieBearing(
 
 /**
  * The tracker is the one thing that sees past the fog, which is the whole of
- * what it is for — but only while it is actually in your hand. That cost is
- * the point: consulting it means not holding a gun.
+ * what it is for. **It runs on being carried, not on being held.**
+ *
+ * It used to need to be in your hand, and the cost of that was meant to be the
+ * point — consulting it means not holding a gun. In practice it made the item
+ * something you took out, read, and put away, which is the opposite of a
+ * compass: what a bearing to the nearest zombie is *for* is knowing which way
+ * trouble is while you are doing something else, and the one moment you most
+ * want it is the one moment you least want to be holding it instead of a
+ * rifle. The slot it takes is the cost now, the same trade thermal goggles and
+ * the beacon handset already make.
+ *
+ * The hole in the fog does not widen: this is a bearing and nothing else, the
+ * same single number it always was. Nothing about *where* anybody is comes
+ * down the wire for it.
  */
 function trackBearing(world: World, inv: Inventory, x: number, y: number): number | null {
-  if (heldItem(inv) !== 'zombieTracker') return null;
+  if (!inv.utilities.includes('zombieTracker')) return null;
   return nearestZombieBearing(world, x, y)?.bearing ?? null;
 }
 

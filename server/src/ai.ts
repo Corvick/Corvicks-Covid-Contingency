@@ -358,6 +358,7 @@ import {
   isDoorShut,
   lockDoor,
   openDoor,
+  releaseDoor,
   shutDoor,
   unlockDoor,
 } from './doors.js';
@@ -429,6 +430,17 @@ let settledStandsStill = false;
 
 export function setSettledStandsStill(v: boolean): void {
   settledStandsStill = v;
+}
+
+/**
+ * And the same for the two things a bot used to stop being an officer for:
+ * true turns its back when it bolts, and lets nothing interrupt a door.
+ * `server/botkite.ts` is what reads it.
+ */
+let botDropsTheGun = false;
+
+export function setBotDropsTheGun(v: boolean): void {
+  botDropsTheGun = v;
 }
 
 function getAi(world: World, e: Entity, now: number): AiState {
@@ -980,6 +992,19 @@ function step(
   turnRate: number,
   dt: number,
   now: number,
+  /**
+   * Leave `e.facing` alone: the caller is aiming it at something other than
+   * its own footsteps and will set it itself.
+   *
+   * It has to be here rather than fixed up afterwards, and that cost a whole
+   * measurement to learn. Overwriting the facing after the call only ever
+   * survives until the next one — `step` re-ties it to the movement heading
+   * every tick — so a bot correcting its aim by one tick's worth of turn was
+   * being dragged back the other way just as fast. Measured that way it sat a
+   * flat BOT_TURN_RATE * dt (14.3deg) off its own feet and never once got the
+   * gun onto the zombie: **0 of 998 ticks on target.**
+   */
+  keepFacing = false,
 ): void {
   state.heading = turnToward(state.heading, desired, turnRate * dt);
   let speed = baseSpeed * e.speedMul;
@@ -996,7 +1021,7 @@ function step(
   speed = speedAt(world, e.x, e.y, speed, e.type);
   e.x += Math.cos(state.heading) * speed * dt;
   e.y += Math.sin(state.heading) * speed * dt;
-  e.facing = state.heading;
+  if (!keepFacing) e.facing = state.heading;
 }
 
 // ---------------------------------------------------------------- settling
@@ -2349,9 +2374,38 @@ function warnTheRoom(world: World, e: Entity, state: AiState, index: number, now
  * carry on to wherever they were going the moment the door swings.
  */
 function doorTick(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  /**
+   * **A door is a job, and a zombie at your shoulder is not something you
+   * finish a job through.**
+   *
+   * Reported as a bot standing at a door it was kicking while a zombie walked
+   * up and ate it, and the code said exactly that: `doorTick` is called above
+   * the fight branch and its mid-handle case returns before that branch is
+   * ever reached, so DOOR_KICK_MS (4.2s) was 4.2 seconds of an officer stood
+   * still with the gun down and no way to change its mind.
+   *
+   * BOT_SAFE_DIST is the figure because it is already the one that means "I am
+   * not clear of it" everywhere else a bot uses it — the bolt hysteresis, the
+   * charge-rifle gate, the dog rule. A second number here would be a second
+   * opinion about the same question.
+   *
+   * Only a bot. Hearing something and going in anyway is most of what makes a
+   * civilian a civilian, and a civilian at a handle has no gun to reach for.
+   */
+  const pressed =
+    !botDropsTheGun && world.bots.has(e.id) && nearestThreat(e, state) < BOT_SAFE_DIST;
+
   // Mid-handle. Stand there and work it.
   if (state.doorBusyUntil > 0) {
-    if (now < state.doorBusyUntil) return true;
+    if (now < state.doorBusyUntil) {
+      if (!pressed) return true;
+      // Drop the boot and fall through to the fight. The work is lost rather
+      // than banked: half a kick is not a thing you can come back to, and
+      // banking it would let a bot chip a door down between engagements for
+      // free. It starts again from the top once the street is clear.
+      abandonDoorWork(world, e, state);
+      return false;
+    }
     state.doorBusyUntil = 0;
     finishDoorWork(world, e, state, now);
     return true;
@@ -2478,6 +2532,10 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // hopes, a bot takes it off its hinges — but only from the side it can't
     // simply unbolt, which is the same rule the player's prompt follows.
     if (world.bots.has(e.id) && !canWorkLockFrom(world, ahead, e.x, e.y)) {
+      // Not with something close enough to shoot at. No snub is needed and
+      // none is wanted: the refusal is a fact about right now, and the tick
+      // after the street is clear it should be back on the door.
+      if (pressed) return false;
       beginDoorWork(world, e, state, ahead, 'kick', now);
       return true;
     }
@@ -2493,6 +2551,9 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
         state.doorIgnoreUntil = now + DOOR_REENGAGE_MS;
         return false;
       }
+      // Drawing a bolt back takes DOOR_NPC_UNLOCK_MS, which is the same trap
+      // as the kick and gets the same answer.
+      if (pressed) return false;
       beginDoorWork(world, e, state, ahead, 'unlock', now);
       return true;
     }
@@ -4518,16 +4579,17 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
   // The tracker points at the nearest one *on the map*, so it turns a random
   // walk into a bearing to walk down.
   //
-  // Held, not merely carried, exactly as a player must hold it — a bot with
-  // the tracker out is a bot not holding a gun. It costs nothing here because
-  // there is nothing to shoot at; the moment `senseThreats` finds something,
-  // the fight branch puts a gun back in its hands.
+  // Carried is enough, the same as it is for a player now — so the bot no
+  // longer takes the thing out to read it. It used to set `activeSlot` to the
+  // tracker here, which was right while the readout needed a hand and is a bot
+  // walking the city holding a compass the moment it does not: `senseThreats`
+  // finding something is what put a gun back in its hands, and that is a
+  // perception tick later than the zombie seeing it.
   const bag = world.inventories.get(e.id);
-  const trackerSlot = bag ? utilitySlotOf(bag, 'zombieTracker') : -1;
-  if (bag && trackerSlot > 0 && bestScore <= -DANGER_MAX_DISTANCE + standoff) {
+  const hasTracker = bag ? bag.utilities.includes('zombieTracker') : false;
+  if (bag && hasTracker && bestScore <= -DANGER_MAX_DISTANCE + standoff) {
     const fix = nearestZombieBearing(world, e.x, e.y);
     if (fix) {
-      bag.activeSlot = trackerSlot;
       const reach = Math.min(fix.dist, BOT_PATROL_MAX);
       const x = clamp(e.x + Math.cos(fix.bearing) * reach, 70, WORLD_WIDTH - 70);
       const y = clamp(e.y + Math.sin(fix.bearing) * reach, 70, WORLD_HEIGHT - 70);
@@ -4690,13 +4752,122 @@ function gunnerTick(
  * walk of a short list rather than another spatial query — and it takes in
  * whatever the goggles felt through a wall as well as what was seen.
  */
-function nearestThreat(e: Entity, state: AiState): number {
+/**
+ * The nearest thing this entity is afraid of, or null when nothing is.
+ *
+ * `threatPoints` is already line-of-sight filtered and refreshed on the
+ * perception tick, so this is a walk of a short list rather than a query.
+ */
+function nearestThreatPoint(e: Entity, state: AiState): { x: number; y: number } | null {
+  let best: { x: number; y: number } | null = null;
   let closest = Infinity;
   for (const p of state.threatPoints) {
     const d = Math.hypot(p.x - e.x, p.y - e.y);
-    if (d < closest) closest = d;
+    if (d < closest) {
+      closest = d;
+      best = p;
+    }
   }
-  return closest;
+  return best;
+}
+
+function nearestThreat(e: Entity, state: AiState): number {
+  const p = nearestThreatPoint(e, state);
+  return p ? Math.hypot(p.x - e.x, p.y - e.y) : Infinity;
+}
+
+/** How far out the gun in this bot's hands is actually worth firing. */
+function botIdealRange(inv: Inventory): number {
+  const held = heldItem(inv);
+  const def = held ? ITEMS[held] : undefined;
+  const reach = def?.range ?? GUN_RANGE;
+  // Some guns only bite well inside their paper range — a shotgun at 340 is
+  // two pellets on target, and the launcher wants to be out of its own blast.
+  return Math.min(def?.botIdealRange ?? reach, reach);
+}
+
+/**
+ * Take the shot if there is one, from wherever the feet happen to be.
+ *
+ * Pulled out of the fight branch so a bot breaking contact can use it too.
+ * Aimed off `e.facing` rather than `state.heading`, which is the whole point:
+ * one is where the gun is pointing and the other is where the legs are going,
+ * and for an officer those are only the same thing while it stands still.
+ */
+function botTakeShot(
+  world: World,
+  e: Entity,
+  inv: Inventory,
+  threat: Entity,
+  now: number,
+): void {
+  const dx = threat.x - e.x;
+  const dy = threat.y - e.y;
+  if (Math.abs(angleDelta(e.facing, Math.atan2(dy, dx))) >= 0.2) return;
+  const held = heldItem(inv);
+  const def = held ? ITEMS[held] : undefined;
+  // Don't waste a launcher shell on something close enough to splash us.
+  if (def?.explosive === true && Math.hypot(dx, dy) < BLAST_RADIUS * 1.3) return;
+  if (Math.hypot(dx, dy) > botIdealRange(inv)) return;
+  // The launcher lands its shell on the target rather than at arm's length.
+  const at = def?.explosive ? { x: threat.x, y: threat.y } : undefined;
+  fireHeld(world, e, inv, e.facing, now, 1, at);
+}
+
+/**
+ * **The gun stays up while the legs do something else.**
+ *
+ * `step` ends by tying `e.facing` to `state.heading`, which is right for a
+ * civilian — somebody running for their life looks where they are going — and
+ * wrong for a bot. A bot stands in a player's slot, and a player sprinting
+ * away from something is still holding the mouse on it: nothing about driving
+ * a body makes you face your own footsteps. Called *after* `step`, so what it
+ * does is put the facing back where an officer would have kept it; the
+ * movement heading is left alone.
+ *
+ * The aim is the thing being shot at when there is one, and otherwise the
+ * nearest thing frightening enough to be running from — those are routinely
+ * different bodies, and only the first is worth pulling a trigger at.
+ */
+function botGunUpWhileMoving(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  zombie: Entity | undefined,
+  dt: number,
+  now: number,
+): void {
+  const at = zombie ?? nearestThreatPoint(e, state);
+  // Nothing to keep the gun on, so look where you are going after all. Without
+  // this the facing simply freezes, `step` having been told not to touch it.
+  if (!at) {
+    e.facing = state.heading;
+    return;
+  }
+  if (zombie) {
+    const want = longestGun(inv);
+    if (inv.activeSlot !== want) inv.activeSlot = want;
+  }
+  e.facing = turnToward(e.facing, Math.atan2(at.y - e.y, at.x - e.x), BOT_TURN_RATE * dt);
+  if (zombie) botTakeShot(world, e, inv, zombie, now);
+}
+
+/**
+ * Let go of a door handle without finishing the job.
+ *
+ * The claim has to go back with it. `doorBusyForOthers` would drop it on its
+ * own eventually — a claim carries a deadline for exactly this reason — but
+ * "eventually" is DOOR_CLAIM_GRACE_MS past the end of a kick nobody is making
+ * any more, and in the meantime the door reads as busy to everyone who could
+ * have opened it.
+ */
+function abandonDoorWork(world: World, e: Entity, state: AiState): void {
+  if (state.doorBusyUntil <= 0) return;
+  state.doorBusyUntil = 0;
+  releaseDoor(world, state.doorIndex, e.id);
+  state.doorIndex = -1;
+  state.doorAction = null;
 }
 
 /**
@@ -5171,6 +5342,15 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   const inHand = heldGunSlot(inv);
   if (inHand && inHand.ammo <= 0) inv.activeSlot = bestGun(inv).slot;
 
+  // What the gun is for, worked out before anything that moves the feet.
+  //
+  // It used to be looked up below the flight branches, which is what made
+  // running away and fighting mutually exclusive: a bot breaking contact had
+  // no idea what it was breaking contact *from*, so all it could do was point
+  // itself down the street it was running along.
+  const threat = state.targetId ? world.entities.get(state.targetId) : undefined;
+  const zombie = threat && threat.type === 'zombie' ? threat : undefined;
+
   // Shaken after being grabbed: get clear before thinking about anything else.
   //
   // This is the most dangerous moment a bot has — every grab it has already
@@ -5198,7 +5378,22 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
-      step(world, e, state, dodgeThreats(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
+      step(
+        world,
+        e,
+        state,
+        dodgeThreats(world, e, state, desired),
+        speed,
+        HUMAN_TURN_RATE,
+        dt,
+        now,
+        !botDropsTheGun,
+      );
+      // Backing off out of a grapple is still backing off with the gun up.
+      // Whatever had hold of you is right there and is the easiest shot an
+      // officer ever gets; turning your back on it was the old behaviour, and
+      // it is how the same zombie got a second grab.
+      if (!botDropsTheGun) botGunUpWhileMoving(world, e, state, inv, zombie, dt, now);
       return;
     }
   }
@@ -5208,9 +5403,10 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   // whatever it was walking toward untouched.
   if (doorTick(world, e, state, now, dt)) return;
 
-  const threat = state.targetId ? world.entities.get(state.targetId) : undefined;
-
-  if (threat && threat.type === 'zombie') {
+  if (zombie) {
+    // Narrowed: everything below this line wants the zombie specifically, not
+    // whatever `targetId` happened to be holding.
+    const threat = zombie;
     const dx = threat.x - e.x;
     const dy = threat.y - e.y;
     const dist = Math.hypot(dx, dy);
@@ -5289,7 +5485,30 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // Whatever is stood in the first hundred pixels of that line is gone
       // round rather than run at — the destination was scored on the danger
       // field, which is far too coarse to have noticed it.
-      step(world, e, state, dodgeThreats(world, e, state, desired), speed, HUMAN_TURN_RATE, dt, now);
+      step(
+        world,
+        e,
+        state,
+        dodgeThreats(world, e, state, desired),
+        speed,
+        HUMAN_TURN_RATE,
+        dt,
+        now,
+        !botDropsTheGun,
+      );
+      // **And a bolt is a kite, not a rout.**
+      //
+      // A bolt is the legs deciding to be somewhere else, and nothing about
+      // that decision asks the gun to come down or the officer to look away.
+      // The fight branch below has always known it — "backs off with the gun
+      // still up and the shot already fired that tick" — and there was never a
+      // reason for the *urgent* case to be the one that stops shooting. A bot
+      // stands in a player's slot, and a player sprinting out of arm's reach
+      // still has the mouse on the thing he is sprinting away from.
+      //
+      // Below the step rather than above it, because `step` ends by tying the
+      // facing to the legs and this is what unties them again.
+      if (!botDropsTheGun) botGunUpWhileMoving(world, e, state, inv, zombie, dt, now);
       return;
     }
 
@@ -5318,27 +5537,23 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
 
     // Swung rather than snapped. At the NPC officer's rate the barrel jumps
     // between targets, which reads as twitching rather than tracking.
-    state.heading = turnToward(state.heading, aim, BOT_TURN_RATE * dt);
+    //
+    // Swung from `e.facing` rather than from `state.heading`. Those are the
+    // same number on any tick that followed another fighting one, and they are
+    // not on the first tick after giving ground: `state.heading` is where the
+    // legs were going by then. Seeded from the legs, the gun snapped back down
+    // the street the bot had been running along and swung round again from
+    // there, which is a whole turn wasted at the worst possible moment.
+    state.heading = turnToward(e.facing, aim, BOT_TURN_RATE * dt);
     e.facing = state.heading;
 
-    const held = heldItem(inv);
-    const def = held ? ITEMS[held] : undefined;
-    const reach = def?.range ?? GUN_RANGE;
-    // Some guns only bite well inside their paper range — a shotgun at 340 is
-    // two pellets on target, and the launcher wants to be out of its own blast.
-    const ideal = Math.min(def?.botIdealRange ?? reach, reach);
+    const ideal = botIdealRange(inv);
 
     // Planting the heavy MG is worth more than anything else it could be
     // doing, and it roots the bot, so it comes before the footwork.
     const planted = mgTick(world, e, state, inv, dist, now);
 
-    if (Math.abs(angleDelta(state.heading, aim)) < 0.2) {
-      // Don't waste a launcher shell on something close enough to splash us.
-      const tooClose = def?.explosive === true && dist < BLAST_RADIUS * 1.3;
-      // The launcher lands its shell on the target rather than at arm's length.
-      const at = def?.explosive ? { x: threat.x, y: threat.y } : undefined;
-      if (dist <= ideal && !tooClose) fireHeld(world, e, inv, state.heading, now, 1, at);
-    }
+    botTakeShot(world, e, inv, threat, now);
 
     if (planted) return; // behind the gun you are an emplacement, not a person
 

@@ -515,6 +515,21 @@ export const GUN_LOOT: ItemId[] = weighted('gun');
 export const UTILITY_LOOT: ItemId[] = weighted('utility');
 
 /**
+ * Both tables end to end: one draw over everything a city can put on the floor.
+ *
+ * Concatenating rather than picking a table and then an item is what keeps the
+ * rarities honest across the two. Rolling a coin for gun-or-utility first would
+ * make the rarest gun as likely as the rarest utility even though there are
+ * half again as many utilities to spread the same coin over, and a bolt action
+ * no commoner than a shotgun relative to a vest. Here every entry in both
+ * weighted lists is one ticket, so an item is exactly as likely as its share of
+ * all the loot in the game.
+ *
+ * Rarity 0 stays out by construction, since neither table contains it.
+ */
+export const ALL_LOOT: ItemId[] = [...GUN_LOOT, ...UTILITY_LOOT];
+
+/**
  * The scarcest tier of a kind — everything sharing the lowest rarity weight
  * that still appears in the loot table at all.
  *

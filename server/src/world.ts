@@ -100,7 +100,13 @@ import {
   type OrientedBox,
 } from './geometry.js';
 import { generateMap } from './mapgen.js';
-import { dropDebugKit, heldItem, newInventory, spawnPickups } from './inventory.js';
+import {
+  dropDebugKit,
+  giveStartingItem,
+  heldItem,
+  newInventory,
+  spawnPickups,
+} from './inventory.js';
 import { NavGrid, type Waypoint } from './navgrid.js';
 import { DangerField } from './danger.js';
 import { OUTSIDE, RoomMap } from './rooms.js';
@@ -1781,6 +1787,7 @@ export function resetWorld(world: World): void {
     world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
     world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
     world.inventories.set(id, newInventory());
+    giveStartingItem(world, id, spawn.x, spawn.y);
     // A restart is a spawn: the heap comes with them to the new city. After
     // `spawnPickups` above, which clears the table.
     dropDebugKit(world, id, spawn.x, spawn.y);
@@ -2196,6 +2203,10 @@ function populate(world: World): void {
     world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
     world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
     world.bots.add(id);
+    // One random thing in the bag, the same as a player gets. It has to come
+    // after `world.bots.add` only in the sense that it must come after the
+    // inventory exists; the draw itself knows nothing about bots.
+    giveStartingItem(world, id, spawn.x, spawn.y);
   }
 
   // TESTING: one bot starts with the beacon so the whole sequence — pick a

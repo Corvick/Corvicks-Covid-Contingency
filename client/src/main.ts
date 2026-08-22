@@ -1860,7 +1860,7 @@ function render() {
     // Your own character never fades — it's always fully in view.
     const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;
-    drawEntity(ctx, s, isSelf, now, simpleEntities);
+    drawEntity(ctx, s, isSelf, now, simpleEntities, scale);
     // Flame licks over the top of the body, not under it.
     if (s.burning && !simpleEntities) drawBurning(ctx, s, now);
     // The tracker's arrow orbits you, pointing at the nearest one.

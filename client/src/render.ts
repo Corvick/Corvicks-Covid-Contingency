@@ -862,6 +862,30 @@ export function drawHandLinks(
  */
 export const ENTITY_DETAIL_SCALE = 0.5;
 
+/**
+ * A white ring round SWAT once everybody is a dot.
+ *
+ * `SWAT_COLOR` is `#1c1f26` against a road barely lighter than it, which is the
+ * whole point of them up close and useless at one dot per body: the four people
+ * a radio call was spent on are the only thing on screen that cannot be picked
+ * out. Every other kind of body is already its own colour — blue, green, red,
+ * grey — so this is the one that wants a *mark* rather than a shade.
+ *
+ * **Both figures are screen pixels, and that is what makes them worth having.**
+ * `lineWidth` and the radius are in world units under the camera transform, so a
+ * ring written down as 2 lands at 0.58px of screen at the fully zoomed-out 0.29
+ * and is a grey smudge on a black dot — the exact fault it exists to fix. They
+ * are divided by the scale instead, so the mark is the same size at every zoom
+ * this is drawn at, which is what `drawEntity` gained a `scale` for.
+ */
+const SIMPLE_RING_PX = 2;
+/**
+ * And a hair of daylight between the dot and the ring, or a white ring against
+ * near-black gear reads as one fatter pale dot rather than as a body with a mark
+ * on it.
+ */
+const SIMPLE_RING_GAP_PX = 1;
+
 /** Which shoulder the butt goes into. +1 is the officer's right. */
 const RIFLE_SIDE = 1;
 
@@ -918,6 +942,12 @@ export function drawEntity(
   isSelf: boolean,
   now = 0,
   simple = false,
+  /**
+   * World-to-screen, so the `simple` path can put a mark on a body in screen
+   * pixels rather than world ones. Only the dot branch reads it — everything
+   * below is drawn in world units on purpose and must stay that way.
+   */
+  scale = 1,
 ): void {
   // A dog is a zombie everywhere in the simulation and nothing like one on
   // screen: four legs, a neck, and a body drawn along its length rather than a
@@ -972,8 +1002,32 @@ export function drawEntity(
     ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
+    // Black gear on a black road, at four pixels across. Ringed rather than
+    // recoloured: the colour is what says SWAT the rest of the time, and a dot
+    // painted some other shade at this zoom alone would make the one squad you
+    // called in the one body that changes colour as you scroll the wheel.
+    //
+    // The stroke sits wholly *outside* the dot — centred a half-width past the
+    // gap — so the body keeps its own size and its own colour, and the mark is
+    // read as something around it. Not gated on `e.npc`: SWAT are always the
+    // ones a call sent, and there is nothing else wearing that colour.
+    //
+    // It stays on through a turn, unlike the helmet. The reddening tell is
+    // carried by `color` and the ring is carried by who they are — and one of
+    // your own going over is the last body on the map you want to lose track
+    // of.
+    if (e.swat) {
+      const w = SIMPLE_RING_PX / scale;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, radius + SIMPLE_RING_GAP_PX / scale + w / 2, 0, Math.PI * 2);
+      ctx.lineWidth = w;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+    }
     if (isSelf) {
-      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
+      ctx.lineWidth = SIMPLE_RING_PX / scale;
       ctx.strokeStyle = '#ffffff';
       ctx.stroke();
     }

@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.7.1';
+export const GAME_VERSION = '0.9.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -1951,9 +1951,19 @@ export const BOT_GIVE_GROUND_PROBE = 130;
 /** How hard it prefers "directly away" over "roomiest" while doing it. */
 export const BOT_GIVE_GROUND_BIAS = 110;
 /**
- * Backing off with the gun still up. Slower than a walk on purpose — you do
- * not get to retreat at full pace *and* keep shooting, and at three quarters a
- * zombie still closes, so kiting buys time rather than winning outright.
+ * Backing off with the gun still up, *inside the fight branch*. Slower than a
+ * walk on purpose — holding a range you have chosen should not also be free —
+ * and at three quarters a zombie still closes, so kiting buys time rather than
+ * winning outright.
+ *
+ * **A bolt is deliberately exempt from it, and that is not an oversight.** A
+ * bolt keeps the gun on the thing now too, so on the face of it the same rule
+ * should apply — but a bolt is the one case where the officer has already lost
+ * the argument about range and is trying to break contact outright. Three
+ * quarters of a sprint is inside the band a zombie runs at, which is exactly
+ * the "a bolt that cannot outrun what it is bolting from" fault already
+ * recorded against a winded bot. So the bolt keeps its pace and gains the gun;
+ * what it pays instead is the sprint reserve it was already paying.
  */
 export const BOT_KITE_SPEED_MUL = 0.75;
 /**
@@ -2297,8 +2307,20 @@ export const DOOR_CLOSE_MS = 750;
  *  to clear, nudging them out, before giving up and staying open. */
 export const DOOR_BLOCKED_WAIT_MS = 2500;
 export const DOOR_STEP_ASIDE_SPEED = 70;
-export const DOOR_LOCK_MIN_MS = 1000;
-export const DOOR_LOCK_MAX_MS = 2000;
+/**
+ * Throwing a bolt across, and drawing it back.
+ *
+ * **Halved, and the bolt is the one bit of door work that should be quick.**
+ * Opening a door is a handle, a hinge and a body going through the gap, and
+ * DOOR_OPEN_MIN_MS is a civilian fumbling at it in a panic — that slowness is
+ * the drama. A bolt is one movement of one hand, and everything that waits on
+ * it is waiting for nothing: a room full of people cannot get out while one of
+ * them takes two seconds over the lock, `doorBusyForOthers` holds the door
+ * against all of them for the whole of it, and nav plans routes as though the
+ * door were open, so the rest of the room walks into it meanwhile.
+ */
+export const DOOR_LOCK_MIN_MS = 500;
+export const DOOR_LOCK_MAX_MS = 1000;
 
 /** Share of wanderers who shut the door behind them. */
 export const DOOR_CLOSE_BEHIND_CHANCE = 0.75;
@@ -2336,8 +2358,14 @@ export const DOOR_BEG_LINES = [
   'Please, it’s coming!',
 ];
 
-/** Somebody indoors can throw the bolt back, but it takes them a moment. */
-export const DOOR_NPC_UNLOCK_MS = 2000;
+/**
+ * Somebody indoors can throw the bolt back, and it takes them a moment.
+ *
+ * This is the one that keeps a locked city from seizing up, so it is also the
+ * one that most wanted halving: at two seconds a bolted door was a two-second
+ * stop for every single person who wanted through it, one after another.
+ */
+export const DOOR_NPC_UNLOCK_MS = 1000;
 /** Grace period before someone will touch a door they just finished with. */
 export const DOOR_REENGAGE_MS = 6000;
 /** Seeing a zombie sends most people straight for the nearest door to shut it. */
@@ -2376,8 +2404,17 @@ export const DOOR_DEFY_LINES = [
 export const DOOR_USE_RANGE = 54;
 export const DOOR_PLAYER_OPEN_MS = 1000;
 export const DOOR_PLAYER_CLOSE_MS = 1000;
-export const DOOR_PLAYER_LOCK_MS = 1500;
-export const DOOR_PLAYER_UNLOCK_MS = 1000;
+/**
+ * The player holding E at a bolt. Halved with everybody else's.
+ *
+ * **`TAP_MAX_MS` (220) is the floor these cannot go under**, and it is nearer
+ * than it looks. The press arms the *hold* action and a release inside that
+ * window performs the tap instead, so a hold short enough to be mistaken for a
+ * tap is a control that does the wrong thing under the fingers. At 500 there
+ * is more than twice the tap window to get clear of, which is the margin.
+ */
+export const DOOR_PLAYER_LOCK_MS = 750;
+export const DOOR_PLAYER_UNLOCK_MS = 500;
 /** Deliberately slow — kicking one in is a commitment. */
 export const DOOR_KICK_MS = 4200;
 

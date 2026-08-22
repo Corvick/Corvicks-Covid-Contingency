@@ -3355,6 +3355,128 @@ costing the outbreak, where breaking off sooner bought nothing and cost plenty.
   the shield alongside the heavy MG, so `lootWanted` now declines to walk to
   either while holding the other rather than making the trip to be turned away.
 
+#### A bot never has to face where it is running
+
+Two reports, one root: *"make sure Bot player officers can always kite and
+don't ever NEED to face where they are running"*, and *"Bot player officers
+stick to kicking a door down even if a zombie is approaching them"*. Both are
+the same mistake in different clothes — a bot that has committed to one thing
+had no way to be an officer at the same time.
+
+**`e.facing` is the gun and `state.heading` is the legs, and for an officer they
+are only the same thing while it stands still.** `step` ended by tying them
+together, which is right for a civilian — somebody running for their life looks
+where they are going — and wrong for a bot, which stands in a player's slot, and
+a player sprinting away from something still has the mouse on it.
+
+- **A bolt is a kite now, not a rout.** It keeps the gun on the target, takes
+  the shot, and runs on the same scored escape line at the same speed as
+  before. The fight branch has always worked this way — "backs off with the gun
+  still up and the shot already fired that tick" — and there was never a reason
+  for the *urgent* case to be the one that stops shooting.
+- **It has to be a parameter on `step`, not a fix-up after it**, and that cost a
+  whole measurement to learn. Overwriting `e.facing` after the call only ever
+  survives to the next one, so a bot correcting its aim by `BOT_TURN_RATE * dt`
+  was dragged back the other way just as fast: measured that way it sat a flat
+  **14.3° off its own feet and got the gun onto the zombie on 0 of 998 ticks** —
+  which reads exactly like the change doing nothing. `keepFacing` says the caller
+  owns the facing, and only the two bot flight branches pass it.
+- **The shot is one function now** (`botTakeShot`), called from the fight branch,
+  the bolt and the post-grapple flight. Written three times it would have drifted
+  into a bolt that fires launcher shells at its own feet.
+- **The fight branch swings the aim from `e.facing`, not from `state.heading`.**
+  Those are the same number on any tick following another fighting one, and they
+  are not on the first tick after giving ground — by then `state.heading` is
+  where the legs were going. Seeded from the legs, the gun snapped back down the
+  street the bot had been running along and swung round again from there, which
+  is a whole turn thrown away at the worst possible moment.
+- **`BOT_KITE_SPEED_MUL` (0.75) still does not apply to a bolt**, and that is
+  deliberate rather than missed. Holding a range you chose should not be free;
+  breaking contact is the case where the officer has already lost that argument.
+  Three quarters of a sprint is inside the band a zombie runs at, which is the
+  "a bolt that cannot outrun what it is bolting from" fault already recorded
+  against a winded bot. The bolt keeps its pace and gains the gun; what it pays
+  is the sprint reserve it was already paying.
+- **The post-grapple flight gets it too.** Whatever had hold of you is right
+  there and is the easiest shot an officer ever gets, and turning your back on it
+  is how the same zombie got a second grab.
+
+**And a door is a job you can put down.** `DOOR_KICK_MS` is 4.2 seconds, and
+`doorTick` is called *above* the fight branch with a mid-handle case that returns
+before it — so a bot that started a kick could not change its mind, whatever
+walked up behind it.
+
+- **`pressed` is `nearestThreat < BOT_SAFE_DIST`**, which is already the figure
+  that means "I am not clear of it" everywhere else a bot uses one — the bolt
+  hysteresis, the charge-rifle gate, the dog rule. A second number here would be
+  a second opinion about the same question.
+- **It refuses to *start* slow work as well as dropping work in progress.**
+  Otherwise the kick simply begins again on the next tick and nothing changes.
+- **Opening a door is deliberately still allowed**, because for a bot it is
+  instant — and a door is very often the way *out* of the fight rather than a
+  distraction from it. Only the kick and the unlock are refused, which are the
+  two that take time.
+- **The claim goes back with the boot** (`releaseDoor`, in `doors.ts`, which owns
+  door state). `doorBusyForOthers` would drop it eventually, a claim carrying a
+  deadline for exactly this reason, but "eventually" is `DOOR_CLAIM_GRACE_MS`
+  past the end of a kick nobody is making any more, and meanwhile the door reads
+  as busy to everyone who could have opened it.
+- **Half a kick is not banked.** It starts again from the top once the street is
+  clear, which is both simpler and right: banking it would let a bot chip a door
+  down for free between engagements.
+- **Civilians get none of it.** Hearing something and carrying on anyway is most
+  of what makes a civilian a civilian, and a civilian at a handle has no gun to
+  reach for.
+
+`server/botkite.ts` is the harness — headless, no socket, no port, so it leaves
+a game on 8080 alone. Both behaviours run in one process and
+`setBotDropsTheGun` is the gate, kept rather than deleted because the control is
+the entire value of the run. Six staged runs each way, 180 ticks apiece:
+
+| | OLD | NEW |
+|---|---|---|
+| bolting ticks measured | 1066 | 1070 |
+| gun off the zombie, median | 170.7° | **0.0°** |
+| gun off its own footsteps, median | 0.0° | 174.3° |
+| gun on target (within firing tolerance) | 0/1066 | **1039/1070** |
+| shots fired while bolting | 0 | **31** |
+| ground made, median | 561px | 728px |
+| door: let go of the kick early | 0/6 | **6/6** |
+| door: held on for | 4.23s of 4.20s | **0.13s** |
+| door: claim handed back | 6/6 | 6/6 |
+| door: shots fired in that window | 0 | **16** |
+
+**"0.0° off its own footsteps" is the old behaviour stated exactly** — the gun
+was welded to the legs — and 0/1066 on target is what that cost. Read the ground
+made as "no slower" rather than as an improvement: the bolt's speed and bearing
+are untouched by construction and six unseeded cities is not a sample.
+
+Three things about measuring this were the rig lying before they were ever the
+code, and the first is new:
+
+- **The harness clock has to start where the world's does**, and this is not the
+  usual version of that warning. `resetWorld` takes no `now` and stamps every
+  fresh `AiState` with `Date.now()` — so a rig starting its own clock at 10000
+  leaves `nextSenseAt` about fifty-six years in the future and the bot never
+  perceives anything at all. Nothing errors: it reads as a bot standing beside a
+  zombie doing nothing, which is indistinguishable from the bug under test.
+  Measured that way the rig reported **0 bolting ticks in both modes**.
+- **"It let go of the door" is not the same claim as "it let go early."** The
+  kick simply finishing satisfies the first just as well, which is why both modes
+  first read 6/6 at a median of 4.20s of 4.20s. The reading has to be against the
+  deadline.
+- **The bot is staged on open ground rather than at the door it is kicking**,
+  which looks wrong and is not: the mid-handle branch reads a clock and nothing
+  else. Planted on the slab, the zombie lands wherever the far side of that door
+  happens to be — as often as not inside the building — and the bot could not see
+  the thing it was supposed to react to. Measured that way it saw it on **4 of 6**
+  runs one way and **0 of 6** the other, which is the city talking rather than the
+  code. `sawIt` is on the report so that cannot quietly happen again.
+- And the chaser is **unkillable**. Left mortal it is shot dead by the only mode
+  that can shoot, that run ends early, and the ground made reads 441px against
+  604px — which looks like the kite escaping *worse* when all it says is that the
+  run was shorter.
+
 #### An officer listens before it opens a door
 
 A shut door is a room you cannot see into, and walking through one is how a bot
@@ -3458,6 +3580,61 @@ the dog, and all three are built the cheap way on purpose.
 - **The vignette is one cached image.** Built at viewport size and blitted,
   under the HUD and over the fog, so it frames the world without dimming
   anything you have to read.
+
+#### A dot has to be tellable from the road
+
+Reported as *"swat don't really stand out on the mini map… when you are all the
+way zoomed out and everyone is just dots"*, and the numbers say it flatly:
+`SWAT_COLOR` is `#1c1f26` and `GROUND_COLOR` is `#1b1d20`, which is **(1, 2, 6)
+apart per channel**. Below `ENTITY_DETAIL_SCALE` a body is one filled arc of its
+own colour, so at the fully zoomed-out 0.29 a SWAT dot puts down **0 pixels you
+can tell from the road it is standing on**, against 44-52 for every other kind
+at 95-212/255 of contrast. They were not hard to see; they were not visible.
+
+- **A mark, not a colour.** Repainting the dot was the obvious fix and is the
+  wrong one: the colour is what says SWAT everywhere else, and a body that
+  changes colour as you scroll the wheel is a body you have to learn twice. The
+  ring is drawn wholly *outside* the dot — centred a half-width past the gap —
+  so the body keeps its own size and its own colour. Measured: the centre pixel
+  is still `#1c1f26` on 4 of 4 of a stack.
+- **`SIMPLE_RING_PX` and `SIMPLE_RING_GAP_PX` are screen pixels, and that is the
+  whole of why `drawEntity` gained a `scale`.** `lineWidth` and the radius are in
+  world units under the camera transform, so a ring written down as 2 lands at
+  0.58px of screen at 0.29 — a grey smudge on a black dot, which is the exact
+  fault it exists to fix. Measured at both ends of the range this drawing is
+  ever used at: at 0.292 (a full 5000x3700 city) the dot edge is 4.1px, the mark
+  5.1-6.7 and the outer edge 7.4; at 0.486 (the smallest city, just under the
+  detail threshold) 6.8, 7.9-9.6 and 10.1. **Gap 1.0 → 1.1px and thickness 1.6 →
+  1.7px across a 1.67x change of scale** — constant, which is the claim. The
+  ring's *radius* does grow, because it hugs a dot that grows.
+- **The gap is not decoration.** A white stroke laid straight onto near-black
+  gear reads as one fatter pale dot rather than as a body with a mark on it.
+- **It stays on through a turn, unlike the helmet.** The reddening tell is
+  carried by `color` and the ring is carried by who they are, and one of your own
+  going over is the last body on the map you want to lose track of.
+- **Only SWAT.** Every other kind already differs from the road by 95-212 of one
+  channel, so a second ringed thing would cost the first one its meaning.
+  Soldiers are the nearest call at 95 and are still plainly green.
+- **It costs nothing, because there are never many.** A radio sends one van and
+  `ITEM_CITY_CAP` holds radios at 2, so this is a stroke on a handful of bodies
+  against four hundred filled arcs.
+- **Only a spectator ever sees it.** `CAMERA_ZOOM` is 2.0 and `DOG_CAMERA_ZOOM`
+  1.5, so no seat in the game reaches `ENTITY_DETAIL_SCALE`; `simple` is where
+  the ring lives, and the full drawing measured **0 white pixels** either way.
+
+`client/swatring.html` is the rig — a canvas and nothing else, no socket and no
+port, so it leaves a game on 8080 alone. It draws through the real `drawEntity`
+on the real `GROUND_COLOR` at the real fully zoomed-out scale and reads the
+pixels back, because "does it stand out" is a claim about pixels and a
+screenshot cannot settle it — least of all from a browser pane that is not
+compositing, where rAF is throttled to nothing and `getImageData` is the only
+thing that works. It lives under `client/src`, so unlike the harnesses at
+`server/`'s root it is covered by `npx tsc --noEmit`.
+
+*One of its figures was the rig lying before it was ever the code.* "Visible
+pixels that are not white" looked like the right before-and-after and is not: it
+counts the ring's own antialiased skirt as body, and read 36 where the body puts
+down 0. What the body puts down has to be counted *inside the dot's own radius*.
 
 ### The dog is baked, not drawn
 
@@ -4543,6 +4720,116 @@ The escort branch sits **below** the officer's fighting and **above** its
 patrol. An escort that breaks off a firefight to close the last twenty pixels
 to your shoulder is worse than no escort at all.
 
+### Everybody in a player slot starts with something
+
+One random item in the bag of every **blue** officer — a player and a bot alike,
+since they are the same figure in the same slot. The city's grey officers, the
+SWAT out of a van and the soldiers off a helicopter get nothing.
+
+- **It follows rarity, and `ALL_LOOT` is how.** `GUN_LOOT` and `UTILITY_LOOT`
+  concatenated, so every entry in both weighted lists is one ticket and an item
+  is exactly as likely as its share of all the loot in the game. Rolling a coin
+  for gun-or-utility first and *then* an item was the obvious version and is
+  wrong: it would make the rarest gun as likely as the rarest utility even
+  though there are half again as many utilities spreading the same coin. Rarity
+  0 stays out by construction, since neither table contains it — no grenade
+  launcher, no second beacon.
+- **It ignores the map's limits, deliberately.** `ITEM_CITY_CAP` is a ceiling on
+  what is lying on the *floor* — the radio, where three vans in a round was the
+  complaint — and this is not on the floor. It does not take a loot spot from a
+  building either, nor satisfy the every-gun floor: both count placed pickups,
+  and the pickup made here is collected on the line it is created and is gone
+  before `spawnPickups` ever runs.
+- **It is granted by collecting a real pickup rather than by writing into the
+  bag**, which looks roundabout and is the only version that cannot rot.
+  `collect` is where a duplicate gun becomes ammunition, a second pistol becomes
+  `dual`, a sling or a pack becomes a worn flag, a lozenge is spent on the spot
+  and the shield and the heavy MG refuse each other. Written out again, the
+  first of those to change would quietly stop applying to whatever everybody
+  starts the round holding.
+- **A draw that cannot be taken is re-rolled**, the same as a capped one is in
+  `spawnPickups`, and in practice that is exactly one item. `applyUtility`
+  refuses an ammo box to anybody holding nothing but a pistol, and a bag at the
+  start of a round is nothing but a pistol — so the ammo box is the one entry
+  nobody can ever start with, measured over 20,000 draws. That is correct rather
+  than a gap: a box of rounds for a gun you do not have is the one draw that
+  would have been no draw at all. Without the re-roll it is 4% of officers
+  starting empty-handed, which is indistinguishable from the feature not working.
+- **Three spawn paths, one call**: `populate` for bots, `resetWorld`'s respawn
+  loop for players on a restart, and `spawnPlayer` for somebody joining a round
+  already under way.
+
+`server/startkit.ts` is the harness. Measured over 4000 draws and 40 cities of
+five bots each: **200/200 bots came away with something**, 0 draws came to
+nothing, 0 rarity-0 items, 0 `loot-start-` pickups left on any map, 0 city caps
+broken on the floor, and 23 of the 24 items in the table turned up. The observed
+frequencies track the table: boltRifle **14.8%** against 14.1%, machineGun 13.8%
+against 12.9%, shotgun 11.2% against 10.6%, sniper **1.2%** against 1.2%,
+cureGun 1.1% against 1.2%.
+
+*Two of those figures were the rig lying before they were ever the code*, and
+both are about reading a bag:
+
+- **`inv.guns[0]` is the first *lootable* slot, not the pistol.** The pistol is
+  `activeSlot === 0` and lives outside the array entirely — see `heldItem`.
+  Started at index 1 on the assumption that slot 0 was the sidearm, the rig read
+  every gun draw as an empty bag: **38% of bots "got something"** and the
+  distribution came back with no gun in it at all, which looks exactly like guns
+  being refused.
+- **Some items leave no slot behind, and one leaves two.** The riot shield sets
+  `shield` *and* takes a utility slot, so counting both put it at 10.8% against
+  a table share of 2.4%; the gunsling, the backpack and the rally lozenge are
+  worn or spent and leave nothing in `utilities` at all, so a bot that drew one
+  read as a bot that drew nothing — 12.5% of them. "Did anything land in this
+  bag" is a comparison against a bag that was never given anything, plus a
+  separate look at the rally charge, and the *distribution* is read off what
+  `giveStartingItem` says it granted rather than inferred from the bag at all.
+
+### The tracker runs on being carried
+
+`zombieTracker` used to need to be in your hand, and the cost of that was meant
+to be the point — consulting it means not holding a gun. In practice it made the
+item something you took out, read and put away, which is the opposite of what a
+compass is for: a bearing to the nearest zombie is for knowing which way trouble
+is *while you are doing something else*, and the one moment you most want it is
+the one moment you least want to be holding it instead of a rifle. The slot it
+takes is the cost now, the same trade thermal goggles and the beacon handset
+already make.
+
+- **The hole in the fog does not widen.** It is a bearing and nothing else, the
+  same single number it always was; nothing about *where* anybody is comes down
+  the wire for it. What changed is when the number is non-null.
+- **The bot no longer takes it out to read it.** `botPatrolTarget` set
+  `activeSlot` to the tracker's slot, which was right while the readout needed a
+  hand and is a bot walking the city holding a compass the moment it does not —
+  `senseThreats` finding something is what put a gun back in its hands, and that
+  is a perception tick later than the zombie seeing it.
+- Measured: null with no tracker in the bag, and the **same bearing** with one
+  carried and a pistol in hand as with it held.
+
+### Throwing a bolt is quick now
+
+`DOOR_LOCK_MIN_MS`/`MAX` 1-2s → **0.5-1s**, `DOOR_NPC_UNLOCK_MS` 2s → **1s**,
+`DOOR_PLAYER_LOCK_MS` 1.5s → **0.75s**, `DOOR_PLAYER_UNLOCK_MS` 1s → **0.5s**.
+Opening and closing are untouched.
+
+- **The bolt is the one bit of door work that should be quick.** Opening is a
+  handle, a hinge and a body through the gap, and `DOOR_OPEN_MIN_MS` is a
+  civilian fumbling at it in a panic — that slowness is the drama. A bolt is one
+  movement of one hand, and everything waiting on it is waiting for nothing: a
+  room full of people cannot get out while one of them takes two seconds over
+  the lock, `doorBusyForOthers` holds the door against all of them for the whole
+  of it, and nav plans routes as though the door were open, so the rest of the
+  room walks into it meanwhile.
+- **`DOOR_NPC_UNLOCK_MS` is the one that most wanted it.** It is what keeps a
+  locked city from seizing up, and at two seconds a bolted door was a two-second
+  stop for every single person who wanted through it, one after another.
+- **`TAP_MAX_MS` (220) is the floor the player's two cannot go under**, and it
+  is nearer than it looks. The press arms the *hold* action and a release inside
+  that window performs the tap instead, so a hold short enough to be mistaken
+  for a tap is a control that does the wrong thing under the fingers. At 500 there
+  is 2.3x the tap window to get clear of.
+
 ### The utility belt
 
 Most of these are passive: carrying one is the whole of using it, and the cost
@@ -4550,9 +4837,10 @@ is the slot. `combatBoots` (quicker, cheaper on the legs) · `backpack` (+2
 utility slots) · `gunsling` (+1 gun slot) · `binoculars` (pulls the camera back
 like a scope, and widens `sightRadiusFor` to match — without both you'd be
 looking at fog) · `zombieTracker` (an arrow orbiting you, pointing at the
-nearest one; the only thing in the game that sees past the fog, which is why
-it must be *in hand*) · `grenade` (three to a bundle, counting down in one slot
-the way kevlar does, thrown through the launcher's own shell).
+nearest one; the only thing in the game that sees past the fog, and it runs on
+being carried rather than held — see **The tracker runs on being carried**) ·
+`grenade` (three to a bundle, counting down in one slot the way kevlar does,
+thrown through the launcher's own shell).
 
 **The tracker reaches the whole map.** `TRACKER_RANGE` is derived from the
 city's diagonal rather than written down (it was 1600), so it cannot fall short
@@ -4562,15 +4850,14 @@ way the outbreak is — and a compass that only works when you can nearly see th
 thing is not a compass. It also matters for the *endgame*: victory is
 `zombies === 0`, so the last few have to be hunted down across the whole city.
 
-**A bot uses it too, and pays the same price for it.** `botPatrolTarget` reads
-`nearestZombieBearing` and walks down it, but *only* when no patrol sample
-found anything near — which is the one case the danger field cannot cover. The
-field is sampled at fourteen points inside `BOT_PATROL_MAX`, so once the
-nearest zombie is further off than that, every sample reads the same maximum
-and the choice collapses to a random walk. The bot holds the tracker to consult
-it, exactly as a player must; that costs it nothing at the time because there
-is nothing to shoot at, and the fight branch puts a gun back in its hands the
-moment `senseThreats` finds something. Read on re-pick, never per tick —
+**A bot uses it too.** `botPatrolTarget` reads `nearestZombieBearing` and walks
+down it, but *only* when no patrol sample found anything near — which is the one
+case the danger field cannot cover. The field is sampled at fourteen points
+inside `BOT_PATROL_MAX`, so once the nearest zombie is further off than that,
+every sample reads the same maximum and the choice collapses to a random walk.
+It used to set `activeSlot` to the tracker to consult it, exactly as a player
+had to; carrying is enough now for both of them, so it keeps a gun in its hands
+while it reads the bearing. Read on re-pick, never per tick —
 `nearestZombieBearing` walks every entity.
 
 **`zapMine` goes down where you stand.** It arms after `ZAP_ARM_MS` so you can

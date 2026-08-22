@@ -123,6 +123,19 @@ export function claimDoor(world: World, index: number, byId: string, until: numb
   door.busyUntil = until;
 }
 
+/**
+ * Give it back before the work is done — somebody walked away from the handle.
+ *
+ * Only ever your own claim: a lapsed one is `doorBusyForOthers`’s business and
+ * taking somebody else’s here would be a way to shove them off a door.
+ */
+export function releaseDoor(world: World, index: number, byId: string): void {
+  const door = index >= 0 ? world.doors[index] : undefined;
+  if (!door || door.busyBy !== byId) return;
+  door.busyBy = null;
+  door.busyUntil = 0;
+}
+
 /** Every door slab near a point, shut or not. */
 /**
  * Dedup by door index rather than by hashing.

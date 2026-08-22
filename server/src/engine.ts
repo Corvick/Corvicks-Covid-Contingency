@@ -30,6 +30,7 @@ import {
   gunSlots,
   utilitySlots,
   dropDebugKit,
+  giveStartingItem,
 } from './inventory.js';
 import { ITEMS } from '../../shared/items.js';
 import { grenadesToWire, helicoptersToWire, requestBeacon, smokesToWire, updateAirSupport } from './heli.js';
@@ -222,6 +223,8 @@ function spawnPlayer(id: string, asDog = false): void {
   world.stamina.set(id, STAMINA_MAX);
   world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
   world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
+  // Everybody in a player slot opens the round holding one random thing.
+  giveStartingItem(world, id, spawn.x, spawn.y);
   // TESTING: the debug heap follows whoever spawns rather than being laid into
   // the city. No-ops unless TEST_DROP_ALL_ITEMS.
   dropDebugKit(world, id, spawn.x, spawn.y);
