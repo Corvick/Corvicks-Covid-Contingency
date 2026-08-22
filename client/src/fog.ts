@@ -96,9 +96,6 @@ const LOW_BASE_RAYS = 44;
  * the whole circle the wrong way round — which fills almost everything and
  * reads on screen as the fog switching off. This is the fog dead spot.
  */
-/** Bushes that get tangent rays cast at them. The park has far more. */
-const MAX_BUSH_OCCLUDERS = 22;
-
 function norm(a: number): number {
   const twoPi = Math.PI * 2;
   let x = (a + Math.PI) % twoPi;
@@ -134,19 +131,17 @@ export function visibilityPolygon(
    * The dog's acid, as circles — the lobes of every cloud on screen.
    *
    * **Its own list rather than more entries in `bushes`, and the reason is the
-   * cap.** `MAX_BUSH_OCCLUDERS` exists because the park is a thicket and every
-   * bush costs four rays; dropping the far ones changes nothing, because inside
-   * a thicket they are behind the near ones anyway. Acid is not like that.
-   * There are single figures of it, it is the whole point of an ability
-   * somebody spent a cooldown on, and a cloud that lost seven-of-seven lobes to
-   * a hedge would stop occluding outright — worse, one that lost three of them
-   * would occlude in stripes. So these are added after the cap and are never
-   * subject to it.
+   * standing-in-it exemption.** A bush you are inside does not blind you — you
+   * see out and others cannot see in, which is what makes hiding in one work. A
+   * cloud of acid is the opposite of hiding, so a viewer in one of these is
+   * blinded outright and its lobes go on occluding at point-blank range. That
+   * rule is the whole of why the two lists cannot be one; the client's other
+   * half of saying so is `ACID_INSIDE_SIGHT` — see `fogRadius`.
    *
-   * **Nor do they carry the standing-in-it exemption.** A bush you are inside
-   * does not blind you; a cloud of acid is the opposite of hiding and very much
-   * does. The client's half of saying so is `ACID_INSIDE_SIGHT` — see
-   * `fogRadius` — and these rays clamping to the near lobe's far edge.
+   * It used to be the cap as well: the nearest-22 rule would happily throw a
+   * cloud away in a park, and a cloud that lost three of seven lobes would
+   * occlude in stripes. There is no cap on bushes any more, so that half of the
+   * reasoning is history — but the exemption above is not, and it is enough.
    */
   acid: Bush[] = [],
 ): Point[] {
@@ -177,24 +172,29 @@ export function visibilityPolygon(
 
   // A bush you're standing in doesn't blind you — you see out, others can't see in.
   //
-  // Capped to the nearest few. The park is a dense thicket, and every bush
-  // costs four rays that are then each tested against every other occluder —
-  // standing in it put the ray count into the thousands, which is what made
-  // moving through the trees stutter. The ones nearest you shape the
-  // silhouette; distant ones inside a thicket are behind those anyway.
+  // **Every bush inside the clip occludes, and there is deliberately no cap on
+  // how many.** There used to be one — the nearest 22 — and it is what made the
+  // fog wrong in the park rather than merely coarse. A park holds 90-105 bushes
+  // inside a dog's clip, so three quarters of them were dropped, and a dropped
+  // bush is not a blurrier bush: it is a transparent one. The polygon lit
+  // ground straight through the trees and the shadows that remained belonged to
+  // the handful nearest the viewer, which is what "fog not rendering with many
+  // trees" looks like from the outside.
+  //
+  // The cap predates the near-first early-out below, which is what has since
+  // made the occluder count cheap: `bushOrder` is sorted by near edge and every
+  // ray stops at the first bush it cannot beat, so foliage standing behind what
+  // has already been hit costs one compare. Measured in the thickest part of
+  // four parks, one build, alternating — dropping the cap costs a dog 0.29 →
+  // 0.46ms per rebuild and a scoped officer, the dearest viewer in the game,
+  // 0.71 → 0.99ms. That is paid at most 12.5 times a second, and it buys a
+  // polygon that lights 0.6-2.9% more ground than it should against 62-499%.
   const nearBushes: Bush[] = [];
   for (const b of bushes) {
     const d = Math.hypot(b.x - px, b.y - py);
     if (d <= b.r) continue;
     if (Math.abs(b.x - px) <= clipW + b.r && Math.abs(b.y - py) <= clipH + b.r) nearBushes.push(b);
   }
-  if (nearBushes.length > MAX_BUSH_OCCLUDERS) {
-    nearBushes.sort(
-      (a, b) => Math.hypot(a.x - px, a.y - py) - Math.hypot(b.x - px, b.y - py),
-    );
-    nearBushes.length = MAX_BUSH_OCCLUDERS;
-  }
-  // After the cap, deliberately — see the parameter.
   for (const c of acid) {
     if (Math.abs(c.x - px) <= clipW + c.r && Math.abs(c.y - py) <= clipH + c.r) nearBushes.push(c);
   }

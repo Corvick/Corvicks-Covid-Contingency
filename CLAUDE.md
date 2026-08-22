@@ -3639,6 +3639,64 @@ flat shapes, and the two findings out of it are worth more than the picture:
   entities in view there than at the busiest spot (12 vs 31), and the
   bush-refuge scan is 0.37ms across every hider on the map. All three were
   plausible and all three were wrong.
+  - **That 0.30ms was cheap because it was wrong**, and the figure is history.
+    It was taken while `MAX_BUSH_OCCLUDERS` was dropping three quarters of the
+    park on the floor — see the third fog fault under **Known open issue**. The
+    park is now the dearest place to stand rather than the cheapest: a dog pays
+    0.46ms there and a scoped officer 0.99ms, which is still a fraction of a
+    frame and is what a park honestly costs.
+
+- **The fog's per-frame cost is the blit, not the polygon — and the polygon's
+  point count does not enter into it.** `fogpoly` on the HUD is the visibility
+  polygon and it is cached, so it reads 0.00 standing still; what is paid every
+  frame regardless is clearing and refilling the mask, filling the cached path
+  through a `blur()` filter, and blowing the half-res mask up to the backbuffer.
+  Measured at the real mask size: the path fill is **0.04ms and flat in vertex
+  count** (0.042ms at 208 points, 0.043ms at 552 — the blur is area-bound), and
+  the blit was 1.04ms against 0.25ms with smoothing off. So the blit is off now.
+  It is visually free because the mask is already blurred 4.5px before it is
+  upscaled 2x: over a whole 1920x1080 frame of park fog, `'high'` against off
+  differs by **0.28/255 of alpha on average, 8/255 at worst, 0% of pixels over
+  8**. Anything that wants the fog cheaper should go after those three and not
+  after the polygon.
+  - **In Firefox that one flag is worth four milliseconds and eight frames a
+    second**, against the 0.8ms Chromium says. Measured by flipping it live
+    mid-round from one spot on a park path — the only honest way, the map not
+    being seeded: `'high'` gives **fog 10.0 · render 28.0 · 34fps**, off gives
+    **fog 6.0 · render 23.0 · 42fps**.
+  - **The 37fps park report was Firefox, and Chrome could not reproduce it over
+    several generated parks.** Every phase was inflated together — `map 7.0 ·
+    effects 3.0 · fog 11.0 · hud 7.0`, against ~1.5ms for the whole scene and
+    0.3ms for the HUD's DOM in Chromium. A uniform 5-10x on every phase is the
+    browser's canvas, not any one phase being wrong. **Quote which engine a
+    frame figure came from**; the two disagree most on exactly the operations
+    this game leans on (`ctx.filter` and `imageSmoothingQuality`), and Chromium
+    understates what they cost by about 4x.
+
+## The target browser is Chrome
+
+Decided when the 37fps park report turned out to be Firefox-only and Chrome
+could not reproduce it over several generated parks. **Test in Chrome; do not
+spend time making frame figures good in anything else.** The game has core
+features still missing, and multi-browser performance work is not what that time
+should buy.
+
+- **It is a testing rule, not a compatibility one.** Nothing here is
+  Chrome-specific and Firefox plays perfectly well — it is slower, and that is
+  now somebody's recommendation to switch rather than a bug to chase.
+- **Anything that came out of the Firefox chase and was worth keeping is
+  already in**, so the decision costs nothing already paid for. The fog blit's
+  smoothing is the one real fix out of it — 0.8ms in Chrome, 4ms and eight
+  frames a second in Firefox — and it was found only because Firefox charges
+  4x for that class of operation and so made it visible. Worth remembering that
+  a slow engine is a magnifying glass even when it is not the target.
+- **`map` at 8-9ms was the next Firefox lead and it was dropped there.** For the
+  record, since it will look like an obvious hotspot to anybody reading
+  `drawGround`: it fills the *whole world*, 5000x3700, twice — once solid and
+  once with the grime pattern. Chromium clips that to the screen for free, which
+  is why the grime measures 0.09ms there. Whether Firefox does was never
+  settled. Do not "fix" it on the strength of how it reads; in Chrome there is
+  nothing there to fix.
 
 - **Everything expensive is budgeted or cached.** AI perception runs at 10Hz
   staggered per entity, not per tick; bush scanning and refuge choice are cached
@@ -3950,6 +4008,74 @@ Reported as *"everything but the floor and some fog stop rendering"* and
 - Measured in isolation, viewer inside the occluder: **0.0% of the circle
   visible → 95-100%**, while the open-ground controls are untouched at 80.3%
   and 66.9% — occlusion still works exactly as it did for walls you are not in.
+
+**A third fault, in the other direction: the polygon was capped at twenty-two
+bushes and a park holds a hundred.** Reported as *"fog not rendering with many
+trees"*, over a screenshot of a dog on the park path.
+
+- **A dropped occluder is not a blurrier one, it is a transparent one.**
+  `MAX_BUSH_OCCLUDERS` kept the nearest 22 and threw the rest away — out of the
+  tangent rays *and* out of the list every ray is tested against. So three
+  quarters of a park did not exist as far as the fog was concerned: the polygon
+  lit straight through the trees, and the only shadows left were the very wide
+  ones cast by the handful of bushes nearest the viewer. That is the starburst
+  of black wedges in the screenshot, and it is why it reads as the fog being
+  broken rather than as trees not casting shadows.
+- **The client was the half that was lying.** `hasLineOfSight` walks every bush
+  in the query rect with no cap of any kind, so the server had been refusing to
+  send anything out there all along. What is on screen is therefore a park lit
+  to the horizon with **`2 drawn`** on the HUD — lit ground with nothing in it,
+  which is what "the fog is not rendering" actually looks like from the inside.
+  Anything that lights more ground than the server populates produces an empty
+  street rather than an error; this is the third time that has been the shape of
+  it, after the sniper's radius and the binoculars'.
+- **The cap predates the near-first early-out and was never re-measured against
+  it.** Being an occluder is cheap now: `bushOrder` is sorted by near edge and
+  every ray stops at the first bush it cannot beat, so foliage standing behind
+  what has already been hit costs one compare. Only *silhouetting* is quadratic
+  — four rays each, and every ray is tested against every occluder. One cap was
+  being paid on both, and only one of them had earned it.
+- **Splitting the two was built and thrown away.** Every bush occluding with
+  only the nearest 22 silhouetted fixes the leak completely and costs nothing at
+  all, the ray count being unchanged — but the shadow edges then land on
+  whichever of the 120 base rays happens to cross a bush, and that three-degree
+  quantisation ate **4-23%** of genuinely visible ground. Correct but blocky, in
+  exchange for a saving that turned out not to be needed. Swept: 22 or 34
+  silhouettes leaves 23% of the ground wrongly dark, 48 or 64 leaves 13-14%, and
+  it only comes good at 96 — which is every bush a park has, so the cap was
+  doing nothing by then anyway.
+- **So there is no cap.** Measured in the thickest part of four parks, one
+  build, alternating: a dog pays **0.29 → 0.46ms** per rebuild, and a scoped
+  officer — the dearest viewer in the game, where the clip and the radius grow
+  together — **0.71 → 0.99ms**, worst 1.9ms. It is paid at most 12.5 times a
+  second, and a scope cost 2.93ms median before the occluder clip went in.
+
+| lit, as a share of the sight circle | on the path | in the thicket | a street (control) |
+|---|---|---|---|
+| before | 26.6-44.9% | 4.3-47.5% | 19.3-32.1% |
+| after | 11.1-21.0% | 0.7-21.5% | 19.3-32.1% |
+| **truth** | 10.9-20.9% | 0.7-21.1% | 19.2-32.1% |
+
+`server/fogpark.ts` is the harness — headless, no socket, no port, so it leaves
+a game on 8080 alone. It imports the client's own `fog.ts`, stands a dog at the
+real `DOG_SIGHT_RADIUS` and clip, and compares the polygon against a brute-force
+cast over every occluder inside that clip. Three things about it are worth not
+rediscovering:
+
+- **It has to be measured per bearing, not by eye.** "The fog is missing" and
+  "the fog is in the wrong place" are indistinguishable in a screenshot, and the
+  second is what this was. The two figures that come out are ground lit that
+  should be dark and ground dark that should be lit, and they move independently
+   — the discarded split fixed the first and made the second much worse.
+- **The street is the control and it is load-bearing.** With 0-7 bushes in the
+  clip the leak is 0.0-0.5% *before and after*, which is what says the polygon
+  was only ever wrong about foliage. Without it, "the fog changed" is satisfied
+  just as well by having broken walls.
+- **It reads the filled path, arcs included, not the vertices.** `drawFog`
+  stitches two unobstructed neighbours with a true arc of the sight circle under
+  conditions of its own, so a rig that joins the vertices with chords
+  understates the lit area everywhere the real thing curved — which would show
+  up as a leak the code does not have.
 
 **The watchdog cries wolf, and it is worth knowing before trusting it.** Its
 second test is `|fraction - lastFraction| > 0.3`, which fires on the perfectly

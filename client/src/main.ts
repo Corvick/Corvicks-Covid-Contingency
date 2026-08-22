@@ -1521,9 +1521,9 @@ function visibilityFor(me: EntityState, now: number): FogPoint[] {
     // either, and it inherits the near-first ordering and the viewport clip
     // that make the polygon affordable at all.
     //
-    // Its own argument rather than more entries in the bush list, because
-    // `MAX_BUSH_OCCLUDERS` would happily throw a cloud away in the park; see
-    // the parameter.
+    // Its own argument rather than more entries in the bush list, because a
+    // bush you are standing in does not blind you and a cloud of acid very much
+    // does; see the parameter.
     //
     // **A dog is handed none of it.** It is a zombie, and zombies see through
     // their own acid on the server — lighting less ground here than the server
@@ -1660,9 +1660,53 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
     fogCtx.globalCompositeOperation = 'source-over';
   }
 
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
+  /**
+   * **Smoothed off, because by this point there is nothing left to smooth.**
+   *
+   * The mask is filled through `blur(FOG_BLUR_PX * m)` — 4.5px at the half
+   * resolution it is held at, unconditionally, with no graphics setting that
+   * turns it off. So by the time it is blown up 2x, neighbouring source pixels
+   * already differ by almost nothing and a bicubic resample lands where
+   * nearest-neighbour does. Measured over a whole 1920x1080 frame of real park
+   * fog, `'high'` against off: **0.28/255 of alpha difference on average, 8/255
+   * at the very worst, and 0% of pixels differing by more than 8.** That is not
+   * a visible change; it is the blur having already done the resampling's job.
+   *
+   * What it buys is the dearest single operation in `drawFog`. The polygon fill
+   * through the blur filter is 0.04ms and does not care how many points the
+   * polygon has — 208 or 552, the same figure. This one blit was 1.04ms against
+   * 0.25ms smoothed off in Chromium, where the fog was never a problem.
+   *
+   * **In Firefox, which is where it was, it is worth four milliseconds and
+   * eight frames a second.** Measured by flipping the flag live mid-round from
+   * one park path — the only honest way, since the map is not seeded and two
+   * rounds are not a comparison: `'high'` gives **fog 10.0, render 28.0, 34fps**
+   * and off gives **fog 6.0, render 23.0, 42fps**. Chromium's own figures
+   * understate this by roughly 4x, which is the general rule for this game's
+   * two engines and the reason a frame figure has to say which one it came
+   * from.
+   *
+   * **The `save`/`restore` stays whichever way the flag is set**, and used not
+   * to be there at all. `imageSmoothingQuality` is context state, nothing put
+   * it back, and every `save`/`restore` pair elsewhere preserved it rather than
+   * clearing it — so the first fogged frame set the main context to `'high'`
+   * for the session and every `drawImage` after it paid: the dog's ~20 baked
+   * sprite parts every frame (`drawSprite`), the corner map, the vignette, the
+   * acid murk, the helicopter layer and the grime pattern. The cost of one flag
+   * in `drawFog` landed on `map`, `entities` and `hud`, which is why every
+   * phase inflated together and why turning the fog off made the *whole* frame
+   * cheap rather than just the fog.
+   *
+   * Same shape as the `ctx.restore()`-without-`save()` in `dogHeadHalves`, and
+   * the same lesson: shared context state set and not put back does not fail
+   * loudly, and the damage shows up a long way from its cause. **A bench of
+   * `drawFog` alone cannot see it at all** — its own cost is ~2ms and always
+   * was; what was expensive is everything it drew *before* and *after*.
+   */
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
   ctx.drawImage(fogCanvas, 0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+  ctx.restore();
 }
 
 /**
@@ -1755,7 +1799,6 @@ function render() {
     panSpectator(frameDelta);
   }
   const { view, scale } = cameraFor(me);
-
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#0b0d10';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
