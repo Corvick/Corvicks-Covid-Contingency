@@ -549,6 +549,30 @@ export function rarestOf(kind: ItemKind): ItemId[] {
   return ids.filter((id) => ITEMS[id].rarity === floor);
 }
 
+/**
+ * Everything at or below a rarity ceiling, still weighted by rarity.
+ *
+ * The scarcity gradient through the corner complex is a *ceiling* that comes
+ * down room by room rather than a set of hand-picked tiers, so the shallow
+ * rooms hold ordinary loot and the deep ones hold only what is genuinely hard
+ * to find — and anything added to the registry lands in the right place on
+ * that gradient the day it exists, without anybody remembering to list it.
+ *
+ * Weighted rather than flat, because inside a tier the odds should still be
+ * the odds: a ceiling of 5 is "no bolt actions, no machine guns, no shotguns",
+ * not "every rare item is now equally likely".
+ *
+ * Rarity 0 is excluded, exactly as `weighted` excludes it — those are placed
+ * by their own roll and are a quota rather than a tier. Never returns an empty
+ * table: a ceiling below the scarcest thing in the game falls back to that
+ * scarcest tier, so a caller can walk the ceiling down as far as it likes.
+ */
+export function lootAtMost(maxRarity: number): ItemId[] {
+  const table = ALL_LOOT.filter((id) => ITEMS[id].rarity <= maxRarity);
+  if (table.length > 0) return table;
+  return [...rarestOf('gun'), ...rarestOf('utility')];
+}
+
 export function isGun(id: ItemId): boolean {
   return ITEMS[id].kind === 'gun';
 }

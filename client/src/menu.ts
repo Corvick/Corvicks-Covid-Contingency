@@ -13,8 +13,17 @@ import {
   WORLD_BASE_WIDTH,
   WORLD_BASE_HEIGHT,
   LOBBY_CODE_LENGTH,
+  RENDER_SCALES,
+  VIEWPORT_WIDTH,
+  VIEWPORT_HEIGHT,
   citySizeFor,
 } from '../../shared/constants.js';
+
+/** The backbuffer a render scale asks for, which is what the row is named after. */
+const resolutionAt = (scale: number): { w: number; h: number } => ({
+  w: Math.round(VIEWPORT_WIDTH * scale),
+  h: Math.round(VIEWPORT_HEIGHT * scale),
+});
 
 /**
  * The front end: title, gamertag, create or browse, lobby. It owns no game
@@ -562,12 +571,14 @@ export function setupMenu(hooks: MenuHooks): Menu {
    * its own value; there is no Apply, because there is nothing to apply.
    */
   const optRows = {
+    resolution: el<HTMLButtonElement>('opt-resolution'),
     smooth: el<HTMLButtonElement>('opt-smooth'),
     fog: el<HTMLButtonElement>('opt-fog'),
     noFog: el<HTMLButtonElement>('opt-nofog'),
     ground: el<HTMLButtonElement>('opt-ground'),
     vignette: el<HTMLButtonElement>('opt-vignette'),
     blood: el<HTMLButtonElement>('opt-blood'),
+    dogLimits: el<HTMLButtonElement>('opt-doglimits'),
   };
 
   const drawOptions = (): void => {
@@ -577,6 +588,12 @@ export function setupMenu(hooks: MenuHooks): Menu {
       val.textContent = text;
       val.classList.toggle('off', !on);
     };
+    // Named in pixels rather than as a multiplier, because "1600x900" is a
+    // thing a player already knows the size of and "0.83" is not. The number
+    // shown is the backbuffer, which is exactly what the row changes — the
+    // amount of *world* on screen is the same at every setting.
+    const { w, h } = resolutionAt(settings.renderScale);
+    set(optRows.resolution, `${w}x${h}`, settings.renderScale >= 1);
     set(optRows.smooth, settings.smoothMotion ? 'ON' : 'OFF', settings.smoothMotion);
     set(optRows.fog, settings.fogDetail === 'full' ? 'FULL' : 'LOW', settings.fogDetail === 'full');
     // Reads as the *state of the fog*, not of the switch: OFF is the notable
@@ -585,12 +602,27 @@ export function setupMenu(hooks: MenuHooks): Menu {
     set(optRows.ground, settings.groundDetail ? 'ON' : 'OFF', settings.groundDetail);
     set(optRows.vignette, settings.vignette ? 'ON' : 'OFF', settings.vignette);
     set(optRows.blood, settings.blood ? 'ON' : 'OFF', settings.blood);
+    // Reads as the state of the *limits*, not of the switch — OFF is the
+    // notable condition here, the same wording `NO FOG` uses for the same
+    // reason: green is spent on the thing worth noticing.
+    set(optRows.dogLimits, settings.dogLimits ? 'ON' : 'OFF', !settings.dogLimits);
 
     // The presets double as a readout: whichever one you are already on says so.
     el('btn-opt-low').classList.toggle('dim', isLow());
     el('btn-opt-default').classList.toggle('dim', isDefault());
   };
 
+  // Cycles like every other row here rather than being a dropdown: six values
+  // is a short enough list to walk, and one control that behaves the same way
+  // as the five below it is worth more than a second kind of widget.
+  optRows.resolution.addEventListener('click', () => {
+    const at = RENDER_SCALES.indexOf(settings.renderScale as (typeof RENDER_SCALES)[number]);
+    // A stored value from an older build, or one that has been edited out of
+    // the list, lands on -1 and comes back at the start rather than nowhere.
+    const next = RENDER_SCALES[(at + 1) % RENDER_SCALES.length];
+    applySettings({ renderScale: next });
+    drawOptions();
+  });
   optRows.smooth.addEventListener('click', () => {
     applySettings({ smoothMotion: !settings.smoothMotion });
     drawOptions();
@@ -613,6 +645,26 @@ export function setupMenu(hooks: MenuHooks): Menu {
   });
   optRows.blood.addEventListener('click', () => {
     applySettings({ blood: !settings.blood });
+    drawOptions();
+  });
+  /**
+   * **The one row here that is sent anywhere.**
+   *
+   * Every other setting on this screen is about how this machine draws the
+   * world and takes effect on the next frame with nothing to plumb through —
+   * that is what makes "no two players can see a different game" true of the
+   * rest of them. A cooldown and an unlock requirement are rules about the
+   * game, so this one has to reach the server, which is free to refuse it
+   * outright: see `World.dogAbilitiesFree`.
+   *
+   * It is also resent — from `main.ts`'s `onStart`, not from here — because
+   * `resetWorld` clears the server's copy on every fresh round, and a player
+   * who left this on before clicking START would otherwise find it silently
+   * off again.
+   */
+  optRows.dogLimits.addEventListener('click', () => {
+    applySettings({ dogLimits: !settings.dogLimits });
+    hooks.send({ type: 'testDogAbilities', free: !settings.dogLimits });
     drawOptions();
   });
 

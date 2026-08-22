@@ -7,8 +7,7 @@ import {
   GUN_COOLDOWN_MS,
   GUNSHOT_ALERT_RADIUS,
   ZOMBIE_LAST_SEEN_MS,
-  RETALIATE_CHANCE,
-  RETALIATE_COMMIT_MS,
+  ZOMBIE_PROVOKED_MS,
   PLAYER_ONE_SHOT_KILL,
   MUZZLE_OFFSET_MUL,
   WINDOW_BULLET_DAMAGE,
@@ -43,7 +42,7 @@ import {
   GRAPPLED_COOLDOWN_MUL,
 } from '../../shared/constants.js';
 import { throwGrenade } from './heli.js';
-import { staggerDog } from './dog.js';
+import { dogDamageMul, staggerDog } from './dog.js';
 import { ITEMS, isGun, type ItemDef } from '../../shared/items.js';
 import { angleDelta, segmentCircleT, segmentRectT, turnToward } from './geometry.js';
 import {
@@ -68,8 +67,26 @@ import { placeMine } from './mines.js';
  * Gunfire is loud: every zombie in earshot investigates the shooter's position
  * whether or not it can see them. This is what stops a bush from being a
  * perfect firing blind.
+ *
+ * **It is a nudge, not a grudge**, and the difference is deliberate. Anyone in
+ * earshot with nothing better to do wanders toward the bang, and a meal in
+ * front of them still wins — hearing a shot is not the same as being shot, and
+ * a 900px radius that *committed* everything in it would pull whole
+ * neighbourhoods onto one officer every time a trigger was pulled. The
+ * commitment is in `hit`, on the body that actually took the round.
+ *
+ * What it must not do is undo one. Somebody already provoked by a different
+ * officer keeps that grudge — otherwise a teammate firing nearby quietly
+ * re-aims the zombie you are being charged by, which is the same back-and-forth
+ * from the other end.
  */
-function alertZombies(world: World, x: number, y: number, now: number): void {
+function alertZombies(
+  world: World,
+  shooterId: string,
+  x: number,
+  y: number,
+  now: number,
+): void {
   const heard = world.entityGrid.queryCircle(x, y, GUNSHOT_ALERT_RADIUS, new Set<Entity>());
   for (const zombie of heard) {
     if (zombie.type !== 'zombie') continue;
@@ -83,12 +100,37 @@ function alertZombies(world: World, x: number, y: number, now: number): void {
     }
     // Don't pull a zombie off a target it can actually see.
     if (state.targetId) continue;
+    // Nor off somebody else who has already shot it.
+    if (
+      !zombieForgetsTheShooter &&
+      state.provokedBy !== null &&
+      state.provokedBy !== shooterId &&
+      now < state.provokedUntil
+    ) {
+      continue;
+    }
     state.lastSeenX = x;
     state.lastSeenY = y;
     state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
     state.path = null;
     state.nextPathAt = 0;
   }
+}
+
+/**
+ * Put back the 45% roll and the 1.6s perception delay that the grudge
+ * replaced, so `server/provoke.ts` has something to measure against. Read by
+ * `senseTarget` as well, which is why it is exported from here rather than
+ * kept in `ai.ts` — `ai.ts` imports this module and not the other way round.
+ */
+let zombieForgetsTheShooter = false;
+
+export function setZombieForgetsTheShooter(v: boolean): void {
+  zombieForgetsTheShooter = v;
+}
+
+export function forgetsTheShooter(): boolean {
+  return zombieForgetsTheShooter;
 }
 
 const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
@@ -243,7 +285,7 @@ export function fire(
     hit: struck.length > 0,
   });
 
-  alertZombies(world, shooter.x, shooter.y, now);
+  alertZombies(world, shooter.id, shooter.x, shooter.y, now);
   // Anything on the water takes off at the noise, and at the round going past.
   scareDucks(world, shooter.x, shooter.y, now);
   scareDucks(world, endX, endY, now);
@@ -275,7 +317,16 @@ function hit(
   const headshot = def?.headshot === true && off <= HEADSHOT_ARC;
 
   const rolled = lo + Math.floor(Math.random() * (hi - lo + 1));
-  const damage = oneShot || headshot ? victim.health : Math.round(rolled * damageMul);
+  // **A dog tearing itself open takes a tenth.** Two seconds rooted in the open
+  // is the whole vulnerability of a four-minute ability, and without the
+  // reduction the answer to it is "shoot it while it stands still" — it would
+  // never once complete in front of anybody worth using it on. Applied to the
+  // roll rather than folded into `damageMul`, which is the *weapon's* business
+  // and is passed in by the caller. A headshot and the one-shot test still
+  // bypass it, exactly as they bypass everything else.
+  const armour = dogDamageMul(world, victim.id);
+  const damage =
+    oneShot || headshot ? victim.health : Math.round(rolled * damageMul * armour);
   victim.health -= damage;
 
   if (victim.health > 0) {
@@ -312,21 +363,62 @@ function hit(
       state.slowUntil = Math.max(state.slowUntil, now + slowMs);
       state.slowMul = Math.min(state.slowMul || 1, def?.slowMul ?? SHOT_SLOW_MULTIPLIER);
 
-      if (Math.random() < RETALIATE_CHANCE) {
+      /**
+       * **Being shot is a commitment.**
+       *
+       * It used to be a 45% roll for a 1.6s delay on the next perception tick,
+       * and both halves of that were wrong. The roll was made *per round that
+       * landed*, so a burst re-decided the zombie several times a second; and a
+       * delayed perception tick is not a decision, it is a pause before the old
+       * decision is made again — 1.6s is exactly the "approaches me for one
+       * second and then changes its mind" that was reported.
+       *
+       * The grudge is latched to the **first** shooter. Another officer landing
+       * rounds on it meanwhile gets the flinch and the stagger and nothing else
+       * — with three people firing, "commit to the one that shot at them
+       * originally" is only meaningful if later shooters cannot take it over.
+       */
+      if (zombieForgetsTheShooter) {
+        // The old behaviour, for the harness only: a coin toss per round that
+        // landed, and a pause rather than a decision.
+        const RETALIATE_CHANCE = 0.45;
+        const RETALIATE_COMMIT_MS = 1600;
+        if (Math.random() < RETALIATE_CHANCE) {
+          state.lastSeenX = shooter.x;
+          state.lastSeenY = shooter.y;
+          state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
+          state.targetId = null;
+          state.path = null;
+          state.nextPathAt = 0;
+          state.nextSenseAt = now + RETALIATE_COMMIT_MS;
+        } else if (!state.targetId) {
+          state.lastSeenX = shooter.x;
+          state.lastSeenY = shooter.y;
+          state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
+          state.path = null;
+          state.nextPathAt = 0;
+        }
+        return;
+      }
+
+      const held = state.provokedBy !== null && now < state.provokedUntil;
+      if (!held) state.provokedBy = shooter.id;
+      if (state.provokedBy === shooter.id) {
+        state.provokedUntil = now + ZOMBIE_PROVOKED_MS;
         state.lastSeenX = shooter.x;
         state.lastSeenY = shooter.y;
-        state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
-        state.targetId = null;
+        // The memory has to outlive its usual nine seconds, or the walk to the
+        // spot expires under the grudge that is still standing.
+        state.lastSeenUntil = state.provokedUntil;
         state.path = null;
         state.nextPathAt = 0;
-        // Commit briefly so the next perception tick doesn't undo it.
-        state.nextSenseAt = now + RETALIATE_COMMIT_MS;
-      } else if (!state.targetId) {
-        state.lastSeenX = shooter.x;
-        state.lastSeenY = shooter.y;
-        state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
-        state.path = null;
-        state.nextPathAt = 0;
+        if (state.targetId !== shooter.id) state.targetId = null;
+        // Look again *now* rather than in a moment. The old code pushed the next
+        // perception tick away to protect the decision from being undone;
+        // `senseTarget` protects it at the source now, so an immediate look is
+        // free and is what lets a zombie shot at arm's length turn and take the
+        // shooter on the very next tick.
+        state.nextSenseAt = 0;
       }
     }
     return;

@@ -26,6 +26,7 @@ import {
   resetWorld,
   rebuildEntityGrid,
   spawnDog,
+  killEntity,
   makeEntity,
   newAiState,
   hasLineOfSight,
@@ -33,9 +34,11 @@ import {
   type Entity,
   type World,
 } from './src/world.js';
-import { computeFrozen, updateAi } from './src/ai.js';
+import { computeFrozen, setBotIgnoresAcid, updateAi } from './src/ai.js';
+import { newInventory } from './src/inventory.js';
 import { startDogAbility, updateDogs, dogHudFor } from './src/dog.js';
 import { updateAcid } from './src/acid.js';
+import { bouncesOff } from './src/heli.js';
 import { acidLobes, inAcidLobes } from '../shared/acidshape.js';
 import {
   ACID_BLIND_LINE,
@@ -46,8 +49,13 @@ import {
   ACID_LOBE_COUNT,
   ACID_IMPACT_RADIUS,
   ACID_SLOW_MUL,
+  BOT_ACID_CLEAR,
+  DOG_DEATH_MS,
+  DOG_BIRTH_MS,
   DOG_SPIT_COOLDOWN_MS,
   DOG_SPIT_RANGE,
+  DOG_SPIT_UNLOCK_AT,
+  DOG_ROAR_MS,
   DOG_SPIT_TRAVEL_MS,
   HUMAN_WALK_SPEED,
   TICK_RATE,
@@ -73,17 +81,74 @@ interface Rig {
   body(id: string, type: 'human' | 'officer' | 'zombie', x: number, y: number): Entity;
 }
 
-function rig(withAi = false): Rig {
+/**
+ * Somewhere a gobbet can be thrown `reach` east of without hitting anything.
+ *
+ * Sampled with **`bouncesOff` itself**, not with `nav.isBlocked`: those are not
+ * the same set — a shut door is solid to a thrown thing and is deliberately not
+ * in the nav grid — and a lane cleared by the wrong predicate is a lane with a
+ * door in it, which is the bounce firing in the one test that assumes it will
+ * not.
+ */
+function openThrow(world: World, reach: number): { x: number; y: number } {
+  for (let i = 0; i < 6000; i++) {
+    const x = 80 + Math.random() * Math.max(1, world.map.width - reach - 160);
+    const y = 80 + Math.random() * (world.map.height - 160);
+    if (!world.nav.isReachable(x, y)) continue;
+    let clear = true;
+    for (let d = 0; d <= reach && clear; d += 6) clear = !bouncesOff(world, x + d, y);
+    if (clear) return { x, y };
+  }
+  return { x: 2000, y: 1500 };
+}
+
+/** Somewhere walkable, well clear of a point, for a control that has to walk. */
+function walkableNear(
+  world: World,
+  x: number,
+  y: number,
+  min: number,
+  max: number,
+): { x: number; y: number } {
+  for (let i = 0; i < 4000; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const d = min + Math.random() * (max - min);
+    const px = x + Math.cos(a) * d;
+    const py = y + Math.sin(a) * d;
+    if (px < 80 || py < 80 || px > world.map.width - 80 || py > world.map.height - 80) continue;
+    if (world.nav.isBlocked(px, py) || !world.nav.isReachable(px, py)) continue;
+    return { x: px, y: py };
+  }
+  return { x: x + max, y };
+}
+
+function rig(withAi = false, unlocked = true): Rig {
   const world = createWorld();
   resetWorld(world);
   world.dogs.add(DOG);
   world.playerIds.add(DOG);
   spawnDog(world, DOG);
+  // **The acid is earned now**, so every rig that is about the acid rather than
+  // about the gate has to have earned it — otherwise `spit()` is refused and
+  // each of those checks passes or fails on the wrong thing entirely.
+  // `dogTurned` is the running total and nothing spends it; `dogConversions` is
+  // the roar's balance and is deliberately left at nought, so the roar's own
+  // checks still see a dog with nothing banked.
+  if (unlocked) world.dogTurned.set(DOG, DOG_SPIT_UNLOCK_AT);
   const dog = world.entities.get(DOG)!;
-  // Out of the way of the city's own outbreak, and on ground the staged bodies
-  // can be placed around.
-  dog.x = 2000;
-  dog.y = 1500;
+  // **Open ground with a clear throw east of it**, found rather than assumed.
+  //
+  // This used to be a fixed (2000, 1500), and that was safe only while a gobbet
+  // passed through walls: now that it *bounces*, a spot that happens to be in a
+  // shop or against a party wall on this city sends the thing back past the dog
+  // and every check that stages a body at the crosshair fails. Measured that
+  // way the failures moved from run to run — one run lost the splash tests,
+  // the next lost "it lands where the crosshair is" with the cloud 465px off —
+  // which is the harness reporting the city rather than the code, and is the
+  // trap this repo has recorded against a fixed staging spot several times now.
+  const spot = openThrow(world, DOG_SPIT_RANGE + 80);
+  dog.x = spot.x;
+  dog.y = spot.y;
   world.commands.set(DOG, {
     input: { up: false, down: false, left: false, right: false },
     aim: 0,
@@ -110,7 +175,7 @@ function rig(withAi = false): Rig {
       const frozen = computeFrozen(world);
       updateDogs(world, TICK_MS / 1000, this.clock);
       if (withAi) updateAi(world, this.clock, TICK_MS / 1000, frozen);
-      updateAcid(world, this.clock);
+      updateAcid(world, this.clock, TICK_MS / 1000);
     },
     run(n: number): void {
       for (let i = 0; i < n; i++) this.tick();
@@ -559,7 +624,15 @@ function testSplash(): void {
   const landing = { x: r.dog.x + 300, y: r.dog.y };
   const hit = r.body('hit', 'human', landing.x + 10, landing.y);
   const near = r.body('near', 'human', landing.x + ACID_CLOUD_RADIUS - 12, landing.y);
-  const clear = r.body('clear', 'human', landing.x + 900, landing.y);
+  // **The control has to be stood on ground it can actually walk on**, and it
+  // used to be dropped at a flat `landing.x + 900`. The rig now stands the dog
+  // on open ground it *found*, and clears only the throw east of it — 900px
+  // past the cloud is well outside that and lands inside a shop often enough to
+  // matter. Measured, one run in three had the control civilian covering 0px
+  // and failing, which reads as the blinding leaking onto somebody it never
+  // touched rather than as a body parked in a wall.
+  const spare = walkableNear(r.world, landing.x, landing.y, 700, 900);
+  const clear = r.body('clear', 'human', spare.x, spare.y);
 
   r.aim(landing.x, landing.y);
   r.spit();
@@ -692,7 +765,341 @@ function testRefusals(): void {
   check('nor does a paused one', r4.spit() === 'refused');
 }
 
+// ------------------------------------------------------------- the unlock
+
+/**
+ * **It is earned, and the roar cannot take it back.**
+ *
+ * That second half is the one worth a rig. Both abilities read a conversion
+ * tally, and the roar *spends* its one — so if the gate were on the same
+ * counter, a dog would turn fifteen people, open the hexagon, roar, and watch
+ * it lock itself again with fifteen to go. `dogTurned` against
+ * `dogConversions` is what separates them, and the control is that roaring
+ * plainly does empty the roar's own badge in the same run.
+ */
+function testUnlock(): void {
+  console.log('\nthe acid is earned');
+  const r = rig(false, false);
+  r.aim(r.dog.x + 200, r.dog.y);
+
+  check('a fresh dog cannot spit at all', r.spit() === 'refused');
+  let bar = dogHudFor(r.world, DOG, r.clock)!.abilities;
+  check('and the hexagon says how many are left', bar[1]?.locked === DOG_SPIT_UNLOCK_AT,
+    `${bar[1]?.locked}`);
+
+  r.world.dogTurned.set(DOG, DOG_SPIT_UNLOCK_AT - 1);
+  check('one short is still refused', r.spit() === 'refused');
+  bar = dogHudFor(r.world, DOG, r.clock)!.abilities;
+  check('and the hexagon counts down', bar[1]?.locked === 1, `${bar[1]?.locked}`);
+
+  r.world.dogTurned.set(DOG, DOG_SPIT_UNLOCK_AT);
+  bar = dogHudFor(r.world, DOG, r.clock)!.abilities;
+  check('at the threshold the hexagon opens', bar[1]?.locked === 0);
+  check('and the key is taken', r.spit() === 'spat');
+
+  // The roar must not be able to shut it again.
+  const r2 = rig(false, false);
+  r2.aim(r2.dog.x + 200, r2.dog.y);
+  r2.world.dogTurned.set(DOG, DOG_SPIT_UNLOCK_AT);
+  r2.world.dogConversions.set(DOG, DOG_SPIT_UNLOCK_AT);
+  check('unlocked before the roar', r2.spit() === 'spat');
+  // Past the spit's own cooldown, and then roar the banked charges away.
+  r2.run(Math.ceil((DOG_SPIT_COOLDOWN_MS + 200) / TICK_MS));
+  check('the roar starts', startDogAbility(r2.world, DOG, 0, r2.clock) === 'roared');
+  r2.run(Math.ceil((DOG_ROAR_MS + 200) / TICK_MS));
+  const after = dogHudFor(r2.world, DOG, r2.clock)!.abilities;
+  check('and spends its own badge', after[0]?.charges === 0, `${after[0]?.charges}`);
+  check('but the acid stays unlocked', after[1]?.locked === 0, `${after[1]?.locked}`);
+  check('and can still be thrown', r2.spit() === 'spat');
+}
+
+// ------------------------------------------------------------- the bounce
+
+/**
+ * **A gobbet comes off a wall rather than through it.**
+ *
+ * Staged against a wall the rig *finds* rather than one it assumes: the map is
+ * not seeded, and a fixed spot is a corridor on some cities and open road on
+ * others. The claim is two things at once and both need saying — that it does
+ * not end up on the far side of the wall, and that it does not simply stop
+ * dead at it, because "stopped at the wall" would satisfy a naive
+ * did-it-get-through check just as well as a bounce does.
+ */
+function testBounce(): void {
+  console.log('\nit bounces off walls');
+
+  let staged = 0;
+  let stoppedShort = 0;
+  let cameBack = 0;
+  let throughIt = 0;
+
+  for (let attempt = 0; attempt < 400 && staged < 8; attempt++) {
+    const r = rig();
+    // A spot with open ground behind the dog and a wall in front of it, well
+    // inside the throw. `isBlocked` carries walls and intact glass, which is
+    // exactly the set `bouncesOff` reads.
+    let spot: { x: number; y: number; wall: number } | null = null;
+    for (let i = 0; i < 3000 && !spot; i++) {
+      const x = 100 + Math.random() * (r.world.map.width - 200);
+      const y = 100 + Math.random() * (r.world.map.height - 200);
+      if (r.world.nav.isBlocked(x, y) || !r.world.nav.isReachable(x, y)) continue;
+      // Walk east and find the first wall inside the throw.
+      /**
+       * **The wall has to be in the first half of the throw**, and that band is
+       * not fussiness — it is the difference between measuring the code and
+       * measuring the city.
+       *
+       * A gobbet that hits a wall keeps whatever is left of its 420ms, at
+       * `GRENADE_BOUNCE` of its speed. Hit one at 120px of a 380px throw and
+       * 68% of the flight remains, which carries it ~142px back — plainly a
+       * rebound. Hit one at 340px and 10% remains, which is ~21px: a real
+       * bounce that is indistinguishable from stopping dead. So an unbanded
+       * rig asks "where did this city put its walls", and `cameBack >
+       * stoppedShort` came out a coin toss — measured, it failed 1 run in 8.
+       */
+      let wall = -1;
+      for (let d = 40; d < DOG_SPIT_RANGE - 40; d += 6) {
+        if (r.world.nav.isBlocked(x + d, y)) { wall = d; break; }
+      }
+      if (wall < 120 || wall > DOG_SPIT_RANGE * 0.55) continue;
+      spot = { x, y, wall };
+    }
+    if (!spot) continue;
+
+    staged++;
+    r.dog.x = spot.x;
+    r.dog.y = spot.y;
+    // Aimed at the far side of the wall: without a bounce the gobbet would
+    // land inside it or beyond it.
+    r.aim(spot.x + DOG_SPIT_RANGE, spot.y);
+    r.spit();
+    r.run(travelTicks + 2);
+    const c = onlyCloud(r.world);
+    if (!c) continue;
+    const along = c.x - spot.x;
+    if (along > spot.wall) throughIt++;
+    // Came back toward the dog past where it hit, which only a bounce does.
+    else if (along < spot.wall - 60) cameBack++;
+    else stoppedShort++;
+  }
+
+  check('a wall to throw at was found', staged >= 6, `${staged} cities staged`);
+  check('nothing lands past the wall', throughIt === 0, `${throughIt} of ${staged}`);
+  // Every one of them, now the wall is staged where a bounce has flight left to
+  // spend. "Most of them" was the coin toss the band above replaced.
+  check('and every one rebounds rather than sticking to it', stoppedShort === 0,
+    `${cameBack} came back, ${stoppedShort} stopped at it`);
+
+  // An unobstructed throw is untouched by any of it: the last step is charged
+  // only for what is left of the flight, so it still lands on the crosshair
+  // rather than a tick's travel past it.
+  const clear = rig();
+  clear.aim(clear.dog.x + 200, clear.dog.y);
+  clear.spit();
+  clear.run(travelTicks + 2);
+  const c = onlyCloud(clear.world);
+  const off = c ? Math.hypot(c.x - (clear.dog.x + 200), c.y - clear.dog.y) : 999;
+  check('a clear throw still lands on the crosshair', off < 1, `${off.toFixed(2)}px off`);
+}
+
+// -------------------------------------------------- dying is not a shortcut
+
+/**
+ * **The cooldown survives being killed.**
+ *
+ * At 22 seconds against a death and a birth of under four, the cheapest way to
+ * have the acid back was otherwise to go and get shot. It lived on `DogState`,
+ * which `finishDogBirth` *deletes* — right for the neck, the jaws and a bite in
+ * progress, all of which belong to the body that died, and wrong for a
+ * cooldown. `World.dogCooldowns` is where it lives now.
+ *
+ * The strong form of the check is not "it is still refused" — that would pass
+ * for a cooldown that had been reset and merely restarted. It is that the
+ * **time remaining matches the clock**: whatever elapsed while the animal was
+ * dead has to have come off it.
+ */
+function testDeathCooldown(): void {
+  console.log('\ndying does not refresh a cooldown');
+  const r = rig();
+  // Something to rise back out of. Without a shambler on the map the dog is
+  // simply out of the round, and the check would never reach a second life.
+  r.body('host', 'zombie', r.dog.x + 260, r.dog.y + 120);
+
+  r.aim(r.dog.x + 200, r.dog.y);
+  check('spat once', r.spit() === 'spat');
+  const spatAt = r.clock;
+  check('and refused straight away', r.spit() === 'refused');
+
+  killEntity(r.world, r.dog, r.clock);
+  check('killed: down, and no birth yet',
+    r.world.dogDeaths.has(DOG) && !r.world.dogBirths.has(DOG));
+
+  // All the way through dying and being born again.
+  const deathTicks = Math.ceil(DOG_DEATH_MS / TICK_MS) + 1;
+  const birthTicks = Math.ceil(DOG_BIRTH_MS / TICK_MS) + 2;
+  r.run(deathTicks + birthTicks);
+  const alive = r.world.entities.get(DOG);
+  check('it is back on its feet', alive !== undefined && !r.world.dogsOut.has(DOG));
+  check('and its bite state was rebuilt from scratch',
+    r.world.dogState.get(DOG) === undefined || r.world.dogState.get(DOG)!.victimId === null);
+
+  // The claim. Elapsed is real wall time on the rig's own clock.
+  const gone = r.clock - spatAt;
+  const bar = dogHudFor(r.world, DOG, r.clock)!.abilities;
+  const left = (1 - (bar[1]?.ready ?? 1)) * DOG_SPIT_COOLDOWN_MS;
+  const want = DOG_SPIT_COOLDOWN_MS - gone;
+  check('still refused after coming back', r.spit() === 'refused');
+  check('and the bar has counted the time it spent dead',
+    Math.abs(left - want) < 120,
+    `${Math.round(left)}ms left, ${Math.round(want)}ms expected after ${Math.round(gone)}ms dead`);
+
+  // And it does still come good — a cooldown that never expired would pass
+  // every check above just as well.
+  r.run(Math.ceil((DOG_SPIT_COOLDOWN_MS - gone + 200) / TICK_MS));
+  check('and comes good on its own clock', r.spit() === 'spat');
+}
+
+// ------------------------------------------------------- bots and the cloud
+
+/**
+ * **A blue officer gets out of the acid, and stays out of it.**
+ *
+ * **The control is the old behaviour, not a bot with no acid on it**, and that
+ * distinction cost a measurement to find. "It left the cloud" is satisfied just
+ * as well by a bot that was walking somewhere anyway: measured against a bot
+ * dropped on the same pixel of the same city with nothing on it, clearing the
+ * same 190px took **1.2-1.7s either way**, because a patrolling officer covers
+ * that in about a second and a half regardless. `setBotIgnoresAcid` runs both
+ * behaviours over the same staged cloud, which is the only comparison that says
+ * anything.
+ *
+ * A civilian on the same pixel is the second control: they are slowed by the
+ * stuff and blinded by the splash and have no rule about either, so they should
+ * still be standing in it when the bot has gone.
+ */
+function testBots(): void {
+  console.log('\na bot officer gets out of the acid');
+
+  let gotOut = 0;
+  let stayed = 0;
+  let runs = 0;
+  let oldGotOut = 0;
+  const botReach: number[] = [];
+  const civReach: number[] = [];
+  const control: number[] = [];
+
+  for (let attempt = 0; attempt < 60 && runs < 8; attempt++) {
+    setBotIgnoresAcid(false);
+    const r = rig(true);
+    const landing = { x: r.dog.x + 200, y: r.dog.y };
+
+    // **The cloud is laid first and the bodies dropped into it**, rather than
+    // staged at the crosshair and thrown at. A bot officer walks — patrolling
+    // at ~115px/s it covers 50px during the gobbet's 420ms flight, which is
+    // outside the cloud's 39px starting radius — so aiming at where it *was*
+    // caught it on 1 attempt in 200, and the run measured the staging rather
+    // than the code. The question here is what a bot does once it is in the
+    // stuff, so putting it in is the honest staging.
+    r.aim(landing.x, landing.y);
+    if (r.spit() !== 'spat') continue;
+    r.run(travelTicks);
+    const c = onlyCloud(r.world);
+    if (!c) continue;
+    // Grown to full width first, so the bot is genuinely inside rather than
+    // inside the seed of one.
+    r.run(Math.ceil(ACID_GROW_MS / TICK_MS) + 1);
+    const grown = onlyCloud(r.world);
+    if (!grown) continue;
+
+    // Both bodies on the same pixel — the middle of the cloud — so the only
+    // difference between them is which rules they run.
+    const bot = r.body('bot', 'officer', grown.x, grown.y);
+    r.world.bots.add('bot');
+    r.world.inventories.set('bot', newInventory());
+    r.world.stamina.set('bot', 100);
+    const civ = r.body('civ', 'human', grown.x + 14, grown.y);
+    if (!inAcidLobes(grown.lobes, bot.x, bot.y)) continue;
+    runs++;
+
+    // Three seconds. The cloud lasts far longer, so this is "did it leave
+    // promptly", not "did it leave eventually".
+    //
+    // **Measured as how long it takes to be clear of the spot**, not as how far
+    // it ends up from it. Net displacement is the wrong figure for the control
+    // below: a bot patrolling with nothing on its mind walks a *long* way in
+    // three seconds, further than one that bolts 130px out of a cloud and then
+    // goes back to patrolling — so distance would say the acid slowed it down.
+    // Time to clear the ground the cloud is standing on is the claim.
+    const clearOf = ACID_CLOUD_RADIUS + BOT_ACID_CLEAR;
+    let out = -1;
+    let awayAt = -1;
+    for (let t = 0; t < 90; t++) {
+      r.run(1);
+      const cloud = onlyCloud(r.world);
+      if (out < 0 && cloud && !inAcidLobes(cloud.lobes, bot.x, bot.y)) out = t;
+      if (awayAt < 0 && Math.hypot(bot.x - grown.x, bot.y - grown.y) > clearOf) awayAt = t;
+    }
+    if (out >= 0) gotOut++;
+    else stayed++;
+    botReach.push(awayAt < 0 ? 90 : awayAt);
+    civReach.push(Math.hypot(civ.x - grown.x, civ.y - grown.y));
+
+    // The control: **the old behaviour**, over its own staged cloud. A bot with
+    // no acid on it at all is not a control — it walks off just as promptly,
+    // for reasons that have nothing to do with this.
+    setBotIgnoresAcid(true);
+    const q = rig(true);
+    q.aim(q.dog.x + 200, q.dog.y);
+    if (q.spit() === 'spat') {
+      q.run(travelTicks + Math.ceil(ACID_GROW_MS / TICK_MS) + 1);
+      const old = onlyCloud(q.world);
+      if (old) {
+        const idle = q.body('bot', 'officer', old.x, old.y);
+        q.world.bots.add('bot');
+        q.world.inventories.set('bot', newInventory());
+        q.world.stamina.set('bot', 100);
+        let idleAt = -1;
+        let stillIn = true;
+        for (let t = 0; t < 90; t++) {
+          q.run(1);
+          const cloud = onlyCloud(q.world);
+          if (cloud && !inAcidLobes(cloud.lobes, idle.x, idle.y)) stillIn = false;
+          if (idleAt < 0 && Math.hypot(idle.x - old.x, idle.y - old.y) > clearOf) idleAt = t;
+        }
+        if (!stillIn) oldGotOut++;
+        control.push(idleAt < 0 ? 90 : idleAt);
+      }
+    }
+    setBotIgnoresAcid(false);
+  }
+
+  const med = (xs: number[]) =>
+    xs.length ? xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)] : 0;
+
+  const secs = (t: number) => (t / TICK_RATE).toFixed(2) + 's';
+  check('a bot was caught in one', runs >= 5, `${runs} runs staged`);
+  check('and it got clear inside three seconds', stayed === 0, `${gotOut} out, ${stayed} still in it`);
+  check('well clear of the ground the cloud is on', med(botReach) < 60,
+    `${secs(med(botReach))} to get ${ACID_CLOUD_RADIUS + BOT_ACID_CLEAR}px off it`);
+  check('sooner than the old behaviour on its own cloud', med(botReach) < med(control),
+    `${secs(med(botReach))} against ${secs(med(control))}`);
+  // Reported rather than asserted. "Did it ever leave" does not discriminate:
+  // a bot with no rule about clouds still patrols, and often enough it strolls
+  // out of one inside three seconds all eight times. **Time to clear is the
+  // figure that separates them**, and it is the check above.
+  console.log(
+    `  ..    the old behaviour left it at all on ${oldGotOut} of ${control.length}, ` +
+      `against ${gotOut} of ${runs}`,
+  );
+  check('and a civilian on the same pixel is still there', med(civReach) < 60,
+    `the civilian moved ${Math.round(med(civReach))}px`);
+}
+
 console.log('=== the dog spits, and the street stops being one street ===');
+testUnlock();
+testBounce();
+testDeathCooldown();
+testBots();
 testThrow();
 testSlow();
 testShape();

@@ -11,6 +11,7 @@ import {
   ZOMBIE_SIGHT_RADIUS,
   ZOMBIE_TURN_RATE,
   ZOMBIE_LUNGE_RANGE,
+  ZOMBIE_PROVOKED_SNIFF,
   ZOMBIE_LUNGE_MULTIPLIER,
   ZOMBIE_LUNGE_MS,
   ZOMBIE_LUNGE_COOLDOWN_MS,
@@ -73,6 +74,9 @@ import {
   WINDOW_ZOMBIE_DAMAGE,
   RALLY_RADIUS,
   RALLY_ARRIVE_DIST,
+  RALLY_BUILDING_SNAP,
+  RALLY_ROOM_GIVE_UP_MS,
+  INDOOR_ROUTE_DOOR_REACH,
   RALLY_LOOK_MIN_MS,
   RALLY_LOOK_MAX_MS,
   RALLY_LOOK_TURN_RATE,
@@ -197,7 +201,13 @@ import {
   BOT_LOOT_RANGE,
   BOT_LOOT_SCAN_MS,
   BOT_LOOT_SNUB_MS,
+  BOT_COMPLEX_NOTICE,
+  BOT_COMPLEX_RAID_MS,
+  BOT_COMPLEX_SNUB_MS,
+  BOT_COMPLEX_ROOM_REACH,
+  BOT_COMPLEX_LEAVE_AT,
   BOT_LOOT_MIN_CLEARANCE,
+  BOT_ACID_CLEAR,
   BOT_SWAP_MARGIN,
   BOT_REFILL_APPETITE,
   BOT_WALK_SPEED,
@@ -374,11 +384,12 @@ import {
   newAiState,
   rollSpeedMul,
   speedAt,
+  acidCloudAt,
   type AiState,
   type Entity,
   type World,
 } from './world.js';
-import { fire, fireHeld } from './combat.js';
+import { fire, fireHeld, forgetsTheShooter } from './combat.js';
 
 import { requestBeacon } from './heli.js';
 
@@ -430,6 +441,81 @@ let settledStandsStill = false;
 
 export function setSettledStandsStill(v: boolean): void {
   settledStandsStill = v;
+}
+
+/**
+ * And the same for an order pointed at a building: true takes the shout back
+ * to a bare coordinate, so the crowd asks the router for one long route to a
+ * room several partitions in, gets nothing back, and grinds into the outside
+ * wall. `server/rallycheck.ts` is what reads it.
+ *
+ * Kept rather than deleted for the same reason `settledStandsStill` is: the
+ * control is what says the fix is the fix. Not `process.env`, so both
+ * behaviours run in one build — two `npx tsx` runs on this box are not
+ * comparable and the map is not seeded either.
+ */
+let rallyIgnoresBuildings = false;
+
+export function setRallyIgnoresBuildings(v: boolean): void {
+  rallyIgnoresBuildings = v;
+}
+
+/**
+ * And the same for a bot officer and the dog's acid: true puts back the
+ * behaviour where a cloud is a piece of open street like any other — it walks
+ * into them, loots in them, and stands sweeping its head about if the splash
+ * blinds it.
+ *
+ * Kept rather than deleted, because the obvious control does not discriminate.
+ * "The bot left the cloud" is satisfied just as well by a bot that was walking
+ * somewhere anyway: measured against a bot with no acid on it at all, clearing
+ * the same ground took **1.2-1.7s either way**, because a patrolling officer
+ * covers 190px in about that regardless. Running both behaviours over the same
+ * staged cloud is the only comparison that says anything. `server/acidcheck.ts`
+ * reads it.
+ */
+let botIgnoresAcid = false;
+
+export function setBotIgnoresAcid(v: boolean): void {
+  botIgnoresAcid = v;
+}
+
+/**
+ * Walking somewhere they were *told* to go, rather than somewhere they chose.
+ *
+ * The one thing that follows from it is that they leave doors alone on the
+ * way: seeing to a door is a civilian's own business and this is a moment when
+ * they have been handed somebody else's, and a crowd filing through one
+ * doorway cannot afford the person in front to shut it on them.
+ */
+function underOrders(state: AiState): boolean {
+  return state.mode === 'rallied' && !rallyIgnoresBuildings;
+}
+
+/**
+ * A doorway that is somebody's way in to a building a crowd has been shouted
+ * into, while that order might still be being obeyed.
+ *
+ * **Nobody shuts one, not only the people under orders**, and that distinction
+ * is the whole of the second report: *"a lot are shutting the door on those
+ * trying to get in"*. `underOrders` covers the person walking through, which
+ * stops the front of the queue shutting it on the back — and does nothing at
+ * all about the people who were already *living* in the building, who are
+ * neither rallied nor settled-with-a-guard and who shut doors after themselves
+ * exactly as they always have. In a house with people in it that is most of
+ * the door-shutting there is.
+ *
+ * Exterior doors only. The order was to be in the building; a bolt between two
+ * of its rooms is nobody's way in and shutting one is ordinary behaviour.
+ *
+ * One map lookup, guarded on the map being empty — which it is for the whole of
+ * every round nobody has given an order in.
+ */
+function doorHeldOpen(world: World, index: number, now: number): boolean {
+  if (world.ralliedInto.size === 0) return false;
+  const spec = world.map.doors[index];
+  if (!spec || spec.interior) return false;
+  return (world.ralliedInto.get(spec.building) ?? 0) > now;
 }
 
 /**
@@ -1779,6 +1865,47 @@ function deeperRoom(world: World, e: Entity, now: number): { x: number; y: numbe
 }
 
 /**
+ * The next room to walk into on the way to a *particular* one, or null when
+ * there is no way through the room graph to it.
+ *
+ * `deeperRoom` is the same search with "as deep as possible" for a
+ * destination; this one is told where it is going, which is what an order to
+ * get into a specific room needs. Both walk one hop at a time and for the same
+ * reason — the router has no idea an indoor journey is meant to stay indoors,
+ * so the shortest nav line from a front room to a back one runs out of one
+ * street door and in at another, and a room eight doorways in is a long enough
+ * search that A\* gives it up at `PATH_MAX_NODES` and comes back with nothing
+ * at all.
+ *
+ * The street is deliberately not a node: a route through it is a route that
+ * leaves the building, which is the one thing this exists to prevent. The
+ * graph is one building — twenty rooms at the outside — and this runs once per
+ * room walked into rather than per tick.
+ */
+function roomHopToward(world: World, from: number, to: number): { x: number; y: number } | null {
+  if (from === OUTSIDE || to === OUTSIDE || from === to) return null;
+
+  const first = new Map<number, number>();
+  const queue: number[] = [from];
+  first.set(from, from);
+  for (let head = 0; head < queue.length; head++) {
+    const id = queue[head];
+    for (const index of world.rooms.rooms[id].exits) {
+      const far = world.rooms.farSideOf(index, id);
+      if (far === OUTSIDE || first.has(far)) continue;
+      const step = id === from ? far : first.get(id)!;
+      if (far === to) {
+        const room = world.rooms.rooms[step];
+        return { x: room.x, y: room.y };
+      }
+      first.set(far, step);
+      queue.push(far);
+    }
+  }
+  return null;
+}
+
+/**
  * Hole up. Everything that decides somebody has stopped running goes through
  * here rather than assigning the mode, because settling is not one thing: it
  * is a room to be in, possibly a walk to the back of the building first, and a
@@ -1787,8 +1914,13 @@ function deeperRoom(world: World, e: Entity, now: number): { x: number; y: numbe
  * `settleRoom` is latched here rather than read fresh every tick on purpose —
  * it is what "pace about in *here*" means, and somebody who drifts into their
  * own doorway must not thereby adopt the room next door.
+ *
+ * `deeper` is what an order overrides. Somebody who has just been *sent* to a
+ * room is already where they were told to be, and a `hidesDeeper` civilian
+ * wandering another three doorways in from there is not obeying it — the whole
+ * point of pointing at a place is that people end up in that place.
  */
-function settleHere(world: World, e: Entity, state: AiState, now: number): void {
+function settleHere(world: World, e: Entity, state: AiState, now: number, deeper = true): void {
   state.mode = 'settled';
   state.path = null;
   state.nextPathAt = 0;
@@ -1800,11 +1932,11 @@ function settleHere(world: World, e: Entity, state: AiState, now: number): void 
   state.wanderX = e.x;
   state.wanderY = e.y;
 
-  if (!state.hidesDeeper || state.settleRoom === OUTSIDE) return;
-  const deeper = deeperRoom(world, e, now);
-  if (!deeper) return;
-  state.settleGoalX = deeper.x;
-  state.settleGoalY = deeper.y;
+  if (!deeper || !state.hidesDeeper || state.settleRoom === OUTSIDE) return;
+  const back = deeperRoom(world, e, now);
+  if (!back) return;
+  state.settleGoalX = back.x;
+  state.settleGoalY = back.y;
   // One budget for the whole move in, not one per room. It is never extended
   // as they go, which is what bounds a ping-pong at a doorway.
   state.settleWalkUntil = now + HIDE_DEEPER_GIVE_UP_MS;
@@ -1846,6 +1978,12 @@ function unsecuredDoorOf(world: World, e: Entity, state: AiState, now: number): 
   for (const index of room.exits) {
     const door = world.doors[index];
     if (!door || door.broken) continue;
+    // Somebody shouted a crowd into this building and they are still arriving.
+    // Bolting the street door on the half of them still outside is the whole
+    // of what an order to get in there was meant to prevent, and `guardsDoors`
+    // fires on nearly half the city — so the first one in settles, sees the
+    // front door standing open, and locks the rest out.
+    if (doorHeldOpen(world, index, now)) continue;
     if (!door.open && (door.locked || door.playerLocked)) continue; // already seen to
     if (index === state.doorIgnore && now < state.doorIgnoreUntil) continue;
     if (doorBusyForOthers(world, index, e.id, now)) continue;
@@ -2244,8 +2382,17 @@ function finishDoorWork(world: World, e: Entity, state: AiState, now: number): v
   if (action === 'open') {
     openDoor(world, index);
     // Remember to deal with it once we're through to the other side.
+    //
+    // **The second place a follow-up is armed, and it is the one that mattered
+    // for an order into a building.** The other is in `doorTick`, for walking
+    // through a door somebody else left open; this is for the door you opened
+    // yourself — which under an order is the street door of the building the
+    // whole crowd is filing through. Gated on both counts for the same reason,
+    // and missing it here left **19 shuts on the queue** where gating only the
+    // other one took 60 down to 19.
     const frightened = state.mode === 'flee' || state.mode === 'retreat';
-    if (frightened ? state.locksDoors || state.barricades : state.closesDoors) {
+    const mine = frightened ? state.locksDoors || state.barricades : state.closesDoors;
+    if (mine && !underOrders(state) && !doorHeldOpen(world, index, now)) {
       state.doorFollowUp = index;
       // Someone getting away from a zombie shuts it *and* throws the bolt.
       state.doorFollowUpLock = frightened;
@@ -2495,9 +2642,28 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
   // Stepping through a doorway that's already standing open. Shutting it is
   // about going through it, not about having been the one to open it —
   // without this, every door drifts open and stays that way.
-  if (state.doorFollowUp < 0) {
+  //
+  // **Nobody under orders shuts a door behind them.** A crowd sent into a
+  // building goes through one doorway one at a time, and `closesDoors` is
+  // rolled on two thirds of the city — so the first person in shuts it on the
+  // eleven still coming, the next has to work the handle again for a second
+  // or two, and the queue outside grinds along the wall in the meantime. That
+  // is precisely the huddling this order was reported for. Measured on a rig,
+  // twelve people and one street door: the door spent **38-40% of the walk-in
+  // open**, with 6-7 shuts and one of them bolted on the stragglers.
+  //
+  // It is not a new trait and not a per-door rule — it is the same shape as
+  // bots having `closesDoors` cleared at spawn, and for the same reason:
+  // seeing to a door is a civilian's own business, and this is a moment when
+  // they have been given somebody else's.
+  if (state.doorFollowUp < 0 && !underOrders(state)) {
     const through = doorBeingUsed(world, e, state);
-    if (through >= 0) {
+    // …and nobody at all shuts the way *in* to a building a crowd has just been
+    // shouted into. `underOrders` only covers the people walking; the residents
+    // who were already in there are neither rallied nor settled and shut doors
+    // after themselves exactly as they always have, which in a house with
+    // people in it is most of the door-shutting there is. See `doorHeldOpen`.
+    if (through >= 0 && !doorHeldOpen(world, through, now)) {
       const frightened = state.mode === 'flee' || state.mode === 'retreat';
       if (frightened ? state.locksDoors || state.barricades : state.closesDoors) {
         state.doorFollowUp = through;
@@ -2528,22 +2694,22 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // reroute like everyone else rather than undoing a teammate's work.
     if (door.playerLocked) return false;
 
-    // An officer has a boot. Where a civilian hammers on a locked door and
-    // hopes, a bot takes it off its hinges — but only from the side it can't
-    // simply unbolt, which is the same rule the player's prompt follows.
-    if (world.bots.has(e.id) && !canWorkLockFrom(world, ahead, e.x, e.y)) {
-      // Not with something close enough to shoot at. No snub is needed and
-      // none is wanted: the refusal is a fact about right now, and the tick
-      // after the street is clear it should be back on the door.
-      if (pressed) return false;
-      beginDoorWork(world, e, state, ahead, 'kick', now);
-      return true;
-    }
-
+    // **An officer works the lock from whichever side it is on.** A civilian
+    // can only draw a bolt back from the side it is on, which is what makes
+    // finding a bolted front door a real refusal for the crowd; an officer has
+    // the tools and the authority, so `canWorkLockFrom` is simply not asked of
+    // a bot. It used to take the door off its hinges instead, which reads as
+    // an officer wrecking the house he is there to clear — and the boot is
+    // wanted for barricades rather than for ordinary locks.
+    //
+    // Kicking is *not* gone, only unreachable from here: `beginDoorWork` and
+    // `finishDoorWork` still know the action, and it is what a barricade will
+    // want when there is one.
+    //
     // From the inside you can draw the bolt back — but only if you actually
     // mean to go through it. Somebody holed up, or who has been told to stay
     // in, does not unbolt the way out; between rooms is another matter.
-    if (canWorkLockFrom(world, ahead, e.x, e.y)) {
+    if (world.bots.has(e.id) || canWorkLockFrom(world, ahead, e.x, e.y)) {
       const wayOut = door.insideSign !== 0;
       const stayingPut = holedUp(state) || (wayOut && state.homeBuilding >= 0);
       if (stayingPut) {
@@ -2774,6 +2940,9 @@ function askForNeighbourDoor(
     const door = world.doors[index];
     if (!door || door.broken || door.locked) continue;
     if (doorBusyForOthers(world, index, e.id, now)) continue;
+    // Not a way in that a crowd is still filing through — the third and last
+    // place a door gets shut on somebody, after `doorTick` and `finishDoorWork`.
+    if (doorHeldOpen(world, index, now)) continue;
     // Only a way into this building is worth bolting behind us.
     if (!canWorkLockFrom(world, index, e.x, e.y)) continue;
 
@@ -3027,10 +3196,90 @@ export function holdPosition(world: World, leaderId: string): number {
   return count;
 }
 
-/** Send every civilian within earshot to a point, and make them hold it. */
+/**
+ * Which building, if any, an order was pointed at, and which room of it.
+ *
+ * A click lands on a wall as often as on a floor — from above, the slabs are
+ * most of what a building looks like — so a point that is not strictly inside
+ * anything is snapped to the nearest footprint within `RALLY_BUILDING_SNAP`.
+ * Being sent to the front step of the house you were plainly pointing at is a
+ * much better failure than being sent nowhere.
+ *
+ * Returns -1s for a spot genuinely out in the street, which is the ordinary
+ * case and is left exactly as it was.
+ */
+function rallyRoomAt(world: World, x: number, y: number): { building: number; room: number } {
+  let building = buildingIndexAt(world, x, y);
+  if (building < 0) {
+    let nearest = Infinity;
+    for (let i = 0; i < world.map.buildings.length; i++) {
+      const b = world.map.buildings[i];
+      const dx = Math.max(b.x - x, 0, x - (b.x + b.w));
+      const dy = Math.max(b.y - y, 0, y - (b.y + b.h));
+      const gap = Math.hypot(dx, dy);
+      if (gap < nearest && gap <= RALLY_BUILDING_SNAP) {
+        nearest = gap;
+        building = i;
+      }
+    }
+  }
+  if (building < 0) return { building: -1, room: -1 };
+
+  const rooms = world.rooms.roomsOf(building);
+  if (rooms.length === 0) return { building: -1, room: -1 };
+
+  // The room underfoot when the point is on a floor; otherwise the room of
+  // this building whose own interior point is nearest what was pointed at.
+  // Read against `roomsOf` rather than trusted, because a click near the party
+  // wall between two houses reads as the room next door.
+  const under = world.rooms.roomAt(x, y);
+  if (under !== OUTSIDE && rooms.includes(under) && Number.isFinite(world.rooms.rooms[under].depth)) {
+    return { building, room: under };
+  }
+
+  let room = -1;
+  let best = Infinity;
+  for (const id of rooms) {
+    const r = world.rooms.rooms[id];
+    if (!Number.isFinite(r.depth)) continue; // nothing can reach it from the street
+    const gap = Math.hypot(r.x - x, r.y - y);
+    if (gap < best) {
+      best = gap;
+      room = id;
+    }
+  }
+  return room < 0 ? { building: -1, room: -1 } : { building, room };
+}
+
+/**
+ * Send every civilian within earshot to a point, and make them hold it.
+ *
+ * **An order pointed at a building is an order to go inside it and stay in
+ * there**, which a bare coordinate cannot carry. Left as one, two things went
+ * wrong and the second is what was reported: the aim point is very often a
+ * wall slab rather than a floor, and even when it is a floor, a room several
+ * doorways in is a long enough route that A\* gives it up at `PATH_MAX_NODES`
+ * — after which `slideToward` walks blindly at the goal, which is a crowd
+ * pressed face-first against the outside of the building they were sent into.
+ * Measured: **4 of 12 found a route at all**, and the rest stood 45-75px off
+ * the wall for the rest of the round.
+ *
+ * So the *room* is resolved here, once, at the moment the order is given, and
+ * the walk in is done a room at a time — see `rallyIndoorTick`.
+ */
 export function rallyHumans(world: World, originX: number, originY: number, x: number, y: number): number {
   let count = 0;
   const now = Date.now();
+  const { building, room } = rallyIgnoresBuildings
+    ? { building: -1, room: -1 }
+    : rallyRoomAt(world, x, y);
+  // Its street doors stay open for as long as anybody could still be obeying
+  // this — see `World.ralliedInto`.
+  if (building >= 0) {
+    const until = now + RALLY_ROOM_GIVE_UP_MS;
+    world.ralliedInto.set(building, Math.max(world.ralliedInto.get(building) ?? 0, until));
+  }
+
   for (const e of world.entities.values()) {
     if (e.type !== 'human') continue;
     if (Math.hypot(e.x - originX, e.y - originY) > RALLY_RADIUS) continue;
@@ -3038,14 +3287,207 @@ export function rallyHumans(world: World, originX: number, originY: number, x: n
     const state = world.ai.get(e.id) ?? newAiState(now, e.x, e.y);
     world.ai.set(e.id, state);
     state.mode = 'rallied';
-    state.rallyX = x;
-    state.rallyY = y;
+    state.rallyBuilding = building;
+    state.rallyRoom = room;
+    state.rallyRoomUntil = building >= 0 ? now + RALLY_ROOM_GIVE_UP_MS : 0;
+    // A spot on the room's own floor rather than the pixel that was clicked,
+    // so a crowd sent into a room spreads across it instead of thirty people
+    // converging on one point and shoving each other off it — the same reason
+    // `refugeBias` exists, and the same tool `settledTick` paces with.
+    const spot = building >= 0 ? world.rooms.randomPoint(room) : null;
+    state.rallyX = spot ? spot.x : x;
+    state.rallyY = spot ? spot.y : y;
     state.path = null;
     state.nextPathAt = 0;
     state.pauseUntil = 0;
     count++;
   }
   return count;
+}
+
+/**
+ * Told to get into a building: walk in, and then stay in.
+ *
+ * Three legs, and they are three because the router only knows how to do the
+ * first one.
+ *
+ * 1. **Out in the street** — make for the nearest way in. One short route to a
+ *    doorway, which A\* finds every time, rather than one enormous one to a
+ *    room several partitions past it.
+ * 2. **Inside, but not in the right room** — one doorway at a time, off the
+ *    room graph. This is the whole of the fix and it is the lesson
+ *    `hidesDeeper` already recorded: the router has no idea an indoor journey
+ *    is meant to stay indoors, and a room eight doorways in is a long enough
+ *    search that A\* gives it up at `PATH_MAX_NODES` and returns nothing —
+ *    which drops through to `slideToward` and grinds a face into the outside
+ *    wall. Measured before this, **4 of 12 found a route at all**.
+ * 3. **Arrived** — hole up. `settleHere` is the one door into that state, so
+ *    they get its pacing, its door-guarding and its refusal to open the way
+ *    out for nothing, and "stay in there" needs no code of its own.
+ *
+ * `rallyRoomUntil` is one budget for the whole move in, never extended as they
+ * go — the same shape as `HIDE_DEEPER_GIVE_UP_MS`, and what bounds a ping-pong
+ * at a doorway however the room underfoot is read. Spending it inside the
+ * building is a fine place to stop; spending it outside is not, so that case
+ * drops back to ordinary wandering rather than settling in the street.
+ */
+function rallyIndoorTick(world: World, e: Entity, state: AiState, now: number, dt: number): void {
+  const here = buildingIndexAt(world, e.x, e.y);
+
+  if (here !== state.rallyBuilding) {
+    const way = wayIntoBuilding(world, e, state, state.rallyBuilding);
+    // Out of time, or every way in has been walked up to and found bolted.
+    // Ordinary behaviour beats standing at a door that has beaten them, and it
+    // is what leaves them free to find shelter of their own when something
+    // turns up. Giving up on the doors immediately rather than on the clock
+    // matters: a crowd stood at a locked house for forty seconds is the
+    // huddling-against-the-wall this exists to stop, only in slow motion.
+    if (!way || now >= state.rallyRoomUntil) {
+      state.rallyBuilding = -1;
+      state.rallyRoom = -1;
+      state.mode = 'wander';
+      // And somewhere else to be, or they mill about on the doorstep of the
+      // building that has just beaten them — which looks exactly like the
+      // huddling this order was reported for, only without an order behind it.
+      pickWanderTarget(world, e, state, now, false, HUMAN_WANDER_RADIUS * 1.4);
+      return;
+    }
+    // Something is getting nowhere: a crowd in the threshold, a wall being
+    // scraped along. The same breakout every other flight here runs, and the
+    // only leg of this with room for it — the two indoor legs are a single
+    // room's width and would trip it constantly, which is exactly the trap
+    // already recorded against `hidesDeeper`.
+    if (unstickTick(world, e, state, now, dt, HUMAN_WALK_SPEED * 1.45)) return;
+
+    const desired = headingToward(world, e, state, way.x, way.y, now);
+    step(world, e, state, desired, HUMAN_WALK_SPEED * 1.45, HUMAN_TURN_RATE, dt, now);
+    return;
+  }
+
+  const room = world.rooms.roomAt(e.x, e.y);
+  const arrived = room === state.rallyRoom;
+  if (arrived || now >= state.rallyRoomUntil || room === OUTSIDE) {
+    // In the right room, or out of time inside the right building. Either way
+    // this is home now. `deeper: false` because being sent somewhere and then
+    // wandering three doorways past it is not obeying the order — see
+    // `settleHere`.
+    settleHere(world, e, state, now, false);
+    state.rallyBuilding = -1;
+    state.rallyRoom = -1;
+    return;
+  }
+
+  const hop = roomHopToward(world, room, state.rallyRoom);
+  if (!hop) {
+    // No way through the room graph from here — a doorway the map never hung,
+    // or a room the flood fill left on its own. Wherever they have got to is
+    // inside the building they were sent into, which is most of the order.
+    settleHere(world, e, state, now, false);
+    state.rallyBuilding = -1;
+    state.rallyRoom = -1;
+    return;
+  }
+  const desired = headingToward(world, e, state, hop.x, hop.y, now);
+  step(world, e, state, desired, HUMAN_WALK_SPEED * 1.45, HUMAN_TURN_RATE, dt, now);
+}
+
+/**
+ * Walk at something inside the same building as you, one doorway at a time.
+ *
+ * **A no-op for most of the city, by construction.** An ordinary block is a
+ * single undivided room, so `here` and `there` are the same room and this
+ * falls straight through to the router — it only ever does anything in a
+ * landmark, which is the only place it is needed and the same reason
+ * `hidesDeeper` never fires anywhere else.
+ *
+ * Where it does fire, it is the fix for the one fault this file has now hit
+ * twice: a route from one end of a partitioned landmark to the other is long
+ * and twisting enough that A\* gives it up at `PATH_MAX_NODES` and returns
+ * nothing, after which `slideToward` walks blindly at the goal and grinds a
+ * face into a wall. Measured on the rallied crowd, **47 of 72** such routes
+ * were found at all.
+ */
+function indoorHeadingToward(
+  world: World,
+  e: Entity,
+  state: AiState,
+  gx: number,
+  gy: number,
+  now: number,
+): number {
+  const there = world.rooms.roomAt(gx, gy);
+  if (there === OUTSIDE) return headingToward(world, e, state, gx, gy, now);
+
+  const here = world.rooms.roomAt(e.x, e.y);
+  const building = world.rooms.rooms[there].building;
+
+  // Out in the street, or in some other building: the way in comes first.
+  // Without this the bot asks for the whole route in one go from outside,
+  // which is the search that fails — measured, a city with thirty pickups in
+  // its complex had a bot target one six partitions in from the pavement and
+  // never get through the front wall for the whole round.
+  if (here === OUTSIDE || world.rooms.rooms[here].building !== building) {
+    const way = wayIntoBuilding(world, e, state, building);
+    if (way && Math.hypot(way.x - e.x, way.y - e.y) > INDOOR_ROUTE_DOOR_REACH) {
+      return headingToward(world, e, state, way.x, way.y, now);
+    }
+    // Standing in the doorway already. Aiming at a point underfoot is a
+    // garbage bearing, and one more step puts `roomAt` inside anyway.
+    return headingToward(world, e, state, gx, gy, now);
+  }
+
+  if (here !== there) {
+    const hop = roomHopToward(world, here, there);
+    if (hop) return headingToward(world, e, state, hop.x, hop.y, now);
+  }
+  return headingToward(world, e, state, gx, gy, now);
+}
+
+/**
+ * The nearest doorway *from the street* into a building, or null when every
+ * one of them has been tried and refused.
+ *
+ * **`interior` is the load-bearing filter**, exactly as it is in
+ * `anotherWayIn`. `doorsOf` hands back every door of a building including the
+ * partitions between its rooms, and a landmark has far more of the second kind
+ * than the first — so an unfiltered "nearest door" walks somebody in the
+ * street at a doorway several rooms deep, which is the same enormous A\* route
+ * this whole path exists to avoid. Measured with it unfiltered, one city put
+ * **5 of 12** inside with almost every door on it standing open.
+ *
+ * Deliberately not `openDoorInto`, which answers "is there a way in nothing is
+ * standing in" and returns a boolean. This needs the point, and it is asked by
+ * somebody under orders rather than somebody running for their life — so a
+ * zombie near a doorway is a reason to prefer a different one, not a reason to
+ * give the building up.
+ */
+function wayIntoBuilding(
+  world: World,
+  e: Entity,
+  state: AiState,
+  building: number,
+): { x: number; y: number } | null {
+  let best: { x: number; y: number } | null = null;
+  let bestScore = Infinity;
+  for (const index of world.map.buildings[building]?.doors ?? []) {
+    const spec = world.map.doors[index];
+    if (!spec || spec.interior) continue;
+    // Walked up to it and found it bolted. Nobody knows a door is locked until
+    // they try it, and having tried it, they go round the side rather than
+    // standing at it for the rest of the order.
+    if (state.refusedDoors.includes(index)) continue;
+    if (!world.nav.isReachable(spec.x, spec.y)) continue;
+
+    let score = Math.hypot(spec.x - e.x, spec.y - e.y);
+    for (const threat of state.threatPoints) {
+      if (Math.hypot(threat.x - spec.x, threat.y - spec.y) < DOOR_BLOCK_RADIUS) score += 900;
+    }
+    if (score < bestScore) {
+      bestScore = score;
+      best = { x: spec.x, y: spec.y };
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------- humans
@@ -3306,6 +3748,12 @@ function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: n
 
   // A rally shout outranks ordinary wandering once the coast is clear.
   if (state.mode === 'rallied' && state.rallyX !== null && state.rallyY !== null) {
+    // Sent into a building rather than to a spot in the street. That is a
+    // different journey and a different ending — see `rallyIndoorTick`.
+    if (state.rallyBuilding >= 0) {
+      rallyIndoorTick(world, e, state, now, dt);
+      return;
+    }
     const dist = Math.hypot(state.rallyX - e.x, state.rallyY - e.y);
     if (dist <= RALLY_ARRIVE_DIST) {
       // Holding where told, but glancing about rather than standing like a post.
@@ -4394,6 +4842,12 @@ function lootWanted(
     const dist = Math.hypot(p.x - e.x, p.y - e.y);
     if (dist > range) continue;
     if (!world.nav.isReachable(p.x, p.y)) continue;
+    // Nothing lying in the dog's acid is worth walking into it for. A cloud
+    // lasts `ACID_CLOUD_MS` and the rifle will still be there afterwards; going
+    // in after it means standing blind in the open in the one place the dog has
+    // chosen. The same shape as `BOT_LOOT_MIN_CLEARANCE` below — a floor, not a
+    // preference.
+    if (!botIgnoresAcid && acidCloudAt(world, p.x, p.y)) continue;
 
     // Nothing lying on a floor is worth walking into a crowd for, and until
     // this went in a bot would cross 1400px of overrun city for a marginally
@@ -4529,6 +4983,291 @@ function lootWanted(
 }
 
 /**
+ * Caught in the dog's acid: get out, and get out first.
+ *
+ * **Standing in a cloud is the worst place an officer can be, and nothing about
+ * it feels urgent from the inside.** The slow is the small half. The real cost
+ * is the fog: `hasLineOfSight` fails every line for a viewer whose own position
+ * is inside one, and zombies — the dog included — are exempt. So a bot in acid
+ * has an empty `threatPoints`, no target, nothing to shoot at and no reason it
+ * can perceive to move, while the horde walks straight in at it. It cannot
+ * notice, because noticing is exactly what the cloud takes away.
+ *
+ * Which is why this is a branch of its own above everything, rather than a
+ * penalty folded into where a bot chooses to stand. It sits above the
+ * post-grapple flight because that flight reads `threatPoints` to decide when it
+ * is clear, and inside a cloud that list is empty — a bot would call itself safe
+ * standing in the middle of the stuff.
+ *
+ * - **Straight out, on the bearing off the cloud's centre.** Not
+ *   `escapeDestination`, which reads the danger field and is a question about
+ *   zombies; the cloud is a piece of ground and the shortest way off it is the
+ *   way you came. `slideToward` fans it out if that bearing is into a wall.
+ * - **Sprinting.** The stuff slows you to `ACID_SLOW_MUL`, so a walk out of a
+ *   130px cloud is several seconds of being blind in the open — this is exactly
+ *   what the sprint reserve is for.
+ * - **Clear means past `BOT_ACID_CLEAR` of the bounding radius**, measured from
+ *   the centre rather than by asking `acidCloudAt` again: the lumps mean the
+ *   real rim sits inside the bounding radius in places, and a bot that stopped
+ *   the instant `acidCloudAt` came back null would stop in a notch with the
+ *   cloud still all round it.
+ * - **The gun stays up**, like every other bot flight. Whatever is in there is
+ *   the thing that will be at its shoulder when it comes out.
+ */
+function acidBoltTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  now: number,
+  dt: number,
+): boolean {
+  if (botIgnoresAcid || world.acid.size === 0) return false;
+
+  // Nearest cloud whose grip we are not yet clear of. Walked rather than
+  // broadphased for the same reason `speedAt` walks them: clouds are single
+  // figures and short-lived, so an index would cost more to keep than to skip.
+  let worst: { x: number; y: number; r: number } | null = null;
+  let deepest = -Infinity;
+  for (const c of world.acid.values()) {
+    const gap = Math.hypot(e.x - c.x, e.y - c.y);
+    const inside = c.r + BOT_ACID_CLEAR - gap;
+    if (inside > 0 && inside > deepest) {
+      deepest = inside;
+      worst = c;
+    }
+  }
+  if (!worst) return false;
+
+  const away = Math.atan2(e.y - worst.y, e.x - worst.x);
+  const speed = botStaminaTick(state, true, dt, inv);
+  if (unstickTick(world, e, state, now, dt, speed)) return true;
+  // Straight out where that is walkable, fanned out where it is not.
+  const desired = world.nav.lineClear(
+    e.x,
+    e.y,
+    e.x + Math.cos(away) * 48,
+    e.y + Math.sin(away) * 48,
+  )
+    ? away
+    : slideToward(world, e, e.x + Math.cos(away) * 200, e.y + Math.sin(away) * 200);
+  step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now, !botDropsTheGun);
+  if (!botDropsTheGun) {
+    const threat = state.targetId ? world.entities.get(state.targetId) : undefined;
+    botGunUpWhileMoving(
+      world,
+      e,
+      state,
+      inv,
+      threat && threat.type === 'zombie' ? threat : undefined,
+      dt,
+      now,
+    );
+  }
+  return true;
+}
+
+/** Stop raiding, and leave the place alone for a while. */
+function endRaid(state: AiState, now: number): void {
+  state.raidUntil = 0;
+  state.raidRoom = -1;
+  state.raidLeaving = false;
+  state.raidSnubUntil = now + BOT_COMPLEX_SNUB_MS;
+  state.path = null;
+  state.nextPathAt = 0;
+}
+
+/** The room of a building furthest in from the street — where the rare loot is. */
+function deepestRoomOf(world: World, building: number): number {
+  let best = -1;
+  let bestDepth = -1;
+  for (const id of world.rooms.roomsOf(building)) {
+    const room = world.rooms.rooms[id];
+    if (!Number.isFinite(room.depth)) continue; // nothing can reach it from the street
+    if (room.depth > bestDepth) {
+      bestDepth = room.depth;
+      best = id;
+    }
+  }
+  return best;
+}
+
+/** And the way back out: a room with a doorway straight onto the street. */
+function shallowestRoomOf(world: World, building: number): number {
+  let best = -1;
+  let bestDepth = Infinity;
+  for (const id of world.rooms.roomsOf(building)) {
+    const room = world.rooms.rooms[id];
+    if (room.depth < bestDepth) {
+      bestDepth = room.depth;
+      best = id;
+    }
+  }
+  return best;
+}
+
+/**
+ * Walking past the corner complex is how a bot learns what is in it.
+ *
+ * The complex is stocked room by room with the rarity going up as you go in
+ * (`COMPLEX_RARITY_CEILING`), and until this went in there was no way for a
+ * bot to get any of it. Two separate things stopped it, and both had to go:
+ *
+ * - **Nothing ever took a bot to the building.** `botPatrolTarget` refuses an
+ *   indoor sample outright — "indoors is where the loot is, not where the work
+ *   is" — which is right for an ordinary house it has already stripped and
+ *   wrong for the one building in the city worth going into.
+ * - **And it could not have walked through it if it had.** `lootWanted` scores
+ *   anything inside `BOT_LOOT_RANGE` (1400), which from the front step is most
+ *   of a landmark — so a bot would target a rifle six partitions in and ask the
+ *   router for one route to it, which is exactly the search that comes back
+ *   empty at `PATH_MAX_NODES`. `indoorHeadingToward` is what fixed that, and it
+ *   fixed it for the loot walk as well as for this.
+ *
+ * **Coming near it is the trigger, deliberately.** A bot that knew about the
+ * complex from the first tick would set off across the city for it and every
+ * round would open with four officers filing into one corner; knowledge you
+ * pick up by being there is also the only kind an officer plausibly has, since
+ * what you can tell from the street is that it is a very big building.
+ *
+ * **And it knows the way out**, which is the half that would otherwise be
+ * missing: past `BOT_COMPLEX_LEAVE_AT` of the budget it turns round and walks
+ * out down `Room.depth`, one doorway at a time, and only then goes back to
+ * being an officer. Left to the clock alone a raid ends with a bot switching
+ * off in a back room, which is worse than never having gone in.
+ *
+ * Sits **below** the loot branch and **above** patrol. Below loot because the
+ * raid exists to put loot in reach and the collecting is already written;
+ * above patrol because a patrol target is outdoors by construction and would
+ * walk the bot straight back out of the building on the next tick.
+ */
+function complexRaidTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+  dt: number,
+): boolean {
+  const complex = world.map.cornerBuilding;
+  if (complex < 0 || complex >= world.map.buildings.length) return false;
+
+  const inv = world.inventories.get(e.id);
+  if (!inv) return false; // not a bot officer at all
+  const speed = botWalkSpeed(inv);
+
+  if (state.raidUntil <= 0) {
+    if (now < state.raidSnubUntil) return false;
+
+    // Near enough to see what kind of building it is.
+    const b = world.map.buildings[complex];
+    const dx = Math.max(b.x - e.x, 0, e.x - (b.x + b.w));
+    const dy = Math.max(b.y - e.y, 0, e.y - (b.y + b.h));
+    if (Math.hypot(dx, dy) > BOT_COMPLEX_NOTICE) return false;
+
+    // Shopping means standing still indoors, and a raid is a long one. The
+    // same floor `lootWanted` puts under crossing a street for a rifle.
+    if (world.danger.distanceAt(e.x, e.y) < BOT_LOOT_MIN_CLEARANCE) return false;
+
+    const deepest = deepestRoomOf(world, complex);
+    if (deepest < 0) {
+      // Nothing in it can be reached from the street, which cannot happen on a
+      // repaired map — but a snub is cheaper than asking again every tick.
+      state.raidSnubUntil = now + BOT_COMPLEX_SNUB_MS;
+      return false;
+    }
+    state.raidUntil = now + BOT_COMPLEX_RAID_MS;
+    state.raidRoom = deepest;
+    state.raidLeaving = false;
+    state.path = null;
+    state.nextPathAt = 0;
+  }
+
+  if (now >= state.raidUntil) {
+    endRaid(state, now);
+    return false;
+  }
+
+  const here = buildingIndexAt(world, e.x, e.y);
+
+  // Out of the building. On the way in that means walking to a door; on the
+  // way out it means the raid is over and done with.
+  if (here !== complex) {
+    if (state.raidLeaving) {
+      endRaid(state, now);
+      return false;
+    }
+    const way = wayIntoBuilding(world, e, state, complex);
+    if (!way) {
+      // Every street door walked up to and found bolted. An officer kicks one
+      // down rather than begging — `doorTick` does that above this branch — so
+      // reaching here means there is genuinely no way in worth waiting at.
+      endRaid(state, now);
+      return false;
+    }
+    if (unstickTick(world, e, state, now, dt, speed)) return true;
+    const desired = avoidBushes(world, e, headingToward(world, e, state, way.x, way.y, now));
+    step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+    return true;
+  }
+
+  const room = world.rooms.roomAt(e.x, e.y);
+  if (room === OUTSIDE) return false; // in a doorway; nothing to decide from here
+
+  // Time to turn round. Reserved out of the budget rather than waiting for it
+  // to run out, so the walk back has time in it.
+  if (!state.raidLeaving && state.raidUntil - now <= BOT_COMPLEX_RAID_MS * (1 - BOT_COMPLEX_LEAVE_AT)) {
+    state.raidLeaving = true;
+    state.raidRoom = shallowestRoomOf(world, complex);
+    state.path = null;
+    state.nextPathAt = 0;
+  }
+
+  // Arrived. Going in, that means the back of the building is stripped —
+  // reaching this branch at all means the loot scan above found nothing left
+  // worth walking to — so turn round. Coming out, it means the street door is
+  // the next thing to walk through.
+  const there = world.rooms.rooms[state.raidRoom];
+  const arrived =
+    room === state.raidRoom ||
+    (there !== undefined && Math.hypot(there.x - e.x, there.y - e.y) < BOT_COMPLEX_ROOM_REACH);
+
+  if (arrived && !state.raidLeaving) {
+    state.raidLeaving = true;
+    state.raidRoom = shallowestRoomOf(world, complex);
+    state.path = null;
+    state.nextPathAt = 0;
+    return true;
+  }
+
+  if (arrived && state.raidLeaving) {
+    const way = wayIntoBuilding(world, e, state, complex);
+    if (!way) {
+      endRaid(state, now);
+      return false;
+    }
+    const desired = headingToward(world, e, state, way.x, way.y, now);
+    step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+    return true;
+  }
+
+  const hop = roomHopToward(world, room, state.raidRoom);
+  if (!hop) {
+    // No way through the room graph from here. Going in that is a dead end;
+    // coming out it is a bot that would otherwise stand in a back room.
+    if (!state.raidLeaving) {
+      state.raidLeaving = true;
+      state.raidRoom = shallowestRoomOf(world, complex);
+      return true;
+    }
+    endRaid(state, now);
+    return false;
+  }
+  const desired = headingToward(world, e, state, hop.x, hop.y, now);
+  step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now);
+  return true;
+}
+
+/**
  * An officer played by the machine. Unlike the grey NPC officers — who patrol
  * with a fixed sidearm — a bot carries a real inventory, goes looking for
  * better guns, and fires them through the same path a player does, so its
@@ -4560,6 +5299,11 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
     if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
     // Indoors is where the loot is, not where the work is.
     if (buildingIndexAt(world, x, y) >= 0) continue;
+    // And never *into* the dog's acid. `acidBoltTick` is what gets a bot out of
+    // one; this is what stops it walking into the next one on purpose, which it
+    // otherwise would — a cloud is a piece of open street as far as every score
+    // below is concerned, and standing in one is blindness.
+    if (!botIgnoresAcid && acidCloudAt(world, x, y)) continue;
 
     const danger = Math.min(world.danger.distanceAt(x, y), DANGER_MAX_DISTANCE);
     // Near the trouble, not stood in it.
@@ -5313,6 +6057,26 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   const inv = world.inventories.get(e.id);
   if (!inv) return;
 
+  /**
+   * Acid in its eyes.
+   *
+   * **Blind in a cloud is the one case a bot does not simply wait out.**
+   * Standing in the stuff sweeping its head about is the worst thing it could
+   * be doing: the cloud is what took its sight away, and everything that can
+   * see it is stood outside looking in. So it stumbles clear — still blind
+   * while it does, with no perception, no target and no shooting, walking a
+   * bearing off the cloud's centre rather than anywhere it has chosen. That is
+   * what "get out" has to mean for something that cannot see, and it is
+   * deliberately much narrower than lifting the blindness.
+   *
+   * Blind anywhere else — the cloud has lifted, or it was caught at the edge —
+   * and it sweeps like anybody else.
+   */
+  if (world.blinded.has(e.id)) {
+    if (!acidBoltTick(world, e, state, inv, now, dt)) blindedTick(world, e, state, now);
+    return;
+  }
+
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
     // Bots look through foliage. A civilian loses someone behind a hedge; an
@@ -5350,6 +6114,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
   // itself down the street it was running along.
   const threat = state.targetId ? world.entities.get(state.targetId) : undefined;
   const zombie = threat && threat.type === 'zombie' ? threat : undefined;
+
+  // Stood in the dog's acid. Get out, before anything else at all.
+  if (acidBoltTick(world, e, state, inv, now, dt)) return;
 
   // Shaken after being grabbed: get clear before thinking about anything else.
   //
@@ -5686,11 +6453,28 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       }
       // Scraping along something on the way to it counts as not getting there.
       if (unstickTick(world, e, state, now, dt, botWalkSpeed(inv))) return;
-      const desired = avoidBushes(world, e, headingToward(world, e, state, target.x, target.y, now));
+      // One doorway at a time when it is in another room of the building we
+      // are already in. A no-op for an ordinary block, which is one undivided
+      // room — and the difference between stripping the corner complex and
+      // standing in its hallway, since `BOT_LOOT_RANGE` is 1400 and most of a
+      // landmark is inside that from the front step. See `indoorHeadingToward`.
+      const desired = avoidBushes(
+        world,
+        e,
+        indoorHeadingToward(world, e, state, target.x, target.y, now),
+      );
       step(world, e, state, desired, botWalkSpeed(inv), HUMAN_TURN_RATE, dt, now);
       return;
     }
   }
+
+  // Nothing left in reach worth taking. If we are near — or inside — the
+  // corner complex, that is the cue to go in after what is deeper in it, and
+  // then to walk back out. Below the loot branch because the raid exists to
+  // put loot in reach and collecting it is already written; above patrol
+  // because a patrol target is outdoors by construction and would walk the bot
+  // straight back out of the building on the next tick.
+  if (complexRaidTick(world, e, state, now, dt)) return;
 
   // Otherwise patrol. Targets are outdoors by construction, so a bot that has
   // finished stripping a house walks itself back out to the street rather than
@@ -5719,6 +6503,27 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
 function senseTarget(world: World, e: Entity, state: AiState, now: number): void {
   const nearby = world.entityGrid.queryCircle(e.x, e.y, ZOMBIE_SIGHT_RADIUS, new Set<Entity>());
 
+  /**
+   * **Somebody shot us, and until that lapses they are the only thing worth
+   * changing our mind for.**
+   *
+   * This is the half of the fix that matters. `hit` could set the grudge as
+   * firmly as it liked and this function undid it a tenth of a second later:
+   * it takes the nearest thing it can see and then writes that body's position
+   * into `lastSeen` — the very field carrying where the shot came from. So a
+   * zombie shot from a hedge set off toward the hedge, spotted a civilian in
+   * the street on its next perception tick, and both its target *and its
+   * memory of the shot* were replaced. It did not change its mind; it had the
+   * mind taken off it.
+   *
+   * `committed` is deliberately narrower than `provoked`: it holds only while
+   * there is still somewhere to be. Once the walk is spent — arrived, or given
+   * up on — ordinary targeting resumes, so a zombie that went to the spot and
+   * found nobody is not locked out of the rest of the city for the remainder.
+   */
+  const provoked = !forgetsTheShooter() && state.provokedBy !== null && now < state.provokedUntil;
+  const committed = provoked && state.lastSeenX !== null;
+
   let best: Entity | null = null;
   let bestScore = Infinity;
   // The nearest zombie that can see prey itself, for the case where we cannot.
@@ -5743,6 +6548,19 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
     if (other.type !== 'human' && other.type !== 'officer') continue;
     const dist = Math.hypot(other.x - e.x, other.y - e.y);
     if (dist > ZOMBIE_SIGHT_RADIUS) continue;
+
+    // On our way to whoever shot us: nobody else is worth turning for.
+    //
+    // The one exception is somebody already inside pouncing distance, and it is
+    // not a softening of the rule so much as the absence of an absurdity — a
+    // provoked zombie that walks *through* a civilian at arm's length to reach
+    // a spot two streets away is a different kind of wrong from the one being
+    // fixed. `ZOMBIE_LUNGE_RANGE` is reused rather than a figure of its own
+    // because it is already this game's definition of close enough to throw
+    // yourself at something, and an interception at that range is not the
+    // reported flip-flop: it ends in a grab, and the grudge is still standing
+    // underneath it when that resolves.
+    if (committed && other.id !== state.provokedBy && dist > ZOMBIE_LUNGE_RANGE) continue;
 
     // Someone already swarmed by a full pack isn't worth joining.
     const session = world.grapples.get(other.id);
@@ -5773,7 +6591,12 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
     if (!noTargetStick && other.id === state.targetId) score *= ZOMBIE_TARGET_STICK;
 
     if (score >= bestScore) continue;
-    if (!hasLineOfSight(world, e.x, e.y, other.x, other.y, false, e.type)) continue;
+    // Right on top of the one that shot us, and it is in a bush. Sight is not
+    // what finds somebody at this range and the foliage is not what is hiding
+    // them — see `ZOMBIE_PROVOKED_SNIFF`. Only ever the shooter, and only while
+    // the grudge stands, so cover still works for everybody else.
+    const found = provoked && other.id === state.provokedBy && dist <= ZOMBIE_PROVOKED_SNIFF;
+    if (!found && !hasLineOfSight(world, e.x, e.y, other.x, other.y, false, e.type)) continue;
 
     best = other;
     bestScore = score;
@@ -5781,9 +6604,14 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
 
   if (best) {
     state.targetId = best.id;
-    state.lastSeenX = best.x;
-    state.lastSeenY = best.y;
-    state.lastSeenUntil = now + ZOMBIE_LAST_SEEN_MS;
+    // Whoever shot us owns `lastSeen` while we are on our way to them. Taking a
+    // body at arm's length must not cost us the spot we were walking to, or the
+    // interception above becomes another way to lose the grudge.
+    if (!committed || best.id === state.provokedBy) {
+      state.lastSeenX = best.x;
+      state.lastSeenY = best.y;
+      state.lastSeenUntil = Math.max(now + ZOMBIE_LAST_SEEN_MS, state.lastSeenUntil);
+    }
     return;
   }
 
@@ -6384,19 +7212,28 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
 // ---------------------------------------------------------------- infection
 
 /**
- * A dog's tally, banked as a charge for its roar.
+ * A dog's tally, banked twice: as a charge for its roar, and on the running
+ * total that unlocks the acid.
  *
  * **Turned, not bitten**, which is why it is here and not in `attemptGrab`:
  * somebody incubating is not a zombie and may never be one. Both routes out of
  * `resolveGrapple` come through `convert` — the grab that turns on the spot,
  * and the one that takes a minute — so one line covers both and neither has to
  * know it is being counted.
+ *
+ * **Two counters and not one, and that is not redundancy.** `dogConversions` is
+ * a *balance*: the roar spends it whole and sets it to nought. `dogTurned` is a
+ * *total* and is never spent. Gating the acid on the balance would let the roar
+ * take the acid away again — turn fifteen people, unlock it, roar, and the
+ * hexagon locks itself with fifteen to go — which is nobody's idea of
+ * progression. One line each, incremented together, so they cannot drift.
  */
 function creditConversion(world: World, targetId: string): void {
   const dogId = world.infectedByDog.get(targetId);
   world.infectedByDog.delete(targetId);
   if (dogId === undefined || !world.dogs.has(dogId)) return;
   world.dogConversions.set(dogId, (world.dogConversions.get(dogId) ?? 0) + 1);
+  world.dogTurned.set(dogId, (world.dogTurned.get(dogId) ?? 0) + 1);
 }
 
 /**
@@ -6420,6 +7257,18 @@ function markDogBite(world: World, session: GrappleLike, targetId: string): void
 
 function convert(world: World, target: Entity, now: number): void {
   creditConversion(world, target.id);
+  /**
+   * **The outbreak's own tally, unconditional on who did the biting.**
+   *
+   * `creditConversion` above only credits a *dog* — it reads `infectedByDog`
+   * and returns at once if nobody there was one. This is different: it is what
+   * `DOG_MORPH_UNLOCK_CONVERTED` reads, and the ask is "converted to zombies by
+   * other zombies and yourself" — an ordinary shambler finishing an incubated
+   * bite counts exactly as much as this dog's own jaws do. So it goes here,
+   * unconditionally, in the one function every conversion in the game passes
+   * through however it got here.
+   */
+  world.totalConverted++;
   target.type = 'zombie';
   target.health = ENTITY_MAX_HEALTH.zombie;
   target.maxHealth = ENTITY_MAX_HEALTH.zombie;
@@ -6931,7 +7780,14 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
     // Somebody stood dead still on a bearing reads as the game having stopped
     // paying attention to them — which is exactly what standing about used to
     // look like before `settledTick`, and the same fix applies.
-    if (world.blinded.has(e.id)) {
+    // **A blinded bot officer is the one exception**, and it is handed on to
+    // `updateBotOfficer` to decide rather than settled here — a bot blind *in
+    // the acid* stumbles out of it, and a bot blind anywhere else sweeps its
+    // head like everybody else. See the branch at the top of that function.
+    //
+    // Civilians and grey officers keep the old behaviour whole: they have no
+    // rule about clouds and nowhere in particular to be.
+    if (world.blinded.has(e.id) && !world.bots.has(e.id)) {
       blindedTick(world, e, state, now);
       continue;
     }

@@ -15,6 +15,8 @@ import type {
   SpitState,
   SpeechState,
   BlastState,
+  TentacleState,
+  LashState,
   Pond,
   DuckState,
   EmplacementState,
@@ -85,12 +87,15 @@ import {
   MINIMAP_MARGIN,
   BEACON_MUSTER_RADIUS,
   DOG_ART_RADIUS,
+  DOG_MORPH_ART_MUL,
+  DOG_MORPH_TENTACLES,
   DOG_MAP_MARGIN,
   DOG_MAP_SIZE,
   DOG_MAX_HEALTH,
   DOG_ROAR_RING_MS,
   DOG_ROAR_RING_REACH,
   DOG_BODY_COLOR,
+  DOG_TENTACLE_COLOR,
   DOG_FUR_COLOR,
   DOG_HEAD_COLOR,
   DOG_DECAY_COLOR,
@@ -1571,7 +1576,18 @@ function drawDog(
   now: number,
   simple: boolean,
 ): void {
-  const r = DOG_ART_RADIUS;
+  /**
+   * **Coming apart makes it bigger, and that is one multiplier on `r`.**
+   *
+   * Every measurement in this function is already in radii — the hips, the
+   * legs, the muzzle, the shadow, the health bar — so growing the animal is
+   * this line and nothing else. `DOG_MORPH_ART_MUL` is deliberately far larger
+   * than what the *body* grows to on the server: how big it looks is an art
+   * decision and how big it collides is capped by the narrowest doorway a city
+   * generates. See the note on `DOG_MORPH_RADIUS`.
+   */
+  const morph = e.morph ?? 0;
+  const r = DOG_ART_RADIUS * (1 + (DOG_MORPH_ART_MUL - 1) * morph);
   const pose = dogPoseFor(e, now);
   const art = dogSprites();
 
@@ -1624,6 +1640,20 @@ function drawDog(
     x += -Math.sin(facing) * thrash;
     y += Math.cos(facing) * thrash;
     head += Math.sin(phase * 2.7) * 0.13;
+  }
+  /**
+   * **Tearing itself open: vibration, not thrashing** — the same distinction
+   * the birth already makes, and for the same reason. Two people wrestling is
+   * something the eye can follow; this is too fast to track and reads as a body
+   * failing rather than struggling. The two axes run at rates that are not
+   * multiples of each other so it never settles into a line, and it ramps on
+   * the *square* of the progress, because linear reads as fully broken from the
+   * first frame and then has nowhere left to go.
+   */
+  if (e.morphing) {
+    const p = morph * morph;
+    x += Math.sin(now * 0.061 + hashId(e.id)) * 3.4 * p;
+    y += Math.cos(now * 0.047 + hashId(e.id) * 1.7) * 3.4 * p;
   }
   // The head goes over as it falls, and which way is hashed so a row of bodies
   // are not all lolling identically.
@@ -1810,6 +1840,11 @@ function drawDog(
   // with a bite taken out of it.
   if (e.roaring) drawRoar(ctx, hingeX, hingeY, head, r, hashId(e.id), now);
 
+  // Over the body, because they are coming *out* of it. After the head, so
+  // one can cross the muzzle — a tentacle that respected the silhouette would
+  // read as decoration painted on rather than as something tearing free.
+  if (morph > 0) drawTentacles(ctx, x, y, facing, r, morph, hashId(e.id), now);
+
   // **A corpse has no health to report.** The bar is drawn whenever health is
   // under the maximum, and a body is on zero — so every corpse in the city wore
   // an empty bar over it, which reads as a thing still in the fight.
@@ -1831,6 +1866,226 @@ function drawDog(
   // round, the camera is on yours, and `drawSelfMarker` already puts a chevron
   // where it went if the pan takes it off screen.
   void isSelf;
+}
+
+/**
+ * The tentacles that come out of a transforming dog, and go on writhing for as
+ * long as it is one.
+ *
+ * **Live rather than baked**, unlike everything else on the animal. The dog's
+ * parts are painted once into offscreen canvases because they are rigid shapes
+ * that only need posing; a tentacle is a curve whose whole point is that it
+ * moves, so there is nothing to bake. Eight of them at four segments each is
+ * about thirty line segments on one entity — the cost of a handful of bodies,
+ * on the one body in the round that is worth it.
+ *
+ * **No per-frame state.** Every tentacle's bearing, length and phase come off
+ * the dog's own id and the clock, exactly as the saliva strands and the acid
+ * churn do, so two dogs transforming side by side do not writhe in lockstep and
+ * nothing has to be remembered between frames.
+ *
+ * They grow with `morph` rather than appearing at the end of it: the wind-up is
+ * *them ripping out*, so at 0.2 they are stubs and at 1 they are at full reach.
+ */
+function drawTentacles(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  facing: number,
+  r: number,
+  morph: number,
+  seed: number,
+  now: number,
+): void {
+  const count = DOG_MORPH_TENTACLES;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let i = 0; i < count; i++) {
+    // Anchored round the trunk rather than at one point, and jittered off the
+    // even spacing — evenly spaced anything reads as designed, which is the
+    // lesson the acid's petals and the dog's own ribs both learned.
+    const h = hash2(seed, i);
+    const base = facing + (i / count) * TAU + (h % 1) * 0.5;
+    const anchorAlong = Math.cos(base - facing) * r * 0.55;
+    const anchorAcross = Math.sin(base - facing) * r * 0.42;
+    const ax = x + Math.cos(facing) * anchorAlong - Math.sin(facing) * anchorAcross;
+    const ay = y + Math.sin(facing) * anchorAlong + Math.cos(facing) * anchorAcross;
+
+    const reach = r * (0.75 + (h * 7) % 0.75) * morph;
+    // Each on its own clock, so the mass of them churns rather than pulsing.
+    const t = now * 0.004 + h * 6.3;
+    const segs = 4;
+
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    let px = ax;
+    let py = ay;
+    let dir = base;
+    for (let s = 1; s <= segs; s++) {
+      // The curl builds along the length — a tentacle is stiff where it leaves
+      // the body and loose at the tip, and a constant bend per segment reads as
+      // an arc of wire.
+      dir += Math.sin(t + s * 1.3 + h) * 0.55 * (s / segs);
+      const step = (reach / segs) * (1.15 - s * 0.09);
+      px += Math.cos(dir) * step;
+      py += Math.sin(dir) * step;
+      ctx.lineTo(px, py);
+    }
+
+    // Two passes: a dark one wider than the light one, so each has a contour
+    // and the mass of them does not merge into a single blob at a distance.
+    ctx.strokeStyle = 'rgba(24, 10, 12, 0.9)';
+    ctx.lineWidth = r * 0.3 * morph;
+    ctx.stroke();
+    ctx.strokeStyle = DOG_TENTACLE_COLOR;
+    ctx.lineWidth = r * 0.18 * morph;
+    ctx.stroke();
+
+    // A wet tip, which is most of what makes it read as flesh rather than rope.
+    ctx.beginPath();
+    ctx.arc(px, py, r * 0.09 * morph, 0, TAU);
+    ctx.fillStyle = 'rgba(196, 72, 78, 0.85)';
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** Two integers into a stable fraction. Same trick as `hashId`, one more input. */
+function hash2(a: number, b: number): number {
+  const n = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+/**
+ * Tentacles thrown out of a burst dog — in the air, then lying where they fell.
+ *
+ * **The bouncing is the server's**, which is why these arrive on the wire at
+ * all rather than being thrown client-side like the blood and the birth gore:
+ * they come off walls, and the client has no business deciding where a wall is.
+ * What is left here is the picture — a curl, a shadow while it is up, and a
+ * fade once it is down.
+ */
+export function drawTentacleDebris(
+  ctx: CanvasRenderingContext2D,
+  list: TentacleState[],
+  view: Viewport,
+  now: number,
+): void {
+  if (list.length === 0) return;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    if (t.x < view.x - 60 || t.x > view.x + view.w + 60) continue;
+    if (t.y < view.y - 60 || t.y > view.y + view.h + 60) continue;
+
+    const h = hash2(Math.round(t.x), i);
+    const len = DOG_ART_RADIUS * (0.9 + h * 0.7);
+    const alpha = t.t;
+
+    // Under it while it is up, so the arc reads as height rather than as the
+    // thing being drawn off to one side. The same fix the flamethrower's arc
+    // needed.
+    if (t.air) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+      ctx.beginPath();
+      ctx.ellipse(t.x + 3, t.y + 4, len * 0.4, len * 0.2, t.a, 0, TAU);
+      ctx.fill();
+    }
+
+    // Airborne it whips; on the ground it lies still, so the churn is gated on
+    // `air` rather than always running — a pile of debris quietly writhing in
+    // the road is a different and much odder thing to look at.
+    const curl = t.air ? Math.sin(now * 0.012 + h * 6.3) * 0.7 : (h - 0.5) * 0.8;
+    const lift = t.air ? -6 : 0;
+
+    ctx.beginPath();
+    let px = t.x;
+    let py = t.y + lift;
+    let dir = t.a;
+    ctx.moveTo(px, py);
+    for (let s = 1; s <= 3; s++) {
+      dir += curl * (s / 3);
+      px += Math.cos(dir) * (len / 3);
+      py += Math.sin(dir) * (len / 3);
+      ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = 'rgba(24, 10, 12, ' + (0.85 * alpha).toFixed(3) + ')';
+    ctx.lineWidth = DOG_ART_RADIUS * 0.26;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(126, 44, 48, ' + (0.9 * alpha).toFixed(3) + ')';
+    ctx.lineWidth = DOG_ART_RADIUS * 0.15;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * A tentacle lashing out at somebody.
+ *
+ * Drawn from the dog to whatever it reached, with a curl in it so it is plainly
+ * a limb rather than a tracer, and a splash at the far end when it caught
+ * somebody — **which is the only readout there is** that it worked. The lash
+ * infects rather than damaging, so there is no blood, no health bar moving and
+ * nothing else on screen to say anything happened.
+ */
+export function drawLashes(
+  ctx: CanvasRenderingContext2D,
+  list: LashState[],
+  view: Viewport,
+  now: number,
+): void {
+  if (list.length === 0) return;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let i = 0; i < list.length; i++) {
+    const l = list[i];
+    if (Math.max(l.x1, l.x2) < view.x - 60 || Math.min(l.x1, l.x2) > view.x + view.w + 60) continue;
+    if (Math.max(l.y1, l.y2) < view.y - 60 || Math.min(l.y1, l.y2) > view.y + view.h + 60) continue;
+
+    const dx = l.x2 - l.x1;
+    const dy = l.y2 - l.y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const px = -dy / len;
+    const py = dx / len;
+    // It **snaps back** as it fades rather than simply thinning: `t` runs 1 to
+    // 0, so the far end walks in toward the dog and the whole thing is drawn
+    // shorter every frame. A lash that faded in place would read as a beam.
+    const reach = len * (0.35 + 0.65 * l.t);
+    const tipX = l.x1 + (dx / len) * reach;
+    const tipY = l.y1 + (dy / len) * reach;
+    // One kink, sinusoidal on its own life, so it reads as something thrown.
+    const bow = Math.sin(now * 0.02 + i) * reach * 0.1 * l.t;
+
+    ctx.beginPath();
+    ctx.moveTo(l.x1, l.y1);
+    ctx.quadraticCurveTo(
+      (l.x1 + tipX) / 2 + px * bow,
+      (l.y1 + tipY) / 2 + py * bow,
+      tipX,
+      tipY,
+    );
+    ctx.strokeStyle = 'rgba(24, 10, 12, ' + (0.85 * l.t).toFixed(3) + ')';
+    ctx.lineWidth = 7;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(150, 52, 58, ' + (0.95 * l.t).toFixed(3) + ')';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    if (l.hit) {
+      ctx.beginPath();
+      ctx.arc(tipX, tipY, 9 * l.t + 3, 0, TAU);
+      ctx.fillStyle = 'rgba(120, 190, 70, ' + (0.5 * l.t).toFixed(3) + ')';
+      ctx.fill();
+    }
+  }
+  ctx.restore();
 }
 
 /**
@@ -2457,6 +2712,41 @@ function drawDogAbilities(
       ctx.fillStyle = 'rgba(120, 113, 108, 0.75)';
       ctx.font = 'bold 12px system-ui, sans-serif';
       ctx.fillText(DOG_ABILITY_KEY_CAPS[i] ?? '', cx, cy);
+      continue;
+    }
+
+    // **Locked is not the same as recharging**, and it must not look like it.
+    // A cooldown fills and comes good on its own; this one only moves when you
+    // bite somebody, so it is drawn cold — no amber fill, a dashed outline like
+    // an empty slot, and the number of people still to turn where the charge
+    // badge goes. That count *is* the instruction: it says the ability exists,
+    // that it is earned, and exactly how much further there is to go.
+    if (ability.locked > 0) {
+      hexPath(ctx, cx, cy, DOG_HEX_R);
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = 'rgba(120, 113, 108, 0.85)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = 'rgba(168, 162, 158, 0.85)';
+      ctx.font = 'bold 14px system-ui, sans-serif';
+      ctx.fillText(DOG_ABILITY_KEY_CAPS[i] ?? '', cx, cy - 5);
+      ctx.font = 'bold 7px system-ui, sans-serif';
+      ctx.fillText(ability.name, cx, cy + 9);
+
+      const bx = cx + DOG_HEX_R * 0.66;
+      const by = cy + half - 1;
+      ctx.beginPath();
+      ctx.arc(bx, by, 8, 0, TAU);
+      ctx.fillStyle = '#292524';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(168, 162, 158, 0.8)';
+      ctx.stroke();
+      ctx.fillStyle = '#d6d3d1';
+      ctx.font = 'bold 9px system-ui, sans-serif';
+      ctx.fillText(String(Math.min(99, ability.locked)), bx, by + 0.5);
       continue;
     }
 

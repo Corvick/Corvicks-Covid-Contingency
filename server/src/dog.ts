@@ -1,4 +1,4 @@
-import type { DogAbilityHud, DogHud } from '../../shared/types.js';
+import type { DogAbilityHud, DogHud, LashState, TentacleState } from '../../shared/types.js';
 import {
   DOG_ABILITY_SLOTS,
   DOG_ART_RADIUS,
@@ -28,6 +28,31 @@ import {
   DOG_SHAKE_THROW,
   DOG_SPEED,
   DOG_SPIT_COOLDOWN_MS,
+  DOG_SPIT_UNLOCK_AT,
+  DOG_MAX_HEALTH,
+  DOG_RADIUS,
+  DOG_MORPH_WINDUP_MS,
+  DOG_MORPH_MS,
+  DOG_MORPH_COOLDOWN_MS,
+  DOG_MORPH_DAMAGE_MUL,
+  DOG_MORPH_HEALTH_MUL,
+  DOG_MORPH_SPRINT_MUL,
+  DOG_MORPH_RADIUS,
+  DOG_MORPH_UNLOCK_CONVERTED,
+  DOG_LASH_RANGE,
+  DOG_LASH_WIDTH,
+  DOG_LASH_COOLDOWN_MS,
+  DOG_LASH_SHOW_MS,
+  DOG_BURST_CLOUD_MUL,
+  DOG_BURST_TENTACLES,
+  DOG_BURST_THROW,
+  DOG_BURST_FLIGHT_MS,
+  DOG_BURST_LIE_MS,
+  ACID_CLOUD_RADIUS,
+  GRENADE_BOUNCE,
+  WALL_THICKNESS,
+  TURN_DELAY_MIN_MS,
+  TURN_DELAY_MAX_MS,
   DOG_SPRINT_MULTIPLIER,
   DOG_STAGGER_STRENGTH,
   DOG_STAGGER_TIME_MUL,
@@ -42,13 +67,17 @@ import {
   WORLD_WIDTH,
 } from '../../shared/constants.js';
 import { angleDelta, clamp, turnToward } from './geometry.js';
-import { spitAcid } from './acid.js';
+import { layCloud, spitAcid } from './acid.js';
+import { bouncesOff } from './heli.js';
 import { attemptGrab } from './ai.js';
 import { damageDoor } from './doors.js';
 import {
   beginDogBirth,
   finishDogBirth,
+  isMorphed,
+  killEntity,
   hasLineOfSight,
+  hasWallClearPath,
   spawnAtBreach,
   speedAt,
   type Command,
@@ -118,17 +147,51 @@ export interface DogState {
    * three and cannot fall out of step with itself the way three booleans would.
    */
   roarStartedAt: number;
-  /** Earliest it may be roared again — see `DOG_ROAR_COOLDOWN_MS`. */
-  roarReadyAt: number;
   /**
-   * Earliest it may spit again — see `DOG_SPIT_COOLDOWN_MS`.
+   * The transformation: when the wind-up began, and when the form it produces
+   * runs out. Both 0 the rest of the time.
    *
-   * A deadline and nothing else, unlike the roar's pair: spitting is over on
-   * the tick the key goes down, so there is no "it is happening now" for the
-   * legs, the wire or the HUD to read. What happens afterwards belongs to the
-   * gobbet and then to the cloud, neither of which is the dog.
+   * **Both belong to the body**, unlike the cooldown — a dog shot half way
+   * through tearing itself open does not get up two seconds later as the
+   * monster, and one killed at second nineteen does not rise still transformed.
+   * `killEntity` clears them beside `roarStartedAt` and for the same reason.
    */
-  spitReadyAt: number;
+  morphStartedAt: number;
+  morphedUntil: number;
+  /** Between tentacle lashes — see `DOG_LASH_COOLDOWN_MS`. */
+  lashReadyAt: number;
+  /**
+   * **The ability cooldowns are deliberately not here.** They live on
+   * `World.dogCooldowns`, keyed by connection and by ability slot, because this
+   * state is *deleted* on every respawn — which is right for everything that is
+   * in it and wrong for a cooldown. Left here, the cheapest way to have the
+   * acid back was to go and get shot: 22s of cooldown against under four
+   * seconds of dying and rising again.
+   */
+}
+
+/** A tentacle thrown out of a burst, on grenade physics until it comes to rest. */
+export interface Tentacle {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  /** Which way it is lying. Spun while it flies, held once it lands. */
+  a: number;
+  spin: number;
+  /** How long it has been going, against its flight and then its lie. */
+  age: number;
+}
+
+/** A lash going out, kept only long enough to be drawn. */
+export interface Lash {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  hit: boolean;
+  until: number;
 }
 
 /**
@@ -173,12 +236,341 @@ function dogStateFor(world: World, id: string, facing: number): DogState {
       slowUntil: 0,
       slowMul: 1,
       roarStartedAt: 0,
-      roarReadyAt: 0,
-      spitReadyAt: 0,
+      morphStartedAt: 0,
+      morphedUntil: 0,
+      lashReadyAt: 0,
     };
     world.dogState.set(id, dog);
   }
   return dog;
+}
+
+/**
+ * When ability `slot` may be used again, and how it is put on cooldown.
+ *
+ * Two lines that exist so nothing has to know the shape of the map — and so
+ * that "read the deadline" and "set the deadline" cannot end up disagreeing
+ * about where it lives, which is exactly how it came to be on `DogState` and
+ * therefore refreshed by dying. See `World.dogCooldowns`.
+ */
+/**
+ * And the lash's own short deadline, which lives on  rather than in
+ * the slot map — it belongs to the body, the way a bite in progress does.
+ * Read through a function of its own so the testing switch has one place to
+ * be honoured here too.
+ */
+function lashReadyAt(world: World, dog: DogState | undefined): number {
+  if (free(world)) return 0;
+  return dog?.lashReadyAt ?? 0;
+}
+
+function readyAt(world: World, id: string, slot: number): number {
+  // TESTING: every hexagon comes good at once. Gated on the round actually
+  // being offline here rather than where the flag is set — see
+  // `World.noDogCooldowns`.
+  if (free(world)) return 0;
+  return world.dogCooldowns.get(id)?.[slot] ?? 0;
+}
+
+function coolDown(world: World, id: string, slot: number, until: number): void {
+  let bar = world.dogCooldowns.get(id);
+  if (!bar) {
+    bar = new Array(DOG_ABILITY_SLOTS).fill(0);
+    world.dogCooldowns.set(id, bar);
+  }
+  bar[slot] = until;
+}
+
+// ------------------------------------------------ the transformation (F)
+
+/**
+ * Is F available at all — to every dog in the lobby at once.
+ *
+ * **One global threshold, not a per-dog one.** `world.totalConverted` is the
+ * whole outbreak's tally — every human turned, by any zombie, dog or shambler
+ * — so this takes no `id` at all: the city crossing `DOG_MORPH_UNLOCK_CONVERTED`
+ * opens the ability for everybody driving one, whatever any single animal has
+ * personally bitten.
+ */
+export function morphUnlocked(world: World): boolean {
+  if (free(world)) return true;
+  return world.totalConverted >= DOG_MORPH_UNLOCK_CONVERTED;
+}
+
+/**
+ * And the acid's own gate: fifteen people this dog has *turned*.
+ *
+ * A function of its own rather than the comparison written out at the two
+ * places that need it — the refusal in `startDogAbility` and the count on the
+ * hexagon — which is the same shape `morphUnlocked` has and for the same
+ * reason. Written twice they drift into a key that works beside a hexagon
+ * saying it does not, which is precisely the failure the count exists to
+ * prevent.
+ */
+export function spitUnlocked(world: World, id: string): boolean {
+  if (free(world)) return true;
+  return (world.dogTurned.get(id) ?? 0) >= DOG_SPIT_UNLOCK_AT;
+}
+
+/**
+ * **TESTING: the dog's abilities with nothing in the way** — no cooldowns, and
+ * no unlock requirements either.
+ *
+ * Read by `readyAt`, `lashReadyAt`, `spitUnlocked` and `morphUnlocked`, which
+ * between them are every gate on the bar. That is four lines rather than a
+ * branch per ability, and it is the whole reason the cooldowns were moved onto
+ * the world and the unlocks were given helpers.
+ *
+ * **Only ever while the round is genuinely offline**, and the check lives here
+ * rather than where the flag is set. A setting the menu declines to offer is
+ * still in `localStorage` and would otherwise be carried into an online round
+ * without anybody touching anything — the trap `noFog` already documents — and
+ * a client that lies about being offline changes nothing, because this reads
+ * the server's own `world.offline`.
+ */
+function free(world: World): boolean {
+  return world.dogAbilitiesFree && world.offline;
+}
+
+
+/**
+ * What a round does to a dog — a tenth of it while the wind-up is running.
+ *
+ * Read by `hit`, which knows nothing about dogs beyond `staggerDog`. Two
+ * seconds rooted in the open is the whole vulnerability of a four-minute
+ * ability, and without this the counter to it is "shoot it while it stands
+ * still", which means it never once completes in front of anybody worth using
+ * it on. The transformed form that follows takes rounds like anything else —
+ * what it got instead is `DOG_MORPH_HEALTH_MUL`.
+ */
+export function dogDamageMul(world: World, id: string): number {
+  const dog = world.dogState.get(id);
+  return dog && dog.morphStartedAt > 0 ? DOG_MORPH_DAMAGE_MUL : 1;
+}
+
+/**
+ * The wind-up finishing, and then the twenty seconds running out.
+ *
+ * Both ends in one place and called from `dogTick`, so there is nowhere else
+ * that knows how the form starts or stops. The ending is `killEntity`: the dog
+ * bursts, which is a death — it drops its body, it costs a life, and it rises
+ * again out of a shambler like any other. See `World.pendingBursts` for why the
+ * cloud and the tentacles are queued rather than thrown from here.
+ */
+function morphTick(world: World, e: Entity, dog: DogState, now: number): void {
+  if (dog.morphStartedAt > 0 && now - dog.morphStartedAt >= DOG_MORPH_WINDUP_MS) {
+    dog.morphStartedAt = 0;
+    dog.morphedUntil = now + DOG_MORPH_MS;
+    // Six times the health, and a body four pixels wider — see
+    // `DOG_MORPH_ART_MUL` for why the *drawing* nearly doubles and this does
+    // not. Health is set as well as the ceiling, or a dog that transformed at
+    // half health would come out of it on a sixth of its new bar.
+    e.maxHealth = DOG_MAX_HEALTH * DOG_MORPH_HEALTH_MUL;
+    e.health = e.maxHealth;
+    e.radius = DOG_MORPH_RADIUS;
+    return;
+  }
+
+  if (dog.morphedUntil > 0 && now >= dog.morphedUntil) killEntity(world, e, now);
+}
+
+/**
+ * A tentacle out at the cursor, and whoever it lands on is infected.
+ *
+ * **It infects rather than damaging**, which is the whole of what the
+ * transformed dog is for: it is far too slow to run anybody down, so its work
+ * is done at arm's length. A body already incubating is passed over rather than
+ * re-bitten — the same rule `resolveGrapple` follows, and for the same reason:
+ * the first set of teeth turned them and there is only one body to count.
+ *
+ * Nearest first along the line, so a lash into a crowd catches the front of it
+ * rather than whoever happens to be enumerated first.
+ */
+function lashOut(world: World, e: Entity, dog: DogState, command: Command, now: number): void {
+  const aim = Math.atan2(command.aimY - e.y, command.aimX - e.x);
+  const reach = clamp(Math.hypot(command.aimX - e.x, command.aimY - e.y), 40, DOG_LASH_RANGE);
+  const tipX = e.x + Math.cos(aim) * reach;
+  const tipY = e.y + Math.sin(aim) * reach;
+
+  let best: Entity | null = null;
+  let bestAlong = Infinity;
+  for (const other of world.entities.values()) {
+    if (other.id === e.id || other.type === 'zombie') continue;
+    if (world.pendingInfections.has(other.id)) continue;
+    // Distance along the lash, and distance off it. A body behind the dog has a
+    // negative `along` and is not in front of anything.
+    const along = (other.x - e.x) * Math.cos(aim) + (other.y - e.y) * Math.sin(aim);
+    if (along < 0 || along > reach) continue;
+    const off = Math.abs(-(other.x - e.x) * Math.sin(aim) + (other.y - e.y) * Math.cos(aim));
+    if (off > DOG_LASH_WIDTH + other.radius) continue;
+    /**
+     * **A physical line, not a sight line**, and the difference is not academic
+     * in either direction.
+     *
+     * `hasLineOfSight` waves *glass* through, which is the whole point of glass
+     * — and a tentacle does not go through an intact window. It also stops at
+     * *foliage*, and a tentacle very much does go through a hedge, exactly as a
+     * blast does. So a sight test is wrong on both counts and happens to be
+     * wrong in opposite directions.
+     *
+     * `hasWallClearPath` is the one predicate in the game that asks whether a
+     * physical thing can get from here to there: walls, intact glass, shut
+     * doors and parked vehicles, with bushes waved through. It is what
+     * `headingToward` asks about *walking*, and reaching somebody with a limb
+     * is the same question.
+     */
+    if (!hasWallClearPath(world, e.x, e.y, other.x, other.y)) continue;
+    if (along < bestAlong) {
+      bestAlong = along;
+      best = other;
+    }
+  }
+
+  dog.lashReadyAt = now + DOG_LASH_COOLDOWN_MS;
+  const caught = best !== null;
+  if (best) {
+    infectByLash(world, e.id, best, now);
+  }
+  world.lashes.push({
+    x1: e.x,
+    y1: e.y,
+    x2: caught ? best!.x : tipX,
+    y2: caught ? best!.y : tipY,
+    hit: caught,
+    until: now + DOG_LASH_SHOW_MS,
+  });
+}
+
+/**
+ * Infect somebody the lash caught.
+ *
+ * **Not `markDogBite`**: that one reads a grapple session to find out whose
+ * teeth these were, and a lash is not a grapple. What it must share is
+ * `infectedByDog`, so the conversion — when it lands, in `convert` — still
+ * credits this dog's own roar balance and total, exactly as a bite does.
+ */
+function infectByLash(world: World, dogId: string, target: Entity, now: number): void {
+  if (world.pendingInfections.has(target.id)) return;
+  world.infectedByDog.set(target.id, dogId);
+  world.pendingInfections.set(
+    target.id,
+    now + TURN_DELAY_MIN_MS + Math.random() * (TURN_DELAY_MAX_MS - TURN_DELAY_MIN_MS),
+  );
+}
+
+/**
+ * A dog that has burst: a toxic cloud where it stood, and its own tentacles
+ * thrown out on grenade physics.
+ *
+ * Drained here rather than done in `killEntity` because the cloud belongs to
+ * `acid.ts` and `world.ts` may not load it — see `World.pendingBursts`. The
+ * grey corpse pieces are not here at all: the client throws those itself off
+ * the body leaving the snapshot, exactly as it throws the gore when a birth
+ * host bursts and exactly as blood is derived from `Shot.hit`.
+ */
+function drainBursts(world: World, now: number): void {
+  for (const at of world.pendingBursts) {
+    layCloud(world, at.x, at.y, ACID_CLOUD_RADIUS * DOG_BURST_CLOUD_MUL, now);
+    for (let i = 0; i < DOG_BURST_TENTACLES; i++) {
+      // Fanned round the whole circle rather than thrown forward: the thing has
+      // come apart, and a directed spray would read as an attack.
+      const a = (i / DOG_BURST_TENTACLES) * Math.PI * 2 + Math.random() * 0.5;
+      const reach = DOG_BURST_THROW * (0.45 + Math.random() * 0.55);
+      const flight = DOG_BURST_FLIGHT_MS / 1000;
+      const id = `tent-${tentacleCounter++}`;
+      world.tentacles.set(id, {
+        id,
+        x: at.x,
+        y: at.y,
+        vx: (Math.cos(a) * reach) / flight,
+        vy: (Math.sin(a) * reach) / flight,
+        a,
+        spin: (Math.random() - 0.5) * 9,
+        age: 0,
+      });
+    }
+  }
+  world.pendingBursts.length = 0;
+}
+
+let tentacleCounter = 0;
+
+/**
+ * Tentacles in the air and then lying about, and lashes fading off the screen.
+ *
+ * The flight is the gobbet's, which is the grenades' — substepped against
+ * `WALL_THICKNESS / 2` for the same reason and it is not optional here either:
+ * a tentacle covers `DOG_BURST_THROW` in `DOG_BURST_FLIGHT_MS`, which is a
+ * larger step than a wall is thick.
+ */
+function updateTentacles(world: World, now: number, dt: number): void {
+  for (const [key, t] of world.tentacles) {
+    t.age += dt * 1000;
+    if (t.age >= DOG_BURST_FLIGHT_MS + DOG_BURST_LIE_MS) {
+      world.tentacles.delete(key);
+      continue;
+    }
+    if (t.age >= DOG_BURST_FLIGHT_MS) continue; // landed; it just lies there
+
+    const speed = Math.hypot(t.vx, t.vy);
+    const steps = Math.max(1, Math.ceil((speed * dt) / (WALL_THICKNESS / 2)));
+    const sub = dt / steps;
+    for (let i = 0; i < steps; i++) {
+      const nx = t.x + t.vx * sub;
+      const ny = t.y + t.vy * sub;
+      let bounced = false;
+      if (bouncesOff(world, nx, t.y)) {
+        t.vx = -t.vx * GRENADE_BOUNCE;
+        t.vy *= GRENADE_BOUNCE;
+        bounced = true;
+      }
+      if (bouncesOff(world, t.x, ny)) {
+        t.vy = -t.vy * GRENADE_BOUNCE;
+        t.vx *= GRENADE_BOUNCE;
+        bounced = true;
+      }
+      if (!bounced && bouncesOff(world, nx, ny)) {
+        t.vx = -t.vx * GRENADE_BOUNCE;
+        t.vy = -t.vy * GRENADE_BOUNCE;
+      }
+      t.x = clamp(t.x + t.vx * sub, 4, WORLD_WIDTH - 4);
+      t.y = clamp(t.y + t.vy * sub, 4, WORLD_HEIGHT - 4);
+      t.a += t.spin * sub;
+    }
+  }
+
+  for (let i = world.lashes.length - 1; i >= 0; i--) {
+    if (now >= world.lashes[i].until) world.lashes.splice(i, 1);
+  }
+}
+
+export function tentaclesToWire(world: World): TentacleState[] {
+  const out: TentacleState[] = [];
+  for (const t of world.tentacles) {
+    const air = t[1].age < DOG_BURST_FLIGHT_MS;
+    // Its own life from 1 down to 0 across the lying-about half, so it can be
+    // faded on the client with no per-frame state and no second clock.
+    const lie = (t[1].age - DOG_BURST_FLIGHT_MS) / DOG_BURST_LIE_MS;
+    out.push({
+      x: Math.round(t[1].x),
+      y: Math.round(t[1].y),
+      a: Math.round(t[1].a * 100) / 100,
+      t: air ? 1 : Math.round(clamp(1 - lie, 0, 1) * 100) / 100,
+      air,
+    });
+  }
+  return out;
+}
+
+export function lashesToWire(world: World, now: number): LashState[] {
+  return world.lashes.map((l) => ({
+    x1: Math.round(l.x1),
+    y1: Math.round(l.y1),
+    x2: Math.round(l.x2),
+    y2: Math.round(l.y2),
+    hit: l.hit,
+    t: Math.round(clamp((l.until - now) / DOG_LASH_SHOW_MS, 0, 1) * 100) / 100,
+  }));
 }
 
 /** Are this dog's teeth still actually in the person it thinks they are? */
@@ -243,6 +635,12 @@ export function updateDogs(world: World, dt: number, now: number): void {
 
     dogTick(world, e, dog, command, dt, now);
   }
+
+  // Anything that burst this tick or last, and everything already in the air.
+  // Below the loop rather than inside it: a burst is queued by `killEntity`,
+  // which can be reached from a dog's own tick, from a bullet, or from a fire.
+  drainBursts(world, now);
+  updateTentacles(world, now, dt);
 }
 
 /**
@@ -288,6 +686,18 @@ function dogTick(
   if (dog.roarStartedAt > 0 && world.stunned.has(e.id)) dog.roarStartedAt = 0;
   const roaring = dog.roarStartedAt > 0;
 
+  // ---- coming apart. Two seconds of vibrating on the spot, then twenty of
+  // being something else, then the burst. A mine takes the wind-up off you the
+  // same way it takes the roar — but *not* the transformed form, which is a
+  // body rather than an act: being dropped in the road as the thing is being
+  // dropped in the road as the thing.
+  if (dog.morphStartedAt > 0 && world.stunned.has(e.id)) dog.morphStartedAt = 0;
+  morphTick(world, e, dog, now);
+  // It may have just burst, which is a death — nothing below applies to a body
+  // that is on its way down.
+  if (world.dogDeaths.has(e.id)) return;
+  const morphing = dog.morphStartedAt > 0;
+
   // ---- the neck. Both ease toward the mouse; the head simply gets there
   // first, and can only lead the spine by so much before the neck runs out.
   const want = command.aim;
@@ -314,7 +724,10 @@ function dogTick(
 
   // ---- legs
   const stunned = world.stunned.has(e.id);
-  moveDog(world, e, dog, command, dt, now, latched || stunned || roaring);
+  // Rooted for the wind-up, exactly like the roar — "vibrate for two seconds"
+  // is not something you do while running, and the 90% reduction is what pays
+  // for standing still.
+  moveDog(world, e, dog, command, dt, now, latched || stunned || roaring || morphing);
 
   // ---- jaws. Latched, stunned or roaring they are already busy, and a latched
   // dog must not leave them hanging open on the wire while it worries at
@@ -328,7 +741,7 @@ function dogTick(
   // bearing committed to before anything happened would be a worse ability.
   if (roaring && now - dog.roarStartedAt >= DOG_ROAR_MS) {
     dog.roarStartedAt = 0;
-    dog.roarReadyAt = now + DOG_ROAR_COOLDOWN_MS;
+    coolDown(world, e.id, 0, now + DOG_ROAR_COOLDOWN_MS);
     unleashRoar(world, e, command, now);
   }
 
@@ -351,11 +764,11 @@ export function startDogAbility(
   id: string,
   slot: number,
   now: number,
-): 'roared' | 'spat' | 'refused' {
-  // Slots 2-3 are drawn and do nothing: there is nothing in them yet. Said out
+): 'roared' | 'spat' | 'morphing' | 'lashed' | 'refused' {
+  // Slot 2 is drawn and does nothing: there is nothing in it yet. Said out
   // loud rather than falling through, because "the key did nothing" and "the
   // key was refused" are different things and only the second is a bug.
-  if (slot !== 0 && slot !== 1) return 'refused';
+  if (slot !== 0 && slot !== 1 && slot !== 3) return 'refused';
 
   const e = world.entities.get(id);
   if (!e || !world.dogs.has(id) || world.dogsOut.has(id)) return 'refused';
@@ -375,9 +788,16 @@ export function startDogAbility(
   const command = world.commands.get(id);
 
   if (slot === 1) {
-    if (now < dog.spitReadyAt) return 'refused';
+    // Not until this dog has turned enough people. The gate is on the running
+    // total rather than on a spendable charge, so the roar cannot lock the acid
+    // back up by summoning bodies with the same tally — see
+    // `DOG_SPIT_UNLOCK_AT`. Checked here rather than only on the HUD: the wire
+    // carries a slot index and nothing else, so the client's hexagon is a
+    // readout and this is the rule.
+    if (!spitUnlocked(world, id)) return 'refused';
+    if (now < readyAt(world, id, 1)) return 'refused';
     if (!command) return 'refused';
-    dog.spitReadyAt = now + DOG_SPIT_COOLDOWN_MS;
+    coolDown(world, id, 1, now + DOG_SPIT_COOLDOWN_MS);
     // The jaws shut to spit, the same as they shut to roar — and for the same
     // reason this must not go through `shutJaws`, which would take a bite out
     // of whatever door happens to be in front of the animal on the way past.
@@ -386,7 +806,40 @@ export function startDogAbility(
     return 'spat';
   }
 
-  if (now < dog.roarReadyAt) return 'refused';
+  /**
+   * **F does two things, and which one is not a mode the player sets.**
+   *
+   * Out in the world as the transformed thing, it lashes. Anything else, it
+   * begins the transformation. That is what the spec asks for — *"pressing F
+   * during this transformation will have a tentacle lash out"* — and it is
+   * better than a second key: the row is Q, E, R, F and W walks the dog, so
+   * there is exactly one free key left and this ability wants both halves of
+   * it. Nothing has to be learned, either: while you are the monster, F is what
+   * the monster does.
+   *
+   * The lash therefore has to be checked **above** the transformation's own
+   * cooldown, or F would be dead for the whole twenty seconds it is most
+   * wanted.
+   */
+  if (slot === 3) {
+    if (isMorphed(dog, now)) {
+      if (now < lashReadyAt(world, dog) || !command) return 'refused';
+      lashOut(world, e, dog, command, now);
+      return 'lashed';
+    }
+    // Not while it is already tearing itself open.
+    if (dog.morphStartedAt > 0) return 'refused';
+    if (!morphUnlocked(world)) return 'refused';
+    if (now < readyAt(world, id, 3)) return 'refused';
+    // Charged on the press, like the other two — a wind-up a rifle interrupts
+    // has still been spent, which is what makes shooting it worth doing.
+    coolDown(world, id, 3, now + DOG_MORPH_COOLDOWN_MS);
+    dog.morphStartedAt = now;
+    dog.jawsOpenedAt = 0;
+    return 'morphing';
+  }
+
+  if (now < readyAt(world, id, 0)) return 'refused';
   dog.roarStartedAt = now;
   dog.jawsOpenedAt = 0;
   return 'roared';
@@ -544,7 +997,17 @@ function moveDog(
   // on a timer of its own, so nothing else has to know about it.
   if (now >= dog.slowUntil) dog.slowMul = 1;
   const stagger = now < dog.slowUntil ? dog.slowMul : 1;
-  const base = DOG_SPEED * (sprinting ? DOG_SPRINT_MULTIPLIER : 1) * stagger;
+  // **The sprint is what the transformation costs**, and it is the cost that is
+  // actually felt: an ordinary dog's sprint is what wins it every flat-out
+  // chase in the game, and at this size it is barely quicker than the walk. The
+  // walk is left alone — a monster that could not cross a street would spend
+  // its twenty seconds where it stood.
+  const rush = sprinting
+    ? isMorphed(dog, now)
+      ? DOG_MORPH_SPRINT_MUL
+      : DOG_SPRINT_MULTIPLIER
+    : 1;
+  const base = DOG_SPEED * rush * stagger;
   const speed = speedAt(world, e.x, e.y, base, e.type);
   e.x += (dx / len) * speed * dt;
   e.y += (dy / len) * speed * dt;
@@ -803,21 +1266,22 @@ function abilityBar(
 ): Array<DogAbilityHud | null> {
   const bar: Array<DogAbilityHud | null> = new Array(DOG_ABILITY_SLOTS).fill(null);
   const roaring = dog !== undefined && dog.roarStartedAt > 0;
+  const banked = world.dogConversions.get(id) ?? 0;
+  const turned = world.dogTurned.get(id) ?? 0;
   bar[0] = {
     name: 'ROAR',
     // `max(1, …)` so a cooldown set to zero reads as permanently ready rather
     // than dividing by it.
-    ready: dog
-      ? clamp(1 - (dog.roarReadyAt - now) / Math.max(1, DOG_ROAR_COOLDOWN_MS), 0, 1)
-      : 1,
-    charges: world.dogConversions.get(id) ?? 0,
+    ready: clamp(1 - (readyAt(world, id, 0) - now) / Math.max(1, DOG_ROAR_COOLDOWN_MS), 0, 1),
+    // The *balance*, which the roar spends whole — not the running total. The
+    // badge says how many bodies the next roar will walk in.
+    charges: banked,
     active: roaring ? clamp((now - dog!.roarStartedAt) / DOG_ROAR_MS, 0, 1) : -1,
+    locked: 0,
   };
   bar[1] = {
     name: 'SPIT',
-    ready: dog
-      ? clamp(1 - (dog.spitReadyAt - now) / Math.max(1, DOG_SPIT_COOLDOWN_MS), 0, 1)
-      : 1,
+    ready: clamp(1 - (readyAt(world, id, 1) - now) / Math.max(1, DOG_SPIT_COOLDOWN_MS), 0, 1),
     // **-1, not 0.** The badge is drawn only for an ability that banks
     // something, and a nought sitting under a hexagon every round is noise —
     // the badge *appearing* is itself the news that the roar now does more.
@@ -826,6 +1290,40 @@ function abilityBar(
     // Nothing to run. It is over on the tick the key went down; what happens
     // afterwards belongs to the gobbet and then to the cloud.
     active: -1,
+    // **Earned, not given.** The same tally the roar's summons spends, read
+    // rather than drawn down — see `DOG_SPIT_UNLOCK_AT`. Reported as what is
+    // left to go, because a locked hexagon that says nothing is
+    // indistinguishable from a broken one.
+    locked: spitUnlocked(world, id) ? 0 : Math.max(1, DOG_SPIT_UNLOCK_AT - turned),
+  };
+  bar[3] = {
+    name: isMorphed(dog, now) ? 'LASH' : 'RIP',
+    // **Two different clocks behind one hexagon, and that is the honest
+    // reading.** Out in the world as the thing, what F does is lash, and the
+    // number that matters is the lash's own short cooldown — the four minutes
+    // are not a decision anybody can make until the form is over anyway. Any
+    // other arrangement shows a bar that cannot move for twenty seconds beside
+    // a key being pressed twice a second.
+    ready: isMorphed(dog, now)
+      ? clamp(1 - (lashReadyAt(world, dog) - now) / Math.max(1, DOG_LASH_COOLDOWN_MS), 0, 1)
+      : clamp(1 - (readyAt(world, id, 3) - now) / Math.max(1, DOG_MORPH_COOLDOWN_MS), 0, 1),
+    charges: -1,
+    // The wind-up fills; the twenty seconds drain. One reading for the two, so
+    // the hexagon runs through the transformation and then empties across the
+    // form — which is also the only readout of how long there is left of it.
+    active:
+      dog && dog.morphStartedAt > 0
+        ? clamp((now - dog.morphStartedAt) / DOG_MORPH_WINDUP_MS, 0, 1)
+        : isMorphed(dog, now)
+          ? clamp((dog!.morphedUntil - now) / DOG_MORPH_MS, 0, 1)
+          : -1,
+    // How many more conversions the *whole outbreak* needs — the same number
+    // on every dog's hexagon, because it is one shared threshold rather than a
+    // personal one. `Math.max(1, …)` so a city that has already crossed it,
+    // read a tick before `morphUnlocked` agrees, cannot show a stale 0.
+    locked: morphUnlocked(world)
+      ? 0
+      : Math.max(1, DOG_MORPH_UNLOCK_CONVERTED - world.totalConverted),
   };
   return bar;
 }

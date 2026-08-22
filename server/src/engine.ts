@@ -92,7 +92,7 @@ import {
   toWire,
   type Entity,
 } from './world.js';
-import { dogHudFor, startDogAbility, updateDogs } from './dog.js';
+import { dogHudFor, lashesToWire, startDogAbility, tentaclesToWire, updateDogs } from './dog.js';
 import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
 import { processShooting, steerAim } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
@@ -288,6 +288,7 @@ function startLobby(lobby: Lobby): void {
   lobby.running = true;
   clearNotice(lobby);
   world.botOfficerCount = bots;
+  world.offline = lobby.offline;
   // Which team each of them sat on. Read *before* `resetWorld`, because the
   // respawn loop inside it consults `world.dogs` to decide what to rebuild
   // anyone already in the world as.
@@ -532,6 +533,21 @@ export function handle(id: string, msg: ClientMessage): void {
           const lobby = lobbyOf(id);
           if (lobby) pushLobby(lobby);
         }
+      } else if (msg.type === 'testDogAbilities') {
+        /**
+         * TESTING: the dog's ability cooldowns, off.
+         *
+         * **Stored whatever the round is, and honoured only offline** — the
+         * refusal lives in `readyAt` rather than here. Two reasons it is that
+         * way round: the client sends this on `start`, which is the moment
+         * `world.offline` has just been written, so a check here would race the
+         * order the two arrive in; and a rule enforced at the point of use
+         * cannot be got round by a message sent at some other moment.
+         */
+        world.dogAbilitiesFree = msg.free;
+        console.log(
+          `[server] dog ability limits ${msg.free ? 'OFF' : 'on'} (offline round: ${world.offline})`,
+        );
       } else if (msg.type === 'lobbyPopulation') {
         // Sent live as the host drags, so the room watches the number move.
         // `setPopulation` answers false for a value that did not change, which
@@ -618,6 +634,8 @@ export function disconnect(id: string): void {
     world.pendingInfections.delete(id);
     world.infectedByDog.delete(id);
     world.dogConversions.delete(id);
+    world.dogTurned.delete(id);
+    world.dogCooldowns.delete(id);
     world.grappleCounts.delete(id);
     world.speedBoosts.delete(id);
     world.lastShotAt.delete(id);
@@ -709,9 +727,25 @@ function sightRadiusFor(viewer: Entity): number {
   const inv = world.inventories.get(viewer.id);
   const held = inv ? heldItem(inv) : null;
   if (held && ITEMS[held]?.scope) return SNIPER_SIGHT_RADIUS;
-  // Binoculars pull the camera back the way a scope does, so the server has to
-  // send the ground you can now see or you would be looking at empty fog.
-  if (held === 'binoculars') return BINOCULAR_SIGHT_RADIUS;
+  /**
+   * **Binoculars run on being carried, not on being held**, the same trade the
+   * tracker, the goggles and the beacon handset already make: the slot is the
+   * cost.
+   *
+   * Held, they were something you took out, looked through and put away — and
+   * the one moment you most want to see further is the one moment you least
+   * want to be holding a pair of binoculars instead of a rifle. Carried, what
+   * they buy is a wider circle in **every** direction rather than a longer look
+   * down one bearing, which is the honest version of the same item: the camera
+   * push (`BINOCULAR_PUSH`) still needs them in hand, and that is what "looking
+   * down them" now means.
+   *
+   * The client's `baseSightRadius` reads the same bag for the same reason the
+   * sniper's radius has to be matched on both ends — a fog hole wider than what
+   * the server populates is an empty street rather than an error, which is the
+   * fault this file has recorded three times.
+   */
+  if (inv && inv.utilities.includes('binoculars')) return BINOCULAR_SIGHT_RADIUS;
   return PLAYER_SIGHT_RADIUS;
 }
 
@@ -962,7 +996,7 @@ function tick(): void {
     // there *now* rather than where they were at the top of the tick — and
     // before the serialise below, so a cloud that formed this tick is on the
     // wire this tick rather than one behind the body it is meant to hide.
-    updateAcid(world, now);
+    updateAcid(world, now, dt);
     mark('shooting+world');
   }
 
@@ -1002,7 +1036,11 @@ function tick(): void {
   const airGrenades = grenadesToWire(world, now);
   const airSmokes = smokesToWire(world, now);
   const airAcid = acidToWire(world, now);
-  const airSpits = spitsToWire(world, now);
+  const airSpits = spitsToWire(world);
+  // A burst dog's parts, and any lash still on screen. Sent unfiltered like the
+  // helicopters and the acid: a body coming apart is not something fog hides.
+  const airTentacles = tentaclesToWire(world);
+  const airLashes = lashesToWire(world, now);
   const airHelis = helicoptersToWire(world, now);
   // Detonations linger only long enough for the ring to be drawn out.
   world.blasts = world.blasts.filter((b) => now - b.at < BLAST_MS);
@@ -1068,6 +1106,8 @@ function tick(): void {
       // It is also a handful of entries at the very most.
       acid: airAcid,
       spits: airSpits,
+      tentacles: airTentacles,
+      lashes: airLashes,
       blasts: airBlasts,
       ducks: ducksToWire(world),
       emplacements: emplacementsToWire(world),

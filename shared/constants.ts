@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.9.0';
+export const GAME_VERSION = '0.13.1';
 
 // ---------------------------------------------------------------- world
 /**
@@ -61,6 +61,35 @@ export let WORLD_HEIGHT = WORLD_BASE_HEIGHT;
 export const VIEWPORT_WIDTH = 1920;
 export const VIEWPORT_HEIGHT = 1080;
 export const TICK_RATE = 30;
+
+/**
+ * What the RESOLUTION row on the options screen offers, as a multiple of the
+ * viewport above.
+ *
+ * **It changes how many pixels the frame is painted at, and nothing else.**
+ * The viewport stays 1920x1080 in *layout* units — every camera, HUD, fog,
+ * pan and mouse figure in the game is written in those, so the amount of world
+ * on screen is identical at every setting and no two players can see a
+ * different game because of what their machine can afford. That is the same
+ * line every other row on that screen holds, and it is the only reading of
+ * "resolution" consistent with it: a setting that changed how much city you
+ * could see would be a cheat, not a graphics option.
+ *
+ * **Why it is the most valuable row there.** Everything else on the screen is
+ * measured in fractions of a millisecond — the grime tile 0.09ms, the vignette
+ * 0.36ms — because they are cached fills. Painting is not cached and it scales
+ * with area, so 0.75 is 56% of the pixels and 0.5 is a quarter of them. The
+ * fog mask rides `FOG_MASK_SCALE` *of the backbuffer*, so its blit and its
+ * blur come down with it too.
+ *
+ * Above 1 is a supersample: 1.5 paints 2.25x the pixels and the browser scales
+ * it back down, which is a free high-quality antialias — the same trick
+ * `DOG_SS` uses to bake the dog, and worth having on a machine with frames to
+ * spare. It is deliberately not the default: the game is *tuned* at 1.0 and a
+ * fresh install should see what it was designed to cost.
+ */
+export const RENDER_SCALES = [0.5, 2 / 3, 0.75, 1, 1.25, 1.5] as const;
+export type RenderScale = (typeof RENDER_SCALES)[number];
 
 // ---------------------------------------------------------------- map gen
 export const TILE = 28;
@@ -617,7 +646,7 @@ export const BIRTH_BURST_AT = 0.9;
  * to lay a cloud on ground you cannot see, or the ability turns into a way of
  * editing the map at range.
  */
-export const DOG_SPIT_RANGE = 620;
+export const DOG_SPIT_RANGE = 380;
 export const DOG_SPIT_MIN_THROW = 90;
 /** How long the gobbet is in the air. Enough to read as thrown, not as fired. */
 export const DOG_SPIT_TRAVEL_MS = 420;
@@ -626,10 +655,176 @@ export const DOG_SPIT_TRAVEL_MS = 420;
  *
  * Long, and for the same reason `DOG_ROAR_COOLDOWN_MS` is: without one, a held
  * key lays a wall of the stuff across the whole map and there is no decision
- * left in it. Shorter than the roar's, because a cloud is a piece of ground
- * rather than the whole horde and it goes out of date on its own.
+ * left in it.
+ *
+ * **Longer than the roar's now**, where it used to be shorter. The three
+ * numbers here move together: a cloud that has to be earned over fifteen
+ * conversions, thrown a little over a third of the way across your own view,
+ * is a thing you place rather than a thing you spam — and twenty-two seconds is
+ * what makes the placement the decision.
+ *
+ * At this length **it has to survive dying**, or the cheapest way to have the
+ * acid back is to go and get shot: a death and a birth together are under four
+ * seconds. See `World.dogCooldowns`.
  */
-export const DOG_SPIT_COOLDOWN_MS = 11000;
+export const DOG_SPIT_COOLDOWN_MS = 22000;
+/**
+ * How many people this dog has turned before the acid is available at all.
+ *
+ * Counted on `world.dogConversions`, the same tally the roar's summons spends —
+ * *turned*, not bitten, banked in `convert` where a body actually becomes a
+ * zombie. So both abilities are paid for in the same currency and the dog's
+ * whole progression is one number: bite people, and the animal gets more
+ * dangerous.
+ *
+ * **The tally is not spent by unlocking.** The roar spends it a charge at a
+ * time; this is a threshold on the running total, so reaching it once opens the
+ * ability for the rest of the round however many bodies the roar has since
+ * summoned. Two abilities drawing down the same counter would make the roar
+ * able to *lock the acid again*, which is nobody's idea of progression.
+ */
+export const DOG_SPIT_UNLOCK_AT = 15;
+
+/**
+ * How far clear of a cloud a bot officer wants to be, and how hard it tries.
+ *
+ * **Standing in one is the worst place an officer can be, and it does not feel
+ * like it.** The cloud only slows you; what actually happens is the fog —
+ * `hasLineOfSight` fails every line for a viewer inside one, so the bot is
+ * blind, while the horde and the dog see straight through it. An officer stood
+ * in acid is an officer being shot at by things it cannot see, and it has no
+ * way of noticing on its own, because noticing is what the cloud takes away.
+ *
+ * `BOT_ACID_CLEAR` is measured from the cloud's *centre* against its bounding
+ * radius, so it is a margin past the rim rather than a radius of its own — the
+ * lumps mean the rim is not where the bounding radius is, and aiming at the
+ * bounding radius exactly would leave a bot standing in a notch calling itself
+ * clear.
+ */
+export const BOT_ACID_CLEAR = 60;
+
+// ------------------------------------------------ the dog comes apart (F)
+/**
+ * The transformation, on F.
+ *
+ * Two seconds of vibrating on the spot while tentacles tear out of the body,
+ * then twenty seconds of something much bigger, much tougher and much slower —
+ * and then it bursts, into a toxic cloud and a scatter of its own parts.
+ *
+ * **The whole ability is a trade of speed for presence.** Everything else the
+ * dog has is about arriving somewhere before the street is ready; this is about
+ * being somewhere the street cannot deal with, for twenty seconds, and paying
+ * for it with a life and four minutes.
+ */
+export const DOG_MORPH_WINDUP_MS = 2000;
+export const DOG_MORPH_MS = 20000;
+export const DOG_MORPH_COOLDOWN_MS = 250000;
+/**
+ * What a round does to it *during the wind-up* — a tenth of the damage.
+ *
+ * The wind-up is the only genuinely helpless moment the ability has: rooted,
+ * vibrating, in the open, and for two full seconds. Without the reduction the
+ * counter to a four-minute ability is "shoot it while it stands still", which
+ * would mean it never completed in front of anybody worth using it on. The
+ * payoff afterwards is the health rather than more armour, so the transformed
+ * form takes rounds like anything else.
+ */
+export const DOG_MORPH_DAMAGE_MUL = 0.1;
+/** Six times the health it had. Set on completion and taken back on the burst. */
+export const DOG_MORPH_HEALTH_MUL = 6;
+/**
+ * And much slower on the sprint, which is the cost that is *felt*.
+ *
+ * A dog's ordinary sprint (`DOG_SPRINT_MULTIPLIER`) is what wins it every
+ * flat-out chase in the game. At this size it is a thing that arrives rather
+ * than a thing that catches you, so the sprint is barely faster than the walk —
+ * you commit to the ground you are on for twenty seconds.
+ */
+export const DOG_MORPH_SPRINT_MUL = 1.12;
+/**
+ * How much bigger it *looks*, and how much bigger it actually *is*.
+ *
+ * **These are deliberately very different numbers**, and it is the same split
+ * `DOG_RADIUS` and `DOG_ART_RADIUS` already make. How big it looks is an art
+ * decision. How big it collides is capped by the narrowest doorway a city
+ * generates — `CLEAR` in `mapgen` is 46px — and a monster that cannot follow
+ * anybody indoors is a monster that spends its twenty seconds in the street.
+ * Worse, one that transformed *inside* a building would be walled into it for
+ * the whole of them.
+ *
+ * So the drawing nearly doubles and the body grows by four pixels.
+ */
+export const DOG_MORPH_ART_MUL = 1.85;
+/**
+ * **21, and it cannot be much more.** `DOG_RADIUS` is 19 — a *radius*, so a
+ * 38px body — and the tightest opening a city cuts is 46px. 21 is a 42px body
+ * with two pixels either side; 22 does not fit at all.
+ *
+ * The first value written here was 42, on a misreading of the same figure as a
+ * diameter, which would have been an 84px body squeezing through a 46px gap:
+ * a monster walled out of every building in the city, and walled *into* one if
+ * it transformed indoors. The drawing nearly doubles instead — see
+ * `DOG_MORPH_ART_MUL` — and `morphcheck.ts` asserts the doorway sum rather
+ * than the number, so the next person to raise this is told why they cannot.
+ */
+export const DOG_MORPH_RADIUS = 21;
+/**
+ * How many humans the **whole outbreak** has to have turned before F exists —
+ * `world.totalConverted`, one counter shared by every zombie in the city and
+ * every dog in the lobby.
+ *
+ * **Turned, and by anyone**, which is deliberately not a per-dog figure. The
+ * acid (`DOG_SPIT_UNLOCK_AT`) is earned by *this* dog's own reach; the
+ * transformation is earned by how far the outbreak itself has got — a shambler
+ * finishing a bite counts exactly as much as this dog's own jaws do, and
+ * "yourself" is already inside "the outbreak" rather than a clause of its own.
+ * That is what makes it reachable in a round going badly for one dog in
+ * particular: the city crossing the line opens it for everybody, whatever any
+ * single animal has personally done.
+ *
+ * 101 rather than a rounder number, because a round number reads as a target
+ * to chase and this is meant to read as a threshold the *city* crosses, almost
+ * by accident, partway through an outbreak that is already going hard.
+ */
+export const DOG_MORPH_UNLOCK_CONVERTED = 101;
+
+/**
+ * The tentacle lash: F again while transformed.
+ *
+ * Medium range, aimed at the cursor, and it **infects** whoever it lands on
+ * rather than damaging them — the transformed dog is slow, so its reach is how
+ * it does its work. Shorter than the acid's throw and much shorter than a
+ * sniper's, so the officers' answer is still distance.
+ */
+export const DOG_LASH_RANGE = 300;
+/** How far off the line a body may be and still be caught by it. */
+export const DOG_LASH_WIDTH = 26;
+/**
+ * **Not in the spec, and it needs one.** Without a cooldown F is a key you hold
+ * to infect everybody in the street inside a second and a half, which is not a
+ * lash, it is a hose. Two thirds of a second is a rhythm you can feel and about
+ * thirty reaches over the twenty seconds.
+ */
+export const DOG_LASH_COOLDOWN_MS = 650;
+/** How long the lash stays on screen after it goes out. */
+export const DOG_LASH_SHOW_MS = 220;
+
+/**
+ * The burst.
+ *
+ * A toxic cloud where it stood, and its own tentacles thrown out on grenade
+ * physics — the same `bouncesOff` and `GRENADE_BOUNCE` the charges and the
+ * gobbet use, so they come off walls rather than through them.
+ */
+export const DOG_BURST_CLOUD_MUL = 1.6;
+export const DOG_BURST_TENTACLES = 8;
+/** How far a thrown tentacle travels, and how long it is in the air. */
+export const DOG_BURST_THROW = 230;
+export const DOG_BURST_FLIGHT_MS = 620;
+/** And how long the pieces lie there before they fade. */
+export const DOG_BURST_LIE_MS = 4200;
+/** How many tentacles a transformed dog is drawn with. Client-side only. */
+export const DOG_MORPH_TENTACLES = 8;
 /**
  * How long a cloud sits there, and how wide it gets.
  *
@@ -1025,6 +1220,14 @@ export const DOG_MAP_MARGIN = 14;
 export const DOG_BODY_COLOR = '#3a342d'; // the back — charcoal with the brown left in
 export const DOG_FUR_COLOR = '#4e463a'; // the saddle down the spine, a shade up
 export const DOG_HEAD_COLOR = '#5b452f'; // warmer, the way a shepherd's face is
+/**
+ * The tentacles that come out of a transforming one — raw, and a good deal
+ * warmer than the hide. They have just torn their way out of it, so they are
+ * the one part of the animal that is *not* shaded well down: the rule about
+ * keeping the eye on the head does not apply to a thing that is meant to read
+ * as the body failing.
+ */
+export const DOG_TENTACLE_COLOR = '#7e2c30';
 export const DOG_DECAY_COLOR = '#8b8d74'; // hide gone off: sickly, pale, greenish
 export const DOG_ROT_COLOR = '#6d4232';
 export const DOG_MAW_COLOR = '#4a1418'; // down its throat, and inside the flank
@@ -1374,6 +1577,57 @@ export const BOT_SWAP_MARGIN = 12;
  * shopping a pile well inside twenty seconds, so this costs them nothing.
  */
 export const BOT_LOOT_SNUB_MS = 20000;
+
+// ------------------------------------------------ raiding the corner complex
+/**
+ * How near a bot has to come to the corner complex before it knows what is in
+ * it, and goes in after it.
+ *
+ * **Walking past it is the trigger, and the trigger is the design.** A bot
+ * that knew about the complex from the moment the round started would set off
+ * across the city for it and the landmark would stop being somewhere you come
+ * across — every round would open with four officers filing into one corner.
+ * So it is knowledge you acquire by being there, which is also the only kind
+ * an officer plausibly has: you can see it is a big building from the street.
+ *
+ * Generous against `BOT_LOOT_RANGE` (1400) on purpose. Loot is scored on what
+ * a bot can see lying about; the whole point of the complex is that the good
+ * things in it are several partitions in, where nothing is going to turn up in
+ * a scan of what is nearby until the bot is already inside.
+ */
+export const BOT_COMPLEX_NOTICE = 900;
+/**
+ * How long a raid gets before the bot gives it up and goes back to being an
+ * officer, and how long it then leaves the place alone.
+ *
+ * One budget for the whole raid, never extended — the same shape as
+ * `HIDE_DEEPER_GIVE_UP_MS` and `RALLY_ROOM_GIVE_UP_MS`, and for the same
+ * reason: what bounds a ping-pong at a doorway is a clock that does not care
+ * how the room underfoot is read. Long, because the point of the building is
+ * that it takes a while to get through, and a raid that expires in the hallway
+ * is a bot that walked in and out of a landmark for nothing.
+ */
+export const BOT_COMPLEX_RAID_MS = 150000;
+/**
+ * And how long before it would consider the place again. Long enough that a
+ * bot which has stripped it is not straight back in, short enough that a raid
+ * broken off by a horde can be resumed later in the round.
+ */
+export const BOT_COMPLEX_SNUB_MS = 120000;
+/** Close enough to a room's own interior point to count as being in it. */
+export const BOT_COMPLEX_ROOM_REACH = 40;
+/**
+ * How much of a raid is spent going in before it turns round and leaves.
+ *
+ * **Knowing the way out is half of the ask**, and it is deliberately not left
+ * to the router: the same one-long-route problem that put a rallied crowd
+ * against an outside wall puts a bot in a back room grinding at a partition,
+ * and the fix is the same — one doorway at a time, outward down `Room.depth`,
+ * until the street door is the next hop. Reserving the last of the budget for
+ * it is what stops a raid ending with the bot simply switching off deep inside
+ * a landmark when the clock runs out.
+ */
+export const BOT_COMPLEX_LEAVE_AT = 0.7;
 /**
  * A bot only spends a frag on a crowd. One zombie is a rifle's job, and a bot
  * throwing its last grenade at a straggler has nothing left when the street
@@ -2240,9 +2494,49 @@ export const PLAYER_ONE_SPAWN_AT_CENTER = true;
 export const TRACER_LIFETIME_MS = 90;
 /** Gunfire carries through walls and bushes — zombies investigate the noise. */
 export const GUNSHOT_ALERT_RADIUS = 900;
-/** Chance a wounded zombie breaks off and hunts whoever shot it. */
-export const RETALIATE_CHANCE = 0.45;
-export const RETALIATE_COMMIT_MS = 1600;
+/**
+ * How long a zombie hunts whoever shot it, to the exclusion of everybody else.
+ *
+ * **Being shot is a commitment now, not a coin toss.** It was
+ * `RETALIATE_CHANCE` 0.45 rolled *per round that landed*, so a zombie under
+ * automatic fire had its mind changed several times a second, and the 55% that
+ * lost the roll only got a bare `lastSeen` that the next perception tick
+ * overwrote. That is the reported back-and-forth, and it was not one bug: the
+ * roll, the missing commitment and `senseTarget` stamping over the memory each
+ * did their own part of it.
+ *
+ * **Longer than `ZOMBIE_LAST_SEEN_MS` (9s) on purpose.** It has to outlast the
+ * ordinary memory of a sighting, or a zombie shot from across the street gives
+ * up on the way. `GUNSHOT_ALERT_RADIUS` is 900px and a zombie covers about a
+ * hundred a second, so this is roughly the walk from the far edge of earshot,
+ * and every further round that lands refreshes it.
+ *
+ * The same caveat `ZOMBIE_LAST_SEEN_MS` carries applies here and is why this is
+ * bounded at all: the branch that walks to a remembered spot sits above every
+ * check that would notice a zombie getting nowhere. What makes it safe is that
+ * a shot came *from* somewhere somebody was standing, so unlike the dog's roar
+ * the spot is reachable ground by construction.
+ */
+export const ZOMBIE_PROVOKED_MS = 12000;
+/**
+ * How near a provoked zombie has to get before it finds its shooter in cover.
+ *
+ * **This is the whole of the bush fix.** A bush you are standing in doesn't
+ * blind you and does stop anybody seeing in, which is what makes hiding work —
+ * and it also meant a zombie could walk to the exact pixel it was shot from,
+ * stand on top of the shooter, fail `hasLineOfSight` against the foliage, find
+ * nothing, and wander off. Reported as exactly that.
+ *
+ * Inside this radius the sight test is skipped **for the shooter alone and
+ * only while the provocation stands**, so it is not a hole in cover: a zombie
+ * strolling past a hedge still cannot see the civilian in it, and `bushHider`
+ * is untouched. It is a rule about somebody who has just been shot going to
+ * where the shot came from and finding whoever is standing there.
+ *
+ * Comfortably wider than a grab so it does not depend on landing on the exact
+ * remembered pixel — the memory is dropped at 30px of it.
+ */
+export const ZOMBIE_PROVOKED_SNIFF = 70;
 
 // ---------------------------------------------------------------- NPC officers
 /**
@@ -2507,6 +2801,36 @@ export const RALLY_NO_CHARGE_LINE = "I can't yell right now I need a lozenge";
 export const RALLY_NO_CHARGE_MS = 5000;
 /** Close enough to the rally point to count as arrived and hold. */
 export const RALLY_ARRIVE_DIST = 46;
+/**
+ * An order pointed at a building is an order to go *inside* it.
+ *
+ * A click lands on a wall as often as on a floor — the slabs are most of what
+ * a building looks like from above — so the point is snapped to the nearest
+ * building within this reach and then resolved to a room. Generous, because
+ * being sent to the front step of the house you were plainly being pointed at
+ * is a better failure than being sent nowhere.
+ */
+export const RALLY_BUILDING_SNAP = 90;
+/**
+ * How long the walk in gets before they hole up wherever they have got to.
+ *
+ * The same shape as `HIDE_DEEPER_GIVE_UP_MS` and for the same reason: one
+ * budget for the whole move in, never extended as they go, which is what
+ * bounds a ping-pong at a doorway however the room underfoot is read. Longer
+ * than that one because a rallied crowd may be crossing the street to the
+ * building first, where a hider is already inside it.
+ */
+export const RALLY_ROOM_GIVE_UP_MS = 40000;
+/**
+ * Near enough to a doorway that aiming at it is no longer a bearing.
+ *
+ * `indoorHeadingToward` sends anybody outside a building at its door first,
+ * and a body standing in that doorway would otherwise be handed the bearing to
+ * a point under its own feet. One more step puts `roomAt` inside, at which
+ * point the room graph takes over, so this only has to cover the threshold
+ * itself.
+ */
+export const INDOOR_ROUTE_DOOR_REACH = 40;
 /** Idle fidgeting so a held crowd doesn't look like a row of statues. */
 export const RALLY_LOOK_MIN_MS = 900;
 export const RALLY_LOOK_MAX_MS = 3400;
@@ -2546,6 +2870,50 @@ export const BUILDING_GUN_CHANCE = 0.58;
 export const BUILDING_UTILITY_CHANCE = 0.58;
 /** Two items in one house never land on top of each other. */
 export const LOOT_MIN_GAP = 44;
+
+// -------------------------------------------------- what is in the complex
+/**
+ * The corner complex is stocked, and the scarcity of what is in it goes up
+ * with `Room.depth` — doorways between a room and the street.
+ *
+ * It is the one landmark that claims its ground outright, it is the most
+ * heavily partitioned building a city has, and until now it held exactly the
+ * one gun and one utility every other house rolls for. A twenty-room block
+ * with a shotgun in the front room is not somewhere anybody goes twice.
+ *
+ * **Depth rather than distance, for the same reason `hidesDeeper` uses it.**
+ * The far end of a long hall is no further from the street than its near end,
+ * and a cupboard off it is — so a gradient measured in pixels would put the
+ * good loot wherever the building happened to be longest rather than wherever
+ * it is genuinely hardest to reach.
+ */
+export const COMPLEX_LOOT_PER_ROOM = 1;
+/** An extra draw every this many doorways in, so the back rooms are worth it. */
+export const COMPLEX_LOOT_DEPTH_BONUS = 3;
+/** Nothing sits at a doorway you have to walk through to reach anything else. */
+export const COMPLEX_LOOT_DOOR_GAP = 40;
+/**
+ * The rarity ceiling at depth 0, and how far it comes down per doorway.
+ *
+ * 12 is the commonest thing in the game (`boltRifle`), so the front rooms draw
+ * from the whole table exactly as any other house does — the complex is not a
+ * different kind of loot, it is more of it, getting scarcer as you go in. Four
+ * doorways in the ceiling is 1, which is the rarest tier and nothing else.
+ */
+export const COMPLEX_RARITY_CEILING = 12;
+export const COMPLEX_RARITY_PER_DEPTH = 2.8;
+
+/**
+ * How much likelier the complex is to be picked as somebody's starting house
+ * than its floor area alone would make it.
+ *
+ * A city block is drawn uniformly from `map.buildings`, which already gives
+ * the complex one ticket in ninety for a building that is twenty rooms and a
+ * whole corner of the map. This is a thumb on that scale rather than a count
+ * of its own, so it scales with the population slider for free and cannot
+ * over-fill a small city's complex.
+ */
+export const COMPLEX_CROWD_MUL = 7;
 
 /** Utility kit. Deliberately not guaranteed — most cities are missing some. */
 export const GRENADE_COUNT = 3;

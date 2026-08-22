@@ -1044,6 +1044,7 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   // sampling for a spot, so it is the one thing that cannot be asked to move —
   // which makes it the thing everything else has to work around.
   const corner = cornerComplexAt(walls, windows, buildings, doors, rand);
+  const cornerBuilding = buildings.length;
   buildings.push(corner.building);
   landmarks.push(corner.box);
 
@@ -1257,6 +1258,7 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     bushes,
     windows,
     buildings,
+    cornerBuilding,
     doors,
     pond,
     park,

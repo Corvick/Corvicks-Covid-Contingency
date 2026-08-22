@@ -114,8 +114,16 @@ export function throwGrenade(
   });
 }
 
-/** Solid to a thrown charge: walls, intact glass, and shut doors. */
-function bouncesOff(world: World, x: number, y: number): boolean {
+/**
+ * Solid to a thrown charge: walls, intact glass, and shut doors.
+ *
+ * Exported because the dog's acid gobbet is a thrown thing too and bounces off
+ * exactly the same set. Written twice they would drift — the day glass or a
+ * parked van changes status for one of them it has to change for both — and
+ * this module is where things that fly through the air and come off walls
+ * already live.
+ */
+export function bouncesOff(world: World, x: number, y: number): boolean {
   // The nav grid already carries walls and unbroken panes.
   if (world.nav.isBlocked(x, y)) return true;
 

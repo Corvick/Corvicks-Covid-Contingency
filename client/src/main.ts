@@ -19,6 +19,7 @@ import {
   UTILITY_SLOTS,
   SCOPE_PUSH,
   BINOCULAR_PUSH,
+  BINOCULAR_SIGHT_RADIUS,
   CAMERA_PAN_X,
   CAMERA_PAN_Y,
   CAMERA_ZOOM,
@@ -41,6 +42,8 @@ import type {
   MapData,
   PickupState,
   AcidState,
+  TentacleState,
+  LashState,
   SmokeState,
   SpitState,
   SpeechState,
@@ -104,6 +107,8 @@ import {
   drawAcidMurk,
   drawSmoke,
   drawSpits,
+  drawTentacleDebris,
+  drawLashes,
   drawDogMap,
   drawStamina,
   DOG_HUD_STAMINA_LIFT,
@@ -121,22 +126,48 @@ import {
 import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import { setupMenu } from './menu.js';
-import { settings } from './settings.js';
+import { applyRenderScale, settings } from './settings.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { AbilityId } from '../../shared/types.js';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
-canvas.width = VIEWPORT_WIDTH;
-canvas.height = VIEWPORT_HEIGHT;
 const ctx = canvas.getContext('2d')!;
 
 // Fog lives on its own layer so we can punch a hole in it without erasing the
 // world underneath. The layer is rasterised at a fraction of viewport size and
 // upscaled — the bilinear filtering doubles as free edge softening.
 const fogCanvas = document.createElement('canvas');
-fogCanvas.width = Math.round(VIEWPORT_WIDTH * FOG_MASK_SCALE);
-fogCanvas.height = Math.round(VIEWPORT_HEIGHT * FOG_MASK_SCALE);
 const fogCtx = fogCanvas.getContext('2d')!;
+
+/**
+ * Size both backbuffers for the chosen render scale.
+ *
+ * **The only place in the client that knows a real pixel from a layout one.**
+ * Everything else is written against `VIEWPORT_WIDTH`/`HEIGHT` and one
+ * `setTransform` at the top of the frame maps between them, which is why a
+ * resolution setting needed no arithmetic anywhere else.
+ *
+ * The fog mask comes with it, and has to: `FOG_MASK_SCALE` is a fraction *of
+ * the backbuffer*, so a mask left at full size while the frame halved would be
+ * blitted up by half as much and its penumbra would come out half as wide.
+ * Sizing it off the same number keeps the blur a fixed share of the picture,
+ * and it is also most of what the setting saves — the mask blit was 1.04ms
+ * with smoothing on.
+ *
+ * `applyRenderScale` calls this once at startup as well as on every change, so
+ * there is no separate initialisation to get out of step.
+ */
+applyRenderScale((px) => {
+  canvas.width = Math.round(VIEWPORT_WIDTH * px);
+  canvas.height = Math.round(VIEWPORT_HEIGHT * px);
+  fogCanvas.width = Math.round(VIEWPORT_WIDTH * px * FOG_MASK_SCALE);
+  fogCanvas.height = Math.round(VIEWPORT_HEIGHT * px * FOG_MASK_SCALE);
+  // Resizing a canvas resets its context, so anything set once at startup has
+  // to be set again. This is the flag measured at 1.04ms against 0.25ms — the
+  // mask is already blurred before it is blown up, so smoothing it costs a
+  // millisecond for 0.28/255 of alpha.
+  ctx.imageSmoothingEnabled = false;
+});
 
 const pausePanel = document.getElementById('pause') as HTMLDivElement;
 const gameOverPanel = document.getElementById('game-over') as HTMLDivElement;
@@ -181,6 +212,8 @@ let grenades: GrenadeState[] = [];
 let smokes: SmokeState[] = [];
 let acid: AcidState[] = [];
 let spits: SpitState[] = [];
+let tentacles: TentacleState[] = [];
+let lashes: LashState[] = [];
 /**
  * Bumped whenever the acid on screen changes shape, so the fog cache knows to
  * throw its polygon away.
@@ -395,6 +428,8 @@ const { send, goOffline, goOnline } = connect((msg) => {
     smokes = msg.smokes;
     acid = msg.acid;
     spits = msg.spits;
+    tentacles = msg.tentacles;
+    lashes = msg.lashes;
     // Cheap and exact: the polygon only cares where the circles are and how big
     // they are, and both are already whole numbers on the wire.
     const shape = acid.map((c) => `${c.x},${c.y},${c.r},${c.s}`).join('|');
@@ -460,6 +495,11 @@ const frontEnd = startSpectating
         pausePanel.classList.add('hidden');
         // A digit typed into the chat box latched a slot key on the way past.
         input.slotPressed = -1;
+        // `resetWorld` clears the server's copy of this on every fresh round,
+        // so a player who left the row set before clicking START has to be
+        // told again — the server ignores it outright unless this round is
+        // actually offline, so sending it unconditionally costs nothing.
+        send({ type: 'testDogAbilities', free: !settings.dogLimits });
       },
       onEnd: standDown,
     });
@@ -581,7 +621,10 @@ canvas.addEventListener(
         return;
       }
 
-      const frame = minimapFrame(canvas.width, canvas.height);
+      // Layout units, not `canvas.width` — the backbuffer is a different
+      // number of real pixels at any render scale but one, and the mouse is
+      // reported in the same 1920x1080 space the map was drawn in.
+      const frame = minimapFrame(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
       const inside =
         input.mouseX >= frame.x &&
         input.mouseX <= frame.x + frame.w &&
@@ -893,6 +936,12 @@ const ENTITY_FIELDS = [
   // exactly that shape. Left out, it would convulse on one frame and then stand
   // there perfectly still until it vanished.
   'birthing',
+  // And the fourth. A dog tearing itself open has been on screen since it
+  // spawned, so left out of this list the ramp would arrive once and then stop
+  // — the animal would grow for a single frame and stand there at its old size
+  // for the whole twenty seconds. Exactly the shape of the three above.
+  'morph',
+  'morphing',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
 
 function copyInto(into: EntityState, from: EntityState): void {
@@ -1178,9 +1227,20 @@ function cameraPanY(): number {
   return dogHud ? DOG_CAMERA_PAN_Y : CAMERA_PAN_Y;
 }
 
-/** The floor under the fog radius: as far as the server will send for us. */
+/**
+ * The floor under the fog radius: as far as the server will send for us.
+ *
+ * **Binoculars widen it from the bag, not from the hand.** The server's
+ * `sightRadiusFor` reads `inv.utilities` and this has to read the same thing —
+ * a fog hole narrower than what the server populates wastes the item entirely,
+ * and one wider than it lights ground with nothing on it, which is the fault
+ * this file has now recorded three times. The camera *push* is still
+ * held-only; that is what `scopeReach` is for.
+ */
 function baseSightRadius(): number {
-  return dogHud ? DOG_SIGHT_RADIUS : PLAYER_SIGHT_RADIUS;
+  if (dogHud) return DOG_SIGHT_RADIUS;
+  if (inventory?.utilities.includes('binoculars')) return BINOCULAR_SIGHT_RADIUS;
+  return PLAYER_SIGHT_RADIUS;
 }
 
 function scopeReach(): number {
@@ -1602,8 +1662,18 @@ function drawFog(me: EntityState, view: Viewport, now: number): void {
   // resolution against the viewport — a screen-space number, which is what the
   // blur is measured in. `s` additionally carries the camera zoom, because
   // everything else here is converting *world* coordinates onto that mask.
-  const m = FOG_MASK_SCALE;
-  const s = FOG_MASK_SCALE * cameraZoom();
+  //
+  // **Both carry the render scale, and this is the one place in the client
+  // outside `applyRenderScale` that has to.** The mask canvas is
+  // `VIEWPORT * renderScale * FOG_MASK_SCALE` pixels — that is what makes a
+  // lower resolution cheaper here rather than only at the blit — while
+  // everything fed into it is in world or layout units. Left at bare
+  // `FOG_MASK_SCALE` the fog hole is written at twice the mask's size at 0.5
+  // and half of it at 1.5: off-centre, clipped, and looking exactly like the
+  // polygon collapses this file has had twice before.
+  const px = settings.renderScale;
+  const m = FOG_MASK_SCALE * px;
+  const s = FOG_MASK_SCALE * px * cameraZoom();
   const mw = fogCanvas.width;
   const mh = fogCanvas.height;
 
@@ -1799,9 +1869,16 @@ function render() {
     panSpectator(frameDelta);
   }
   const { view, scale } = cameraFor(me);
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  // **The one place the render scale exists.** Everything below this line —
+  // every camera figure, every HUD coordinate, the fog mask, the wheel, the
+  // mouse — is written in 1920x1080 layout units and knows nothing about it.
+  // The backbuffer is a different number of real pixels, and this is what maps
+  // one onto the other. `setTransform` rather than `scale` so it is set from
+  // the identity every frame and cannot compound.
+  const px = settings.renderScale;
+  ctx.setTransform(px, 0, 0, px, 0, 0);
   ctx.fillStyle = '#0b0d10';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
 
   ctx.save();
   ctx.scale(scale, scale);
@@ -1880,6 +1957,9 @@ function render() {
   drawBloodSpray(ctx, now);
 
   drawZaps(ctx, zaps, view, now);
+  // Over the bodies, because a lash goes over whoever it is reaching past —
+  // and under the foliage, because it does not.
+  drawLashes(ctx, lashes, view, now);
   drawDucks(ctx, ducks, view);
   if (map) drawBushes(ctx, map.bushes, view);
 
@@ -1890,6 +1970,9 @@ function render() {
   // one thing on screen that is deliberately hard to see past.
   drawAcid(ctx, acid);
   drawSpits(ctx, spits);
+  // Over the cloud they came out of. A tentacle lying in the middle of the acid
+  // is the whole picture of what happened there, and under it it is invisible.
+  drawTentacleDebris(ctx, tentacles, view, now);
   drawBlasts(ctx, blasts, view);
   drawGrenades(ctx, grenades);
   if (helicopters.length > 0) drawHelicopters(ctx, helicopters, now);

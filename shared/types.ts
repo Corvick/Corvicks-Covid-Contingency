@@ -99,6 +99,30 @@ export interface EntityState {
    */
   birthing?: number;
   /**
+   * Coming apart: 0 to 1 across `DOG_MORPH_WINDUP_MS`, then held at 1 for the
+   * whole of the transformed form. Dogs only.
+   *
+   * **One number rather than a ramp and a flag**, because the two halves are
+   * one continuous change to the same body — it grows and the tentacles come
+   * out across the ramp and then stay out. The client scales the drawing by it
+   * and grows the tentacles by it with no branch, and there is no moment where
+   * a ramp reading 1 and a boolean reading false could disagree about what is
+   * on screen.
+   *
+   * Sent to everyone who can see it, like `roaring` and for the same reason: an
+   * animal tearing itself into something twice the size is the only warning the
+   * officers get, and a secret version of it would do nothing.
+   */
+  morph?: number;
+  /**
+   * Still winding up, as against finished and out in the world.
+   *
+   * The one thing `morph` alone cannot say — it is pinned at 1 for both the
+   * last frame of the ramp and the whole twenty seconds — and the two want
+   * different drawings: rooted and vibrating, against moving and writhing.
+   */
+  morphing?: boolean;
+  /**
    * Down. Drawn grey and sprawled, and going nowhere — a dog holds its own
    * body on screen for `DOG_DEATH_MS` before it rises again somewhere else, so
    * that being killed is something you watch rather than a cut.
@@ -325,6 +349,17 @@ export interface MapData {
   windows: Window[];
   /** Building footprints — used for "hide indoors" behaviour. */
   buildings: Building[];
+  /**
+   * Index into `buildings` of the corner complex — the one landmark that
+   * claims its ground outright rather than sampling for a spot, and the one
+   * building in the city worth crossing the map to strip.
+   *
+   * One number on `MapData` rather than a flag on every footprint, and stated
+   * rather than worked out again by whoever wants it: it is `buildings[0]` by
+   * construction today, and anything leaning on that would break silently the
+   * day something else is pushed first.
+   */
+  cornerBuilding: number;
   doors: Door[];
   pond: Pond;
   park: Park;
@@ -401,6 +436,40 @@ export interface SpitState {
   /** Height above the ground, for the shadow and the arc. */
   h: number;
   /** How far along the throw, 0 to 1. */
+  t: number;
+}
+
+/**
+ * A tentacle thrown out of a bursting dog, or lying where it came to rest.
+ *
+ * Simulated rather than drawn client-side, because it **bounces** — off the
+ * same walls, glass and shut doors a grenade does — and the client has no
+ * business deciding where a wall is. `a` is which way it is lying, `t` its life
+ * from 1 down to 0 so it can fade out on its own clock.
+ */
+export interface TentacleState {
+  x: number;
+  y: number;
+  a: number;
+  t: number;
+  /** Still in the air, so it is drawn with a shadow under it and writhing. */
+  air: boolean;
+}
+
+/**
+ * A tentacle lashing out at somebody, drawn for `DOG_LASH_SHOW_MS`.
+ *
+ * On the wire rather than derived, unlike blood: there is no `Shot` behind it
+ * to read a line off, and whether it *caught* anybody is the whole of what the
+ * drawing has to say.
+ */
+export interface LashState {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  hit: boolean;
+  /** 1 when it goes out, 0 as it fades. */
   t: number;
 }
 
@@ -530,6 +599,17 @@ export interface DogAbilityHud {
   charges: number;
   /** 0 to 1 while it is actually running, -1 the rest of the time. */
   active: number;
+  /**
+   * How many more people this dog has to turn before the ability works at all;
+   * 0 once it is open.
+   *
+   * A number rather than a boolean, because a locked hexagon that says nothing
+   * is indistinguishable from a broken one. What the player needs to know is
+   * how much further there is to go, and that is also the whole of the reason
+   * the ability is gated: it makes biting people the thing that unlocks the
+   * rest of the animal.
+   */
+  locked: number;
 }
 
 export interface DogHud {
@@ -759,6 +839,19 @@ export type ClientMessage =
    * hand-crafted message is a value in range rather than a broken city.
    */
   | { type: 'lobbyPopulation'; population: number }
+  /**
+   * **TESTING: turn the dog's ability cooldowns off.** Offline rounds only, and
+   * the server enforces that rather than trusting this.
+   *
+   * The only message the options screen sends, and it is there under protest:
+   * every other row on that screen is a *client* decision about how the world
+   * is drawn, which is what makes "no two players can see a different game"
+   * true. A cooldown is not that — it is a rule about the game and it has to
+   * reach the server — so it carries the same restriction `noFog` does, for the
+   * same reason: an offline round has exactly one person in it, so there is
+   * nobody to see a different game from.
+   */
+  | { type: 'testDogAbilities'; free: boolean }
   | { type: 'lobbyChat'; text: string }
   | { type: 'lobbyLeave' }
   /** Host only. Also what the host's "go" in chat resolves to. */
@@ -830,6 +923,8 @@ export type ServerMessage =
       smokes: SmokeState[];
       acid: AcidState[];
       spits: SpitState[];
+      tentacles: TentacleState[];
+      lashes: LashState[];
       blasts: BlastState[];
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */

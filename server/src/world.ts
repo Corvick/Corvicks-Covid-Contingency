@@ -72,6 +72,7 @@ import {
   DOG_BIRTH_MS,
   DOG_RADIUS,
   DOG_MAX_HEALTH,
+  DOG_MORPH_WINDUP_MS,
   BOLT_FLEE_CHANCE,
   INDOOR_STAY_CHANCE,
   WITNESS_FOLLOW_CHANCE,
@@ -85,6 +86,7 @@ import {
   SOCIAL_GROUP_MAX,
   SOCIAL_CIRCLE_RADIUS,
   BUILDING_START_SHARE,
+  COMPLEX_CROWD_MUL,
   RALLY_CHATTER_MIN_MS,
   RALLY_CHATTER_MAX_MS,
   INITIAL_ZOMBIE_SPREAD,
@@ -119,7 +121,7 @@ import type { Emplacement } from './emplacement.js';
 import type { BackupVehicle } from './backup.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
-import type { DogState } from './dog.js';
+import type { DogState, Lash, Tentacle } from './dog.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -222,6 +224,27 @@ export interface AiState {
   /** Where a rally shout sent them, if any. */
   rallyX: number | null;
   rallyY: number | null;
+  /**
+   * The building and the room they were shouted *into*, or -1 for a spot out
+   * in the street.
+   *
+   * "GET OVER THERE!" pointed at a building is an order to go inside it and
+   * stay inside it, and a raw coordinate cannot carry that. Two separate
+   * things go wrong without it, and the second is the reported one: a deep
+   * room is a long twisting route and A\* gives it up at `PATH_MAX_NODES`,
+   * after which `slideToward` walks blindly at the goal — which is a civilian
+   * pressed face-first into the outside of the building they were sent into.
+   * Measured before the fix: **4 of 12 found a route at all**, and the ones
+   * that did not stood 45-75px off the wall for the rest of the round.
+   *
+   * So the walk in is done a room at a time off the room graph, exactly as
+   * `hidesDeeper` walks a landmark, and arriving means holing up rather than
+   * standing on the pixel.
+   */
+  rallyBuilding: number;
+  rallyRoom: number;
+  /** When to give the walk in up and hole up wherever they got to. */
+  rallyRoomUntil: number;
   /** Committed flee destination, so they don't dither between equal options. */
   escapeX: number | null;
   escapeY: number | null;
@@ -235,6 +258,22 @@ export interface AiState {
   shelterY: number | null;
   shelterBuilding: number;
   nextShelterScanAt: number;
+  /**
+   * A bot officer working its way through the corner complex: when the raid
+   * runs out, and which room it is making for next.
+   *
+   * `raidUntil` is one budget for the whole thing, never extended — the same
+   * shape as `HIDE_DEEPER_GIVE_UP_MS`. `raidSnubUntil` is what stops a bot
+   * that has finished walking straight back in. `raidLeaving` is the second
+   * half of it and the half that was asked for: past `BOT_COMPLEX_LEAVE_AT` of
+   * the budget it turns round and walks *out*, one doorway at a time down
+   * `Room.depth`, rather than switching off in a back room when the clock
+   * stops.
+   */
+  raidUntil: number;
+  raidSnubUntil: number;
+  raidRoom: number;
+  raidLeaving: boolean;
   /** Idle glancing about while standing at a rally point. */
   lookHeading: number;
   nextLookAt: number;
@@ -258,6 +297,17 @@ export interface AiState {
   lastSeenUntil: number;
   lastSeenX: number | null;
   lastSeenY: number | null;
+  /**
+   * Who shot this zombie, and until when it cares.
+   *
+   * Latched to the **first** shooter: a second officer opening up on it does
+   * not steal the grudge while this stands, which is what "commit to the one
+   * that shot at them originally" has to mean when three people are firing.
+   * Where to go rides `lastSeen` like everything else that walks a zombie
+   * somewhere; what this adds is that `senseTarget` may not stamp over it.
+   */
+  provokedBy: string | null;
+  provokedUntil: number;
   wanderX: number;
   wanderY: number;
   pauseUntil: number;
@@ -675,6 +725,25 @@ export interface World {
   speech: Map<string, { text: string; until: number; radio?: boolean }>;
   /** Remaining rally shouts per player. */
   rallyCharges: Map<string, number>;
+  /**
+   * Buildings a crowd has been shouted into, and until when.
+   *
+   * Read by the settled door-guard, which otherwise bolts the street door on
+   * the half of the crowd still walking to it: `guardsDoors` fires on nearly
+   * half the city, so the first person in settles, notices the front door
+   * standing open, walks back and locks everyone else out. Measured before
+   * this, a door held open for the whole walk-in still picked up a bolt on two
+   * cities in six.
+   *
+   * **A deadline rather than a count of who is still coming**, which is the
+   * only shape that cannot leak. A counter has to be decremented by everybody
+   * who arrives, gives up, is eaten or turns — and the one that gets missed
+   * holds the building's doors open for the rest of the round, which is
+   * exactly the `busyBy` fault recorded under **Doors**. This expires on its
+   * own, is one map lookup to read, and says something true: for as long as an
+   * order might still be being obeyed, its building stays open.
+   */
+  ralliedInto: Map<number, number>;
   /** Remaining follow commands, and who currently has people in tow. */
   followCharges: Map<string, number>;
   followers: Set<string>;
@@ -783,6 +852,72 @@ export interface World {
    */
   dogConversions: Map<string, number>;
   /**
+   * The same tally as a **running total**, which nothing ever spends.
+   *
+   * `dogConversions` is a balance and the roar sets it to nought; this is what
+   * the acid's `DOG_SPIT_UNLOCK_AT` reads. Gating an unlock on a balance would
+   * let the roar take the acid *away* again — fifteen turned, hexagon opens,
+   * roar, hexagon shuts with fifteen to go — so the two are separate numbers
+   * incremented on the same line in `creditConversion`.
+   *
+   * On the world for the same reason its twin is: `DogState` is deleted on
+   * every respawn, and a progression that reset each time the animal was shot
+   * would be no progression at all.
+   */
+  dogTurned: Map<string, number>;
+  /**
+   * When each of a dog's abilities may be used again, by slot — and **the whole
+   * reason it is here rather than on `DogState` is that dying must not refresh
+   * them**.
+   *
+   * `finishDogBirth` *deletes* the dog state, which is right for everything
+   * else in it: the neck, the jaws, the bite in progress and the roar in
+   * progress all belong to the body that just died. A cooldown does not. Left
+   * on that state, the cheapest way to have the acid back was to go and get
+   * shot — `DOG_SPIT_COOLDOWN_MS` is 22s against a death and a birth together
+   * of under four. Exactly the reason `dogDeaths`, `dogConversions` and
+   * `dogTurned` live out here too.
+   *
+   * An array by slot rather than a field per ability, because the ability bar
+   * is a fixed row and the whole value of one is that nothing shifts when a
+   * slot is filled in — a third ability should need a constant and a branch in
+   * `startDogAbility`, not another map on the world.
+   *
+   * Cleared by `spawnDog`, which is a *new round* or somebody joining one, and
+   * deliberately not by `finishDogBirth`, which is the same dog getting up.
+   */
+  dogCooldowns: Map<string, number[]>;
+  /**
+   * How many humans the outbreak has turned, in total — by any zombie, dog or
+   * shambler, and the one thing that pays for the transformation.
+   *
+   * **Deliberately not per-dog.** `dogConversions` and `dogTurned` are a
+   * particular dog's own balance and total; this is the city's, shared by
+   * every zombie in it, because `DOG_MORPH_UNLOCK_CONVERTED` is a threshold the
+   * *outbreak* crosses rather than a thing any one animal earns. Incremented
+   * once in `convert`, the single place a body actually becomes a zombie,
+   * whichever of its three call sites got it there.
+   */
+  totalConverted: number;
+  /**
+   * Dogs that have burst and the clouds and tentacles owed to them.
+   *
+   * A queue rather than a call, because `killEntity` lives here and **`world.ts`
+   * must not import `acid.ts` or `dog.ts` at runtime** — the world holds their
+   * data as plain records precisely so `hasLineOfSight` and `speedAt` can read
+   * it without a cycle. `updateDogs` drains this on the next tick, which is the
+   * same arrangement `pendingFires` already uses and costs one tick nobody can
+   * see.
+   */
+  pendingBursts: Array<{ x: number; y: number; facing: number }>;
+  /**
+   * Tentacles thrown out of a burst dog: in the air on grenade physics, then
+   * lying where they came to rest until they fade.
+   */
+  tentacles: Map<string, Tentacle>;
+  /** Tentacle lashes still being drawn. Short-lived; a plain array is enough. */
+  lashes: Lash[];
+  /**
    * Officers the horde has made contact with, for the dog's corner map, and
    * when to work the list out again.
    *
@@ -805,6 +940,35 @@ export interface World {
   infectedByDog: Map<string, string>;
   /** How many the next round should spawn — the lobby sets this. */
   botOfficerCount: number;
+  /**
+   * Whether this round is somebody playing on their own.
+   *
+   * The only thing that reads it is the debug loot ring — see `dropDebugKit`.
+   * Set from the lobby beside `botOfficerCount`, which is the other thing the
+   * lobby tells the world about the shape of the round rather than about who
+   * is in it. Defaults true: a world built without a lobby behind it is a
+   * harness or a bare `?spectate`, and neither is a game anybody else is in.
+   */
+  offline: boolean;
+  /**
+   * **TESTING: the dog's ability cooldowns are off.**
+   *
+   * Read in exactly one place — `readyAt` in `dog.ts`, plus the lash's own
+   * deadline — which is the whole reason the cooldowns were moved onto the
+   * world in the first place: one function answers "when may this fire again"
+   * for every hexagon on the bar, so a testing switch needs one line rather
+   * than one per ability.
+   *
+   * **Only ever honoured while `world.offline`**, checked where it is read
+   * rather than where it is set. A flag set at the menu is still in
+   * `localStorage` when somebody joins an online lobby — the same trap `noFog`
+   * documents — so the rule has to live at the point of use, and it has to live
+   * on the server: a client that lies about being offline changes nothing.
+   *
+   * Cleared by `resetWorld` like everything else about a round, and re-sent by
+   * the client on `start`.
+   */
+  dogAbilitiesFree: boolean;
   /**
    * Survivor beacons standing in the city. Placed, then pointed at.
    *
@@ -961,6 +1125,12 @@ export function makeDogEntity(id: string, x: number, y: number): Entity {
  *
  * The bite state is *deleted* rather than reset here: `dogTick` creates it on
  * first use, so there is one place that knows what a fresh one looks like.
+ *
+ * **This is a new round, or somebody joining one — it is not a respawn.** A dog
+ * rising out of a shambler goes through `finishDogBirth`, which moves the body
+ * it already has. That is what makes clearing the ability cooldowns here
+ * correct and clearing them there wrong: a fresh round starts with everything
+ * ready, and dying is not a way to have it back.
  */
 export function spawnDog(world: World, id: string): void {
   const origin = world.outbreakOrigin;
@@ -971,6 +1141,7 @@ export function spawnDog(world: World, id: string): void {
   world.dogDeaths.delete(id);
   world.dogBirths.delete(id);
   world.dogState.delete(id);
+  world.dogCooldowns.delete(id);
   world.stamina.set(id, STAMINA_MAX);
   world.exhausted.delete(id);
 }
@@ -1044,6 +1215,9 @@ export function newAiState(now: number, x: number, y: number): AiState {
     slowMul: ZOMBIE_POST_GRAPPLE_SLOW,
     rallyX: null,
     rallyY: null,
+    rallyBuilding: -1,
+    rallyRoom: -1,
+    rallyRoomUntil: 0,
     escapeX: null,
     escapeY: null,
     escapeUntil: 0,
@@ -1054,6 +1228,10 @@ export function newAiState(now: number, x: number, y: number): AiState {
     shelterY: null,
     shelterBuilding: -1,
     nextShelterScanAt: 0,
+    raidUntil: 0,
+    raidSnubUntil: 0,
+    raidRoom: -1,
+    raidLeaving: false,
     lookHeading: Math.random() * Math.PI * 2,
     nextLookAt: 0,
     nextChatterAt: now + RALLY_CHATTER_MIN_MS + Math.random() * RALLY_CHATTER_MAX_MS,
@@ -1068,6 +1246,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     lastSeenUntil: 0,
     lastSeenX: null,
     lastSeenY: null,
+    provokedBy: null,
+    provokedUntil: 0,
     wanderX: x,
     wanderY: y,
     pauseUntil: 0,
@@ -1202,7 +1382,7 @@ function resizeGrids(world: World): void {
   world.windowGrid = new SpatialGrid<number>(STATIC_CELL, width, height);
 }
 
-function buildStaticGrids(world: World): void {
+export function buildStaticGrids(world: World): void {
   world.wallGrid.clear();
   world.bushGrid.clear();
   world.windowGrid.clear();
@@ -1503,6 +1683,27 @@ export function speedAt(
   return speed;
 }
 
+/**
+ * The acid cloud this point is inside, or null.
+ *
+ * The same two-stage test `speedAt` and `hasLineOfSight` both do — bounding
+ * radius, then the lobes, because a cloud is a cluster of circles and the
+ * notches between its lumps are ordinary ground. Handed back as the *cloud*
+ * rather than a boolean because the one thing anybody standing in one wants to
+ * know is which way is out, and that is a bearing off its centre.
+ *
+ * Guarded on the map being empty, so the ordinary case — no acid anywhere in
+ * the city — is one integer compare.
+ */
+export function acidCloudAt(world: World, x: number, y: number): AcidCloud | null {
+  if (world.acid.size === 0) return null;
+  for (const c of world.acid.values()) {
+    if (Math.hypot(x - c.x, y - c.y) > c.r) continue;
+    if (inAcidLobes(c.lobes, x, y)) return c;
+  }
+  return null;
+}
+
 /** Rejection-sample a point that clears existing entities and walls. */
 export function findSpawn(
   world: World,
@@ -1600,6 +1801,7 @@ export function createWorld(): World {
     materializeUntil: new Map(),
     speech: new Map(),
     rallyCharges: new Map(),
+    ralliedInto: new Map(),
     followCharges: new Map(),
     followers: new Set(),
     pickups: new Map(),
@@ -1626,10 +1828,18 @@ export function createWorld(): World {
     dogDeaths: new Map(),
     dogBirths: new Map(),
     dogConversions: new Map(),
+    dogTurned: new Map(),
+    dogCooldowns: new Map(),
+    totalConverted: 0,
+    pendingBursts: [],
+    tentacles: new Map(),
+    lashes: [],
     dogContacts: [],
     nextDogContactScan: 0,
     infectedByDog: new Map(),
     botOfficerCount: BOT_OFFICER_COUNT,
+    offline: true,
+    dogAbilitiesFree: false,
     towers: [],
     beacon: null,
     mines: new Map(),
@@ -1714,6 +1924,16 @@ export function resetWorld(world: World): void {
   // Which *seat* somebody took outlives a restart; what they did with it does
   // not. A fresh city has bitten nobody.
   world.dogConversions.clear();
+  world.dogTurned.clear();
+  world.dogCooldowns.clear();
+  // A testing switch is still a thing about *this* round. The client re-sends
+  // it on `start`, so a restart with it on keeps it and one without loses it.
+  world.dogAbilitiesFree = false;
+  // A fresh city, a fresh outbreak — nobody has turned anybody yet.
+  world.totalConverted = 0;
+  world.pendingBursts.length = 0;
+  world.tentacles.clear();
+  world.lashes.length = 0;
   // Nor has anybody killed a dog in it yet.
   //
   // **"Permanent" means permanent for the round.** A corpse is the lasting mark
@@ -1758,6 +1978,11 @@ export function resetWorld(world: World): void {
   world.paused = false;
   world.emplacements.clear();
   world.targetClaims.clear();
+  // Keyed by building index, which means nothing on a map that no longer has
+  // that building in it — the same trap `world.corpses` fell into with its
+  // coordinates. It would expire on its own within the walk-in budget, but
+  // until it did it would hold some unrelated house's doors open.
+  world.ralliedInto.clear();
   world.fires.length = 0;
   world.pendingFires.length = 0;
   world.burning.clear();
@@ -1924,6 +2149,32 @@ export function birthProgress(world: World, id: string, now: number): number {
 }
 
 /**
+ * How much of the transformation is showing: 0 to 1 across the wind-up, then
+ * held at 1 for the whole of the form it produces.
+ *
+ * **Here rather than in `dog.ts`, beside `birthProgress` and for the same
+ * reason.** `toWire` needs it, and `dog.ts` already imports this file at
+ * runtime — putting it there and importing it back would make that a genuine
+ * cycle rather than the one-way edge it is now. Both files can read a
+ * `DogState`; only one of them may load the other.
+ *
+ * One reading rather than a ramp and a flag, so nothing can end up with a ramp
+ * saying 1 and a boolean saying false about the same body.
+ */
+export function morphAmount(dog: DogState | undefined, now: number): number {
+  if (!dog) return 0;
+  if (dog.morphStartedAt > 0) {
+    return clamp((now - dog.morphStartedAt) / DOG_MORPH_WINDUP_MS, 0, 1);
+  }
+  return dog.morphedUntil > now ? 1 : 0;
+}
+
+/** Out in the world as the transformed thing, as against still tearing open. */
+export function isMorphed(dog: DogState | undefined, now: number): boolean {
+  return dog !== undefined && dog.morphedUntil > now;
+}
+
+/**
  * One body dying, wherever it died.
  *
  * Bullets, fire and blasts each used to write their own version of this, which
@@ -1954,6 +2205,34 @@ export function killEntity(world: World, e: Entity, now: number): void {
      * standing still for two seconds is for.
      */
     if (dog) dog.roarStartedAt = 0;
+
+    /**
+     * **A dog that was transformed bursts, whether the twenty seconds ran out
+     * or a rifle did it first.**
+     *
+     * One ending rather than two. The alternative — the timer bursts it and
+     * gunfire merely kills it — makes shooting the thing the anticlimax, and
+     * leaves the transformed form with a second way to end that has to be
+     * written, drawn and remembered. This way `dogTick` simply calls
+     * `killEntity` when the clock runs out and there is exactly one place that
+     * knows what a burst is.
+     *
+     * Queued rather than done here: `killEntity` lives in `world.ts`, and the
+     * cloud belongs to `acid.ts` and the tentacles to `dog.ts`, neither of
+     * which this file may load. See `World.pendingBursts`.
+     */
+    if (dog && dog.morphedUntil > 0) {
+      world.pendingBursts.push({ x: e.x, y: e.y, facing: e.facing });
+    }
+    // The size and the health go back with the body. `DogState` is deleted on
+    // the way up, so the flags clear themselves — `maxHealth` does not, and a
+    // dog reborn with six times its health would keep the whole ability.
+    if (dog) {
+      dog.morphStartedAt = 0;
+      dog.morphedUntil = 0;
+    }
+    e.maxHealth = DOG_MAX_HEALTH;
+    e.radius = DOG_RADIUS;
 
     // It goes down **where it stands and stays there to be looked at**. The
     // body it leaves is permanent; whether it gets back up at all is settled
@@ -2084,8 +2363,25 @@ function populate(world: World): void {
   // A share of the rest start indoors — and most of them live there, rather
   // than immediately strolling out of the front door.
   const indoorTarget = placed + Math.floor(HUMAN_COUNT * BUILDING_START_SHARE);
+  /**
+   * The corner complex is busier than an ordinary block.
+   *
+   * Drawn uniformly it gets one ticket in ninety, which for twenty rooms and a
+   * whole corner of the map reads as a deserted landmark — and it is now the
+   * building with the best loot in the city in it, which ought to be somewhere
+   * with people in it rather than a quiet warehouse.
+   *
+   * A thumb on the existing draw rather than a count of its own, deliberately:
+   * the indoor share is already sized off `HUMAN_COUNT`, so this scales with
+   * the population slider for free and cannot over-fill a small city's complex
+   * with a figure that was picked for a full one.
+   */
+  const complexTickets = world.map.cornerBuilding >= 0 ? COMPLEX_CROWD_MUL - 1 : 0;
+  const houseCount = world.map.buildings.length + complexTickets;
   while (placed < indoorTarget && placed < HUMAN_COUNT) {
-    const b = world.map.buildings[Math.floor(Math.random() * world.map.buildings.length)];
+    const draw = Math.floor(Math.random() * houseCount);
+    const index = draw < world.map.buildings.length ? draw : world.map.cornerBuilding;
+    const b = world.map.buildings[index];
     const spawn = findSpawn(world, ENTITY_RADIUS.human, {
       x: b.x + 18,
       y: b.y + 18,
@@ -2570,6 +2866,16 @@ export function toWire(
     // seconds of a rooted animal with its mouth open is the tell the officers
     // across the street are meant to read, and a private one would do nothing.
     if (dog && dog.roarStartedAt > 0) state.roaring = true;
+    // Coming apart, and then out in the world as the thing. Sent to everybody
+    // for the same reason the roar is — an animal tearing itself into twice the
+    // size is the only warning the street gets. The ramp is computed here
+    // rather than latched, so it cannot drift out of step with the clock the
+    // ability actually runs on.
+    const morph = morphAmount(dog, now);
+    if (morph > 0) {
+      state.morph = Math.round(morph * 100) / 100;
+      if (dog!.morphStartedAt > 0) state.morphing = true;
+    }
     // Down, or lying on the back of the shambler it is about to come out of.
     // Both are invisible: the entity loop skips anything `dead`, which is what
     // lets the body be parked on the host to aim the camera without a second

@@ -84,6 +84,47 @@ export interface Settings {
    * frames on a long game should be able to turn it off.
    */
   blood: boolean;
+
+  /**
+   * How many pixels the frame is painted at, as a multiple of the 1920x1080
+   * viewport — see `RENDER_SCALES`.
+   *
+   * **The one row here that buys frames in proportion to itself.** Everything
+   * else is a cached fill measured in fractions of a millisecond; painting is
+   * not cached and scales with area, so 0.75 is 56% of the pixels and 0.5 is a
+   * quarter. The fog mask is a fraction *of the backbuffer*, so its blur and
+   * its blit come down with it as well.
+   *
+   * It cannot change what you can see. The viewport stays 1920x1080 in layout
+   * units and every camera, fog, HUD and mouse figure is written in those; all
+   * that moves is `canvas.width` and one transform at the top of the frame.
+   *
+   * Applied on the next frame like everything else here, with no restart —
+   * `applyRenderScale` is what `main.ts` registers to resize the two canvases.
+   */
+  renderScale: number;
+
+  /**
+   * **TESTING: the zombie dog's ability cooldowns, off.** Offline rounds only.
+   *
+   * The one row on that screen that is *not* a client decision, and it is worth
+   * being straight about that. Everything else there is how the world is drawn
+   * — nothing reaches the server, so no two players can see a different game
+   * because of it. A cooldown is a rule about the game and it has to be sent.
+   *
+   * It carries the same restriction `noFog` does and for the same reason: an
+   * offline round has exactly one person in it, so there is nobody to see a
+   * different game from. **The server enforces that**, not this flag — a
+   * setting the menu declines to offer is still in `localStorage` and would
+   * otherwise be carried into an online round without anybody touching
+   * anything, which is the trap `noFog` already documents.
+   *
+   * It is the three ability hexagons and the tentacle lash. The jaws are left
+   * alone: the open-shut-recover rhythm is the bite rather than a cooldown on
+   * it, and a dog that could re-open its mouth on the same tick would be
+   * testing something that does not exist.
+   */
+  dogLimits: boolean;
 }
 
 /**
@@ -97,6 +138,12 @@ export const DEFAULTS: Settings = {
   groundDetail: true,
   vignette: true,
   blood: true,
+  // Deliberately 1 rather than the sharpest on offer: the game is tuned and
+  // measured at the viewport's own size, and a fresh install should see what
+  // it was designed to look like *and* cost.
+  renderScale: 1,
+  // On, i.e. the game as it is. A testing switch defaults to not testing.
+  dogLimits: true,
 };
 
 /** What LOW GRAPHICS sets. Everything cosmetic off, and the fog coarsened. */
@@ -109,6 +156,14 @@ export const LOW: Settings = {
   groundDetail: false,
   vignette: false,
   blood: false,
+  // The only row in the preset that is worth more than the rest put together
+  // — 56% of the pixels, against fractions of a millisecond for the others.
+  // 0.75 rather than the floor because LOW should still be playable to look
+  // at; anybody who needs a quarter of the pixels can say so on the row.
+  renderScale: 0.75,
+  // Deliberately *not* part of the preset, the same as `noFog` above: LOW is
+  // about how the game is drawn, and this changes what a round is.
+  dogLimits: true,
 };
 
 const KEY = 'zombie.settings.v1';
@@ -135,9 +190,26 @@ function load(): Settings {
   }
 }
 
+/**
+ * Told when the render scale changes, so the two canvases can be resized.
+ *
+ * Everything else here is read straight out of `settings` by the render path
+ * on the next frame and needs no notification at all. The backbuffer is the
+ * exception: a canvas has to be *told* its new size, and resizing it clears it
+ * — so it is done once on the change rather than tested every frame.
+ */
+let onRenderScale: ((scale: number) => void) | null = null;
+
+export function applyRenderScale(fn: (scale: number) => void): void {
+  onRenderScale = fn;
+  fn(settings.renderScale);
+}
+
 /** Write the choice back into the live object, and remember it. */
 export function apply(next: Partial<Settings>): void {
+  const was = settings.renderScale;
   Object.assign(settings, next);
+  if (settings.renderScale !== was) onRenderScale?.(settings.renderScale);
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));
   } catch {

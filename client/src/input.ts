@@ -1,4 +1,5 @@
 import type { InputState } from '../../shared/types.js';
+import { VIEWPORT_WIDTH, VIEWPORT_HEIGHT } from '../../shared/constants.js';
 
 const keyMap: Record<string, keyof InputState> = {
   KeyW: 'up',
@@ -13,7 +14,10 @@ const keyMap: Record<string, keyof InputState> = {
 
 export interface InputTracker {
   state: InputState;
-  /** Mouse position in canvas pixel space. */
+  /**
+   * Mouse position in *viewport* space — 0..1920 by 0..1080, whatever the
+   * backbuffer is actually painted at. See `updateMouse`.
+   */
   mouseX: number;
   mouseY: number;
   shooting: boolean;
@@ -34,8 +38,8 @@ export interface InputTracker {
 export function trackInput(canvas: HTMLCanvasElement): InputTracker {
   const tracker: InputTracker = {
     state: { up: false, down: false, left: false, right: false },
-    mouseX: canvas.width / 2,
-    mouseY: canvas.height / 2,
+    mouseX: VIEWPORT_WIDTH / 2,
+    mouseY: VIEWPORT_HEIGHT / 2,
     shooting: false,
     sprint: false,
     interact: false,
@@ -108,9 +112,17 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
   new ResizeObserver(refreshRect).observe(canvas);
 
   function updateMouse(e: MouseEvent) {
-    // The canvas is letterboxed by CSS, so map client px back to canvas px.
-    tracker.mouseX = ((e.clientX - rect.left) / rect.width) * canvas.width;
-    tracker.mouseY = ((e.clientY - rect.top) / rect.height) * canvas.height;
+    // The canvas is letterboxed by CSS, so map client px back to the viewport.
+    //
+    // **`VIEWPORT_WIDTH`, not `canvas.width`.** Those are the same number only
+    // at a render scale of 1 — the backbuffer is however many real pixels the
+    // player has asked the frame to be painted at, while everything that reads
+    // the mouse (the camera pan, the wheel's hit test, the beacon map, the
+    // scope push) is written in layout units. Reading the backbuffer here
+    // would make the crosshair drift further from the cursor the further the
+    // scale is from 1, and in exactly the settings a struggling machine picks.
+    tracker.mouseX = ((e.clientX - rect.left) / rect.width) * VIEWPORT_WIDTH;
+    tracker.mouseY = ((e.clientY - rect.top) / rect.height) * VIEWPORT_HEIGHT;
   }
 
   canvas.addEventListener('mousemove', updateMouse);

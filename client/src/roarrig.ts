@@ -44,7 +44,7 @@ function hud(over: Partial<DogHud> = {}): DogHud {
     latched: false,
     hold: 0,
     shaken: 0,
-    abilities: [{ name: 'ROAR', ready: 1, charges: 0, active: -1 }, null, null, null],
+    abilities: [{ name: 'ROAR', ready: 1, charges: 0, active: -1, locked: 0 }, null, null, null],
     contacts: [],
     hosts: 43,
     out: false,
@@ -58,15 +58,41 @@ const states: Array<{ label: string; hud: DogHud }> = [
   { label: 'ready, nothing banked', hud: hud() },
   {
     label: 'ready, 12 banked',
-    hud: hud({ abilities: [{ name: 'ROAR', ready: 1, charges: 12, active: -1 }, null, null, null] }),
+    hud: hud({ abilities: [{ name: 'ROAR', ready: 1, charges: 12, active: -1, locked: 0 }, null, null, null] }),
   },
   {
     label: 'roaring',
-    hud: hud({ abilities: [{ name: 'ROAR', ready: 0, charges: 12, active: 0.45 }, null, null, null] }),
+    hud: hud({ abilities: [{ name: 'ROAR', ready: 0, charges: 12, active: 0.45, locked: 0 }, null, null, null] }),
   },
   {
     label: 'cooling down, spent',
-    hud: hud({ abilities: [{ name: 'ROAR', ready: 0.35, charges: 0, active: -1 }, null, null, null] }),
+    hud: hud({ abilities: [{ name: 'ROAR', ready: 0.35, charges: 0, active: -1, locked: 0 }, null, null, null] }),
+  },
+  {
+    // Locked has to be tellable from cooling down at a glance, which is the
+    // whole reason it is drawn cold and dashed rather than with an amber fill:
+    // a cooldown comes good on its own and this one only moves when you bite
+    // somebody. Both are on screen together here for exactly that comparison.
+    label: 'spit still locked, roar cooling',
+    hud: hud({
+      abilities: [
+        { name: 'ROAR', ready: 0.6, charges: 4, active: -1, locked: 0 },
+        { name: 'SPIT', ready: 1, charges: -1, active: -1, locked: 11 },
+        null,
+        null,
+      ],
+    }),
+  },
+  {
+    label: 'both open',
+    hud: hud({
+      abilities: [
+        { name: 'ROAR', ready: 1, charges: 15, active: -1, locked: 0 },
+        { name: 'SPIT', ready: 0.4, charges: -1, active: -1, locked: 0 },
+        null,
+        null,
+      ],
+    }),
   },
 ];
 

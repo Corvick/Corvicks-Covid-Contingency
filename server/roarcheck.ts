@@ -41,6 +41,8 @@ import {
   DOG_ROAR_MS,
   DOG_ROAR_ORDER_MS,
   DOG_ROAR_RANGE,
+  DOG_SPIT_UNLOCK_AT,
+  DOG_MORPH_UNLOCK_CONVERTED,
   TICK_RATE,
   TURN_DELAY_MAX_MS,
   WORLD_HEIGHT,
@@ -207,23 +209,46 @@ function testLock(): void {
 }
 
 function testTheBar(): void {
-  console.log('\nfour hexagons, two of them filled');
+  console.log('\nfour hexagons, three of them filled');
   const r = rig();
   const hud = dogHudFor(r.world, DOG, r.clock)!;
   check('the bar is four long', hud.abilities.length === 4, String(hud.abilities.length));
-  // Two now: the roar on Q and the acid on E. The empty pair are still drawn,
-  // because the whole value of a fixed row is that a key does not move when the
-  // one beside it is filled in — which is exactly what happened here.
-  check('two are filled', hud.abilities.filter((a) => a !== null).length === 2);
+  // Three now: the roar on Q, the acid on E and the transformation on F. R is
+  // still an outline — and **this check has now done its job twice**, which is
+  // the whole reason a fixed row was drawn with its empty slots showing: E was
+  // filled in after Q and nothing moved, then F after E and nothing moved. The
+  // count is asserted rather than the positions because the positions are what
+  // the two checks below cover.
+  check('three are filled', hud.abilities.filter((a) => a !== null).length === 3,
+    String(hud.abilities.filter((a) => a !== null).length));
+  check('R is still an outline', hud.abilities[2] === null);
+  check('and F is the transformation', hud.abilities[3]?.name === 'RIP');
   check('and it is slot 0, ROAR', hud.abilities[0]?.name === 'ROAR');
   check('it starts ready', (hud.abilities[0]?.ready ?? 0) >= 1);
   check('with nothing banked', hud.abilities[0]?.charges === 0);
-  // Slot 1 belongs to `acidcheck.ts` and is only established here as *not
-  // refused*, so that this file's claim about the empty slots stays honest.
-  check('E slot 1 is the acid, and is taken', startDogAbility(r.world, DOG, 1, r.clock) === 'spat');
-  for (const slot of [2, 3]) {
-    check(`R/F slot ${slot} does nothing`, startDogAbility(r.world, DOG, slot, r.clock) === 'refused');
-  }
+  // Slot 1 belongs to `acidcheck.ts`. All this file needs of it is that it is a
+  // *filled* slot rather than an empty one, which is what keeps the claim about
+  // the two empty ones honest — and since the acid is earned now, "not refused"
+  // is no longer the way to say that. A fresh dog is refused it for a reason a
+  // dog can do something about, and the hexagon says what.
+  check('E slot 1 is the acid, drawn and locked with a count on it',
+    hud.abilities[1]?.name === 'SPIT' && (hud.abilities[1]?.locked ?? 0) > 0,
+    `locked ${hud.abilities[1]?.locked}`);
+  check('a dog that has turned nobody is refused it',
+    startDogAbility(r.world, DOG, 1, r.clock) === 'refused');
+  r.world.dogTurned.set(DOG, DOG_SPIT_UNLOCK_AT);
+  check('and one that has earned it is not',
+    startDogAbility(r.world, DOG, 1, r.clock) === 'spat');
+  check('R slot 2 does nothing', startDogAbility(r.world, DOG, 2, r.clock) === 'refused');
+  // F is filled now, and its own refusals belong to `morphcheck.ts`. All this
+  // file asserts is that it is refused for a *reason* — a fresh city has turned
+  // nobody at all — rather than because the slot is empty, which is the
+  // distinction the whole fixed row exists to make readable.
+  check('F slot 3 is refused until it is earned',
+    startDogAbility(r.world, DOG, 3, r.clock) === 'refused');
+  r.world.totalConverted = DOG_MORPH_UNLOCK_CONVERTED;
+  check('and taken once the outbreak has earned it',
+    startDogAbility(r.world, DOG, 3, r.clock) === 'morphing');
 
   r.world.dogConversions.set(DOG, 5);
   check('the badge counts what has been turned', dogHudFor(r.world, DOG, r.clock)!.abilities[0]!.charges === 5);

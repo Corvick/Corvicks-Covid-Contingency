@@ -5,6 +5,7 @@ import {
   ITEMS,
   UTILITY_LOOT,
   isGun,
+  lootAtMost,
   rarestOf,
   type ItemId,
 } from '../../shared/items.js';
@@ -19,6 +20,11 @@ import {
   BUILDING_GUN_CHANCE,
   BUILDING_UTILITY_CHANCE,
   LOOT_MIN_GAP,
+  COMPLEX_LOOT_PER_ROOM,
+  COMPLEX_LOOT_DEPTH_BONUS,
+  COMPLEX_LOOT_DOOR_GAP,
+  COMPLEX_RARITY_CEILING,
+  COMPLEX_RARITY_PER_DEPTH,
   GRENADE_COUNT,
   ZAP_MINE_COUNT,
   RADIO_USES,
@@ -143,6 +149,15 @@ export function utilitySlots(inv: Inventory): number {
  */
 export function dropDebugKit(world: World, owner: string, x: number, y: number): void {
   if (!TEST_DROP_ALL_ITEMS) return;
+  // **Offline only.** It is a testing tool, and in a round with other people in
+  // it it is one player being handed one of every item in the game where the
+  // rest of the city has to go and find them. `TEST_DROP_ALL_ITEMS` is left on
+  // by default precisely because it is safe to leave on while measuring
+  // anything that is not about loot — and it stops being safe the moment a
+  // second person is in the lobby, which is what this line covers. The flag is
+  // still the master switch: turning it off takes the ring out of solo rounds
+  // too.
+  if (!world.offline) return;
   const ids = (Object.keys(ITEMS) as ItemId[]).filter((id) => id !== 'dualPistols');
   ids.forEach((item, i) => {
     const angle = (i / ids.length) * Math.PI * 2;
@@ -307,6 +322,76 @@ export function spawnPickups(world: World): void {
     }
     if (Math.random() < BUILDING_UTILITY_CHANCE) {
       placeIn(b, drawItem(UTILITY_LOOT));
+    }
+  }
+
+  /**
+   * And the corner complex is stocked, with the scarcity going up as you go in.
+   *
+   * Every room of it gets a draw of its own — which is what makes it *more*
+   * loot rather than better loot in the same one place — and the rarity
+   * ceiling comes down by `COMPLEX_RARITY_PER_DEPTH` for every doorway between
+   * a room and the street. The front rooms therefore draw from the whole table
+   * exactly as any other house does, and four doorways in there is nothing but
+   * the rarest tier left in the table at all.
+   *
+   * **Placed by room, not by rect.** `placeIn` samples the building's footprint
+   * rows, which for a twenty-room landmark is a lottery over the whole thing —
+   * there would be no way to say which room anything landed in, and the
+   * gradient is the entire feature. `RoomMap.randomPoint` is uniform over one
+   * room's own floor cells, which is the same tool `settledTick` paces with and
+   * the only honest one for an L-shaped room.
+   *
+   * It goes through `drawItem` like everything else, so `ITEM_CITY_CAP` still
+   * holds: a twenty-room complex would otherwise be the fastest way in the game
+   * to put six radios on one map.
+   */
+  const complex = world.map.cornerBuilding;
+  if (complex >= 0) {
+    for (const roomId of world.rooms.roomsOf(complex)) {
+      const room = world.rooms.rooms[roomId];
+      if (!room || !Number.isFinite(room.depth)) continue;
+
+      const ceiling = COMPLEX_RARITY_CEILING - room.depth * COMPLEX_RARITY_PER_DEPTH;
+      const table = lootAtMost(ceiling);
+      const count = COMPLEX_LOOT_PER_ROOM + Math.floor(room.depth / COMPLEX_LOOT_DEPTH_BONUS);
+
+      for (let i = 0; i < count; i++) {
+        const item = drawItem(table);
+        for (let attempt = 0; attempt < 20; attempt++) {
+          const spot = world.rooms.randomPoint(roomId);
+          if (!spot) break;
+          if (world.nav.isBlocked(spot.x, spot.y) || !world.nav.isReachable(spot.x, spot.y)) continue;
+
+          // Never in a doorway. A room's id bleeds a couple of cells past its
+          // own floor (`ROOM_DILATE_CELLS`) so that somebody standing in a
+          // threshold reads as being in a room — which means `randomPoint` can
+          // hand back the threshold itself, and a rifle lying in the one gap
+          // between two rooms is a rifle everybody trips over on the way past.
+          let inADoorway = false;
+          for (const index of room.exits) {
+            const door = world.map.doors[index];
+            if (door && Math.hypot(door.x - spot.x, door.y - spot.y) < COMPLEX_LOOT_DOOR_GAP) {
+              inADoorway = true;
+              break;
+            }
+          }
+          if (inADoorway) continue;
+
+          let crowded = false;
+          for (const p of world.pickups.values()) {
+            if (Math.hypot(p.x - spot.x, p.y - spot.y) < LOOT_MIN_GAP) {
+              crowded = true;
+              break;
+            }
+          }
+          if (crowded) continue;
+
+          const id = `loot-${n++}`;
+          world.pickups.set(id, { id, item, x: spot.x, y: spot.y });
+          break;
+        }
+      }
     }
   }
 

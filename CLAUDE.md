@@ -66,7 +66,8 @@ Server modules and what each owns:
   Also guarantees every indoor space can be reached from the street. Ground is
   claimed in order — park, corner complex, big buildings, edge buildings, then
   ordinary blocks yield to all of it — so anything that must get its spot goes
-  early
+  early. `MapData.cornerBuilding` names the complex outright rather than
+  leaving anybody to assume it is `buildings[0]`
 - `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string pulling
 - `rooms.ts` — which room every indoor spot is in, the way out of each, and who
   is in it. Static for the round; occupancy is recounted once a tick
@@ -560,6 +561,126 @@ spent stuck in one empty room: median **17-20s → 8-12s**, p90 **65-76s →
 *more* zombies alive, because they find people. It is a harder game now:
 survivors at 180s fell from 187-263 to 80-176.
 
+### Being shot is a grudge, not a suggestion
+
+Two reports: *"when zombies are attracted to being shot at they should commit to
+the person that shot at them originally — lots of back and forth happening right
+now"*, and *"if I am in a tree and shoot a zombie it will approach me for one
+second and then change its mind and go back to whatever it was doing"*. One
+mechanism, three separate faults, and none of them would have been enough on its
+own.
+
+- **The intent was re-rolled per round that landed.** `RETALIATE_CHANCE` was
+  0.45, rolled inside `hit` — so a burst re-decided the same zombie several
+  times a second, and the 55% that lost the roll got a bare `lastSeen` with no
+  commitment at all.
+- **What the winning roll bought was a pause, not a decision.**
+  `state.nextSenseAt = now + RETALIATE_COMMIT_MS` (1600) delays the next
+  perception tick; it does not change what that tick then decides. 1.6s is
+  exactly the "approaches me for one second and then changes its mind" in the
+  report, and it is a coincidence only in the sense that the number was picked
+  before anybody watched it.
+- **And `senseTarget` stamped over the memory.** This is the one that mattered.
+  It writes the chosen body's position into `lastSeen` — the very field carrying
+  where the shot came from — so a zombie that set off toward a hedge, spotted a
+  civilian on its next perception tick, lost *both* its target and its record of
+  the shot. It did not change its mind; it had its mind taken off it.
+
+`provokedBy` and `provokedUntil` on the AiState are the whole of the fix.
+
+- **It is latched to the first shooter.** A second officer landing rounds on it
+  gets the flinch and the stagger and nothing else. With three people firing,
+  "commit to the one that shot at them originally" is only meaningful if later
+  shooters cannot take it over.
+- **Where to go still rides `lastSeen`**, like the dog's roar and
+  `followTheChase` before it — so no new branch was needed in `updateZombie` and
+  nothing about walking to a remembered spot is written twice. What the
+  provocation adds is that `senseTarget` may not overwrite it, and that
+  `lastSeenUntil` is stretched to the provocation's own deadline rather than
+  expiring at `ZOMBIE_LAST_SEEN_MS` under a grudge that still stands.
+- **`committed` is deliberately narrower than `provoked`.** The exclusivity
+  holds only while there is still somewhere to be; once the walk is spent —
+  arrived, or given up on — ordinary targeting resumes, so a zombie that went to
+  the spot and found nobody is not locked out of the rest of the city for the
+  remainder of the twelve seconds.
+- **One exception, at pouncing distance.** A provoked zombie that walks *through*
+  somebody at arm's length to reach a spot two streets away is a different kind
+  of wrong from the one being fixed. `ZOMBIE_LUNGE_RANGE` is reused rather than a
+  figure of its own because it is already this game's definition of close enough
+  to throw yourself at something — and an interception at that range is not the
+  reported flip-flop: it ends in a grab, with the grudge still standing
+  underneath it when that resolves. Taking it does **not** cost the remembered
+  spot, or the exception becomes another way to lose the grudge.
+- **The noise is a nudge, not a grudge.** `alertZombies` still sends everything
+  in `GUNSHOT_ALERT_RADIUS` (900) toward the bang with no commitment, and a meal
+  in front of them still wins — hearing a shot is not the same as being shot,
+  and a 900px radius that *committed* everything in it would pull whole
+  neighbourhoods onto one officer every time a trigger was pulled. What it must
+  not do is undo one, so it now skips anybody already provoked by a different
+  officer.
+
+**`ZOMBIE_PROVOKED_SNIFF` (70) is the whole of the bush fix**, and it is the
+half that no amount of commitment would have supplied. A bush you are standing
+in does not blind you and does stop anybody seeing in, which is what makes
+hiding work — and it also meant a zombie could walk to the exact pixel it was
+shot from, stand on top of the shooter, fail `hasLineOfSight` against the
+foliage, find nothing and wander off. Inside that radius the sight test is
+skipped **for the shooter alone and only while the provocation stands**, so it
+is not a hole in cover: a zombie strolling past a hedge still cannot see the
+civilian in it and `bushHider` is untouched.
+
+`server/provoke.ts` is the harness — headless, no socket, no port.
+`setZombieForgetsTheShooter` is the gate, kept rather than deleted because the
+control is the entire value of the run. Sixteen staged runs each way:
+
+| | OLD | NEW |
+|---|---|---|
+| intent on the shooter | 1516/2003 ticks (76%) | **1748/1748 (100%)** |
+| intent on the decoy | 487 ticks (24%) | **0** |
+| reached the shooter | 10/13 | **15/15** |
+| bush: reached the spot | 12/12 | 12/12 |
+| **bush: found the shooter** | **0/12** | **12/12** |
+| bush: closest approach | 28.0px | 62.8px |
+
+**The bush row is the report stated exactly**: the old behaviour walked to within
+**28 pixels** of the officer who shot it and never once found them. The new one
+is *further* away at 62.8px only because the run stops the moment it finds them,
+which is inside the 70px sniff.
+
+**What the rig does not show is oscillation**, and that is worth being straight
+about. It stages one zombie and one round, where the median run makes a single
+decisive defection to the decoy rather than flapping — flips are median 0 either
+way. The "lots of back and forth" in a live round is that per-round re-roll
+across a burst and a crowd, which is the cause the first bullet above names, and
+this is the mechanism rather than a reproduction of the feel.
+
+*Four things about staging this were the rig lying rather than the code failing,
+and every one of them made the two modes look alike:*
+
+- **`fire` reads `world.entityGrid`, and staging entities does not fill it.**
+  Bodies added since the last `rebuildEntityGrid` are not in it, so the hitscan
+  found nothing and **no round ever landed on anybody**. What still ran was
+  `alertZombies`, which fires on the *shot* rather than on the hit — so the
+  zombie walked toward the noise and the rig scored that as the grudge working.
+  Both modes read ~60% committed and neither had executed a line of the code
+  under test.
+- **`world.bushGrid` is what `hasLineOfSight` reads, not `map.bushes`.** Pushing
+  foliage onto the map without rebuilding the broadphase leaves it invisible to
+  every sight test in the game: the zombie saw the shooter straight through the
+  thicket at 380px and targeted him on tick one, so the rig reported **7/7 found
+  the shooter in *both* modes** and had staged no bush at all. `buildStaticGrids`
+  is exported for this.
+- **One round, not a burst.** The old behaviour re-rolled and re-paused on every
+  round that landed, so firing once a second bought 6.4s of an 8s run and the old
+  code scored **80% committed**.
+- **The decoy has to stay a temptation for the whole walk.** Staged 260px off the
+  zombie on the far side it fell out of sight as the zombie advanced — 160px of
+  walking puts it at exactly `ZOMBIE_SIGHT_RADIUS` — so the old behaviour was
+  never offered the choice it is supposed to fail and both modes read 100%/0%.
+  And staged at 150px it sat exactly on `ZOMBIE_LUNGE_RANGE`, the one distance
+  the new rule deliberately lets through, so the rig measured the carve-out and
+  the *new* behaviour scored worse than the old.
+
 ### Word of a chase travels exactly one hop
 
 A zombie that can see somebody chasing prey — but cannot see the prey itself —
@@ -875,10 +996,10 @@ Two things about measuring this are worth not rediscovering:
   budget is charged in *nodes* now — see the note under performance — so those
   harnesses run A\* capped at ten node expansions, which finds nothing at all.
   It is a leftover from before the budget changed units. `settlecheck.ts`,
-  `crowdcheck.ts` and `vehiclecheck.ts` use the right one; `tickprof.ts`,
-  `targetchurn.ts`, `grapplecheck.ts` and `pathbench.ts` still do not, and any
-  figure they produced that depended on something routing around a wall is
-  suspect.
+  `crowdcheck.ts`, `vehiclecheck.ts`, `rallycheck.ts` and `complexcheck.ts` use
+  the right one; `tickprof.ts`, `targetchurn.ts`, `grapplecheck.ts` and
+  `pathbench.ts` still do not, and any figure they produced that depended on
+  something routing around a wall is suspect.
 - **`server/tsconfig.json` only includes `src/**`, so none of the harnesses at
   the `server/` root are typechecked.** `npx tsc --noEmit` there passes while
   `vehiclecheck.ts` is calling `closestOnBox(x, y, box)` on a function whose
@@ -891,6 +1012,253 @@ Two things about measuring this are worth not rediscovering:
   stillness.** A pacing civilian covers 0.99px in a tick, so every single
   moving tick reported as motionless and the pacing read 90% still. It is not;
   the threshold was the whole of the difference.
+
+### An order into a building is an order to go inside it
+
+Reported as *"when civilians are ordered to GET OVER THERE and it's in a
+building I don't want civilians just pushing themselves against the wall of the
+building — they need to know they are being asked to go in a building and stay
+in there"*. The report is exact, and there were three separate causes.
+
+- **The order was a bare coordinate.** `rallyHumans` took an `x, y` and every
+  civilian in earshot walked at it. A click from above lands on a wall slab as
+  often as on a floor — the slabs are most of what a building looks like — and
+  nothing resolved that into anywhere anybody could stand.
+- **The route was one long A\*, and it mostly failed.** A room several
+  partitions in is a long twisting search, and it comes back empty at
+  `PATH_MAX_NODES`; `headingToward` then falls through to `slideToward`, which
+  walks blindly at the goal. **That is the wall-pressing, exactly.** Measured
+  over six cities, one route from the street to the deepest room of each was
+  found on **43 of 72** attempts.
+- **And there was no "stay in there" at all.** Arriving set nothing; the
+  `rallied` hold is a spot, not a room, and it was reached by 0 of 72.
+
+`rallyRoomAt` resolves the building and the room once, at the moment the order
+is given, and `rallyIndoorTick` is the walk. Three legs, and they are three
+because the router only knows how to do the first one: to a street door, then
+one doorway at a time off the room graph, then `settleHere`.
+
+- **The room is resolved on the shout, not per person.** One point, one answer,
+  and a point that is not strictly inside anything snaps to the nearest
+  footprint within `RALLY_BUILDING_SNAP` — being sent to the front step of the
+  house you were plainly pointing at is a far better failure than being sent
+  nowhere.
+- **Everybody gets their own spot on that room's floor** (`randomPoint`), not
+  the pixel that was clicked. Thirty people converging on one point shove each
+  other off it; this is the same reason `refugeBias` exists.
+- **Arriving is `settleHere` with `deeper: false`.** "Stay in there" needed no
+  code of its own — settling already paces the room, sees to its doors and
+  refuses to open the way out. The one thing overridden is `hidesDeeper`:
+  somebody *sent* to a room is already where they were told to be, and
+  wandering another three doorways past it is not obeying an order.
+- **`roomHopToward` is `deeperRoom` told where it is going.** Same BFS, same
+  one-hop-at-a-time reason, and the street is deliberately not a node in it —
+  a route through the street is a route that leaves the building.
+
+**The door faults were doing as much damage as the pathing**, and none of them
+is about the person walking. Reported a second time as *"a lot are shutting the
+door on those trying to get in"*, which is what said the first fix was only a
+third of one.
+
+**`world.ralliedInto` is the mechanism: a building a crowd has been shouted
+into holds its *street* doors open while the order might still be being
+obeyed.** It is **a deadline rather than a count of who is still coming**, which
+is the only shape that cannot leak — a counter has to be decremented by
+everybody who arrives, gives up, is eaten or turns, and the one that gets missed
+holds the doors open for the rest of the round, which is the `busyBy` fault
+under **Doors**. Cleared by `resetWorld`, because a building index means nothing
+on a new map. Interior doors are never held: the order was to be *in the
+building*, and a bolt between two of its rooms is nobody's way in.
+
+**There are exactly three places a door gets shut on somebody, and it took all
+three.** Gating one took 60 shuts to 19; gating two left 19; all three is 0.
+
+- **`doorTick`** arms a follow-up for walking through a door somebody else left
+  open. `underOrders` covers the walker here, which is the same shape as bots
+  having `closesDoors` cleared at spawn and the same reason: seeing to a door is
+  a civilian's own business, and this is a moment when they have been handed
+  somebody else's.
+- **`finishDoorWork`** arms one for the door you *opened yourself* — which under
+  an order is the street door the whole crowd is filing through. **This was the
+  one that mattered and the one that was missed**, because it is not where you
+  look: the first fix gated the branch that reads like "shutting a door" and
+  left the branch that reads like "opening" one.
+- **`askForNeighbourDoor`**, which bolts the door next to the one just done.
+
+Underneath all three, **`guardsDoors` fires on nearly half the city**, so
+somebody settled, noticed the front door standing open, walked back and locked
+the rest out. `unsecuredDoorOf` asks `doorHeldOpen` too.
+
+Measured on the paired rig, counted only while the order could still be being
+obeyed — the hold lasts `RALLY_ROOM_GIVE_UP_MS` and the run is half again as
+long, so counting the whole window folds in the perfectly correct shuts that
+happen once everybody has settled:
+
+| its street doors, while the crowd is filing in | OLD | NEW |
+|---|---|---|
+| shut on the queue | 47-49 | **0** |
+| bolted on it | 0 | **0** |
+| share of that window they stood open | 45.7-54.6% | **75.8-96.9%** |
+
+`server/rallycheck.ts` is the harness — headless, no socket, no port.
+`setRallyIgnoresBuildings` is the gate and it is kept: the control is the whole
+value of the run. **Paired**, both behaviours on the same city from the same
+start positions with the same rolled traits and the same doors — unpaired it
+measures the city rather than the code, and two runs of it swapped the groups'
+places on nothing but how many of each city's deep rooms happened to be
+reachable.
+
+| twelve shouted into the deepest room, 60s, 10-14 cities | OLD | NEW |
+|---|---|---|
+| ended up inside the building | 107/120, 111/168 | **117/120, 148/168** |
+| …and holed up in it | **0** | **117/120, 148/168** |
+| ticks spent inside it | 45.5-62.2% | 64.1-70.9% |
+| ticks pressed on its outside wall | 23.0-28.3% | **9.8-12.1%** |
+
+Two runs quoted rather than one because the map is not seeded and how many of a
+city's deep rooms are reachable moves the absolute numbers a long way. The
+"holed up" row is the unambiguous one: that half of the order did not exist.
+
+**The residual ~10% is mostly a queue, not a fault.** A crowd of twelve goes
+through one street doorway one at a time, and a building whose only way in is
+bolted genuinely cannot be entered — `wayIntoBuilding` returns null once every
+exterior door has been walked up to and refused, and they give up *then* rather
+than standing there for the whole budget. Giving up picks a fresh wander target
+away from the building, or they mill about on the doorstep that just beat them,
+which looks like the reported fault with no order behind it.
+
+### The corner complex is worth going into now
+
+Three asks, one landmark: more loot in it, rarer the deeper in you go, more
+people living in it, and bot officers that know both of those things and can
+find their way back out.
+
+**`MapData.cornerBuilding` is the whole of how anything finds it.** One index on
+the map rather than a flag on every footprint — it is `buildings[0]` by
+construction today, and anything leaning on that would break silently the day
+something else is pushed first.
+
+- **Every room of it gets a draw**, which is what makes it *more* loot rather
+  than better loot in one place. `COMPLEX_LOOT_PER_ROOM` plus one more every
+  `COMPLEX_LOOT_DEPTH_BONUS` doorways in. Measured over ten cities: **13-52
+  pickups in it, median 22**, against a median of **1.4** in an ordinary house
+  that got any at all. The map is not seeded and the complex is 12-25 rooms
+  depending on the draw, so quote the range — the 52 is a 25-room one.
+- **Rarity is a ceiling that comes down with `Room.depth`**, not a set of
+  hand-picked tiers — `lootAtMost(COMPLEX_RARITY_CEILING - depth *
+  COMPLEX_RARITY_PER_DEPTH)`, still weighted, so inside a tier the odds are
+  still the odds. Derived from the registry, so anything added later lands on
+  the gradient the day it exists. Measured over ten cities, median rarity by
+  depth: **9 at the front door, then 3, 3, 3, 2, 2, 1** six doorways in — which
+  in play is "the front rooms can hold a bolt action or a machine gun, the back
+  ones only ever hold snipers, flamethrowers, radios and shields". Depth rather
+  than distance for the same reason `hidesDeeper` uses it: the far end of a
+  long hall is no further from the street than its near end, and a cupboard off
+  it is.
+  - **The gradient is compressed at the top and that is the table, not a
+    bug.** `ALL_LOOT` is weighted by rarity, so its own median draw is about 3
+    — the ceiling only has room to *remove* the handful of very common entries
+    before it is down to the scarce tiers. What the player sees is the ceiling
+    coming down, which is the whole ask.
+- **Placed by room, not by rect.** `placeIn` samples a building's footprint
+  rows, which for a twenty-room landmark is a lottery over the whole thing —
+  there would be no way to say which room anything landed in, and the gradient
+  is the entire feature. `RoomMap.randomPoint` is uniform over one room's own
+  floor cells.
+- **Nothing lands in a doorway.** A room's id bleeds a couple of cells past its
+  floor so a body in a threshold reads as being in a room, which means
+  `randomPoint` can hand back the threshold itself. Measured: **0** in a
+  doorway across eight cities.
+- **It draws through `drawItem` like everything else**, so `ITEM_CITY_CAP`
+  still holds — a twenty-room building drawing on its own would otherwise be
+  the fastest way in the game to put six radios on one map. Measured over ten
+  cities: **0 caps broken, 0 guns or utilities missing**, so the ceiling and
+  both floors under the rest of the city are untouched.
+- **The crowd is a thumb on the existing draw, not a count of its own.**
+  `COMPLEX_CROWD_MUL` extra tickets in the same uniform pick `populate`
+  already makes, so it scales with the population slider for free and cannot
+  over-fill a small city's complex. Measured: **19-33 civilians in it, 4.4-6.6%
+  of a whole city in one building.**
+
+#### And bots go in after it
+
+`complexRaidTick`. Two separate things stopped a bot ever getting any of this,
+and both had to go.
+
+- **Nothing took a bot to the building.** `botPatrolTarget` refuses an indoor
+  sample outright — right for a house it has already stripped, wrong for the
+  one building in the city worth going into.
+- **And it could not have walked through it.** `lootWanted` scores anything
+  inside `BOT_LOOT_RANGE` (1400), which from the front step is most of a
+  landmark — so a bot targets a rifle six partitions in and asks for one route
+  to it, which is the same search that comes back empty at `PATH_MAX_NODES`.
+  Measured, a city with thirty pickups in its complex had a bot pick one from
+  the pavement and never get through the front wall for the whole round.
+
+**`indoorHeadingToward` is the fix and it is shared.** Out in the street, aim
+at the way in first; inside, one doorway at a time off the room graph. **A
+no-op for most of the city by construction** — an ordinary block is a single
+undivided room, so it falls straight through to the router, which is the same
+reason `hidesDeeper` never fires anywhere else. It is used by the bot's loot
+walk as well as by the raid, and it is what took rooms entered from a median of
+10 to 15.
+
+- **Walking past it is the trigger** (`BOT_COMPLEX_NOTICE`, 900), deliberately.
+  A bot that knew about the complex from the first tick would set off across
+  the city for it and every round would open with four officers filing into one
+  corner. Knowledge you pick up by being there is also the only kind an officer
+  plausibly has: what you can tell from the street is that it is a very big
+  building.
+- **It sits below the loot branch and above patrol.** Below loot because the
+  raid exists to put loot in reach and collecting it is already written; above
+  patrol because a patrol target is outdoors by construction and would walk the
+  bot straight back out on the next tick.
+- **And it knows the way out**, which is the half that would otherwise be
+  missing. Past `BOT_COMPLEX_LEAVE_AT` of the budget it turns round and walks
+  out down `Room.depth`, one doorway at a time, and only then goes back to
+  being an officer. Reserved out of the budget rather than waiting for the
+  clock, because a raid that ends when the clock stops ends with a bot
+  switching off in a back room, which is worse than never having gone in.
+- **Arriving at the deepest room is itself the cue to leave**, and it needs no
+  bookkeeping: reaching this branch at all means the loot scan above it found
+  nothing left in reach worth walking to.
+- **One budget, never extended** — same shape as `HIDE_DEEPER_GIVE_UP_MS` and
+  `RALLY_ROOM_GIVE_UP_MS`, and what bounds a ping-pong at a doorway however the
+  room underfoot is read. `BOT_COMPLEX_SNUB_MS` is what stops one that has
+  finished walking straight back in.
+
+`server/complexcheck.ts` is the harness — headless, no socket, no port. It runs
+with nothing alive but the bot, deliberately: a live outbreak turns the run into
+a measurement of how far the city got rather than of whether the bot can work a
+landmark. Measured over eight to ten cities, 180s each: **went in and came back
+out 7-8 of 8**, median 85-137s, **8-13 rooms entered**, deepest **5-7 doorways
+in**, **7-12 items taken**.
+
+**A run that did not go in is the report working, not failing.** One was near
+enough to notice the place for 3% of the round — it walked off after something
+it could see across the street first, which is what an officer should do. The
+harness prints that share for exactly this reason: "did not go in" and "was
+never near it" are very different claims and a run that cannot tell them apart
+is reporting the city.
+
+**Three things about staging this were the rig lying rather than the code
+failing:**
+
+- **A bot staged with a bare `newAiState` is not a bot.** `populate` clears
+  `closesDoors`, `locksDoors`, `slamsDoors`, `barricades`, `guardsDoors` and
+  `hidesDeeper` at spawn; a rig that skips that gets an officer rolling
+  civilian door traits, and the run reported **144 door-shutting jobs across
+  eight cities** — none of which a real bot would ever have done.
+- **`initDoors` starts every door unlocked**, and a lock only ever appears
+  because a civilian threw one. So a rig with nothing alive but a bot never
+  meets a bolted door at all, and the claim that an officer works a lock rather
+  than kicking it in cannot be measured in the raid loop — it has to be staged
+  with every exterior door bolted, which is also the only way to tell "unlocked
+  it" from "walked round to another one".
+- **Opening is instant for a bot**, so a door job counted by watching
+  `state.doorAction` change never sees an `open` at all: `finishDoorWork` runs
+  on the same tick. The counter reads what takes *time*, which is the set this
+  is actually about.
 
 ### Barricading, and why it is rarer than it sounds
 
@@ -2548,13 +2916,15 @@ Everything an officer's HUD does — the slot bar, the E prompt, the Q wheel, th
 scroll — is simply not drawn for a dog. In the opposite corner is the one thing
 an officer does *not* get: the corner map, below.
 
-**Above them is the ability bar: four hexagons on Q, E, R and F.** Two are
-filled — the roar and the acid — and the other two are empty outlines drawn
-anyway, because a bar that grew a hexagon at a time would shift the keys already
-on it every time one was filled, and the whole value of a fixed row is that a key
-is always in the same place. An outline says "there will be something here"; a
-gap says nothing at all. **That claim has now been tested by the thing it exists
-for**: E was filled in after Q, and nothing on the row moved.
+**Above them is the ability bar: four hexagons on Q, E, R and F.** Three are
+filled — the roar, the acid and the transformation — and R is an empty outline
+drawn anyway, because a bar that grew a hexagon at a time would shift the keys
+already on it every time one was filled, and the whole value of a fixed row is
+that a key is always in the same place. An outline says "there will be something
+here"; a gap says nothing at all. **That claim has now been tested twice by the
+thing it exists for**: E was filled in after Q and nothing moved, then F after E
+and nothing moved. `roarcheck.ts` asserts the count and the two positions
+either side of the gap, so a third filling cannot quietly shuffle the row.
 
 - **The three rows are stacked, not squeezed.** An officer's stamina bar sits
   just above their slot row; a dog's has a taller row of hexagons under it, so
@@ -2746,8 +3116,9 @@ to you; this takes the street's line of sight away.
 - `AcidState` carries the same `{x, y, r}` a `Bush` does — `r` being the
   *bounding* radius — plus a seed the lobes are derived from and an `a` and a
   `t` the fog path simply ignores.
-- The flight is `sprayFlame`'s trick: work out where it lands on the tick the key
-  went down, against the geometry as it stood, then wait `DOG_SPIT_TRAVEL_MS`.
+- **The flight is a grenade** — the same `bouncesOff`, the same `GRENADE_BOUNCE`,
+  the same axis-at-a-time reflection, exported from `heli.ts` rather than
+  written twice. See **A gobbet bounces** below.
 - **It lands where the crosshair is**, clamped to `DOG_SPIT_RANGE` and floored at
   `DOG_SPIT_MIN_THROW` — the rule the flamethrower needed, for the same reason: a
   direction with no distance puts every cloud at maximum range.
@@ -2917,11 +3288,175 @@ grenade with a nine-second tail.
   civilian nobody threw acid at, in the same city over the same window — plainly
   walks.
 
-**`DOG_SPIT_COOLDOWN_MS` (11s) is the cost**, and without one a held key lays a
-wall of the stuff across the map with no decision left in it. The range is
-deliberately shorter than `DOG_SIGHT_RADIUS`: it must not be possible to lay a
-cloud on ground you cannot see, or the ability becomes a way of editing the map
-at a distance.
+#### It is earned, it is slow, and it does not go far
+
+Three numbers, and they move together: **fifteen conversions to unlock it, an
+eighteen-second cooldown, and 380px of throw** against a 945px view. A cloud you
+have to earn, place close, and then wait a long time for is a thing you site;
+one that is free from the first tick, thrown across the street and available
+every eleven seconds is a thing you spam.
+
+- **`DOG_SPIT_UNLOCK_AT` (15) reads `world.dogTurned`, and that is a *second*
+  counter beside `world.dogConversions` on purpose.** They are incremented on
+  the same line in `creditConversion` and they are not the same kind of number:
+  `dogConversions` is a **balance** the roar spends whole and sets to nought,
+  `dogTurned` is a **total** nothing spends. Gate the unlock on the balance and
+  the roar takes the acid away again — turn fifteen, the hexagon opens, roar,
+  and it locks itself with fifteen to go. `acidcheck.ts` checks exactly that
+  sequence, with the roar's own badge emptying in the same run as the control.
+- **The hexagon says how many are left, in the badge's place.** A locked
+  ability that says nothing is indistinguishable from a broken one, and the
+  count *is* the instruction: it says the thing exists, that biting people is
+  what earns it, and how much further there is to go. Drawn cold and dashed
+  rather than with the amber recharge fill — a cooldown comes good on its own,
+  and this one only moves when you bite somebody, so one treatment for both
+  would be read wrong.
+- **`DOG_SPIT_COOLDOWN_MS` is 22s**, and it is *longer* than the roar's now
+  where it used to be shorter. Without a cooldown at all a held key lays a wall
+  of the stuff across the map with no decision left in it.
+- **And it survives being killed**, which at this length it has to: a death and
+  a birth together are under four seconds, so the cheapest way to have the acid
+  back was otherwise to go and get shot. See **A cooldown outlives the body**.
+- **`DOG_SPIT_RANGE` is 380**, down from 620, and still deliberately far shorter
+  than `DOG_SIGHT_RADIUS`: it must not be possible to lay a cloud on ground you
+  cannot see, or the ability becomes a way of editing the map at a distance.
+
+#### A cooldown outlives the body
+
+**`World.dogCooldowns` is where an ability's next-ready deadline lives**, keyed
+by connection and by ability slot. It used to be a pair of fields on `DogState`,
+and `finishDogBirth` *deletes* that — which is right for everything else in it
+(the neck, the jaws, a bite in progress, a roar in progress all belong to the
+body that just died) and wrong for a cooldown. At 22 seconds against a death and
+a birth of under four, the cheapest way to have the acid back was to go and get
+shot.
+
+This is the same fault, and the same fix, as `dogDeaths`, `dogConversions` and
+`dogTurned`: **anything about the dog that is not about its current body has to
+live out on the world**, because the state keyed to the body is deliberately
+rebuilt from scratch every time one dies.
+
+- **Cleared by `spawnDog`, not by `finishDogBirth`.** Those are the two ways a
+  dog gets a body and only one of them is a new dog: `spawnDog` is a fresh
+  round or somebody joining one, `finishDogBirth` is the same animal getting up.
+  A fresh round starts with everything ready; dying is not a way to have it back.
+- **An array by slot, not a field per ability.** The bar is a fixed row and the
+  whole value of one is that nothing shifts when a slot is filled in — a third
+  ability should need a constant and a branch in `startDogAbility`, not another
+  map on the world.
+- **`readyAt` and `coolDown` are two lines each and exist so nothing else knows
+  the shape of the map** — which is exactly how the deadline came to be on
+  `DogState` in the first place and stayed there unnoticed.
+- **The roar's cooldown moved with it**, and that was not separately asked for.
+  It is the same mechanism and the same exploit, only smaller — an 8s cooldown
+  against a 3.9s death is a partial refund rather than a full one — and storing
+  one of the two out here while leaving the other on state that gets deleted
+  would be a bug waiting to be rediscovered. Trivially separable if the roar
+  should keep resetting.
+- **`roarStartedAt` deliberately stays on `DogState`.** A roar *in progress*
+  genuinely does belong to the body carrying it, and being shot out from under
+  one is meant to cost it — see the note about a dog shot mid-roar under
+  **The roar (Q)**.
+
+Measured in `acidcheck.ts`, and the strong form of the check matters: "still
+refused" would pass just as well for a cooldown that had been reset and merely
+restarted, so what is asserted is that the **time remaining matches the clock**.
+Spit, get killed, ride out the death and the birth, come back up: **18000ms
+left against 18000ms expected after 4000ms spent dead** — and it still comes
+good on its own clock afterwards, which is what says it did not simply stop.
+
+#### A gobbet bounces
+
+*"The projectile will bounce off walls if it hits it before landing, like the
+grenades in the game."* It is the grenades' code, not a copy of it — `bouncesOff`
+is exported from `heli.ts` and `GRENADE_BOUNCE` is shared, because they come off
+the same walls, the same intact glass and the same shut doors and two copies of
+that set would drift the first time one of those three changed status.
+
+**What had to change is that the landing point is no longer known at launch.**
+The flight used to be `sprayFlame`'s trick — work it out on the tick the key went
+down, against the geometry as it stood, then wait. That is right for a
+flamethrower, whose stream is stopped dead by the first wall. A gobbet comes off
+the wall, so the position is integrated instead and `spitsToWire` sends where it
+*is* rather than a fraction of the way to where it was going. A client drawing
+the chord would show it passing through the wall it had just come off.
+
+Two things about that are not obvious and both were measured:
+
+- **It is substepped, and it has to be.** 380px in 420ms is about 30px a tick
+  against a `WALL_THICKNESS` of 10 — stepped whole it jumps clean over an
+  interior wall and lands on the far side. Measured that way the rig read **1 of
+  8 landing past the wall**, intermittently, which is what tunnelling looks like:
+  it depends where in the step the wall falls. Half a wall's thickness is the
+  step now, which is five or six extra point tests per tick on one short-lived
+  object. *The grenades have the same shape of risk and are not substepped* —
+  they cover a comparable distance over `GRENADE_FLIGHT_MS` (850) so their step
+  is less than half of this one's, but it is worth knowing if either number
+  moves.
+- **The last step is charged only for what is left of the flight**
+  (`AcidSpit.flownMs`, not a `firedAt` against the clock). A tick is 33.3ms and
+  the flight is 420, so running until the *age* passes the flight takes fourteen
+  whole steps for thirteen ticks of travel and lands ~3% long — visibly past the
+  crosshair on a clear throw. Measured after: **0.00px off**.
+
+Measured, staged against a wall the rig finds rather than assumes: **0 of 8 land
+past it**, **8 of 8 rebound** rather than sticking to it, and a clear throw is
+still exactly on the crosshair.
+
+*One thing about measuring this was the rig lying rather than the code failing,
+and it is the usual one.* `acidcheck`'s rig stood the dog at a fixed (2000, 1500)
+— safe only while a gobbet passed through walls. Bouncing, that spot is inside a
+shop on some cities and against a party wall on others, and the failures moved
+from run to run: one run lost the splash tests, the next had the cloud 465px from
+the crosshair. `openThrow` finds ground with a clear throw east of it, sampled
+with **`bouncesOff` itself** rather than `nav.isBlocked` — those are not the same
+set, a shut door being solid to a thrown thing and deliberately not in the nav
+grid.
+
+#### And a blue officer gets out of it
+
+*"Blue officer bots need to stay away from the zombie dog's spit cloud and if
+they get caught in it need to get out ASAP."*
+
+**Standing in a cloud is the worst place an officer can be, and nothing about it
+feels urgent from the inside.** The slow is the small half. The real cost is the
+fog: `hasLineOfSight` fails every line for a viewer inside one and zombies are
+exempt, so a bot in acid has an empty `threatPoints`, no target, nothing to shoot
+at and no reason it can perceive to move, while the horde walks in at it. It
+cannot notice, because noticing is exactly what the cloud takes away.
+
+- **`acidBoltTick` is a branch of its own above everything**, including the
+  post-grapple flight — which decides it is clear by reading `threatPoints`, and
+  inside a cloud that list is empty, so a bot would call itself safe standing in
+  the middle of the stuff.
+- **Straight out, on the bearing off the cloud's centre**, sprinting, with the
+  gun still up. Not `escapeDestination`: that reads the danger field and is a
+  question about zombies, where a cloud is a piece of ground and the shortest way
+  off it is the way you came.
+- **Clear is `BOT_ACID_CLEAR` past the bounding radius**, measured from the
+  centre rather than by asking `acidCloudAt` again — the lumps mean the real rim
+  sits inside the bounding radius in places, and a bot that stopped the instant
+  `acidCloudAt` came back null would stop in a notch with the cloud all round it.
+- **A blinded bot still gets out**, and it is the one exception to
+  `blindedTick`. It is still blind while it does — no perception, no target, no
+  shooting, walking a bearing it did not choose — which is what "get out ASAP"
+  has to mean for something that cannot see, and is deliberately much narrower
+  than lifting the blindness. Civilians and grey officers keep the old behaviour
+  whole. Without this a bot caught by the splash stands in the middle of the
+  cloud sweeping its head for the whole of `ACID_BLIND_MS`.
+- **And it will not walk into one**: `botPatrolTarget` refuses a sample in a
+  cloud and `lootWanted` refuses a pickup lying in one. A cloud lasts
+  `ACID_CLOUD_MS` and the rifle will still be there afterwards.
+
+**The obvious control does not discriminate, and that cost a measurement.** "The
+bot left the cloud" is satisfied just as well by a bot that was walking somewhere
+anyway: against a bot dropped on the same pixel of the same city with no acid on
+it at all, clearing the same 190px took **1.2-1.7s either way**, because a
+patrolling officer covers that in about a second and a half regardless.
+`setBotIgnoresAcid` is the gate and it is kept for that reason. Both behaviours
+over the same staged cloud, eight runs: **got clear in 1.2-1.3s against 2.6-3.0s**,
+8 of 8 out inside three seconds, and a civilian dropped on the same pixel has
+moved **17-28px** when the bot has gone.
 
 **The hexagon carries no badge**, unlike the roar's. `charges: -1` rather than 0:
 the badge is for an ability that banks something, and a nought under a hexagon
@@ -3054,6 +3589,167 @@ failing*, and both are the staging:
   by only ever sampling due east of the cloud; a 64-bearing sweep walks into a
   hedge sooner or later and reported **10 of 64 bearings slowed past a rim
   nothing reaches**.
+
+#### It tears itself open (F)
+
+Two seconds of vibrating on the spot while tentacles rip out of the body, then
+twenty seconds of something six times as tough and much slower, and then it
+bursts into a toxic cloud and a scatter of its own parts. `server/dog.ts` owns
+it; `server/morphcheck.ts` is the harness.
+
+**The whole ability is a trade of speed for presence.** Everything else the dog
+has is about arriving somewhere before the street is ready. This is about being
+somewhere the street cannot deal with, for twenty seconds, and paying for it
+with a life and four minutes.
+
+- **It is earned by the outbreak, not by this dog.** `DOG_MORPH_UNLOCK_CONVERTED`
+  (101) reads `world.totalConverted` — one shared counter, incremented once in
+  `convert`, the single function every human-to-zombie conversion in the game
+  passes through however it got there. A shambler finishing an incubated bite
+  on the far side of the map counts exactly as much as this dog's own jaws do,
+  which is the whole of what "by other zombies and yourself" means. The
+  mechanism this replaced (forty personal infections, or one blue officer down
+  anywhere) rewarded either a dog's own tally or a death that need not involve
+  a conversion at all; this is explicitly about turning, and only turning.
+- **Deliberately not per-dog.** `dogConversions` and `dogTurned` stay a
+  particular dog's own balance and total, for the roar; `totalConverted` is the
+  city's, shared by every zombie in it. A second dog with nothing of its own to
+  show for the round — no bites, no lashes fired — gets the ability the instant
+  the shared tally crosses the line, because the threshold belongs to the
+  outbreak rather than to any one animal. Measured on the harness: refused with
+  its own tally at zero, and taken the moment `totalConverted` alone is moved
+  to 101.
+- **Only a genuine conversion moves it — a kill does not.** Shooting somebody
+  dead outright never touches `world.totalConverted`, staged and checked
+  directly against `killEntity`. A round can therefore go badly — a garrison
+  cut down, buildings lost — without the ability opening a moment sooner than
+  the city's own dead have actually started walking.
+- **101 rather than a round number.** It reads as a threshold the outbreak
+  crosses almost by accident partway through a bad round, not a target a
+  player is chasing turn by turn the way `DOG_SPIT_UNLOCK_AT`'s fifteen is.
+- **Rooted for the wind-up, at a tenth of the damage.** Two seconds standing
+  still in the open is the whole vulnerability of a four-minute ability, and
+  without `DOG_MORPH_DAMAGE_MUL` the counter to it is "shoot it while it stands
+  still" — it would never once complete in front of anybody worth using it on.
+  The form that follows takes rounds like anything else; what it got instead is
+  the health. Measured through the real `fire` path with a bolt action: **41hp
+  before, 5hp during, 43hp after**.
+- **`DOG_MORPH_RADIUS` is 21 and cannot be much more, and the first value
+  written here was wrong.** `DOG_RADIUS` is 19 — a *radius*, so a 38px body —
+  and the tightest opening a city cuts is 46px. 42 was written on a misreading
+  of that as a diameter, which would have been an 84px body squeezing through a
+  46px gap: a monster locked out of every building in the city and locked
+  *into* one if it transformed indoors. The **drawing** nearly doubles instead
+  (`DOG_MORPH_ART_MUL`), which is the same `DOG_RADIUS`/`DOG_ART_RADIUS` split
+  the animal already makes. The harness asserts the doorway sum rather than the
+  number, so the next person to raise it is told why they cannot.
+- **The sprint is the cost that is felt.** An ordinary dog's sprint is what wins
+  it every flat-out chase in the game; at this size it is barely quicker than
+  the walk. The *walk* is untouched — a monster that could not cross a street
+  would spend its twenty seconds where it stood. Measured on the same pixel of
+  the same city, transformed against not: **93px against 189px over 0.67s.**
+
+**F does two things and which one is not a mode anybody sets.** Out in the world
+as the thing, it lashes; anything else, it begins the transformation. The row is
+Q, E, R, F and W walks the dog, so there is exactly one free key and this
+ability wants both halves of it — and nothing has to be learned, because while
+you are the monster, F is what the monster does. The lash is therefore checked
+*above* the transformation's own cooldown, or F would be dead for the twenty
+seconds it is most wanted.
+
+- **The lash infects rather than damaging**, which is the whole point of a form
+  too slow to run anybody down: its work is done at arm's length. Somebody
+  already incubating is passed over, the same rule `resolveGrapple` follows.
+- **`DOG_LASH_COOLDOWN_MS` is not in the spec and it needs one.** Without it F
+  is a key you hold to infect a whole street in a second and a half, which is
+  not a lash, it is a hose. Two thirds of a second is a rhythm you can feel and
+  about thirty reaches across the form.
+- **It reads `hasWallClearPath`, not `hasLineOfSight`**, and that mattered in
+  both directions. A sight line waves *glass* through — that is the point of
+  glass — and a tentacle does not go through an intact window; and it stops at
+  *foliage*, which a tentacle very much does go through, exactly as a blast
+  does. `hasWallClearPath` is the one predicate in the game that asks whether a
+  physical thing can get from here to there.
+
+**The burst is a death, and that is one ending rather than two.** The clock
+running out calls `killEntity`; so does a rifle. Without that, shooting the
+thing is the anticlimax and the form has a second way to end that has to be
+written, drawn and remembered. So it drops a body, costs a life and rises again
+out of a shambler like any other death — and with no shamblers left, that was
+the last of them.
+
+- **The cloud is `layCloud`**, exported from `acid.ts` so `dog.ts` never learns
+  what a cloud's seed, lobes or growth curve look like. `AcidCloud.full` is new
+  and is why: a burst leaves a much bigger one (`DOG_BURST_CLOUD_MUL`) and the
+  growth curve is shared.
+- **The tentacles are the gobbet's physics**, which are the grenades' — the same
+  `bouncesOff`, the same `GRENADE_BOUNCE`, substepped against `WALL_THICKNESS`
+  for the same reason. Measured: **0 of 8 come to rest inside a wall.**
+- **`world.pendingBursts` is a queue rather than a call**, because `killEntity`
+  lives in `world.ts` and the cloud belongs to `acid.ts` and the tentacles to
+  `dog.ts` — neither of which that file may load. `updateDogs` drains it on the
+  next tick, the same arrangement `pendingFires` already uses, and it costs one
+  tick nobody can see.
+- **The grey corpse pieces are not on the wire at all.** The client throws them
+  itself off the body leaving the snapshot, exactly as it throws the gore when a
+  birth host bursts and exactly as blood is derived from `Shot.hit`.
+- **`maxHealth` and `radius` are put back in `killEntity`.** `DogState` is
+  deleted on the way up so the flags clear themselves; those two do not, and a
+  dog reborn six times as tough would keep the whole ability for the rest of the
+  round.
+- **And the cooldown outlives the body**, like the acid's — see **A cooldown
+  outlives the body**. At 250s against a four-second death this is the one where
+  it matters most. Measured: **224s left against 224s expected after 26s.**
+
+**One wire number, not a ramp and a flag.** `EntityState.morph` runs 0 to 1
+across the wind-up and then holds at 1 for the whole form, so the client scales
+the drawing and grows the tentacles off it with no branch and there is no moment
+where a ramp reading 1 and a boolean reading false could disagree about what is
+on screen. `morphing` says which half it is in, which is the one thing the ramp
+alone cannot — the two want different drawings, rooted and vibrating against
+moving and writhing. **Both are in `ENTITY_FIELDS`**; left out, a dog that has
+been on screen since it spawned would grow for one frame and then stand there at
+its old size for twenty seconds, which is the fourth time that list has caught
+exactly this.
+
+**The tentacles are drawn live rather than baked**, unlike everything else on
+the animal — the dog's parts are painted once because they are rigid shapes that
+only need posing, and a tentacle is a curve whose whole point is that it moves.
+Eight at four segments each is about thirty line segments on the one body in the
+round worth it, with no per-frame state: every bearing, length and phase comes
+off the dog's own id and the clock, exactly as the saliva strands and the acid
+churn do.
+
+`server/morphcheck.ts` is the harness — headless, no socket, no port. Three
+things in it were the rig lying rather than the code failing, and all three are
+the staging:
+
+- **The rig stages on open ground, which defeats the wall test.** `rig()` finds a
+  spot with several hundred pixels clear in every direction — right for every
+  other check and exactly wrong for "a wall stops the lash", which reported
+  **0 cities staged**. It has to move the dog off it.
+- **`nav.isBlocked` is inflated, so a victim "behind a wall" can be in front of
+  one.** The first blocked sample walking east is several pixels before the
+  slab, and a line can graze that skirt without crossing anything solid. Staged
+  that way it leaked on **1 city in 3**, and then on 1 in 6 after a
+  point-test fix. The body has to go past the *far* face of the solid run, with
+  cities where that lands outside the reach skipped rather than measured.
+- **Two rigs are two cities, and `speedAt` reads bushes.** The sprint comparison
+  put the plain dog and the heavy one in different worlds, and a hedge under one
+  of the runs failed it 1 run in 5 — with the *plain* dog slowed rather than the
+  heavy one quick. Same dog, same pixel, same city, stamina refilled before each
+  window.
+- **The dog can eat its own test subject.** Checking that a lash's incubation
+  actually turns somebody means waiting out `TURN_DELAY_MAX_MS` (45s), which
+  outlasts the transformed form itself (`DOG_MORPH_MS`, 20s) — so left alone the
+  dog's own clock runs out mid-wait, it bursts, and `respawnDogFromHorde` looks
+  for a shambler to rise out of. In a city deliberately emptied down to the dog
+  and its one victim, the victim — now the only zombie anywhere — *is* that
+  shambler, and `finishDogBirth` removes the entity outright. It read as the
+  conversion having worked and the entity having vanished in the same run,
+  which is correct game behaviour caught next to the wrong test. The form's own
+  deadline is pinned past the wait before it starts, which is the incubation's
+  business and not the dog's lifecycle.
 
 #### The corner map, and what it refuses to show
 
@@ -3217,8 +3913,13 @@ races with zombies. A bot is meant to win them.
   back across a room to see to it — and every one is a bot standing in a
   doorway instead of fighting. Cleared as *data* at spawn rather than branched
   on in `doorTick`, so nothing downstream has to know bots are different.
-  Opening a door they need through is untouched, and so is kicking a locked one
-  down. Measured over two seeds: the only door action a bot performs is `kick`.
+  Opening a door they need through is untouched, and so is drawing the bolt on
+  a locked one. Measured over two seeds *before* the boot was taken away: the
+  only door action a bot performed was `kick`; it is `unlock` now, and neither
+  is a tidying-up job. **A rig has to clear these by hand** — one that stages a
+  bot with a bare `newAiState` gets a bot that rolls `closesDoors` like a
+  civilian and spends the round shutting doors after itself, which is 144 jobs
+  across eight cities and not one of them a thing a real bot would do.
 - **A bot opens a door instantly, the way a player does.** For a player,
   opening is a *tap* and a tap resolves the moment it is released; the 1.1-2s
   in `DOOR_OPEN_MIN_MS`/`MAX` is a civilian fumbling with a handle in a panic,
@@ -3228,14 +3929,28 @@ races with zombies. A bot is meant to win them.
   opening: bolting a door and kicking one down are deliberate acts and take a
   bot as long as anyone. Measured over two seeds, `bot:open` went from ~1.5s a
   door to never appearing as a spell at a handle at all.
-- **A locked door is not a wall to an officer.** Where a civilian hammers and
-  hopes, a bot kicks it off its hinges — but only from the side it can't simply
-  unbolt, the same rule the player's own prompt follows. A door a *player*
-  bolted (`playerLocked`) is still left standing: a bot is on that player's
-  side and reroutes rather than undoing their work.
-  The alert fires **after** the kick, the opposite of a slam — shutting a door
-  blocks the very sight line the alert needs, so that has to go first; kicking
-  one opens it, so waiting is what lets the room beyond hear it at all.
+- **A locked door is not a wall to an officer, and it is not a door to be
+  kicked in either.** Where a civilian can only draw a bolt back from the side
+  it is on — which is what makes finding a bolted front door a real refusal for
+  the crowd — an officer works the lock from whichever side it is on, so
+  `canWorkLockFrom` is simply not asked of a bot. It used to take the door off
+  its hinges instead, which reads as an officer wrecking the house he is there
+  to clear; **the boot is being kept for barricades**, when there are some.
+  Measured on a rig with every way into the corner complex bolted, eight to ten
+  cities, with the old behaviour temporarily gated back in: **kicked 8/8 →
+  0/10**, drew the bolt **2/8 → 9/10**, and still got inside — median 8-13s
+  against the kick's 9.6s, since an unlock is `DOOR_NPC_UNLOCK_MS` and that is
+  a quarter of `DOOR_KICK_MS`.
+  A door a *player* bolted (`playerLocked`) is still left standing: a bot is on
+  that player's side and reroutes rather than undoing their work.
+  **Kicking is unreachable rather than gone** — `beginDoorWork` and
+  `finishDoorWork` still know the action, `DOOR_KICK_MS` still exists, and
+  `server/botkite.ts` still stages one directly to measure a bot dropping slow
+  door work when something walks up behind it. That measurement is unaffected,
+  because the drop applies to any job at a handle and an unlock is one.
+  The alert fires **after** the door comes open, the opposite of a slam —
+  shutting a door blocks the very sight line the alert needs, so that has to go
+  first; opening one is what lets the room beyond hear it at all.
 - **A dry gun in the bag counts as a free slot** in `lootWanted` — they ditch
   it on arrival. Otherwise a bot holding three empty rifles is "full" and walks
   past every gun in the city. On arrival they drop the dry one *then* collect,
@@ -3805,6 +4520,62 @@ flat shapes, and the two findings out of it are worth more than the picture:
   life is how you end up with detail nobody sees and a silhouette that doesn't
   read. Measured in a live city: 144fps, 2.7ms tick, with the dog on screen.
 
+### The options screen, and the one row on it worth anything
+
+Every row is a *client* decision — how the world is drawn, never what is in it
+— so nothing on it reaches the server and no two players can see a different
+game because of it. That is the line, and it is what decides what "resolution"
+is allowed to mean here.
+
+**RESOLUTION changes how many pixels the frame is painted at, and nothing
+else.** `RENDER_SCALES` is 0.5 to 1.5 of the viewport — 960x540 up to
+2880x1620 — and the *layout* stays 1920x1080 at every setting. Everything in
+the client is written in those layout units and one `ctx.setTransform(px, …)`
+at the top of the frame maps them onto the backbuffer, which is why a
+resolution setting needed no arithmetic anywhere else. The amount of world on
+screen is identical at every setting; a row that changed how much city you
+could see would be a cheat, not a graphics option.
+
+- **It is the only row here that buys anything in proportion to itself.**
+  Everything else is a cached fill measured in fractions of a millisecond — the
+  grime tile 0.09ms, the vignette 0.36ms. Painting is not cached and scales
+  with *area*: 0.75 is 56% of the pixels and 0.5 is a quarter of them. Above 1
+  is a supersample the browser scales back down, which is a free high-quality
+  antialias — the same trick `DOG_SS` uses to bake the dog.
+- **It is in the LOW preset at 0.75**, and it is worth more there than the
+  other five rows put together. Not the floor, because LOW should still be
+  playable to look at.
+- **The default is 1**, deliberately, not the sharpest on offer: the game is
+  tuned and measured at the viewport's own size and a fresh install should see
+  what it was designed to cost.
+- **There are exactly four places that know a real pixel from a layout one**,
+  and a fifth would be a bug. `applyRenderScale` sizes the two canvases; the
+  frame transform; `drawFog`'s `m` and `s`; and `input.ts`'s mouse mapping.
+  - **The fog mask has to come with it.** `FOG_MASK_SCALE` is a fraction *of
+    the backbuffer*, so a mask left at full size while the frame halved would
+    be blitted up by half as much and its penumbra would come out half as wide.
+    Both of `drawFog`'s scales carry the render scale for the same reason —
+    left at bare `FOG_MASK_SCALE` the hole is written at twice the mask's size
+    at 0.5 and half of it at 1.5: off-centre, clipped, and looking exactly like
+    the polygon collapses this file has had twice before.
+  - **The mouse is reported in layout units, not backbuffer pixels.**
+    `input.ts` read `canvas.width`, which is the same number as
+    `VIEWPORT_WIDTH` only at a scale of 1 — left alone, the crosshair would
+    drift further from the cursor the further the scale is from 1, and in
+    exactly the settings a struggling machine picks. The beacon map's hit test
+    had the same read and the same fix.
+  - **Resizing a canvas resets its context**, so `imageSmoothingEnabled` is set
+    again inside `applyRenderScale` rather than once at startup.
+
+**The client half of this is arithmetic and an enumeration, not a rig**, and
+that is worth saying plainly. rAF is throttled to nothing while the browser
+pane is not compositing — a round started offline never painted a single frame,
+verified by reading the backbuffer's centre pixel back as transparent — so the
+same standard applies as to `DOG_CAMERA_ZOOM`: the sites were confirmed by
+listing them, the cycle and the backbuffer sizes were measured live
+(1920x1080 → 2400x1350 → 2880x1620 → 960x540 → 1280x720 → 1440x810 → back,
+`canvas.width` following exactly), and somebody has to look at the picture.
+
 ## Performance rules (these matter — 400+ entities)
 
 - **The park was overdraw, not the fog.** Walking through the trees stuttered
@@ -4125,6 +4896,14 @@ In `shared/constants.ts`:
   as they spawn**, not into the city at generation. Turning it off leaves the
   map untouched, which is why it is safe to leave on while measuring anything
   that is not about loot.
+  - **And it only ever fires in an offline round now** (`world.offline`, set
+    from the lobby beside `botOfficerCount`). Safe to leave on was true right up
+    until a second person was in the lobby, at which point it is one player
+    being handed one of every item in the game while everybody else goes and
+    finds them. The flag is still the master switch — turning it off takes the
+    ring out of solo rounds too — and `world.offline` defaults **true**, since a
+    world built without a lobby behind it is a harness or a bare `?spectate`
+    and neither is a game anybody else is in.
 - `PLAYER_ONE_SPAWN_AT_CENTER = true` — player one spawns mid-map, not on the outbreak
 - `PLAYER_ONE_SHOT_KILL = false` — already off; set true to one-shot zombies
 - `TEST_BEACON_ON_A_BOT = false` — **turned off, and worth knowing why.** With
@@ -4785,6 +5564,25 @@ both are about reading a bag:
   separate look at the rally charge, and the *distribution* is read off what
   `giveStartingItem` says it granted rather than inferred from the bag at all.
 
+### The binoculars run on being carried
+
+Same trade as the tracker, the goggles and the beacon handset: **the slot is the
+cost.** Held, they were something you took out, looked through and put away —
+and the one moment you most want to see further is the one moment you least want
+to be holding a pair of binoculars instead of a rifle.
+
+- **What being carried buys is a wider circle in every direction**, not a longer
+  look down one bearing. `sightRadiusFor` reads `inv.utilities` rather than
+  `heldItem`, so it is `BINOCULAR_SIGHT_RADIUS` all round, all the time.
+- **The camera push still needs them in hand**, and that is now the whole of
+  what "looking down them" means. `scopeReach` is untouched.
+- **Both ends had to move together.** The client's `baseSightRadius` reads the
+  same bag, because a fog hole narrower than what the server populates wastes
+  the item entirely and one wider than it lights ground with nothing on it. That
+  second failure is invisible — an empty street rather than an error — and it is
+  the third time this file has had to record it, after the sniper's radius and
+  the binoculars' own.
+
 ### The tracker runs on being carried
 
 `zombieTracker` used to need to be in your hand, and the cost of that was meant
@@ -4834,9 +5632,9 @@ Opening and closing are untouched.
 
 Most of these are passive: carrying one is the whole of using it, and the cost
 is the slot. `combatBoots` (quicker, cheaper on the legs) · `backpack` (+2
-utility slots) · `gunsling` (+1 gun slot) · `binoculars` (pulls the camera back
-like a scope, and widens `sightRadiusFor` to match — without both you'd be
-looking at fog) · `zombieTracker` (an arrow orbiting you, pointing at the
+utility slots) · `gunsling` (+1 gun slot) · `binoculars` (a wider circle in
+every direction, on being carried — see **The binoculars run on being carried**
+below) · `zombieTracker` (an arrow orbiting you, pointing at the
 nearest one; the only thing in the game that sees past the fog, and it runs on
 being carried rather than held — see **The tracker runs on being carried**) ·
 `grenade` (three to a bundle, counting down in one slot the way kevlar does,
