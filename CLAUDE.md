@@ -3919,11 +3919,55 @@ cheating a map must not enable.
   in it never builds one at all. Rebuilding faster than the danger field under
   it (160ms) would buy a fresher copy of the same answer.
 - **So it is up to `DOG_MAP_REFRESH_MS` stale, and that is a property rather
-  than a bug.** A contact can read a little past the range by the time it is
-  checked again — the officer walked, or the zombie did. The harness bounds the
-  *overshoot* rather than counting "leaks", which is the difference between a
-  check that says how stale the answer gets and one that fails on its own clock.
-  Measured over a real round, 35 samples: **0 contacts even a pixel over.**
+  than a bug.** The scan is exactly right at the instant it runs, and a cached
+  list is then handed to every snapshot until the next one. What is bounded is
+  its **age**, in milliseconds — measured, **233ms against the 250ms throttle**,
+  which is the last cached tick before a rebuild and is the figure by
+  construction rather than by luck.
+  - **Pixels are the wrong unit for that staleness, and reaching for them cost
+    a wrong measurement.** The harness used to allow 150px of "overshoot" on
+    the reasoning that two bodies walk about 60px apart in a refresh window.
+    They do — but walking is not the dominant term. **The zombie that made the
+    contact dying is**, and that removes a source from the danger BFS outright:
+    the reading jumps to the next-nearest zombie, or to unreachable, in one
+    rebuild and however far off that happens to be. No bound in pixels can
+    describe that, and the one that tried failed on its own clock at roughly
+    1-4 samples in 40-95.
+  - **`Infinity | 0` is `0`, and that is what hid it.** `distanceAt` answers
+    `Infinity` for a cell the BFS never reached, and the failure detail
+    formatted its worst reading with `| 0` — so the check reported "were up to
+    **0px** stale, against 150px of slack", which is self-contradictory and
+    names neither the size nor the cause. Nothing in that harness formats a
+    distance by hand now; `px()` prints `unreachable` and the same trap was
+    waiting in two other details beside it.
+  - **The check is split in two now, and neither half carries a slack figure.**
+    On a **rebuild** tick the list and the field are the same age, so the rule
+    holds exactly and is checked in both directions — nothing listed that
+    should not be, nothing missing that should. Measured: **0 wrong across 263
+    rebuilds and 2100 samples**, every run. On a **cached** tick what is
+    measured is the age above, plus how much of the list has gone stale inside
+    it: **2.7-4.3% of readings**, of which **0 were officers killed**, 4-27
+    turned, and 30-213 were officers still stood where they were with the
+    horde gone — having moved **25-54px**, which is what says it is the zombie
+    leaving rather than the officer walking.
+  - **And it sampled every sixtieth tick, so it had never once read a cached
+    list.** The refresh is 250ms and the harness looked every 2000ms, so every
+    look rebuilt — it was measuring the scan and reporting the figure as though
+    it described the cache. It samples every tick now, which is also what a
+    real snapshot does.
+- **An officer the coarse field cannot answer for is not shown, and it fails
+  closed.** `DANGER_CELL` is 28px and a cell counts as blocked when its
+  *centre* is in a wall, so a body standing in the open a few pixels off a
+  frontage can sit in a cell the BFS never reached — `distanceAt` answers
+  `Infinity` with a shambler 30px away and `refreshDogContacts` declines to
+  list somebody it cannot measure. For a feature defined by what it refuses to
+  show that is the safe direction, so it is left alone; it is a property of
+  reading a coarse field rather than of this rule. **It is also a trap for the
+  harness**, which is where it actually bit: two staged checks settled their
+  officer into such a cell — **3 runs in 12** of one and about **1 in 16** of
+  the other — and reported "0 contacts" as though the rule had broken.
+  `stageInContact` states that precondition rather than assuming it, and
+  engages on ~7.5% of stagings.
 
 **The city is painted once and blitted after that.** Drawn live it is ~90
 building footprints, a park, a pond and a border — a couple of hundred
@@ -3943,8 +3987,9 @@ Measured, 90 footprints at 1920x1080, three runs: bake **0.36-0.84ms once**,
 then **0.031-0.096ms a frame** against **0.48-0.59ms** with the bake thrown away
 each frame — 5-16x. Against a fog polygon at 0.8-2.5ms and walls at 2.15ms, the
 map is under 1% of a frame. Server side, at 522 entities: a forced rebuild is
-**0.014ms** and a snapshot pays **0.006ms**. Over a live round it shows **4-12%
-of the garrison** on average, which is the balance property stated as a number.
+**0.014ms** and a snapshot pays **0.006ms**. Over a live round it shows **5-22%
+of the garrison** on average, which is the balance property stated as a number —
+quote the range and never a single run, the map not being seeded.
 
 *The first cost figure taken read 39ms for the bake and was nonsense* — that is
 the `getImageData` readback's own fixed cost plus a cold canvas, counted as if
