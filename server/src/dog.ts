@@ -1,4 +1,10 @@
-import type { DogAbilityHud, DogHud, LashState, TentacleState } from '../../shared/types.js';
+import type {
+  DogAbilityHud,
+  DogHud,
+  LashHit,
+  LashState,
+  TentacleState,
+} from '../../shared/types.js';
 import {
   DOG_ABILITY_SLOTS,
   DOG_ART_RADIUS,
@@ -40,9 +46,17 @@ import {
   DOG_MORPH_RADIUS,
   DOG_MORPH_UNLOCK_CONVERTED,
   DOG_LASH_RANGE,
-  DOG_LASH_WIDTH,
   DOG_LASH_COOLDOWN_MS,
   DOG_LASH_SHOW_MS,
+  DOG_LASH_WINDUP_MS,
+  DOG_LASH_STRIKE_MS,
+  DOG_LASH_RECOVER_MS,
+  DOG_LASH_IMPACT_RADIUS,
+  DOG_LASH_PUSH,
+  DOG_LASH_PUSH_MS,
+  KNOCKBACK_DECAY,
+  SHIELD_FRONT_ARC,
+  SHIELD_BACK_ARC,
   DOG_BURST_CLOUD_MUL,
   DOG_BURST_TENTACLES,
   DOG_BURST_THROW,
@@ -185,13 +199,43 @@ export interface Tentacle {
   age: number;
 }
 
-/** A lash going out, kept only long enough to be drawn. */
+/**
+ * A tentacle strike in progress: the arms coiling on the animal's back, going
+ * out to a spot, and coming home.
+ *
+ * **The landing point is settled at the keypress and stored here**, which is
+ * the whole of what makes this dodgeable. Re-reading the cursor per tick would
+ * make the ring on the ground a lie — it would show you where the mouse was,
+ * not where the limbs are going — and the player being warned would have no
+ * move available that answered it.
+ */
 export interface Lash {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  hit: boolean;
+  id: number;
+  /** Whose back it came off, so the drawing can find its animal. */
+  dogId: string;
+  /** The locked landing point. */
+  tx: number;
+  ty: number;
+  /** When it was thrown. Every phase boundary is measured off this one stamp. */
+  startedAt: number;
+  /** Set the tick it lands, so it cannot resolve twice. */
+  landed: boolean;
+  /** Whoever it caught and what stopped it, for the client's blood and sparks. */
+  hits: LashHit[];
+}
+
+/**
+ * A body that has been shoved, and the impulse still bleeding off it.
+ *
+ * A map on the world rather than a field on `AiState`, because the things that
+ * can be knocked about are not all AI: a player has no `AiState` at all, and
+ * neither does a dog. This is the one shape that covers every body in the game
+ * without any of them being asked to know about it.
+ */
+export interface Knockback {
+  vx: number;
+  vy: number;
+  /** When the impulse is spent. It decays continuously; this is only the end. */
   until: number;
 }
 
@@ -376,34 +420,88 @@ function morphTick(world: World, e: Entity, dog: DogState, now: number): void {
 }
 
 /**
- * A tentacle out at the cursor, and whoever it lands on is infected.
+ * Throw a strike: pick the spot now, and let the arms take their time about it.
  *
- * **It infects rather than damaging**, which is the whole of what the
- * transformed dog is for: it is far too slow to run anybody down, so its work
- * is done at arm's length. A body already incubating is passed over rather than
- * re-bitten — the same rule `resolveGrapple` follows, and for the same reason:
- * the first set of teeth turned them and there is only one body to count.
+ * **Nothing is resolved here.** All this does is lock a landing point and start
+ * a clock; `updateLashes` lands it `DOG_LASH_WINDUP_MS + DOG_LASH_STRIKE_MS`
+ * later. That split is the whole feature — it is what puts a red ring on the
+ * ground with time left on it, and a ring with time left on it is a thing a
+ * player can answer.
  *
- * Nearest first along the line, so a lash into a crowd catches the front of it
- * rather than whoever happens to be enumerated first.
+ * **The spot is stopped at the first wall on the way**, not merely clamped to
+ * range. A ring drawn inside a building the dog is stood outside of promises an
+ * impact that `hasWallClearPath` will then refuse for everybody in it, which is
+ * a warning that costs whoever obeys it their position for nothing. It is
+ * walked in `WALL_THICKNESS / 2` steps for the same reason the gobbet is
+ * substepped: 300px of reach against a 10px wall is a stride that steps clean
+ * over one.
  */
 function lashOut(world: World, e: Entity, dog: DogState, command: Command, now: number): void {
   const aim = Math.atan2(command.aimY - e.y, command.aimX - e.x);
-  const reach = clamp(Math.hypot(command.aimX - e.x, command.aimY - e.y), 40, DOG_LASH_RANGE);
-  const tipX = e.x + Math.cos(aim) * reach;
-  const tipY = e.y + Math.sin(aim) * reach;
+  const want = clamp(Math.hypot(command.aimX - e.x, command.aimY - e.y), 40, DOG_LASH_RANGE);
 
-  let best: Entity | null = null;
-  let bestAlong = Infinity;
+  let reach = want;
+  const step = WALL_THICKNESS / 2;
+  for (let d = step; d <= want; d += step) {
+    if (hasWallClearPath(world, e.x, e.y, e.x + Math.cos(aim) * d, e.y + Math.sin(aim) * d)) {
+      continue;
+    }
+    // Back off half a step so the ring sits on the near side of whatever
+    // stopped it rather than straddling the slab.
+    reach = Math.max(40, d - step);
+    break;
+  }
+
+  dog.lashReadyAt = now + DOG_LASH_COOLDOWN_MS;
+  world.lashes.push({
+    id: lashCounter++,
+    dogId: e.id,
+    tx: e.x + Math.cos(aim) * reach,
+    ty: e.y + Math.sin(aim) * reach,
+    startedAt: now,
+    landed: false,
+    hits: [],
+  });
+}
+
+let lashCounter = 1;
+
+/**
+ * A strike arriving: everybody standing in the circle is shoved, and the ones
+ * with nothing on turn.
+ *
+ * **The order is shield, then vest, then the infection**, which is the order
+ * `attemptGrab` and `resolveGrapple` already use between them and is not
+ * arbitrary: a shield is held out in front and stops the thing before it
+ * reaches you, where a vest is what is left once it already has. Written the
+ * other way round, a player carrying both would spend the vest they cannot
+ * replace while holding a shield that was covering the very bearing it came in
+ * on.
+ *
+ * **Armour gates the infection and nothing else.** Everybody caught is shoved
+ * and bleeds either way — see `DOG_LASH_PUSH` and `LashHit.blocked`. A vest
+ * that made being hit by a limb the width of a leg into a non-event would be a
+ * vest that reads as invulnerability, and the ability is meant to hurt.
+ */
+function landLash(world: World, lash: Lash, now: number): void {
+  lash.landed = true;
+  const r = DOG_LASH_IMPACT_RADIUS;
+  /**
+   * Where the limbs came *from*, which is not the same as where they came
+   * down, and the shield arc is about the first of those. If the animal has
+   * been shot in the meantime the strike has already been dropped by
+   * `killEntity`, so this is only ever missing on the tick a rig stages one by
+   * hand — and the landing point is the honest fallback there.
+   */
+  const thrower = world.entities.get(lash.dogId);
+  const fromX = thrower ? thrower.x : lash.tx;
+  const fromY = thrower ? thrower.y : lash.ty;
+
   for (const other of world.entities.values()) {
-    if (other.id === e.id || other.type === 'zombie') continue;
-    if (world.pendingInfections.has(other.id)) continue;
-    // Distance along the lash, and distance off it. A body behind the dog has a
-    // negative `along` and is not in front of anything.
-    const along = (other.x - e.x) * Math.cos(aim) + (other.y - e.y) * Math.sin(aim);
-    if (along < 0 || along > reach) continue;
-    const off = Math.abs(-(other.x - e.x) * Math.sin(aim) + (other.y - e.y) * Math.cos(aim));
-    if (off > DOG_LASH_WIDTH + other.radius) continue;
+    if (other.id === lash.dogId || other.type === 'zombie') continue;
+    const dx = other.x - lash.tx;
+    const dy = other.y - lash.ty;
+    if (Math.hypot(dx, dy) > r + other.radius) continue;
     /**
      * **A physical line, not a sight line**, and the difference is not academic
      * in either direction.
@@ -411,35 +509,163 @@ function lashOut(world: World, e: Entity, dog: DogState, command: Command, now: 
      * `hasLineOfSight` waves *glass* through, which is the whole point of glass
      * — and a tentacle does not go through an intact window. It also stops at
      * *foliage*, and a tentacle very much does go through a hedge, exactly as a
-     * blast does. So a sight test is wrong on both counts and happens to be
+     * blast does. So a sight test is wrong on both counts, and happens to be
      * wrong in opposite directions.
      *
      * `hasWallClearPath` is the one predicate in the game that asks whether a
      * physical thing can get from here to there: walls, intact glass, shut
-     * doors and parked vehicles, with bushes waved through. It is what
-     * `headingToward` asks about *walking*, and reaching somebody with a limb
-     * is the same question.
+     * doors and parked vehicles, with bushes waved through. Asked from the
+     * *landing point* rather than from the animal, because that is where the
+     * limbs actually came down — somebody round the corner from the ring is
+     * behind a wall from it whatever the dog can see.
      */
-    if (!hasWallClearPath(world, e.x, e.y, other.x, other.y)) continue;
-    if (along < bestAlong) {
-      bestAlong = along;
-      best = other;
+    if (!hasWallClearPath(world, lash.tx, lash.ty, other.x, other.y)) continue;
+
+    const blocked = spendArmour(world, other, fromX, fromY);
+    // Dead centre has no bearing to shove along; any of them will do.
+    const away = dx === 0 && dy === 0 ? Math.random() * Math.PI * 2 : Math.atan2(dy, dx);
+    knockBack(world, other.id, away, now);
+    lash.hits.push({ x: Math.round(other.x), y: Math.round(other.y), blocked });
+    if (blocked === null) infectByLash(world, lash.dogId, other, now);
+  }
+}
+
+/**
+ * Whichever piece of armour stops this one, spent — or null if nothing did.
+ *
+ * The shield only counts on the side it is covering, exactly as it does against
+ * a grab: up, it is the front arc; slung, the back. Being caught from the other
+ * side is the whole cost of carrying one, and a strike that ignored the arc
+ * would quietly make the shield a better vest than the vest.
+ *
+ * Neither grants a breather — see the note by the shield's return. A strike is
+ * not a grab, and `DOG_LASH_COOLDOWN_MS` already stops one animal landing two
+ * of them inside half a second.
+ */
+function spendArmour(
+  world: World,
+  target: Entity,
+  fromX: number,
+  fromY: number,
+): 'shield' | 'kevlar' | null {
+  const inv = world.inventories.get(target.id);
+  if (!inv) return null;
+
+  if (inv.shield > 0) {
+    /**
+     * **The bearing to the thrower, not to the landing point.**
+     *
+     * Written the obvious way — the direction of the spot the limbs came down
+     * on — it is nonsense for the person actually standing on that spot, whose
+     * bearing to it is whatever rounding left them, and it is close to a right
+     * angle for anybody standing beside them. The blow arrives along the line
+     * the limb travelled, so the shield covers it exactly when it is pointed at
+     * the animal that threw it. Measured with the wrong one: a shield held
+     * directly at the dog blocked **0 of 1** and the vest underneath it was
+     * spent instead.
+     */
+    const off = Math.abs(
+      angleDelta(Math.atan2(fromY - target.y, fromX - target.x), target.facing),
+    );
+    const covered = inv.shieldUp ? off <= SHIELD_FRONT_ARC : off >= Math.PI - SHIELD_BACK_ARC;
+    if (covered) {
+      inv.shield--;
+      if (inv.shield <= 0) {
+        inv.shieldUp = false;
+        const at = inv.utilities.indexOf('riotShield');
+        if (at >= 0) inv.utilities.splice(at, 1);
+      }
+      /**
+       * **No `grappleImmune` window, unlike a blocked grab**, and that is a
+       * deliberate difference rather than an omission. That window means
+       * "nothing can lay a hand on you", and it exists so a vest is not stripped
+       * three times in one second by a crowd that keeps re-grabbing. A strike is
+       * not a grab: there is nothing to break off from, `DOG_LASH_COOLDOWN_MS`
+       * already stops one animal landing two inside it, and granting the window
+       * here would quietly make being hit by a tentacle a *defence* against
+       * being grabbed.
+       */
+      return 'shield';
     }
   }
 
-  dog.lashReadyAt = now + DOG_LASH_COOLDOWN_MS;
-  const caught = best !== null;
-  if (best) {
-    infectByLash(world, e.id, best, now);
+  if (inv.kevlar > 0) {
+    inv.kevlar--;
+    if (inv.kevlar <= 0) {
+      const at = inv.utilities.indexOf('kevlar');
+      if (at >= 0) inv.utilities.splice(at, 1);
+    }
+    return 'kevlar';
   }
-  world.lashes.push({
-    x1: e.x,
-    y1: e.y,
-    x2: caught ? best!.x : tipX,
-    y2: caught ? best!.y : tipY,
-    hit: caught,
-    until: now + DOG_LASH_SHOW_MS,
+
+  return null;
+}
+
+/**
+ * Shove a body away from something.
+ *
+ * An impulse rather than a displacement: 30 pixels applied between two ticks is
+ * a teleport, and the same 30 spread over `DOG_LASH_PUSH_MS` is a body being
+ * knocked off its feet. It is deliberately *not* a stun — they keep walking
+ * through it, which is what lets somebody already running out of the ring go on
+ * running out of it.
+ *
+ * Latched on the stronger of the two rather than added to: two strikes landing
+ * together should knock somebody about, not fire them across the street.
+ */
+function knockBack(world: World, id: string, bearing: number, now: number): void {
+  const held = world.knockbacks.get(id);
+  if (held && Math.hypot(held.vx, held.vy) > DOG_LASH_PUSH) return;
+  world.knockbacks.set(id, {
+    vx: Math.cos(bearing) * DOG_LASH_PUSH,
+    vy: Math.sin(bearing) * DOG_LASH_PUSH,
+    until: now + DOG_LASH_PUSH_MS,
   });
+}
+
+/**
+ * Strikes advancing: landing when their clock says so, and dropped once the
+ * arms are home and the flash has faded.
+ *
+ * The shove itself is applied in `updateKnockback`, not here — that has to run
+ * for every shoved body every tick, rather than only on the tick one is dealt.
+ */
+function updateLashes(world: World, now: number): void {
+  const done = DOG_LASH_WINDUP_MS + DOG_LASH_STRIKE_MS + DOG_LASH_RECOVER_MS + DOG_LASH_SHOW_MS;
+  for (let i = world.lashes.length - 1; i >= 0; i--) {
+    const lash = world.lashes[i];
+    const age = now - lash.startedAt;
+    if (!lash.landed && age >= DOG_LASH_WINDUP_MS + DOG_LASH_STRIKE_MS) landLash(world, lash, now);
+    if (age >= done) world.lashes.splice(i, 1);
+  }
+}
+
+/**
+ * Everybody still carrying a shove, moved.
+ *
+ * Exponential decay rather than a straight ramp, so the body leaves hard and
+ * settles — a linear one stops dead at its deadline, which reads as the shove
+ * being switched off rather than as it running out.
+ *
+ * **Positional, with no wall test of its own**, exactly as the dog's drag is:
+ * `resolveCollisions` runs a few lines later and pushes everything clear of
+ * walls, sandbags and vehicles. Clamping here as well would be a second opinion
+ * about where a body may stand, and the two would disagree.
+ */
+function updateKnockback(world: World, now: number, dt: number): void {
+  if (world.knockbacks.size === 0) return;
+  for (const [id, k] of world.knockbacks) {
+    const e = world.entities.get(id);
+    if (!e || now >= k.until) {
+      world.knockbacks.delete(id);
+      continue;
+    }
+    e.x = clamp(e.x + k.vx * dt, 4, WORLD_WIDTH - 4);
+    e.y = clamp(e.y + k.vy * dt, 4, WORLD_HEIGHT - 4);
+    const drag = Math.exp(-KNOCKBACK_DECAY * dt);
+    k.vx *= drag;
+    k.vy *= drag;
+  }
 }
 
 /**
@@ -504,7 +730,7 @@ let tentacleCounter = 0;
  * a tentacle covers `DOG_BURST_THROW` in `DOG_BURST_FLIGHT_MS`, which is a
  * larger step than a wall is thick.
  */
-function updateTentacles(world: World, now: number, dt: number): void {
+function updateTentacles(world: World, dt: number): void {
   for (const [key, t] of world.tentacles) {
     t.age += dt * 1000;
     if (t.age >= DOG_BURST_FLIGHT_MS + DOG_BURST_LIE_MS) {
@@ -540,9 +766,6 @@ function updateTentacles(world: World, now: number, dt: number): void {
     }
   }
 
-  for (let i = world.lashes.length - 1; i >= 0; i--) {
-    if (now >= world.lashes[i].until) world.lashes.splice(i, 1);
-  }
 }
 
 export function tentaclesToWire(world: World): TentacleState[] {
@@ -563,15 +786,53 @@ export function tentaclesToWire(world: World): TentacleState[] {
   return out;
 }
 
+/**
+ * Strikes on the wire: where they are anchored, where they are going, and how
+ * far through their current phase they are.
+ *
+ * **The anchor is read off the dog live** rather than stamped when the strike
+ * was thrown. The animal keeps walking while its arms are out — it is slow, not
+ * rooted — and limbs still drawn from where it used to be would trail behind it
+ * like a tether. If the dog has gone (shot mid-strike, and `killEntity` drops
+ * the strike with it) the last known point stands for the frame it takes to
+ * disappear.
+ *
+ * `t` is a fraction of the phase rather than of the whole strike, so the client
+ * never has to know that a windup is 340ms and a snap-back is 260. Rounded to
+ * two places like every other ramp here: it is drawn, not integrated against.
+ */
 export function lashesToWire(world: World, now: number): LashState[] {
-  return world.lashes.map((l) => ({
-    x1: Math.round(l.x1),
-    y1: Math.round(l.y1),
-    x2: Math.round(l.x2),
-    y2: Math.round(l.y2),
-    hit: l.hit,
-    t: Math.round(clamp((l.until - now) / DOG_LASH_SHOW_MS, 0, 1) * 100) / 100,
-  }));
+  const out: LashState[] = [];
+  for (const lash of world.lashes) {
+    const e = world.entities.get(lash.dogId);
+    const age = now - lash.startedAt;
+
+    let phase: 0 | 1 | 2 = 0;
+    let t = 0;
+    if (age < DOG_LASH_WINDUP_MS) {
+      t = age / DOG_LASH_WINDUP_MS;
+    } else if (age < DOG_LASH_WINDUP_MS + DOG_LASH_STRIKE_MS) {
+      phase = 1;
+      t = (age - DOG_LASH_WINDUP_MS) / DOG_LASH_STRIKE_MS;
+    } else {
+      phase = 2;
+      t = (age - DOG_LASH_WINDUP_MS - DOG_LASH_STRIKE_MS) / DOG_LASH_RECOVER_MS;
+    }
+
+    out.push({
+      id: lash.id,
+      dogId: lash.dogId,
+      x1: Math.round(e ? e.x : lash.tx),
+      y1: Math.round(e ? e.y : lash.ty),
+      x2: Math.round(lash.tx),
+      y2: Math.round(lash.ty),
+      r: DOG_LASH_IMPACT_RADIUS,
+      phase,
+      t: Math.round(clamp(t, 0, 1) * 100) / 100,
+      hits: lash.hits,
+    });
+  }
+  return out;
 }
 
 /** Are this dog's teeth still actually in the person it thinks they are? */
@@ -591,6 +852,18 @@ function latchedVictim(world: World, id: string, dog: DogState): Entity | null {
  * `processShooting` skips it because it is not an officer.
  */
 export function updateDogs(world: World, dt: number, now: number): void {
+  /**
+   * Strikes and shoves, above the dogs themselves and therefore above
+   * `resolveCollisions` — which is what lets a body knocked into a wall be
+   * pushed back out of it in the same tick, exactly as a shaken victim is.
+   *
+   * Both run whether or not anybody is driving a dog: a strike already thrown
+   * has to land, and a body already shoved has to finish travelling, even if
+   * the animal behind it was shot in between.
+   */
+  updateLashes(world, now);
+  updateKnockback(world, now, dt);
+
   for (const id of world.dogs) {
     const e = world.entities.get(id);
     const command = world.commands.get(id);
@@ -641,7 +914,7 @@ export function updateDogs(world: World, dt: number, now: number): void {
   // Below the loop rather than inside it: a burst is queued by `killEntity`,
   // which can be reached from a dog's own tick, from a bullet, or from a fire.
   drainBursts(world, now);
-  updateTentacles(world, now, dt);
+  updateTentacles(world, dt);
 }
 
 /**

@@ -121,6 +121,12 @@ import {
   drawSpits,
   drawTentacleDebris,
   drawLashes,
+  drawLashWarnings,
+  drawLashScars,
+  drawLashChips,
+  takeLashImpacts,
+  setLashes,
+  clearLashScars,
   drawDogMap,
   drawStamina,
   DOG_HUD_STAMINA_LIFT,
@@ -460,7 +466,7 @@ let solo = false;
 let paused = false;
 if (startSpectating) document.getElementById('shell')!.classList.add('hidden');
 
-const { send, goOffline, goOnline } = connect((msg) => {
+const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
   // The front end reads the lobby traffic; the game below ignores it.
   frontEnd?.handle(msg);
   if (msg.type === 'welcome') {
@@ -489,6 +495,7 @@ const { send, goOffline, goOnline } = connect((msg) => {
     // A fresh city has none of the last one's blood on it, and no dog's legs
     // half way through a stride they took in a street that no longer exists.
     clearBlood();
+    clearLashScars();
     clearDogPoses();
     // The corner map is baked from the city it was built for, and the identity
     // check in `dogMapBaseFor` would catch this on its own — dropping it here
@@ -625,6 +632,8 @@ const frontEnd = startSpectating
   : setupMenu({
       send,
       goOffline,
+      goHost,
+      goGuest,
       goOnline,
       onStart: (offline) => {
         started = true;
@@ -2129,6 +2138,18 @@ function render() {
   phases = [];
   phaseAt = now;
 
+  /**
+   * The strikes, handed over before anything draws them.
+   *
+   * `setLashes` is what lets `drawEntity` pose the dog's own back tentacles as
+   * the ones going out, rather than a separate pass drawing a line from the
+   * middle of the animal. `takeLashImpacts` throws the blood, the chips and the
+   * gouge — once each, on the edge, exactly as the roar's sound and the birth
+   * gore are — so it must be called every frame and not only on a snapshot.
+   */
+  setLashes(lashes);
+  takeLashImpacts(lashes, now);
+
   const me = self();
   if (spectating) {
     applyZoom();
@@ -2173,6 +2194,18 @@ function render() {
     // also blits the shared permanent-stain layer, so it comes before anything
     // that reads from it.
     drawBlood(ctx, view, now);
+    // Where a strike came down and caught nobody. On the ground with the blood,
+    // and for the same reason: it is a mark, not an effect.
+    drawLashScars(ctx, view, now);
+    /**
+     * And the ring where one is *about* to come down.
+     *
+     * **On the ground rather than over the bodies**, which is the whole reason
+     * it is here and not in the effects pass below. The officer standing in it
+     * is the one person who most needs to read it, and a ring painted over the
+     * top of them would hide the very thing it is warning about.
+     */
+    drawLashWarnings(ctx, lashes, view, now);
     // Bodies lie on the blood and under everyone still on their feet.
     drawZombieCorpses(ctx, view, now);
     drawCorpses(ctx, corpses, view, now);
@@ -2290,11 +2323,15 @@ function render() {
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
   // Over the bodies: it is coming off them.
   drawBloodSpray(ctx, now);
+  // And the road thrown up by a strike that hit it, for the same reason.
+  drawLashChips(ctx, now);
 
   drawZaps(ctx, zaps, view, now);
-  // Over the bodies, because a lash goes over whoever it is reaching past —
-  // and under the foliage, because it does not.
-  drawLashes(ctx, lashes, view, now);
+  // The *impact*, over the bodies, because it lands on top of whoever was
+  // stood there. The limbs themselves are drawn with the dog by `drawTentacles`
+  // — they are the same arms that idle on its back, and two bits of code
+  // drawing them would be two bits of code to keep in step.
+  drawLashes(ctx, lashes, view);
   drawDucks(ctx, ducks, view);
   if (map) drawBushes(ctx, map.bushes, view);
 

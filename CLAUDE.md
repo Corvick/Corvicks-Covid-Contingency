@@ -386,6 +386,137 @@ the single field standing in the way and then goes straight in.
   the code gets read aloud to somebody already looking at the game. Different
   moments, so both stay.
 
+### The code is now enough, because the game is peer to peer
+
+**The four letters used to be a key into a `Map` inside one server process, and
+that is exactly why sending somebody the code did not work.** They launched the
+game, their machine started its *own* server, their client connected to their
+*own* localhost, and `lobbies.get('MZGD')` on that machine quite correctly found
+nothing. The two computers never exchanged a packet. Nothing was broken — the
+lobby, the seats, the chat and the code were all real and all working — there
+was simply no mechanism by which a guest's machine could learn where the host's
+was. **The UI was complete and the transport underneath it was missing.**
+
+Four letters cannot carry an address. Twenty letters at four places is 160,000
+codes; an IPv4 address and port is far more than that and a home IP is different
+next week. So a joining machine has to *ask* something it already knows how to
+reach. The only question is who runs that something, and the answer here is
+nobody: **Trystero signals over public infrastructure that is already there for
+other reasons** — Nostr relays by default, BitTorrent trackers and MQTT brokers
+otherwise. Once two browsers have swapped an offer and an answer through it, the
+relay drops out and the connection is direct.
+
+**Almost none of this is new code, and that is the whole reason it was
+affordable.** Three things were already true and none was built for this:
+
+- **`engine.ts` has no Node imports at all** — no `ws`, no `http`, no `fs`. Its
+  entire API is `connect(id, sendTo)` / `handle(id, msg)` / `disconnect(id)`, and
+  it has never cared whether a `sendTo` ends in a socket, a `postMessage` or a
+  data channel.
+- **`offline.ts` already ran that engine in a browser Web Worker.** That was
+  built so a solo round would stop fighting the renderer for cores. It is also,
+  unchanged, a complete game server running in a page.
+- **`net.ts` already hid the transport** behind a `Connection` interface.
+
+So the host's browser *is* the server, exactly as the Node process was, and
+**nothing above `net.ts` found out** — `main.ts`, `menu.ts` and `render.ts` are
+untouched by the transport change.
+
+- **`p2phost.ts` is `offline.ts` with its one assumption removed.** That file
+  says there is exactly one player and hardcodes a single connection id; this
+  one is fed up to six. The only addition is a routing envelope (`p2pwire.ts`)
+  saying which connection a message is from or for.
+- **`p2pwire.ts` exists for a bundling reason, not a design one.** `p2phost.ts`
+  imports the whole engine and is only ever reached through
+  `new Worker(new URL(...))`, which Vite splits into its own chunk — but a plain
+  `import` of even one string constant from it drags the engine back into the
+  main bundle, and every player downloads a second copy of a simulation they are
+  not running.
+- **The peers are connected from the main thread, not the worker.**
+  `RTCPeerConnection` is `[Exposed=Window]` and does not exist in a worker at
+  all. So the page owns the connections and the worker owns the simulation, at
+  the cost of one extra structured clone each way — the same coin `offline.ts`
+  already pays, and still not JSON.
+- **It is a star, not a mesh.** Trystero's documented weak spot is rooms where
+  every peer connects to every other, which grows as the square. Host-authoritative
+  means a guest only ever connects to the host: five connections for six players
+  rather than fifteen, and no guest can desync from another because no guest
+  simulates anything.
+- **`allowWorldReset` is false here where `offline.ts` sets it true**, and the
+  reasoning is the one already written beside `EngineConfig`: that flag is about
+  who can reach the engine. Offline it is only the page that made the worker.
+  Here it is anybody holding the code, and `restart` calls `resetWorld` from any
+  connection, in or out of a lobby.
+- **The room is opened by the transport, not by the menu**, and it cannot be
+  opened any earlier. It is named after the code, and the code is drawn by the
+  engine inside `lobbyCreate` — so `goHost` watches for the first `lobby`
+  message and opens the room on the code in it. An **offline lobby is skipped
+  outright**: it promises nobody can join, and publishing its code to a public
+  relay is exactly what `joinLobby` refuses from the other end.
+
+**There is deliberately no "hello" action for the host to announce itself
+with.** That was the first design and it had a race: the guest would learn who
+the host was and send `lobbyJoin` straight back, possibly before the host's
+engine had run `connect` for that peer — at which point the message is addressed
+to a connection the engine does not know about and is dropped. **The host is
+latched off the first game message instead**, which cannot race, because the
+first thing any engine says to a new connection is `welcome` and it only says it
+*after* connecting them. The greeting and the proof of readiness are the same
+event. No guest can be mistaken for a host either: a guest only ever sends to
+`hostId`, and until that line runs it does not have one.
+
+**`connected` is no longer required by `takeInvite`.** It meant "the socket has
+said `welcome`, so you may talk", which was honest while joining meant sending
+down a socket. Joining needs no socket now, and waiting on one would hang an
+invite link forever on any machine not also running a game server — which is
+every guest's machine.
+
+**The join takes seconds where a socket took none**, so the button says
+`connecting…` and refuses a second click. Finding a peer means reaching a relay,
+being noticed, and a full ICE handshake. Silence for that long is
+indistinguishable from a dead button, which is a fault this screen has had
+before. `JOIN_TIMEOUT_MS` is 8s and a timeout is reported in the same words a
+wrong code produces — from the player's side those are the same event, and
+telling them apart would ask them to act on a distinction they cannot act on.
+
+Measured with two browser tabs, host and guest, no server process anywhere:
+lobby `SZPW` created in the host's page, guest joined **by code alone**, both
+seated (`OFFICER 1 HOSTY`, `OFFICER 2 GUESTY`), round started, and the host's
+engine reported **`516 entities | 2 clients | 498 survivors`** at **7.4–9.0ms
+against the 33.3ms budget**, `serialise+send 0.6–0.7ms`, with survivors falling
+as the outbreak spread. The whole city, for two people, in a tab.
+
+**What is not measured, and should not be claimed:**
+
+- **Nothing about rendering.** rAF is throttled to nothing while the browser
+  pane is not compositing, so the guest's canvas read back blank — that is the
+  documented limitation, not a fault, and it means somebody has to look at a
+  real frame.
+- **Nothing about NAT.** Two tabs on one machine exercise signalling and the
+  data channel and nothing about traversal. Roughly **10–20% of peer pairs
+  cannot connect directly** — symmetric NAT, mostly mobile and corporate — and
+  fixing that needs a TURN relay, which is bandwidth somebody pays for.
+  `BaseRoomConfig` takes `turnConfig` and `rtcConfig` when that day comes.
+- **Nothing about more than two.** Five guests has never been run.
+- **The relays are somebody else's and they visibly wobble.** Every run logged
+  `relay failure from wss://relay.nostr.place/ - pow: insufficient leading-zero
+  bits` and a dead `wss://hornetstorage.net/relay`. It worked anyway because
+  Trystero uses several — but a bad day on public infrastructure is a day nobody
+  can join, and it is not something that can be fixed from here. `joinRoom`
+  takes a `relayUrls` list, and the strategy can be swapped for
+  `trystero/mqtt` or `trystero/torrent` wholesale.
+
+**The old URL path still exists and still works.** `Host Online.bat`, `serve.ts`
+and the whole one-port story are untouched — but CREATE and JOIN no longer go
+near the Node server's lobby, so that path is now for spectating, dev, and
+LAN-with-a-known-address rather than for getting friends in.
+
+**One weakening worth knowing.** The room topic is derived from the app id and
+the code, both of which are in the shipped client, so a public relay could in
+principle be scanned for live four-letter rooms — where before, a stranger also
+needed your URL. `BaseRoomConfig.password` end-to-end encrypts a room and is the
+lever if that ever matters.
+
 ### Playing over the internet
 
 The codes say *which room*; they say nothing about *which machine*, and that
@@ -3734,9 +3865,10 @@ failing*, and both are the staging:
 #### It tears itself open (F)
 
 Two seconds of vibrating on the spot while tentacles rip out of the body, then
-twenty seconds of something six times as tough and much slower, and then it
-bursts into a toxic cloud and a scatter of its own parts. `server/dog.ts` owns
-it; `server/morphcheck.ts` is the harness.
+twenty seconds of something six times as tough and much slower — throwing those
+tentacles at whatever the cursor is on — and then it bursts into a toxic cloud
+and a scatter of its own parts. `server/dog.ts` owns it; `server/morphcheck.ts`
+is the harness, and `client/lashrig.html` measures the drawing.
 
 **The whole ability is a trade of speed for presence.** Everything else the dog
 has is about arriving somewhere before the street is ready. This is about being
@@ -3791,26 +3923,229 @@ with a life and four minutes.
   the same city, transformed against not: **93px against 189px over 0.67s.**
 
 **F does two things and which one is not a mode anybody sets.** Out in the world
-as the thing, it lashes; anything else, it begins the transformation. The row is
+as the thing, it strikes; anything else, it begins the transformation. The row is
 Q, E, R, F and W walks the dog, so there is exactly one free key and this
 ability wants both halves of it — and nothing has to be learned, because while
-you are the monster, F is what the monster does. The lash is therefore checked
+you are the monster, F is what the monster does. The strike is therefore checked
 *above* the transformation's own cooldown, or F would be dead for the twenty
 seconds it is most wanted.
 
-- **The lash infects rather than damaging**, which is the whole point of a form
-  too slow to run anybody down: its work is done at arm's length. Somebody
-  already incubating is passed over, the same rule `resolveGrapple` follows.
-- **`DOG_LASH_COOLDOWN_MS` is not in the spec and it needs one.** Without it F
-  is a key you hold to infect a whole street in a second and a half, which is
-  not a lash, it is a hose. Two thirds of a second is a rhythm you can feel and
-  about thirty reaches across the form.
+##### The strike is the arms on its back, and it is telegraphed
+
+Reported as *"right now pressing F spawns a tentacle that comes from the middle
+of the dog and I would rather the ability use the tentacles in the screenshot. I
+want the ones that are on his back to recoil back and then launch in the
+direction of the cursor"*, with a red warning circle *"that PLAYERS can use to
+dodge"*.
+
+The old lash was a hitscan drawn as a line: `startDogAbility` picked the nearest
+body along a 26px corridor, infected it, and pushed a curve onto `world.lashes`
+for 220ms of decoration. Nothing about it could be dodged, because nothing about
+it took any time, and the drawing came from the middle of the animal because
+there was nothing else for it to come from.
+
+**Three phases now, and the first one is the whole feature.**
+`DOG_LASH_WINDUP_MS` of coiling, `DOG_LASH_STRIKE_MS` of going out,
+`DOG_LASH_RECOVER_MS` of coming home — and nothing is resolved until the arms
+arrive. `startDogAbility` locks a landing point and starts a clock; `updateLashes`
+lands it.
+
+- **The aim point is locked at the keypress and never re-read.** A ring that
+  tracked the cursor would be a warning of nothing: whatever it showed you, the
+  strike would still land wherever the mouse had got to. Locking it is what turns
+  the ring from decoration into information.
+- **It is a circle, not a corridor.** `DOG_LASH_IMPACT_RADIUS` (48) around the
+  landing point catches everybody standing in it, where the old lash took the
+  first body on a line and stopped. A line has nowhere safe to stand and nothing
+  a warning could usefully show; a *place* can be stepped out of, which is what
+  the ring is drawn around. It also means siting the thing is a decision — a
+  crowd standing together loses the crowd.
+- **420ms is derived from the dodge, not picked by eye**, and the first value
+  tried was 340 because 340 *looks* like a telegraph. Clearing the circle from
+  dead centre means putting your own centre past 48 + a 12px body = **60px**,
+  which at `PLAYER_SPEED` (160) takes **375ms** walking and 221ms sprinting. At
+  340 a walking player covers 54px — six short — so being caught in the middle
+  could only ever be answered by a sprint, which is a telegraph most people
+  cannot answer while they are also being shot at. At 420 a walk clears it with
+  7px to spare. A **civilian** covers 15px and cannot dodge at all, which is
+  correct rather than a shortfall: they are the crowd the ability is *for*.
+- **The landing point stops at the first wall on the way**, walked in
+  `WALL_THICKNESS / 2` steps for the same reason the gobbet is substepped. A ring
+  drawn inside a building the dog is stood outside of promises an impact that
+  `hasWallClearPath` then refuses for everybody in it — a warning that costs
+  whoever obeys it their position for nothing.
+- **`DOG_LASH_COOLDOWN_MS` went 650 → 850**, which now covers windup + strike +
+  snap-back (790) with room to spare, so one strike is fully back on the animal
+  before the next coils. 650 fired again mid-recovery — fine while the lash was
+  an instant line and wrong now that the limbs are the drawing.
+- **A strike still coiling dies with the animal.** `killEntity` filters
+  `world.lashes` beside clearing the roar, and for the same reason: the windup is
+  the officers' whole answer to this ability, and a strike that landed anyway out
+  of a dog that had been shot would be that answer doing nothing. Filtered rather
+  than flagged, so nothing downstream has to learn that a strike can be orphaned.
+
+**Armour gates the infection and nothing else.** Everybody caught is shoved and
+bleeds; only somebody with nothing on turns.
+
+- **Shield, then vest, then the infection** — the order `attemptGrab` and
+  `resolveGrapple` already use between them, and it is not arbitrary: a shield is
+  held out in front and stops the thing before it reaches you, where a vest is
+  what is left once it already has. Written the other way round, a player
+  carrying both would spend the vest they cannot replace while holding a shield
+  that was covering the very bearing it came in on.
+- **The shield's arc is measured to the *thrower*, not to the landing point**,
+  and that was a real bug. Written the obvious way it is nonsense for the person
+  actually standing on the spot, whose bearing to it is whatever rounding left
+  them, and close to a right angle for anybody beside them. The blow arrives
+  along the line the limb travelled. Measured with the wrong one: a shield held
+  directly at the dog blocked **0 of 1** and the vest underneath it was spent
+  instead.
+- **No `grappleImmune` window, unlike a blocked grab**, and that is a deliberate
+  difference rather than an omission. That window means "nothing can lay a hand
+  on you" and exists so a vest is not stripped three times in a second by a crowd
+  that keeps re-grabbing. A strike is not a grab: there is nothing to break off
+  from, the cooldown already stops one animal landing two inside it, and granting
+  the window here would quietly make being hit by a tentacle a *defence* against
+  being grabbed.
+- **`LashHit.blocked` is on the wire** so the client can draw a deflect ring
+  rather than only blood. Without it, armour working and armour not working are
+  the same picture.
+
+**`World.knockbacks` is the shove, and it is on the world rather than on
+`AiState`** — the things that can be knocked about are not all AI: a player has
+no `AiState` at all, and neither does a dog. One map covers every body in the
+game without any of them being asked to know that a shove exists.
+
+- **An impulse that decays, not a displacement.** 30 pixels applied between two
+  ticks is a teleport; the same 30 over `DOG_LASH_PUSH_MS` is a body being
+  knocked off its feet. Exponential (`KNOCKBACK_DECAY`) rather than linear, so it
+  leaves hard and settles — a linear one stops dead at its deadline, which reads
+  as the shove being switched off rather than running out.
+- **Not a stun.** They keep walking through it, which is what lets somebody
+  already running out of the ring go on running out of it.
+- **Applied in `updateDogs`, above `resolveCollisions`**, so a body shoved into a
+  wall is pushed back out of it in the same tick — the same deal the dog's own
+  drag gets, and the reason it needs no wall test of its own.
+
+**The arms are drawn with the dog, by `drawTentacles`.** They are the same limbs
+that idle on its back, and two bits of code drawing them would be two bits of
+code to keep in step. `setLashes` in `render.ts` is how it knows — module state
+rather than a seventh parameter threaded through five call sites that have no
+idea what a tentacle is, which is how the file already holds the blood decals and
+the baked sprites.
+
+- **`DOG_LASH_STRIKE_ARMS` (3) of `DOG_MORPH_TENTACLES` (8) go**, picked off the
+  *strike's* id so it is a different three each time and the drawing does not
+  develop a favourite side. Not all of them, for the same reason
+  `ZOMBIE_SPREAD_SHARE` is not 1: a body that throws its whole silhouette at one
+  spot has no silhouette left, and stops reading as a mass of limbs.
+- **`DOG_LASH_COIL` is 0.9, not the 0.35 first written, and the rig is what said
+  so.** A *gather* — the arm shortening to a third of itself while turning away —
+  is what a limb loading actually does, and at this size it is invisible: the five
+  arms that are not striking still fan out in every direction and bury it.
+  Measured as the shift in where the mass of the drawing sits along the axis to
+  the landing point, a 0.35 gather moved it **+0.3px** — nothing, and the wrong
+  way. Drawn back to nearly full length *pointing away from the target*, three
+  arms make a bundle behind the animal that is plainly a thing being loaded.
+- **The segment taper has to be normalised, or the arm never reaches the ring.**
+  Segments get shorter toward the tip, which is what makes a limb taper rather
+  than read as a chain of equal links — but the weights (`1.15 - s * 0.09`) sum
+  to 4.40 across five segments, not 5. Divided by the segment count the arm lands
+  at **88% of its own reach**, and since that reach at full extension is the whole
+  span to the landing point, the tip came down a ninth of the throw short of the
+  red circle everybody had been told to dodge. Measured off the canvas: **0.91 of
+  the span before, 1.02 after.** The idle arms have the same shape and it does not
+  matter there — how long an idle arm looks is an art decision with nothing to
+  agree with — so the normalisation is not shared.
+
+**The ring is drawn on the ground, under the bodies**, with `drawBlood` and the
+tyre marks. The officer standing in it is the one person who most needs to read
+it, and a ring painted over the top of them would hide the very thing it is
+warning about. Three readings, answering different questions: the **rim** is
+where the edge of the impact is, so "am I in it" is about your own feet rather
+than judging a distance; the **sweep** filling round it is how long there is
+left; and the **wash** inside comes up as the sweep closes, so it reads as
+loading even at the edge of vision where the rim is a couple of pixels.
+
+**A miss has to have happened.** `LASH_GOUGE_*` and `LASH_CHIP_*` — a scuff in
+the road and three chips of it thrown up, with a rising arc and a shadow under
+each, the same trick the flamethrower's stream and the thrown tentacles use and
+for the same reason: on a top-down map height only reads if something on the
+ground stays put underneath it. It is the smallest thing that turns "the ability
+did nothing" into "it missed", and the reason a dodge is worth making rather than
+merely surviving.
+
+**Nothing thrown by the client is on the wire.** The blood, the chips and the
+gouge are all derived from the strike landing, exactly as blood is derived from
+`Shot.hit` and the gore from a birth host leaving the snapshot. **`LashState.id`
+is what makes that once-per-strike rather than once-per-frame** — a strike is on
+the wire for the whole of its snap-back, so anything done off the flag rather
+than off the transition would be done twenty times. Same trap as the roar's
+sound, solved the same way, on the edge.
+
 - **It reads `hasWallClearPath`, not `hasLineOfSight`**, and that mattered in
   both directions. A sight line waves *glass* through — that is the point of
   glass — and a tentacle does not go through an intact window; and it stops at
   *foliage*, which a tentacle very much does go through, exactly as a blast
   does. `hasWallClearPath` is the one predicate in the game that asks whether a
-  physical thing can get from here to there.
+  physical thing can get from here to there. Asked from the **landing point**
+  rather than from the animal, because that is where the limbs actually came
+  down — somebody round the corner from the ring is behind a wall from it
+  whatever the dog can see.
+- **The infection is still an infection.** Somebody already incubating is passed
+  over, the same rule `resolveGrapple` follows, and a completed one credits
+  `infectedByDog` so it feeds this dog's roar balance and the shared
+  `totalConverted` exactly as a bite does.
+
+`server/morphcheck.ts` covers all of it and `client/lashrig.html` covers the half
+it cannot. Measured server-side: **nothing is infected on the tick the key goes
+down** (the control for every dodge claim — without it "they got out of the way"
+is satisfied by a strike that never worked), **8/8 caught standing still and 8/8
+dodged walking out at `PLAYER_SPEED`**, a civilian at 35px/s covers 15px of the
+48 it would need, **3/3 in the circle and 0/1 outside it**, shield and vest each
+spend exactly one charge and neither turns, **carrying both spends the shield and
+leaves the vest at 3/3**, four bodies caught and three of them blocked, the shove
+is **23.7px against a 0.0px control** and goes away from the impact, and a strike
+out of a dog killed mid-coil never lands while the same strike left alive does.
+
+Client-side, off the canvas: reach toward the landing point **0.22 idle → 1.02
+out → 0.24 home** (an idle arm cannot pass 0.27 of the span by construction, so
+anything past that is a striking arm and nothing else), the drawing's mass shifts
+**-1.1px coiling and +26.7px going out**, arm-ring ink holds at **431 of 448**
+across eight strike ids with **7 distinct drawings** out of those eight — so some
+arms always stay and which three go genuinely varies — and the ring, the flash,
+the deflect ring, the gouge and the chips all put ink down, with the gouge laid
+**once** across two frames of the same strike.
+
+*Three things about measuring this were the rig lying rather than the code
+failing.*
+
+- **`HUMAN_WALK_SPEED` is a civilian and the claim is about players.** Staged at
+  35px/s the dodge read **0/8**, which looks exactly like the telegraph not
+  working and is in fact asking a body that moves at 35px/s to cover 60 in under
+  half a second.
+- **`nav.isBlocked` carries `NAV_INFLATE`, so a "wall" found in it may not be
+  there.** The wall test picks its slab off the nav grid, and a blocked run in
+  that grid can be *pure skirt* — inflation near a corner with no geometry on the
+  line. `lashOut` stops at the first thing `hasWallClearPath` refuses, which is
+  real geometry, so on such a city it does not stop at all and the check fails
+  having staged nothing. It leaked **2 of 6** and moved run to run, because the
+  map is not seeded. The staging now confirms with `hasWallClearPath` that the
+  dog genuinely cannot reach the victim, and skips cities where it can. The
+  comment already in that function had learned this lesson once for the victim's
+  *position*; this is the same lesson for the wall's *existence*.
+- **One `getImageData` per sample hangs the page.** The rig's ring probe was
+  ~2,300 single-pixel readbacks per ring and nine rings a run — 21,000 forced GPU
+  round trips, and the tab stopped responding. Exactly the trap `paintbench.ts`
+  documents: batch the work behind one readback, or measure the readback.
+
+**What is not measured is what it looks like**, and that is the same standard
+`DOG_CAMERA_ZOOM` and the resolution row are held to: rAF is throttled to nothing
+while the browser pane is not compositing, so no frame of a live round can be put
+on screen from here and `computer{action:"screenshot"}` times out. `getImageData`
+needs no compositing, which is what the figures above come off. Open
+`/lashrig.html` on the dev server to look — it draws the four phases as a panel
+one under the other at the real sizes.
 
 **The burst is a death, and that is one ending rather than two.** The clock
 running out calls `killEntity`; so does a rifle. Without that, shooting the
@@ -3929,11 +4264,55 @@ cheating a map must not enable.
   in it never builds one at all. Rebuilding faster than the danger field under
   it (160ms) would buy a fresher copy of the same answer.
 - **So it is up to `DOG_MAP_REFRESH_MS` stale, and that is a property rather
-  than a bug.** A contact can read a little past the range by the time it is
-  checked again — the officer walked, or the zombie did. The harness bounds the
-  *overshoot* rather than counting "leaks", which is the difference between a
-  check that says how stale the answer gets and one that fails on its own clock.
-  Measured over a real round, 35 samples: **0 contacts even a pixel over.**
+  than a bug.** The scan is exactly right at the instant it runs, and a cached
+  list is then handed to every snapshot until the next one. What is bounded is
+  its **age**, in milliseconds — measured, **233ms against the 250ms throttle**,
+  which is the last cached tick before a rebuild and is the figure by
+  construction rather than by luck.
+  - **Pixels are the wrong unit for that staleness, and reaching for them cost
+    a wrong measurement.** The harness used to allow 150px of "overshoot" on
+    the reasoning that two bodies walk about 60px apart in a refresh window.
+    They do — but walking is not the dominant term. **The zombie that made the
+    contact dying is**, and that removes a source from the danger BFS outright:
+    the reading jumps to the next-nearest zombie, or to unreachable, in one
+    rebuild and however far off that happens to be. No bound in pixels can
+    describe that, and the one that tried failed on its own clock at roughly
+    1-4 samples in 40-95.
+  - **`Infinity | 0` is `0`, and that is what hid it.** `distanceAt` answers
+    `Infinity` for a cell the BFS never reached, and the failure detail
+    formatted its worst reading with `| 0` — so the check reported "were up to
+    **0px** stale, against 150px of slack", which is self-contradictory and
+    names neither the size nor the cause. Nothing in that harness formats a
+    distance by hand now; `px()` prints `unreachable` and the same trap was
+    waiting in two other details beside it.
+  - **The check is split in two now, and neither half carries a slack figure.**
+    On a **rebuild** tick the list and the field are the same age, so the rule
+    holds exactly and is checked in both directions — nothing listed that
+    should not be, nothing missing that should. Measured: **0 wrong across 263
+    rebuilds and 2100 samples**, every run. On a **cached** tick what is
+    measured is the age above, plus how much of the list has gone stale inside
+    it: **2.7-4.3% of readings**, of which **0 were officers killed**, 4-27
+    turned, and 30-213 were officers still stood where they were with the
+    horde gone — having moved **25-54px**, which is what says it is the zombie
+    leaving rather than the officer walking.
+  - **And it sampled every sixtieth tick, so it had never once read a cached
+    list.** The refresh is 250ms and the harness looked every 2000ms, so every
+    look rebuilt — it was measuring the scan and reporting the figure as though
+    it described the cache. It samples every tick now, which is also what a
+    real snapshot does.
+- **An officer the coarse field cannot answer for is not shown, and it fails
+  closed.** `DANGER_CELL` is 28px and a cell counts as blocked when its
+  *centre* is in a wall, so a body standing in the open a few pixels off a
+  frontage can sit in a cell the BFS never reached — `distanceAt` answers
+  `Infinity` with a shambler 30px away and `refreshDogContacts` declines to
+  list somebody it cannot measure. For a feature defined by what it refuses to
+  show that is the safe direction, so it is left alone; it is a property of
+  reading a coarse field rather than of this rule. **It is also a trap for the
+  harness**, which is where it actually bit: two staged checks settled their
+  officer into such a cell — **3 runs in 12** of one and about **1 in 16** of
+  the other — and reported "0 contacts" as though the rule had broken.
+  `stageInContact` states that precondition rather than assuming it, and
+  engages on ~7.5% of stagings.
 
 **The city is painted once and blitted after that.** Drawn live it is ~90
 building footprints, a park, a pond and a border — a couple of hundred
@@ -3953,8 +4332,9 @@ Measured, 90 footprints at 1920x1080, three runs: bake **0.36-0.84ms once**,
 then **0.031-0.096ms a frame** against **0.48-0.59ms** with the bake thrown away
 each frame — 5-16x. Against a fog polygon at 0.8-2.5ms and walls at 2.15ms, the
 map is under 1% of a frame. Server side, at 522 entities: a forced rebuild is
-**0.014ms** and a snapshot pays **0.006ms**. Over a live round it shows **4-12%
-of the garrison** on average, which is the balance property stated as a number.
+**0.014ms** and a snapshot pays **0.006ms**. Over a live round it shows **5-22%
+of the garrison** on average, which is the balance property stated as a number —
+quote the range and never a single run, the map not being seeded.
 
 *The first cost figure taken read 39ms for the bake and was nonsense* — that is
 the `getImageData` readback's own fixed cost plus a cold canvas, counted as if
@@ -4768,6 +5148,55 @@ same standard applies as to `DOG_CAMERA_ZOOM`: the sites were confirmed by
 listing them, the cycle and the backbuffer sizes were measured live
 (1920x1080 → 2400x1350 → 2880x1620 → 960x540 → 1280x720 → 1440x810 → back,
 `canvas.width` following exactly), and somebody has to look at the picture.
+
+#### A screen taller than the window has to scroll
+
+Reported as *"in the options menu you need to be able to scroll up and down. I
+cant see the back button"*, and the numbers say it flatly. Measured at 1024x600
+— a stage 576px tall — the options screen's content is **784px**: eight rows,
+two presets and BACK, overflowing by 208. `.screen` had `overflow` at the
+browser's default and `html, body` are `overflow: hidden`, so what fell off the
+bottom was simply gone, and what fell off was the only way off the screen.
+
+- **`justify-content: safe center` is the load-bearing half, and plain `center`
+  is the trap.** A centred flex column overflows *both* ends and **the overflow
+  above the container cannot be scrolled back to at all** — so adding
+  `overflow-y: auto` on its own trades a missing BACK button for a missing
+  heading. Measured on the real screen with the old rules put back: the
+  scrollable range is **84px against 208px of overflow**, with the heading
+  **168px above the top** and unreachable at any scroll position. `safe` keeps
+  the centring for anything that fits (the title screen is untouched, 0
+  overflow) and pins anything that does not to the top.
+- **`.screen > * { flex-shrink: 0 }` is needed with it.** Flex children shrink
+  by default, so an over-long screen squashes its own rows to fit instead of
+  scrolling, and the scrollbar never appears to say there is more.
+- **The scrollbar is painted**, because the default one is invisible against
+  `#0b0d10` and a scrollbar nobody can see answers "is there more below?" with
+  nothing.
+- It is on `.screen` rather than on `#screen-options`, so the lobby and
+  everything else gets it too — those are the screens that grow.
+
+**And Escape is BACK on every screen that has one**, which is the half that
+needs no scrolling to reach. `escapeBack` in `menu.ts` maps a screen to *the
+same call its own button makes* rather than to a `show` of wherever it came
+from — `btn-online-back` runs `askName`, which is not merely `show('name')`, and
+two ways back that differ in what they do is the sort of thing that rots.
+
+- **The lobby is left out on purpose.** Escape there would be `lobbyLeave`,
+  which despawns you and closes the room behind you if it is yours, and a
+  reflexive keypress must not take four other people's lobby down with it. The
+  title screen gets nothing either: there is nowhere behind it.
+- **A round owns Escape once one is up.** `main.ts` gates its own handler on
+  `started` (pause offline, quit online); this one gates on the shell being
+  hidden, which is the same fact seen from the other side. Verified both ways:
+  inert while the shell is hidden, working again the moment it is back.
+
+Measured live at 1024x600 and 1280x720: BACK fully on screen once scrolled, and
+`elementFromPoint` at its centre returns the button rather than something over
+it; the heading 20px from the top at `scrollTop` 0. Escape backs out of options,
+name, online, create and join — including from **inside a focused text box**,
+which is where the code box would otherwise have swallowed it — and does nothing
+on the title screen.
 
 ## Performance rules (these matter — 400+ entities)
 

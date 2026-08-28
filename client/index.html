@@ -75,9 +75,34 @@
         white-space: pre;
       }
       #build-stamp.mismatch { color: #fbbf24; }
+      /*
+        A screen taller than the window has to scroll, and OPTIONS is: eight
+        rows, two presets and a BACK button do not fit a letterboxed 16:9 stage
+        on a laptop — and what falls off the bottom is the only way off the
+        screen. Escape backs out too (`menu.ts`), because a control you cannot
+        see is not a way out.
+
+        `safe center` is the load-bearing half and plain `center` is the trap:
+        a centred flex column overflows *both* ends, and the overflow above the
+        container cannot be scrolled back to at all. Short content still sits
+        in the middle; content too tall pins to the top and scrolls, so the
+        heading is not what goes missing instead of the button.
+      */
       .screen { display: none; height: 100%; flex-direction: column;
-                align-items: center; justify-content: center; color: #e5e7eb; }
+                align-items: center; justify-content: safe center; color: #e5e7eb;
+                overflow-y: auto; overscroll-behavior: contain;
+                padding: 20px 0; box-sizing: border-box; }
       .screen.active { display: flex; }
+      /* Nothing on a screen may be squashed to make it fit. Flex children
+         shrink by default, so without this an over-long screen compresses its
+         own rows instead of scrolling and the scrollbar never appears. */
+      .screen > * { flex-shrink: 0; }
+      /* The default scrollbar is invisible against #0b0d10, and a scrollbar
+         nobody can see answers "is there more below?" with nothing. */
+      .screen::-webkit-scrollbar { width: 10px; }
+      .screen::-webkit-scrollbar-track { background: transparent; }
+      .screen::-webkit-scrollbar-thumb { background: #2b3441; border-radius: 5px; }
+      .screen::-webkit-scrollbar-thumb:hover { background: #3d4a5c; }
       .screen h1 { margin: 0 0 6px; font-size: 34px; letter-spacing: 0.08em; }
       .screen h1 + p { margin: 0 0 28px; color: #9ca3af; font-size: 13px; }
       .screen h2 { margin: 0 0 18px; font-size: 22px; letter-spacing: 0.04em; }

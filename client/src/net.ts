@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 import type { ClientMessage, ServerMessage } from '../../shared/types.js';
+import { guestRoom, hostRoom, type GuestRoom, type HostRoom } from './p2p.js';
+import { HOST_SELF, type HostIn, type HostOut } from './p2pwire.js';
 
 const RECONNECT_DELAY_MS = 800;
 /**
@@ -20,6 +22,27 @@ export interface Connection {
   goOffline: (onReady: () => void) => void;
   /** Reconnect to a server, having been offline. A no-op if never offline. */
   goOnline: () => void;
+  /**
+   * Host a game for other people, on this machine, with no server anywhere.
+   *
+   * The same worker `goOffline` starts, with the one difference that it is fed
+   * more than one connection — see `p2phost.ts`. `onReady` fires on the host's
+   * own `welcome`, so the caller can create its lobby knowing the engine is
+   * listening, exactly as offline does.
+   *
+   * **The room is opened later and not by the caller.** It is named after the
+   * four-letter code, which the engine draws in `lobbyCreate`, so it cannot
+   * exist until the lobby does. This watches for that and opens it.
+   */
+  goHost: (onReady: () => void) => void;
+  /**
+   * Join somebody else's game by code, over a direct connection to them.
+   *
+   * `onReady` fires once their engine has said `welcome`, which is the first
+   * moment a `lobbyJoin` can be sent. `onFail` fires when nobody answers, and
+   * carries the same wording a wrong code has always produced.
+   */
+  goGuest: (code: string, onReady: () => void, onFail: (why: string) => void) => void;
 }
 
 /**
@@ -72,6 +95,18 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
    * `goOffline` below for why.
    */
   let worker: Worker | null = null;
+  /**
+   * Which worker that is. Both run `engine.ts`, and they take *different*
+   * messages: `offline.ts` is handed a bare `ClientMessage` because it has one
+   * connection and knows who it is, where `p2phost.ts` needs the envelope in
+   * `p2pwire.ts` saying which of its several connections this is. Getting this
+   * wrong is silent — the worker simply ignores a shape it does not recognise.
+   */
+  let workerKind: 'offline' | 'host' = 'offline';
+  /** Our peers, when hosting. Null when not. */
+  let hosting: HostRoom | null = null;
+  /** Our connection to somebody else's engine, when a guest. Null when not. */
+  let guest: GuestRoom | null = null;
 
   /**
    * Where the server is.
@@ -142,9 +177,12 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
     });
     socket.addEventListener('open', () => console.log('[net] connected'));
     socket.addEventListener('close', () => {
-      // Closed because we moved the game into a worker, not because anything
+      // Closed because we moved the game off the socket, not because anything
       // went wrong. Reconnecting would put a server back in the picture.
-      if (worker) return;
+      // `guest` counts as much as `worker` does: joining somebody else's game
+      // drops the socket without starting a worker, and without this line the
+      // retry timer quietly reconnects underneath a peer-to-peer session.
+      if (worker || guest) return;
       console.log('[net] disconnected — retrying');
       if (ws === socket) ws = null;
       // The window is about *this* connection. Carrying it across a reconnect
@@ -166,15 +204,35 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
   // figure keeps meaning something: offline it measures how long the worker
   // took to answer, which is small but real on a loaded machine.
   setInterval(() => {
-    const probe = { type: 'ping', t: performance.now() } satisfies ClientMessage;
-    if (worker) worker.postMessage(probe);
-    else if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(probe));
+    deliver({ type: 'ping', t: performance.now() });
   }, PING_INTERVAL_MS);
+
+  /**
+   * The one place that knows where an outbound message goes.
+   *
+   * There are four possible answers now — a guest's data channel, a host's own
+   * worker, an offline worker, a socket — and the ping loop has to reach the
+   * same one `send` does or the HUD's latency figure measures a route nobody is
+   * playing over. It was duplicated across the two while there were only two
+   * answers, and this is the point at which that stops being tenable.
+   */
+  function deliver(msg: ClientMessage): void {
+    if (guest) {
+      guest.send(msg);
+      return;
+    }
+    if (worker) {
+      worker.postMessage(
+        workerKind === 'host' ? ({ kind: 'msg', id: HOST_SELF, msg } satisfies HostIn) : msg,
+      );
+      return;
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  }
 
   return {
     send(msg: ClientMessage) {
-      if (worker) worker.postMessage(msg);
-      else if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      deliver(msg);
     },
 
     /**
@@ -262,6 +320,129 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
       // copes with — it is the same path a dropped connection takes.
       open();
       console.log('[net] back online — reconnecting to the server');
+    },
+
+    goHost(onReady: () => void) {
+      if (worker) {
+        onReady();
+        return;
+      }
+      const w = new Worker(new URL('./p2phost.ts', import.meta.url), { type: 'module' });
+      worker = w;
+      workerKind = 'host';
+      // Drop the socket, and suppress the reconnect its close would schedule.
+      ws?.close();
+      ws = null;
+
+      /** The code the room is currently open on, so a new lobby moves it. */
+      let openOn: string | null = null;
+      let greeted = false;
+
+      w.addEventListener('message', (event: MessageEvent<HostOut>) => {
+        const { to, msg } = event.data;
+
+        /*
+         * Somebody else's message. Straight out to their channel without being
+         * looked at — this page is their server, and a snapshot addressed to a
+         * peer means nothing here.
+         */
+        if (to !== HOST_SELF) {
+          hosting?.sendTo(to, msg);
+          return;
+        }
+
+        const t0 = performance.now();
+        if (msg.type === 'pong') {
+          recordPing(performance.now() - msg.t);
+          netStats.messages++;
+          return;
+        }
+        onMessage(msg);
+        // Nothing to parse — it arrived as an object rather than as text, so
+        // `parseMs` stays zero, exactly as offline.
+        netStats.applyMs += performance.now() - t0;
+        netStats.messages++;
+
+        if (!greeted && msg.type === 'welcome') {
+          greeted = true;
+          onReady();
+        }
+
+        /*
+         * Open the room the moment there is a code to name it after.
+         *
+         * The code is drawn by the engine inside `lobbyCreate`, so this is the
+         * earliest it can possibly happen, and it is done here rather than by
+         * the caller because which relay a room lives on is a transport
+         * question and the menu has no business knowing there is one.
+         *
+         * An offline lobby is skipped outright: it promises nobody can join it,
+         * and publishing its code to a public relay would be exactly the thing
+         * `joinLobby` refuses to do from the other end.
+         */
+        if (msg.type === 'lobby' && !msg.lobby.offline && msg.lobby.code !== openOn) {
+          hosting?.close();
+          openOn = msg.lobby.code;
+          hosting = hostRoom(msg.lobby.code, {
+            onJoin: (id) => w.postMessage({ kind: 'join', id } satisfies HostIn),
+            onLeave: (id) => w.postMessage({ kind: 'leave', id } satisfies HostIn),
+            onMessage: (id, m) => w.postMessage({ kind: 'msg', id, msg: m } satisfies HostIn),
+          });
+        }
+      });
+      w.addEventListener('error', (e) => console.error('[p2p] host worker failed:', e.message));
+
+      // `__BUILD__` is baked in by Vite; a worker cannot ask git either.
+      w.postMessage({ kind: 'start', build: __BUILD__ } satisfies HostIn);
+      console.log('[net] hosting — the game runs in this page and peers connect to it');
+    },
+
+    goGuest(code: string, onReady: () => void, onFail: (why: string) => void) {
+      /*
+       * A guest runs no engine at all — the host's does everything, exactly as
+       * the Node server used to. So any worker this page had is terminated
+       * rather than parked: it owns a whole world, and it is not the world
+       * about to be played.
+       */
+      if (worker) {
+        worker.terminate();
+        worker = null;
+      }
+      ws?.close();
+      ws = null;
+      guest?.close();
+
+      guest = guestRoom(code, {
+        onReady,
+        onFail: (why) => {
+          guest?.close();
+          guest = null;
+          onFail(why);
+        },
+        onMessage: (msg) => {
+          const t0 = performance.now();
+          if (msg.type === 'pong') {
+            recordPing(performance.now() - msg.t);
+            netStats.messages++;
+            return;
+          }
+          onMessage(msg);
+          netStats.applyMs += performance.now() - t0;
+          netStats.messages++;
+        },
+        /*
+         * The host closed the tab, lost their connection, or quit. There is no
+         * round any more and nothing to reconnect to — the world only ever
+         * existed on their machine. `lobbyLeft` is what the client already does
+         * when a host takes a lobby with them, so this needs no new case
+         * anywhere above.
+         */
+        onHostLost: () => {
+          guest?.close();
+          guest = null;
+          onMessage({ type: 'lobbyLeft', reason: 'the host left' });
+        },
+      });
     },
   };
 }

@@ -15,8 +15,17 @@
  *     dog's
  *   - six times the health, a bigger body, and a **much slower sprint** than
  *     the same dog untransformed over the same ground
- *   - the **lash** infects at range, is stopped by a wall, will not re-bite
- *     somebody already incubating, and has a cooldown
+ *   - the **strike** is telegraphed rather than instant: nothing resolves on the
+ *     tick the key goes down, a locked ring sits on the ground through the
+ *     wind-up, and a player who walks out of it is missed while one who stands
+ *     still is not — with a civilian, who cannot make it out, as the control
+ *   - it catches **everybody in the circle**, not the first body on a line
+ *   - **armour gates the infection and nothing else**: shield before vest, one
+ *     charge each, and the shove and the blood land either way
+ *   - it **shoves** whoever it caught, away from the impact, and the shove is
+ *     spent rather than left running
+ *   - it is stopped by a wall, will not re-bite somebody already incubating,
+ *     has a cooldown, and dies with a dog shot during its own wind-up
  *   - twenty seconds and it **bursts**: a toxic cloud, its own tentacles on
  *     grenade physics, and a body on the ground — a burst is a death
  *   - shot before the clock runs out, it bursts anyway
@@ -35,12 +44,14 @@ import {
   killEntity,
   makeEntity,
   newAiState,
+  hasWallClearPath,
   isMorphed,
   type Entity,
   type World,
 } from './src/world.js';
 import { computeFrozen, updateAi } from './src/ai.js';
-import { startDogAbility, updateDogs, dogHudFor } from './src/dog.js';
+import { startDogAbility, updateDogs, dogHudFor, lashesToWire } from './src/dog.js';
+import { newInventory, type Inventory } from './src/inventory.js';
 import { updateAcid } from './src/acid.js';
 import { bouncesOff } from './src/heli.js';
 import { fire } from './src/combat.js';
@@ -60,6 +71,12 @@ import {
   DOG_MORPH_WINDUP_MS,
   DOG_LASH_COOLDOWN_MS,
   DOG_LASH_RANGE,
+  DOG_LASH_WINDUP_MS,
+  DOG_LASH_STRIKE_MS,
+  DOG_LASH_IMPACT_RADIUS,
+  DOG_LASH_PUSH_MS,
+  HUMAN_WALK_SPEED,
+  PLAYER_SPEED,
   DOG_RADIUS,
   DOG_SPEED,
   STAMINA_MAX,
@@ -415,8 +432,19 @@ function testForm(): void {
 
 // -------------------------------------------------------------- the lash
 
+/** Ticks from the key going down to the arms arriving, plus one for the edge. */
+const strikeTicks = Math.ceil((DOG_LASH_WINDUP_MS + DOG_LASH_STRIKE_MS) / TICK_MS) + 1;
+
+/** Throw a strike at a point and run it out to the moment it lands. */
+function strikeAt(r: Rig, x: number, y: number): string {
+  r.aim(x, y);
+  const said = r.morph();
+  r.run(strikeTicks);
+  return said;
+}
+
 function testLash(): void {
-  console.log('\nthe tentacle lashes out and infects');
+  console.log('\nthe tentacle strike is telegraphed, then it lands');
   const r = rig(false, true, 420);
   transformed(r);
 
@@ -424,25 +452,56 @@ function testLash(): void {
   rebuildEntityGrid(r.world);
   r.aim(target.x, target.y);
 
-  check('F lashes rather than transforming again', r.morph() === 'lashed');
-  check('and it infected them', r.world.pendingInfections.has('near'));
+  check('F strikes rather than transforming again', r.morph() === 'lashed');
+
+  /**
+   * **Nothing happens on the tick the key goes down, and that is the feature.**
+   *
+   * The old lash resolved inside `startDogAbility`, which is a hitscan: there
+   * was no window in which a warning could have been acted on because there was
+   * no window at all. This is the control for every dodge claim below — without
+   * it, "they got out of the way" is satisfied just as well by a strike that
+   * never reached them.
+   */
+  check('nothing is infected on the tick it is thrown',
+    !r.world.pendingInfections.has('near'));
+  check('but the strike is on the wire immediately', r.world.lashes.length === 1);
+
+  let wire = lashesToWire(r.world, r.clock);
+  check('coiling, with a ring to draw', wire[0]?.phase === 0);
+  check('and the ring is at the impact point, not the animal',
+    Math.hypot(wire[0]!.x2 - target.x, wire[0]!.y2 - target.y) < 4,
+    `${wire[0]?.x2},${wire[0]?.y2} against ${Math.round(target.x)},${Math.round(target.y)}`);
+  check('the wire carries the impact radius', wire[0]?.r === DOG_LASH_IMPACT_RADIUS);
+
+  // Halfway through the windup it is still coiling and still has not landed.
+  r.run(Math.floor(DOG_LASH_WINDUP_MS / 2 / TICK_MS));
+  wire = lashesToWire(r.world, r.clock);
+  check('halfway through the tell it has still not landed',
+    wire[0]?.phase === 0 && !r.world.pendingInfections.has('near'),
+    `phase ${wire[0]?.phase}, t ${wire[0]?.t}`);
+  check('and the ring has visibly filled', (wire[0]?.t ?? 0) > 0.35, `t ${wire[0]?.t}`);
+
+  r.run(strikeTicks);
+  check('it infects once the arms arrive', r.world.pendingInfections.has('near'));
   check('credited to this dog', r.world.infectedByDog.get('near') === DOG);
-  check('the lash is on the wire to be drawn', r.world.lashes.length === 1);
-  check('and it says it caught somebody', r.world.lashes[0]?.hit === true);
+  wire = lashesToWire(r.world, r.clock);
+  check('the wire says it caught somebody', (wire[0]?.hits.length ?? 0) === 1);
+  check('with nothing having blocked it', wire[0]?.hits[0]?.blocked === null);
 
   // The cooldown.
-  check('a second lash straight away is refused', r.morph() === 'refused');
+  check('a second strike straight away is refused', r.morph() === 'refused');
   r.run(Math.ceil((DOG_LASH_COOLDOWN_MS + 60) / TICK_MS));
   check('and taken once the cooldown is up', r.morph() === 'lashed');
+  r.run(strikeTicks);
 
   // Somebody already incubating is passed over — the same rule a grab follows.
   // `infectByLash` returns at once for a target already in `pendingInfections`,
-  // so the honest check is that its deadline is untouched by the second lash
+  // so the honest check is that its deadline is untouched by the second strike
   // rather than pushed out or duplicated.
   const deadline = r.world.pendingInfections.get('near');
   r.run(Math.ceil((DOG_LASH_COOLDOWN_MS + 60) / TICK_MS));
-  r.aim(target.x, target.y);
-  r.morph();
+  strikeAt(r, target.x, target.y);
   check('somebody already bitten is not re-bitten',
     r.world.pendingInfections.get('near') === deadline,
     `${r.world.pendingInfections.get('near')} against ${deadline}`);
@@ -452,24 +511,27 @@ function testLash(): void {
   transformed(far);
   const away = far.body('far', 'human', far.dog.x + DOG_LASH_RANGE + 120, far.dog.y);
   rebuildEntityGrid(far.world);
-  far.aim(away.x, away.y);
-  far.morph();
+  strikeAt(far, away.x, away.y);
   check('somebody past the reach is missed', !far.world.pendingInfections.has('far'),
     `${DOG_LASH_RANGE}px reach, staged at ${DOG_LASH_RANGE + 120}`);
-  check('and the lash still went out', far.world.lashes.length === 1);
-  check('saying it caught nobody', far.world.lashes[0]?.hit === false);
+  check('and the strike still went out', far.world.lashes.length === 1);
+  const farWire = lashesToWire(far.world, far.clock);
+  check('saying it caught nobody', (farWire[0]?.hits.length ?? 0) === 0);
+  check('and it came down at the edge of the reach rather than at the target',
+    Math.abs(Math.hypot(farWire[0]!.x2 - far.dog.x, farWire[0]!.y2 - far.dog.y)
+      - DOG_LASH_RANGE) < 8,
+    `${Math.round(Math.hypot(farWire[0]!.x2 - far.dog.x, farWire[0]!.y2 - far.dog.y))}px`);
 
   // A zombie is not a target — it is what the thing is made of.
   const horde = rig(false, true, 420);
   transformed(horde);
   horde.body('z', 'zombie', horde.dog.x + 150, horde.dog.y);
   rebuildEntityGrid(horde.world);
-  horde.aim(horde.dog.x + 150, horde.dog.y);
-  horde.morph();
-  check('the horde is never lashed', !horde.world.pendingInfections.has('z'));
+  strikeAt(horde, horde.dog.x + 150, horde.dog.y);
+  check('the horde is never struck', !horde.world.pendingInfections.has('z'));
 
   /**
-   * **A lash's infection, once it completes, feeds the same tallies a bite
+   * **A strike's infection, once it completes, feeds the same tallies a bite
    * does.** `withAi: true` here, unlike above — this is the one point in the
    * function that needs `updateAi` actually running to resolve the incubation,
    * and it is isolated in its own rig so the rest of the file's careful timing
@@ -483,9 +545,8 @@ function testLash(): void {
   transformed(follow);
   const patient = follow.body('patient', 'human', follow.dog.x + 150, follow.dog.y);
   rebuildEntityGrid(follow.world);
-  follow.aim(patient.x, patient.y);
-  follow.morph();
-  check('the lash set an incubation', follow.world.pendingInfections.has('patient'));
+  strikeAt(follow, patient.x, patient.y);
+  check('the strike set an incubation', follow.world.pendingInfections.has('patient'));
   /**
    * **The dog's own form has to be kept alive past the wait, or it eats its own
    * test.** `TURN_DELAY_MAX_MS` (45s) outlasts `DOG_MORPH_MS` (20s), so waiting
@@ -571,12 +632,31 @@ function testLashWall(): void {
     if (wall < 0) continue;
     const victimX = r.dog.x + farSide;
 
+    /**
+     * **And now confirm with the real geometry that there is a wall there at
+     * all**, which `nav.isBlocked` cannot say.
+     *
+     * The search above reads the nav grid, and the nav grid carries
+     * `NAV_INFLATE` (10px) of padding round everything solid. A "blocked run"
+     * found in it can therefore be *pure skirt* — inflation near a corner with
+     * no slab anywhere on the line. `lashOut` stops the strike at the first
+     * thing `hasWallClearPath` refuses, which is real geometry, so on such a
+     * city it does not stop at all, the strike lands on the victim, and the
+     * check fails having staged no wall.
+     *
+     * The comment three paragraphs up already learned this lesson once, for the
+     * victim's position; this is the same lesson for the *existence* of the
+     * wall. It leaked 2 of 6 cities and moved run to run, because the map is not
+     * seeded — which is what a rig reporting the city rather than the code looks
+     * like. A city that cannot stage one is skipped rather than counted.
+     */
+    if (hasWallClearPath(r.world, r.dog.x, r.dog.y, victimX, r.dog.y)) continue;
+
     staged++;
     transformed(r);
     const behind = r.body('behind', 'human', victimX, r.dog.y);
     rebuildEntityGrid(r.world);
-    r.aim(behind.x, behind.y);
-    r.morph();
+    strikeAt(r, behind.x, behind.y);
     if (!r.world.pendingInfections.has('behind')) stopped++;
 
     // The control: the same reach, no wall.
@@ -584,8 +664,7 @@ function testLashWall(): void {
     transformed(open);
     const clear = open.body('clear', 'human', open.dog.x + farSide, open.dog.y);
     rebuildEntityGrid(open.world);
-    open.aim(clear.x, clear.y);
-    open.morph();
+    strikeAt(open, clear.x, clear.y);
     if (open.world.pendingInfections.has('clear')) controlHit++;
   }
 
@@ -596,6 +675,256 @@ function testLashWall(): void {
 }
 
 // ------------------------------------------------------------- the burst
+
+/**
+ * **The warning is a warning: walking out of the ring is enough.**
+ *
+ * This is the claim the whole rework exists for, and it needs both halves. The
+ * dodge on its own is satisfied just as well by a strike that never worked, so
+ * the control is the *same* body, at the *same* staged distance, in the *same*
+ * city, that simply does not move — and the two runs are paired rather than
+ * averaged over separate rigs, because the map is not seeded and how much open
+ * ground a spot has is the city's business rather than the code's.
+ *
+ * The dodge is deliberately a plain walk at officer pace rather than a sprint:
+ * a telegraph that can only be answered by a fresh stamina bar is a telegraph
+ * most people cannot answer.
+ */
+function testDodge(): void {
+  console.log('\nthe ring is dodgeable, and standing in it is not');
+  let dodged = 0;
+  let caught = 0;
+  const runs = 8;
+
+  for (let i = 0; i < runs; i++) {
+    // Stood still.
+    const still = rig(false, true, 420);
+    transformed(still);
+    const sitter = still.body('sit', 'human', still.dog.x + 200, still.dog.y);
+    rebuildEntityGrid(still.world);
+    strikeAt(still, sitter.x, sitter.y);
+    if (still.world.pendingInfections.has('sit')) caught++;
+
+    // The same staging, walking out of it from the moment the ring appears.
+    const run = rig(false, true, 420);
+    transformed(run);
+    const mover = run.body('run', 'human', run.dog.x + 200, run.dog.y);
+    rebuildEntityGrid(run.world);
+    run.aim(mover.x, mover.y);
+    run.morph();
+    /**
+     * Straight out of the ring, across the line the arms are coming in on, at
+     * **`PLAYER_SPEED`** — the claim is about players, and staging it at
+     * `HUMAN_WALK_SPEED` measures a civilian instead. That was the first
+     * version and it read **0/8 dodged**, which looks exactly like the
+     * telegraph not working and is in fact the rig asking a body that moves at
+     * 35px/s to cover 60 in under half a second.
+     *
+     * A plain walk rather than a sprint, deliberately: a telegraph that can
+     * only be answered with a full stamina bar is one most people cannot answer
+     * while they are also being shot at. See `DOG_LASH_WINDUP_MS`.
+     */
+    const perTick = (PLAYER_SPEED * TICK_MS) / 1000;
+    for (let t = 0; t < strikeTicks; t++) {
+      mover.y += perTick;
+      run.tick();
+    }
+    if (!run.world.pendingInfections.has('run')) dodged++;
+  }
+
+  check('standing in the ring is caught', caught === runs, `${caught}/${runs}`);
+  check('and a player walking out of it is not', dodged === runs, `${dodged}/${runs}`);
+  check('a civilian cannot make it out, which is what the ability is for',
+    !crowdEscapes(), `${HUMAN_WALK_SPEED}px/s covers ` +
+      `${((HUMAN_WALK_SPEED * DOG_LASH_WINDUP_MS) / 1000).toFixed(0)}px of the ` +
+      `${DOG_LASH_IMPACT_RADIUS}px it would need`);
+}
+
+/** The same walk at civilian pace — the control on the dodge above. */
+function crowdEscapes(): boolean {
+  const r = rig(false, true, 420);
+  transformed(r);
+  const civ = r.body('civ', 'human', r.dog.x + 200, r.dog.y);
+  rebuildEntityGrid(r.world);
+  r.aim(civ.x, civ.y);
+  r.morph();
+  const perTick = (HUMAN_WALK_SPEED * TICK_MS) / 1000;
+  for (let t = 0; t < strikeTicks; t++) {
+    civ.y += perTick;
+    r.tick();
+  }
+  return !r.world.pendingInfections.has('civ');
+}
+
+/**
+ * **Everybody in the circle, not the first body on a line.**
+ *
+ * The old lash took whoever was nearest along its corridor and stopped there,
+ * so a crowd standing shoulder to shoulder lost exactly one of its number. A
+ * landing point with a radius catches the group it lands on, which is what
+ * makes siting the thing a decision.
+ */
+function testCrowd(): void {
+  console.log('\nit catches everybody standing in it');
+  const r = rig(false, true, 420);
+  transformed(r);
+  const at = { x: r.dog.x + 200, y: r.dog.y };
+  // Three inside the radius, one plainly outside it — the control, and it is
+  // the half that says this is a circle rather than "everybody nearby".
+  r.body('a', 'human', at.x - 20, at.y);
+  r.body('b', 'human', at.x + 18, at.y - 14);
+  r.body('c', 'human', at.x, at.y + 26);
+  r.body('outside', 'human', at.x, at.y + DOG_LASH_IMPACT_RADIUS + 60);
+  rebuildEntityGrid(r.world);
+  strikeAt(r, at.x, at.y);
+
+  const got = ['a', 'b', 'c'].filter((id) => r.world.pendingInfections.has(id)).length;
+  check('all three in the circle are caught', got === 3, `${got}/3`);
+  check('and the one outside it is not', !r.world.pendingInfections.has('outside'),
+    `staged ${DOG_LASH_IMPACT_RADIUS + 60}px out against a ${DOG_LASH_IMPACT_RADIUS}px radius`);
+}
+
+/**
+ * **Armour gates the infection and spends a charge; the shove and the blood are
+ * not gated on anything.**
+ *
+ * Three subjects, one strike, so the ordering claim is measured rather than
+ * assumed: the shield goes before the vest, and a player carrying both spends
+ * the shield. Each is checked for *both* halves — a charge gone and no
+ * infection — because either alone would pass for the wrong reason: a vest that
+ * denied the turn without being spent would be free, and one spent without
+ * denying it would be worthless.
+ */
+function testArmour(): void {
+  console.log('\nthe shield goes first, then the vest, and only then does it infect');
+  const r = rig(false, true, 420);
+  transformed(r);
+  const at = { x: r.dog.x + 200, y: r.dog.y };
+
+  const shielded = r.body('shielded', 'officer', at.x - 16, at.y);
+  const vested = r.body('vested', 'officer', at.x + 16, at.y);
+  const both = r.body('both', 'officer', at.x, at.y + 20);
+  const bare = r.body('bare', 'officer', at.x, at.y - 20);
+  // Facing the strike, so the shield is covering the bearing it comes in on.
+  for (const e of [shielded, vested, both, bare]) e.facing = Math.PI;
+
+  r.world.inventories.set('shielded', kit({ shield: 3, shieldUp: true }));
+  r.world.inventories.set('vested', kit({ kevlar: 3 }));
+  r.world.inventories.set('both', kit({ shield: 3, shieldUp: true, kevlar: 3 }));
+  r.world.inventories.set('bare', kit({}));
+  rebuildEntityGrid(r.world);
+  strikeAt(r, at.x, at.y);
+
+  const inv = (id: string) => r.world.inventories.get(id)!;
+  check('a shield turns it away', !r.world.pendingInfections.has('shielded'));
+  check('and one charge is gone', inv('shielded').shield === 2, `${inv('shielded').shield}/3`);
+  check('a vest turns it away', !r.world.pendingInfections.has('vested'));
+  check('and one charge is gone', inv('vested').kevlar === 2, `${inv('vested').kevlar}/3`);
+  check('carrying both spends the shield, not the vest',
+    inv('both').shield === 2 && inv('both').kevlar === 3,
+    `shield ${inv('both').shield}/3, vest ${inv('both').kevlar}/3`);
+  check('and somebody with nothing on is infected', r.world.pendingInfections.has('bare'));
+
+  const wire = lashesToWire(r.world, r.clock);
+  const blocked = wire[0]!.hits.filter((h) => h.blocked !== null).length;
+  check('the wire says what stopped each of them', blocked === 3,
+    `${blocked} of ${wire[0]!.hits.length} hits blocked`);
+  check('four bodies were caught, armoured or not', wire[0]!.hits.length === 4,
+    `${wire[0]!.hits.length}`);
+}
+
+/**
+ * **The shove is real, it goes away from the impact, and it is not a stun.**
+ *
+ * The control is a body the strike missed entirely, standing on the same ground
+ * over the same window — without it, "they moved" is satisfied by any body the
+ * rig happens to have left walking.
+ */
+function testKnockback(): void {
+  console.log('\nand it shoves whoever it caught');
+  const r = rig(false, true, 420);
+  transformed(r);
+  const at = { x: r.dog.x + 200, y: r.dog.y };
+
+  const hit = r.body('hit', 'human', at.x + 10, at.y);
+  const miss = r.body('miss', 'human', at.x, at.y + DOG_LASH_IMPACT_RADIUS + 90);
+  rebuildEntityGrid(r.world);
+  const hitFrom = { x: hit.x, y: hit.y };
+  const missFrom = { x: miss.x, y: miss.y };
+  strikeAt(r, at.x, at.y);
+
+  // Let the impulse run out.
+  r.run(Math.ceil((DOG_LASH_PUSH_MS + 100) / TICK_MS));
+  const moved = Math.hypot(hit.x - hitFrom.x, hit.y - hitFrom.y);
+  const control = Math.hypot(miss.x - missFrom.x, miss.y - missFrom.y);
+
+  check('the body it caught is shoved', moved > 8, `${moved.toFixed(1)}px`);
+  check('and one it missed is not', control < 1, `${control.toFixed(1)}px`);
+  check('the shove goes away from the impact, not toward it',
+    Math.hypot(hit.x - at.x, hit.y - at.y) > Math.hypot(hitFrom.x - at.x, hitFrom.y - at.y),
+    `${Math.hypot(hit.x - at.x, hit.y - at.y).toFixed(1)}px out, was ` +
+      `${Math.hypot(hitFrom.x - at.x, hitFrom.y - at.y).toFixed(1)}`);
+  check('and it is spent rather than left running',
+    !r.world.knockbacks.has('hit'), `${r.world.knockbacks.size} still in the air`);
+}
+
+/**
+ * **A strike out of a dog that has been shot never lands.**
+ *
+ * Two seconds of coiling is the officers' whole answer to this ability, and a
+ * strike that came down anyway would be that answer doing nothing. The control
+ * is the same staging with the dog left alive — without it, "nobody was
+ * infected" is satisfied by a strike that was never going to reach.
+ */
+function testStrikeDiesWithTheDog(): void {
+  console.log('\na strike still coiling dies with the animal');
+
+  const shot = rig(false, true, 420);
+  transformed(shot);
+  const near = shot.body('near', 'human', shot.dog.x + 180, shot.dog.y);
+  rebuildEntityGrid(shot.world);
+  shot.aim(near.x, near.y);
+  shot.morph();
+  check('it is coiling', shot.world.lashes.length === 1);
+  killEntity(shot.world, shot.dog, shot.clock);
+  check('killing the dog drops the strike', shot.world.lashes.length === 0);
+  shot.run(strikeTicks + 4);
+  check('and nobody is infected by it', !shot.world.pendingInfections.has('near'));
+
+  const live = rig(false, true, 420);
+  transformed(live);
+  const alive = live.body('near', 'human', live.dog.x + 180, live.dog.y);
+  rebuildEntityGrid(live.world);
+  strikeAt(live, alive.x, alive.y);
+  check('the control — left alive, the same strike lands',
+    live.world.pendingInfections.has('near'));
+}
+
+/**
+ * A bag with nothing in it but the armour under test.
+ *
+ * Built off `newInventory()` rather than by hand: a literal here would have to
+ * be kept in step with every field ever added to `Inventory`, and the one that
+ * got missed would be a rig staging a bag no real player has.
+ *
+ * The `utilities` entry matters as much as the count — `spendArmour` splices
+ * the item out when the last charge goes, exactly as `resolveGrapple` does, and
+ * a bag with charges but no item would pass the count check while proving
+ * nothing about the slot being freed.
+ */
+function kit(over: { shield?: number; kevlar?: number; shieldUp?: boolean }): Inventory {
+  const inv = newInventory();
+  if (over.shield) {
+    inv.shield = over.shield;
+    inv.shieldUp = over.shieldUp ?? true;
+    inv.utilities.push('riotShield');
+  }
+  if (over.kevlar) {
+    inv.kevlar = over.kevlar;
+    inv.utilities.push('kevlar');
+  }
+  return inv;
+}
 
 function testBurst(): void {
   console.log('\ntwenty seconds, then it comes apart');
@@ -727,6 +1056,11 @@ testWindUp();
 testForm();
 testLash();
 testLashWall();
+testDodge();
+testCrowd();
+testArmour();
+testKnockback();
+testStrikeDiesWithTheDog();
 testBurst();
 testShotMidForm();
 testTentaclePhysics();

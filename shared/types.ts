@@ -484,20 +484,68 @@ export interface TentacleState {
 }
 
 /**
- * A tentacle lashing out at somebody, drawn for `DOG_LASH_SHOW_MS`.
+ * Where one body the strike caught was standing, and what stopped it.
  *
- * On the wire rather than derived, unlike blood: there is no `Shot` behind it
- * to read a line off, and whether it *caught* anybody is the whole of what the
- * drawing has to say.
+ * `blocked` is the whole readout that armour did its job. Everybody caught is
+ * shoved and bleeds — the strike is a limb the width of a leg and that is not
+ * something a vest makes pleasant — but only an *unarmoured* body is infected,
+ * and without this the two outcomes are the same picture. A deflect ring over
+ * the blood is what tells the officer their charge was spent on something.
+ */
+export interface LashHit {
+  x: number;
+  y: number;
+  blocked: 'shield' | 'kevlar' | null;
+}
+
+/**
+ * A tentacle strike: the arms coiling, going out, and coming back.
+ *
+ * On the wire rather than derived, unlike blood, and for two reasons that are
+ * not the same. The old lash was on it because there is no `Shot` behind it to
+ * read a line off. This one is on it because **the warning has to reach the
+ * people it is warning** — a ring the dog's own client drew for itself would be
+ * a ring nobody could dodge.
+ *
+ * Sent unfiltered, like the acid and the helicopters. Fog hides what is
+ * happening quietly; a limb the length of a street coming down on you is not
+ * that, and a telegraph you only see once it has already landed is worse than
+ * no telegraph at all.
  */
 export interface LashState {
+  /**
+   * Stable for the life of the strike, so the client can throw the gore, the
+   * chips and the gouge **exactly once** rather than on every frame it is
+   * visible. Same job the birth host's leaving the snapshot does, done with a
+   * number because a strike does not leave — it finishes.
+   */
+  id: number;
+  /**
+   * Whose back these came off. The arms are drawn *with the dog*, by
+   * `drawTentacles`, rather than as a separate pass — they are the same limbs
+   * that idle on its back, and two bits of code drawing them would be two bits
+   * of code to keep in step.
+   */
+  dogId: string;
+  /** The anchor, followed live: the animal can still walk while they are out. */
   x1: number;
   y1: number;
+  /** The locked landing point. Chosen once, at the keypress, and never re-read. */
   x2: number;
   y2: number;
-  hit: boolean;
-  /** 1 when it goes out, 0 as it fades. */
+  /** How wide the impact was, so the ring and the flash agree with the server. */
+  r: number;
+  /** `0` coiling, `1` going out, `2` snapping back. */
+  phase: 0 | 1 | 2;
+  /**
+   * 0 to 1 through whichever phase it is in. One number rather than three
+   * clocks: nothing on the client needs to know how long a phase lasts, only
+   * how far through it is, and a ramp cannot disagree with the phase the way a
+   * second deadline could.
+   */
   t: number;
+  /** Everybody it caught, once it has landed. Empty while it is still coming. */
+  hits: LashHit[];
 }
 
 /** Only ever seen as a shadow passing over the ground. */
