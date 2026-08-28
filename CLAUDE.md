@@ -245,6 +245,137 @@ the single field standing in the way and then goes straight in.
   the code gets read aloud to somebody already looking at the game. Different
   moments, so both stay.
 
+### The code is now enough, because the game is peer to peer
+
+**The four letters used to be a key into a `Map` inside one server process, and
+that is exactly why sending somebody the code did not work.** They launched the
+game, their machine started its *own* server, their client connected to their
+*own* localhost, and `lobbies.get('MZGD')` on that machine quite correctly found
+nothing. The two computers never exchanged a packet. Nothing was broken — the
+lobby, the seats, the chat and the code were all real and all working — there
+was simply no mechanism by which a guest's machine could learn where the host's
+was. **The UI was complete and the transport underneath it was missing.**
+
+Four letters cannot carry an address. Twenty letters at four places is 160,000
+codes; an IPv4 address and port is far more than that and a home IP is different
+next week. So a joining machine has to *ask* something it already knows how to
+reach. The only question is who runs that something, and the answer here is
+nobody: **Trystero signals over public infrastructure that is already there for
+other reasons** — Nostr relays by default, BitTorrent trackers and MQTT brokers
+otherwise. Once two browsers have swapped an offer and an answer through it, the
+relay drops out and the connection is direct.
+
+**Almost none of this is new code, and that is the whole reason it was
+affordable.** Three things were already true and none was built for this:
+
+- **`engine.ts` has no Node imports at all** — no `ws`, no `http`, no `fs`. Its
+  entire API is `connect(id, sendTo)` / `handle(id, msg)` / `disconnect(id)`, and
+  it has never cared whether a `sendTo` ends in a socket, a `postMessage` or a
+  data channel.
+- **`offline.ts` already ran that engine in a browser Web Worker.** That was
+  built so a solo round would stop fighting the renderer for cores. It is also,
+  unchanged, a complete game server running in a page.
+- **`net.ts` already hid the transport** behind a `Connection` interface.
+
+So the host's browser *is* the server, exactly as the Node process was, and
+**nothing above `net.ts` found out** — `main.ts`, `menu.ts` and `render.ts` are
+untouched by the transport change.
+
+- **`p2phost.ts` is `offline.ts` with its one assumption removed.** That file
+  says there is exactly one player and hardcodes a single connection id; this
+  one is fed up to six. The only addition is a routing envelope (`p2pwire.ts`)
+  saying which connection a message is from or for.
+- **`p2pwire.ts` exists for a bundling reason, not a design one.** `p2phost.ts`
+  imports the whole engine and is only ever reached through
+  `new Worker(new URL(...))`, which Vite splits into its own chunk — but a plain
+  `import` of even one string constant from it drags the engine back into the
+  main bundle, and every player downloads a second copy of a simulation they are
+  not running.
+- **The peers are connected from the main thread, not the worker.**
+  `RTCPeerConnection` is `[Exposed=Window]` and does not exist in a worker at
+  all. So the page owns the connections and the worker owns the simulation, at
+  the cost of one extra structured clone each way — the same coin `offline.ts`
+  already pays, and still not JSON.
+- **It is a star, not a mesh.** Trystero's documented weak spot is rooms where
+  every peer connects to every other, which grows as the square. Host-authoritative
+  means a guest only ever connects to the host: five connections for six players
+  rather than fifteen, and no guest can desync from another because no guest
+  simulates anything.
+- **`allowWorldReset` is false here where `offline.ts` sets it true**, and the
+  reasoning is the one already written beside `EngineConfig`: that flag is about
+  who can reach the engine. Offline it is only the page that made the worker.
+  Here it is anybody holding the code, and `restart` calls `resetWorld` from any
+  connection, in or out of a lobby.
+- **The room is opened by the transport, not by the menu**, and it cannot be
+  opened any earlier. It is named after the code, and the code is drawn by the
+  engine inside `lobbyCreate` — so `goHost` watches for the first `lobby`
+  message and opens the room on the code in it. An **offline lobby is skipped
+  outright**: it promises nobody can join, and publishing its code to a public
+  relay is exactly what `joinLobby` refuses from the other end.
+
+**There is deliberately no "hello" action for the host to announce itself
+with.** That was the first design and it had a race: the guest would learn who
+the host was and send `lobbyJoin` straight back, possibly before the host's
+engine had run `connect` for that peer — at which point the message is addressed
+to a connection the engine does not know about and is dropped. **The host is
+latched off the first game message instead**, which cannot race, because the
+first thing any engine says to a new connection is `welcome` and it only says it
+*after* connecting them. The greeting and the proof of readiness are the same
+event. No guest can be mistaken for a host either: a guest only ever sends to
+`hostId`, and until that line runs it does not have one.
+
+**`connected` is no longer required by `takeInvite`.** It meant "the socket has
+said `welcome`, so you may talk", which was honest while joining meant sending
+down a socket. Joining needs no socket now, and waiting on one would hang an
+invite link forever on any machine not also running a game server — which is
+every guest's machine.
+
+**The join takes seconds where a socket took none**, so the button says
+`connecting…` and refuses a second click. Finding a peer means reaching a relay,
+being noticed, and a full ICE handshake. Silence for that long is
+indistinguishable from a dead button, which is a fault this screen has had
+before. `JOIN_TIMEOUT_MS` is 8s and a timeout is reported in the same words a
+wrong code produces — from the player's side those are the same event, and
+telling them apart would ask them to act on a distinction they cannot act on.
+
+Measured with two browser tabs, host and guest, no server process anywhere:
+lobby `SZPW` created in the host's page, guest joined **by code alone**, both
+seated (`OFFICER 1 HOSTY`, `OFFICER 2 GUESTY`), round started, and the host's
+engine reported **`516 entities | 2 clients | 498 survivors`** at **7.4–9.0ms
+against the 33.3ms budget**, `serialise+send 0.6–0.7ms`, with survivors falling
+as the outbreak spread. The whole city, for two people, in a tab.
+
+**What is not measured, and should not be claimed:**
+
+- **Nothing about rendering.** rAF is throttled to nothing while the browser
+  pane is not compositing, so the guest's canvas read back blank — that is the
+  documented limitation, not a fault, and it means somebody has to look at a
+  real frame.
+- **Nothing about NAT.** Two tabs on one machine exercise signalling and the
+  data channel and nothing about traversal. Roughly **10–20% of peer pairs
+  cannot connect directly** — symmetric NAT, mostly mobile and corporate — and
+  fixing that needs a TURN relay, which is bandwidth somebody pays for.
+  `BaseRoomConfig` takes `turnConfig` and `rtcConfig` when that day comes.
+- **Nothing about more than two.** Five guests has never been run.
+- **The relays are somebody else's and they visibly wobble.** Every run logged
+  `relay failure from wss://relay.nostr.place/ - pow: insufficient leading-zero
+  bits` and a dead `wss://hornetstorage.net/relay`. It worked anyway because
+  Trystero uses several — but a bad day on public infrastructure is a day nobody
+  can join, and it is not something that can be fixed from here. `joinRoom`
+  takes a `relayUrls` list, and the strategy can be swapped for
+  `trystero/mqtt` or `trystero/torrent` wholesale.
+
+**The old URL path still exists and still works.** `Host Online.bat`, `serve.ts`
+and the whole one-port story are untouched — but CREATE and JOIN no longer go
+near the Node server's lobby, so that path is now for spectating, dev, and
+LAN-with-a-known-address rather than for getting friends in.
+
+**One weakening worth knowing.** The room topic is derived from the app id and
+the code, both of which are in the shipped client, so a public relay could in
+principle be scanned for live four-letter rooms — where before, a stranger also
+needed your URL. `BaseRoomConfig.password` end-to-end encrypts a room and is the
+lever if that ever matters.
+
 ### Playing over the internet
 
 The codes say *which room*; they say nothing about *which machine*, and that
@@ -4575,6 +4706,55 @@ same standard applies as to `DOG_CAMERA_ZOOM`: the sites were confirmed by
 listing them, the cycle and the backbuffer sizes were measured live
 (1920x1080 → 2400x1350 → 2880x1620 → 960x540 → 1280x720 → 1440x810 → back,
 `canvas.width` following exactly), and somebody has to look at the picture.
+
+#### A screen taller than the window has to scroll
+
+Reported as *"in the options menu you need to be able to scroll up and down. I
+cant see the back button"*, and the numbers say it flatly. Measured at 1024x600
+— a stage 576px tall — the options screen's content is **784px**: eight rows,
+two presets and BACK, overflowing by 208. `.screen` had `overflow` at the
+browser's default and `html, body` are `overflow: hidden`, so what fell off the
+bottom was simply gone, and what fell off was the only way off the screen.
+
+- **`justify-content: safe center` is the load-bearing half, and plain `center`
+  is the trap.** A centred flex column overflows *both* ends and **the overflow
+  above the container cannot be scrolled back to at all** — so adding
+  `overflow-y: auto` on its own trades a missing BACK button for a missing
+  heading. Measured on the real screen with the old rules put back: the
+  scrollable range is **84px against 208px of overflow**, with the heading
+  **168px above the top** and unreachable at any scroll position. `safe` keeps
+  the centring for anything that fits (the title screen is untouched, 0
+  overflow) and pins anything that does not to the top.
+- **`.screen > * { flex-shrink: 0 }` is needed with it.** Flex children shrink
+  by default, so an over-long screen squashes its own rows to fit instead of
+  scrolling, and the scrollbar never appears to say there is more.
+- **The scrollbar is painted**, because the default one is invisible against
+  `#0b0d10` and a scrollbar nobody can see answers "is there more below?" with
+  nothing.
+- It is on `.screen` rather than on `#screen-options`, so the lobby and
+  everything else gets it too — those are the screens that grow.
+
+**And Escape is BACK on every screen that has one**, which is the half that
+needs no scrolling to reach. `escapeBack` in `menu.ts` maps a screen to *the
+same call its own button makes* rather than to a `show` of wherever it came
+from — `btn-online-back` runs `askName`, which is not merely `show('name')`, and
+two ways back that differ in what they do is the sort of thing that rots.
+
+- **The lobby is left out on purpose.** Escape there would be `lobbyLeave`,
+  which despawns you and closes the room behind you if it is yours, and a
+  reflexive keypress must not take four other people's lobby down with it. The
+  title screen gets nothing either: there is nowhere behind it.
+- **A round owns Escape once one is up.** `main.ts` gates its own handler on
+  `started` (pause offline, quit online); this one gates on the shell being
+  hidden, which is the same fact seen from the other side. Verified both ways:
+  inert while the shell is hidden, working again the moment it is back.
+
+Measured live at 1024x600 and 1280x720: BACK fully on screen once scrolled, and
+`elementFromPoint` at its centre returns the button rather than something over
+it; the heading 20px from the top at `scrollTop` 0. Escape backs out of options,
+name, online, create and join — including from **inside a focused text box**,
+which is where the code box would otherwise have swallowed it — and does nothing
+on the title screen.
 
 ## Performance rules (these matter — 400+ entities)
 

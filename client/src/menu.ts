@@ -44,6 +44,18 @@ export interface MenuHooks {
    */
   goOnline: () => void;
   /**
+   * Host for other people on this machine, then call back once the engine is
+   * listening — at which point the lobby is created and its code becomes the
+   * name of the room guests find us by. What HOST GAME does.
+   */
+  goHost: (onReady: () => void) => void;
+  /**
+   * Connect directly to whoever is hosting `code`. `onReady` fires when their
+   * engine has said hello and a `lobbyJoin` can be sent; `onFail` when nobody
+   * answered, which from the player's side is the same event as a wrong code.
+   */
+  goGuest: (code: string, onReady: () => void, onFail: (why: string) => void) => void;
+  /**
    * Our lobby's round has begun; the game takes the screen from here. `solo`
    * says whether it can be paused — only an offline round can, since nobody
    * else is in it.
@@ -149,10 +161,31 @@ export function setupMenu(hooks: MenuHooks): Menu {
    * has to land somewhere with something to correct.
    */
   const takeInvite = (): string => {
-    if (!pendingJoin || !name || !connected) return '';
+    /*
+     * `connected` is deliberately no longer required.
+     *
+     * It meant "the socket has said `welcome`, so you may talk", which was the
+     * honest signal while joining meant sending `lobbyJoin` down a socket to a
+     * server. Joining is peer-to-peer now and needs no socket at all — waiting
+     * on one would hang an invite link forever on any machine that is not also
+     * running a game server, which is every guest's machine.
+     */
+    if (!pendingJoin || !name) return '';
     const code = pendingJoin;
     pendingJoin = '';
-    hooks.send({ type: 'lobbyJoin', code, gamertag: name });
+    hooks.goGuest(
+      code,
+      () => hooks.send({ type: 'lobbyJoin', code, gamertag: name }),
+      (why) => {
+        // Land it on the JOIN screen with the code still in the box, which is
+        // where a refusal has always gone and where it can be corrected.
+        show('join');
+        codeInput.value = code;
+        joinError.textContent = why;
+        codeInput.focus();
+        codeInput.select();
+      },
+    );
     return code;
   };
 
@@ -208,10 +241,25 @@ export function setupMenu(hooks: MenuHooks): Menu {
   // ---- create ----
   const lobbyNameInput = el<HTMLInputElement>('lobby-name-input');
   const doCreate = () => {
-    hooks.send({
-      type: 'lobbyCreate',
-      name: lobbyNameInput.value.trim() || `${name}'s lobby`,
-      gamertag: name,
+    /*
+     * **The game runs here, and guests connect to this machine.**
+     *
+     * There is no server in this any more. The engine goes on a worker in this
+     * page exactly as PLAY OFFLINE puts it there, and the only difference is
+     * that it is fed more than one connection. The lobby is created once it has
+     * said hello, because until then there is nothing listening — the same
+     * ordering PLAY OFFLINE needs, and for the same reason.
+     *
+     * The room guests find us by is named after the four-letter code, which the
+     * engine draws inside `lobbyCreate`. So it cannot be opened from here; the
+     * transport watches for the code and opens it. See `goHost` in `net.ts`.
+     */
+    hooks.goHost(() => {
+      hooks.send({
+        type: 'lobbyCreate',
+        name: lobbyNameInput.value.trim() || `${name}'s lobby`,
+        gamertag: name,
+      });
     });
   };
   lobbyNameInput.addEventListener('keydown', (e) => {
@@ -232,10 +280,19 @@ export function setupMenu(hooks: MenuHooks): Menu {
   const typedCode = () =>
     codeInput.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, LOBBY_CODE_LENGTH);
 
+  /**
+   * A join is in flight. Finding a peer takes seconds where a socket took
+   * none, so the button has to stop accepting clicks for that window — pressed
+   * twice it would open a second room on the same code and leave the first one
+   * orphaned on the relay.
+   */
+  let joining = false;
+
   const refreshJoinButton = () =>
-    joinGo.classList.toggle('dim', typedCode().length < LOBBY_CODE_LENGTH);
+    joinGo.classList.toggle('dim', joining || typedCode().length < LOBBY_CODE_LENGTH);
 
   const doJoin = () => {
+    if (joining) return;
     const code = typedCode();
     // Refuse a short code here rather than sending it: the server would answer
     // the same thing, and a round trip to be told you have not finished typing
@@ -244,8 +301,36 @@ export function setupMenu(hooks: MenuHooks): Menu {
       joinError.textContent = `a code is ${LOBBY_CODE_LENGTH} letters`;
       return;
     }
-    joinError.textContent = '';
-    hooks.send({ type: 'lobbyJoin', code, gamertag: name });
+    /*
+     * Say something, because this one takes a moment.
+     *
+     * A socket to a known address either connects or refuses almost at once.
+     * Finding a peer means reaching a relay, being noticed by the host, and
+     * then a full ICE handshake — seconds, on a cold start. Silence for that
+     * long is indistinguishable from a dead button, which is the fault this
+     * whole screen has been bitten by before.
+     */
+    joinError.textContent = 'connecting…';
+    joining = true;
+    refreshJoinButton();
+    hooks.goGuest(
+      code,
+      () => {
+        joining = false;
+        refreshJoinButton();
+        joinError.textContent = '';
+        hooks.send({ type: 'lobbyJoin', code, gamertag: name });
+      },
+      (why) => {
+        joining = false;
+        refreshJoinButton();
+        // Stays on this screen with the code still in the box: mistyping is the
+        // ordinary case, and being sent back a screen costs you your place.
+        joinError.textContent = why;
+        codeInput.focus();
+        codeInput.select();
+      },
+    );
   };
 
   // Normalise as they type, so a pasted " abcd " or "A-B-C-D" lands as ABCD and
@@ -705,6 +790,48 @@ export function setupMenu(hooks: MenuHooks): Menu {
     codeInput.focus();
   });
   el('btn-join-back').addEventListener('click', () => show('online'));
+
+  /**
+   * **Escape is BACK, on every screen that has one.**
+   *
+   * The BACK button is at the bottom of the screen and OPTIONS is taller than
+   * a letterboxed stage on a laptop, so the one control that gets you off it
+   * is the one that falls off the bottom. The screens scroll now, which is the
+   * real fix — but a key that needs no scrolling to reach is what makes a
+   * screen you have landed on by mistake cost nothing, and Escape is already
+   * what leaves a round.
+   *
+   * Each entry is deliberately the *same call* the screen's own button makes
+   * rather than a `show` of wherever it came from: `btn-online-back` runs
+   * `askName`, which is not merely `show('name')`, and two ways back that
+   * differ in what they do is exactly the sort of thing that rots.
+   *
+   * **The lobby is left out on purpose.** Escape there would be
+   * `lobbyLeave` — which despawns you and closes the room behind you if it is
+   * yours — and a reflexive keypress must not take four other people's lobby
+   * down with it. Nothing is offered for the title screen either: there is
+   * nowhere behind it.
+   */
+  const escapeBack: Partial<Record<Screen, () => void>> = {
+    options: () => show('title'),
+    name: () => show('title'),
+    online: askName,
+    create: () => show('online'),
+    join: () => show('online'),
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'Escape') return;
+    // A round owns Escape once one is up — pause offline, quit online, and
+    // `main.ts` gates that on `started`. The shell being hidden is the same
+    // fact seen from this side.
+    if (shell.classList.contains('hidden')) return;
+    const back = escapeBack[current];
+    if (!back) return;
+    e.preventDefault();
+    back();
+  });
+
   el('lobby-back').addEventListener('click', () => {
     // The server sends nothing back for a leave — you already know you left —
     // so the screen change happens here. An offline room came from the title,
