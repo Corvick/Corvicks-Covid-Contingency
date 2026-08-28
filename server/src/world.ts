@@ -121,7 +121,7 @@ import type { Emplacement } from './emplacement.js';
 import type { BackupVehicle } from './backup.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
-import type { DogState, Lash, Tentacle } from './dog.js';
+import type { DogState, Knockback, Lash, Tentacle } from './dog.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -915,8 +915,25 @@ export interface World {
    * lying where they came to rest until they fade.
    */
   tentacles: Map<string, Tentacle>;
-  /** Tentacle lashes still being drawn. Short-lived; a plain array is enough. */
+  /**
+   * Tentacle strikes in flight: coiling, going out, or coming home. Short-lived
+   * and there are never many, so a plain array is enough.
+   */
   lashes: Lash[];
+  /**
+   * Bodies that have been shoved, and the impulse still bleeding off them.
+   *
+   * **On the world rather than on `AiState`**, because the things that can be
+   * knocked about are not all AI: a player has no `AiState` at all, and neither
+   * does a dog. One map covers every body in the game without any of them being
+   * asked to know that a shove exists — `updateKnockback` in `dog.ts` is the
+   * only thing that reads it, and it runs above `resolveCollisions` so a body
+   * shoved into a wall is pushed back out of it in the same tick.
+   *
+   * Self-emptying: an entry is dropped the moment its deadline passes or its
+   * body leaves the world, so this holds only people currently in the air.
+   */
+  knockbacks: Map<string, Knockback>;
   /**
    * Officers the horde has made contact with, for the dog's corner map, and
    * when to work the list out again.
@@ -1834,6 +1851,7 @@ export function createWorld(): World {
     pendingBursts: [],
     tentacles: new Map(),
     lashes: [],
+    knockbacks: new Map(),
     dogContacts: [],
     nextDogContactScan: 0,
     infectedByDog: new Map(),
@@ -1934,6 +1952,7 @@ export function resetWorld(world: World): void {
   world.pendingBursts.length = 0;
   world.tentacles.clear();
   world.lashes.length = 0;
+  world.knockbacks.clear();
   // Nor has anybody killed a dog in it yet.
   //
   // **"Permanent" means permanent for the round.** A corpse is the lasting mark
@@ -2205,6 +2224,21 @@ export function killEntity(world: World, e: Entity, now: number): void {
      * standing still for two seconds is for.
      */
     if (dog) dog.roarStartedAt = 0;
+
+    /**
+     * **And a strike still coming dies with it, for the same reason.**
+     *
+     * A tentacle strike is 340ms of coiling before it goes out, and that windup
+     * is the whole of what the officers are given to answer it — so a strike
+     * that landed out of an animal that was shot during its own tell would be
+     * the tell doing nothing. It is also what the red ring on the ground is
+     * promising: that there is something behind it still able to throw.
+     *
+     * Filtered rather than flagged, so nothing downstream has to learn that a
+     * strike can be orphaned — `updateLashes` only ever sees live ones, and
+     * `lashesToWire` only ever sends live ones.
+     */
+    world.lashes = world.lashes.filter((l) => l.dogId !== e.id);
 
     /**
      * **A dog that was transformed bursts, whether the twenty seconds ran out

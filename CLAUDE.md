@@ -3724,9 +3724,10 @@ failing*, and both are the staging:
 #### It tears itself open (F)
 
 Two seconds of vibrating on the spot while tentacles rip out of the body, then
-twenty seconds of something six times as tough and much slower, and then it
-bursts into a toxic cloud and a scatter of its own parts. `server/dog.ts` owns
-it; `server/morphcheck.ts` is the harness.
+twenty seconds of something six times as tough and much slower — throwing those
+tentacles at whatever the cursor is on — and then it bursts into a toxic cloud
+and a scatter of its own parts. `server/dog.ts` owns it; `server/morphcheck.ts`
+is the harness, and `client/lashrig.html` measures the drawing.
 
 **The whole ability is a trade of speed for presence.** Everything else the dog
 has is about arriving somewhere before the street is ready. This is about being
@@ -3781,26 +3782,229 @@ with a life and four minutes.
   the same city, transformed against not: **93px against 189px over 0.67s.**
 
 **F does two things and which one is not a mode anybody sets.** Out in the world
-as the thing, it lashes; anything else, it begins the transformation. The row is
+as the thing, it strikes; anything else, it begins the transformation. The row is
 Q, E, R, F and W walks the dog, so there is exactly one free key and this
 ability wants both halves of it — and nothing has to be learned, because while
-you are the monster, F is what the monster does. The lash is therefore checked
+you are the monster, F is what the monster does. The strike is therefore checked
 *above* the transformation's own cooldown, or F would be dead for the twenty
 seconds it is most wanted.
 
-- **The lash infects rather than damaging**, which is the whole point of a form
-  too slow to run anybody down: its work is done at arm's length. Somebody
-  already incubating is passed over, the same rule `resolveGrapple` follows.
-- **`DOG_LASH_COOLDOWN_MS` is not in the spec and it needs one.** Without it F
-  is a key you hold to infect a whole street in a second and a half, which is
-  not a lash, it is a hose. Two thirds of a second is a rhythm you can feel and
-  about thirty reaches across the form.
+##### The strike is the arms on its back, and it is telegraphed
+
+Reported as *"right now pressing F spawns a tentacle that comes from the middle
+of the dog and I would rather the ability use the tentacles in the screenshot. I
+want the ones that are on his back to recoil back and then launch in the
+direction of the cursor"*, with a red warning circle *"that PLAYERS can use to
+dodge"*.
+
+The old lash was a hitscan drawn as a line: `startDogAbility` picked the nearest
+body along a 26px corridor, infected it, and pushed a curve onto `world.lashes`
+for 220ms of decoration. Nothing about it could be dodged, because nothing about
+it took any time, and the drawing came from the middle of the animal because
+there was nothing else for it to come from.
+
+**Three phases now, and the first one is the whole feature.**
+`DOG_LASH_WINDUP_MS` of coiling, `DOG_LASH_STRIKE_MS` of going out,
+`DOG_LASH_RECOVER_MS` of coming home — and nothing is resolved until the arms
+arrive. `startDogAbility` locks a landing point and starts a clock; `updateLashes`
+lands it.
+
+- **The aim point is locked at the keypress and never re-read.** A ring that
+  tracked the cursor would be a warning of nothing: whatever it showed you, the
+  strike would still land wherever the mouse had got to. Locking it is what turns
+  the ring from decoration into information.
+- **It is a circle, not a corridor.** `DOG_LASH_IMPACT_RADIUS` (48) around the
+  landing point catches everybody standing in it, where the old lash took the
+  first body on a line and stopped. A line has nowhere safe to stand and nothing
+  a warning could usefully show; a *place* can be stepped out of, which is what
+  the ring is drawn around. It also means siting the thing is a decision — a
+  crowd standing together loses the crowd.
+- **420ms is derived from the dodge, not picked by eye**, and the first value
+  tried was 340 because 340 *looks* like a telegraph. Clearing the circle from
+  dead centre means putting your own centre past 48 + a 12px body = **60px**,
+  which at `PLAYER_SPEED` (160) takes **375ms** walking and 221ms sprinting. At
+  340 a walking player covers 54px — six short — so being caught in the middle
+  could only ever be answered by a sprint, which is a telegraph most people
+  cannot answer while they are also being shot at. At 420 a walk clears it with
+  7px to spare. A **civilian** covers 15px and cannot dodge at all, which is
+  correct rather than a shortfall: they are the crowd the ability is *for*.
+- **The landing point stops at the first wall on the way**, walked in
+  `WALL_THICKNESS / 2` steps for the same reason the gobbet is substepped. A ring
+  drawn inside a building the dog is stood outside of promises an impact that
+  `hasWallClearPath` then refuses for everybody in it — a warning that costs
+  whoever obeys it their position for nothing.
+- **`DOG_LASH_COOLDOWN_MS` went 650 → 850**, which now covers windup + strike +
+  snap-back (790) with room to spare, so one strike is fully back on the animal
+  before the next coils. 650 fired again mid-recovery — fine while the lash was
+  an instant line and wrong now that the limbs are the drawing.
+- **A strike still coiling dies with the animal.** `killEntity` filters
+  `world.lashes` beside clearing the roar, and for the same reason: the windup is
+  the officers' whole answer to this ability, and a strike that landed anyway out
+  of a dog that had been shot would be that answer doing nothing. Filtered rather
+  than flagged, so nothing downstream has to learn that a strike can be orphaned.
+
+**Armour gates the infection and nothing else.** Everybody caught is shoved and
+bleeds; only somebody with nothing on turns.
+
+- **Shield, then vest, then the infection** — the order `attemptGrab` and
+  `resolveGrapple` already use between them, and it is not arbitrary: a shield is
+  held out in front and stops the thing before it reaches you, where a vest is
+  what is left once it already has. Written the other way round, a player
+  carrying both would spend the vest they cannot replace while holding a shield
+  that was covering the very bearing it came in on.
+- **The shield's arc is measured to the *thrower*, not to the landing point**,
+  and that was a real bug. Written the obvious way it is nonsense for the person
+  actually standing on the spot, whose bearing to it is whatever rounding left
+  them, and close to a right angle for anybody beside them. The blow arrives
+  along the line the limb travelled. Measured with the wrong one: a shield held
+  directly at the dog blocked **0 of 1** and the vest underneath it was spent
+  instead.
+- **No `grappleImmune` window, unlike a blocked grab**, and that is a deliberate
+  difference rather than an omission. That window means "nothing can lay a hand
+  on you" and exists so a vest is not stripped three times in a second by a crowd
+  that keeps re-grabbing. A strike is not a grab: there is nothing to break off
+  from, the cooldown already stops one animal landing two inside it, and granting
+  the window here would quietly make being hit by a tentacle a *defence* against
+  being grabbed.
+- **`LashHit.blocked` is on the wire** so the client can draw a deflect ring
+  rather than only blood. Without it, armour working and armour not working are
+  the same picture.
+
+**`World.knockbacks` is the shove, and it is on the world rather than on
+`AiState`** — the things that can be knocked about are not all AI: a player has
+no `AiState` at all, and neither does a dog. One map covers every body in the
+game without any of them being asked to know that a shove exists.
+
+- **An impulse that decays, not a displacement.** 30 pixels applied between two
+  ticks is a teleport; the same 30 over `DOG_LASH_PUSH_MS` is a body being
+  knocked off its feet. Exponential (`KNOCKBACK_DECAY`) rather than linear, so it
+  leaves hard and settles — a linear one stops dead at its deadline, which reads
+  as the shove being switched off rather than running out.
+- **Not a stun.** They keep walking through it, which is what lets somebody
+  already running out of the ring go on running out of it.
+- **Applied in `updateDogs`, above `resolveCollisions`**, so a body shoved into a
+  wall is pushed back out of it in the same tick — the same deal the dog's own
+  drag gets, and the reason it needs no wall test of its own.
+
+**The arms are drawn with the dog, by `drawTentacles`.** They are the same limbs
+that idle on its back, and two bits of code drawing them would be two bits of
+code to keep in step. `setLashes` in `render.ts` is how it knows — module state
+rather than a seventh parameter threaded through five call sites that have no
+idea what a tentacle is, which is how the file already holds the blood decals and
+the baked sprites.
+
+- **`DOG_LASH_STRIKE_ARMS` (3) of `DOG_MORPH_TENTACLES` (8) go**, picked off the
+  *strike's* id so it is a different three each time and the drawing does not
+  develop a favourite side. Not all of them, for the same reason
+  `ZOMBIE_SPREAD_SHARE` is not 1: a body that throws its whole silhouette at one
+  spot has no silhouette left, and stops reading as a mass of limbs.
+- **`DOG_LASH_COIL` is 0.9, not the 0.35 first written, and the rig is what said
+  so.** A *gather* — the arm shortening to a third of itself while turning away —
+  is what a limb loading actually does, and at this size it is invisible: the five
+  arms that are not striking still fan out in every direction and bury it.
+  Measured as the shift in where the mass of the drawing sits along the axis to
+  the landing point, a 0.35 gather moved it **+0.3px** — nothing, and the wrong
+  way. Drawn back to nearly full length *pointing away from the target*, three
+  arms make a bundle behind the animal that is plainly a thing being loaded.
+- **The segment taper has to be normalised, or the arm never reaches the ring.**
+  Segments get shorter toward the tip, which is what makes a limb taper rather
+  than read as a chain of equal links — but the weights (`1.15 - s * 0.09`) sum
+  to 4.40 across five segments, not 5. Divided by the segment count the arm lands
+  at **88% of its own reach**, and since that reach at full extension is the whole
+  span to the landing point, the tip came down a ninth of the throw short of the
+  red circle everybody had been told to dodge. Measured off the canvas: **0.91 of
+  the span before, 1.02 after.** The idle arms have the same shape and it does not
+  matter there — how long an idle arm looks is an art decision with nothing to
+  agree with — so the normalisation is not shared.
+
+**The ring is drawn on the ground, under the bodies**, with `drawBlood` and the
+tyre marks. The officer standing in it is the one person who most needs to read
+it, and a ring painted over the top of them would hide the very thing it is
+warning about. Three readings, answering different questions: the **rim** is
+where the edge of the impact is, so "am I in it" is about your own feet rather
+than judging a distance; the **sweep** filling round it is how long there is
+left; and the **wash** inside comes up as the sweep closes, so it reads as
+loading even at the edge of vision where the rim is a couple of pixels.
+
+**A miss has to have happened.** `LASH_GOUGE_*` and `LASH_CHIP_*` — a scuff in
+the road and three chips of it thrown up, with a rising arc and a shadow under
+each, the same trick the flamethrower's stream and the thrown tentacles use and
+for the same reason: on a top-down map height only reads if something on the
+ground stays put underneath it. It is the smallest thing that turns "the ability
+did nothing" into "it missed", and the reason a dodge is worth making rather than
+merely surviving.
+
+**Nothing thrown by the client is on the wire.** The blood, the chips and the
+gouge are all derived from the strike landing, exactly as blood is derived from
+`Shot.hit` and the gore from a birth host leaving the snapshot. **`LashState.id`
+is what makes that once-per-strike rather than once-per-frame** — a strike is on
+the wire for the whole of its snap-back, so anything done off the flag rather
+than off the transition would be done twenty times. Same trap as the roar's
+sound, solved the same way, on the edge.
+
 - **It reads `hasWallClearPath`, not `hasLineOfSight`**, and that mattered in
   both directions. A sight line waves *glass* through — that is the point of
   glass — and a tentacle does not go through an intact window; and it stops at
   *foliage*, which a tentacle very much does go through, exactly as a blast
   does. `hasWallClearPath` is the one predicate in the game that asks whether a
-  physical thing can get from here to there.
+  physical thing can get from here to there. Asked from the **landing point**
+  rather than from the animal, because that is where the limbs actually came
+  down — somebody round the corner from the ring is behind a wall from it
+  whatever the dog can see.
+- **The infection is still an infection.** Somebody already incubating is passed
+  over, the same rule `resolveGrapple` follows, and a completed one credits
+  `infectedByDog` so it feeds this dog's roar balance and the shared
+  `totalConverted` exactly as a bite does.
+
+`server/morphcheck.ts` covers all of it and `client/lashrig.html` covers the half
+it cannot. Measured server-side: **nothing is infected on the tick the key goes
+down** (the control for every dodge claim — without it "they got out of the way"
+is satisfied by a strike that never worked), **8/8 caught standing still and 8/8
+dodged walking out at `PLAYER_SPEED`**, a civilian at 35px/s covers 15px of the
+48 it would need, **3/3 in the circle and 0/1 outside it**, shield and vest each
+spend exactly one charge and neither turns, **carrying both spends the shield and
+leaves the vest at 3/3**, four bodies caught and three of them blocked, the shove
+is **23.7px against a 0.0px control** and goes away from the impact, and a strike
+out of a dog killed mid-coil never lands while the same strike left alive does.
+
+Client-side, off the canvas: reach toward the landing point **0.22 idle → 1.02
+out → 0.24 home** (an idle arm cannot pass 0.27 of the span by construction, so
+anything past that is a striking arm and nothing else), the drawing's mass shifts
+**-1.1px coiling and +26.7px going out**, arm-ring ink holds at **431 of 448**
+across eight strike ids with **7 distinct drawings** out of those eight — so some
+arms always stay and which three go genuinely varies — and the ring, the flash,
+the deflect ring, the gouge and the chips all put ink down, with the gouge laid
+**once** across two frames of the same strike.
+
+*Three things about measuring this were the rig lying rather than the code
+failing.*
+
+- **`HUMAN_WALK_SPEED` is a civilian and the claim is about players.** Staged at
+  35px/s the dodge read **0/8**, which looks exactly like the telegraph not
+  working and is in fact asking a body that moves at 35px/s to cover 60 in under
+  half a second.
+- **`nav.isBlocked` carries `NAV_INFLATE`, so a "wall" found in it may not be
+  there.** The wall test picks its slab off the nav grid, and a blocked run in
+  that grid can be *pure skirt* — inflation near a corner with no geometry on the
+  line. `lashOut` stops at the first thing `hasWallClearPath` refuses, which is
+  real geometry, so on such a city it does not stop at all and the check fails
+  having staged nothing. It leaked **2 of 6** and moved run to run, because the
+  map is not seeded. The staging now confirms with `hasWallClearPath` that the
+  dog genuinely cannot reach the victim, and skips cities where it can. The
+  comment already in that function had learned this lesson once for the victim's
+  *position*; this is the same lesson for the wall's *existence*.
+- **One `getImageData` per sample hangs the page.** The rig's ring probe was
+  ~2,300 single-pixel readbacks per ring and nine rings a run — 21,000 forced GPU
+  round trips, and the tab stopped responding. Exactly the trap `paintbench.ts`
+  documents: batch the work behind one readback, or measure the readback.
+
+**What is not measured is what it looks like**, and that is the same standard
+`DOG_CAMERA_ZOOM` and the resolution row are held to: rAF is throttled to nothing
+while the browser pane is not compositing, so no frame of a live round can be put
+on screen from here and `computer{action:"screenshot"}` times out. `getImageData`
+needs no compositing, which is what the figures above come off. Open
+`/lashrig.html` on the dev server to look — it draws the four phases as a panel
+one under the other at the real sizes.
 
 **The burst is a death, and that is one ending rather than two.** The clock
 running out calls `killEntity`; so does a rifle. Without that, shooting the

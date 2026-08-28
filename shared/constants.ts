@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.13.1';
+export const GAME_VERSION = '0.15.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -797,17 +797,114 @@ export const DOG_MORPH_UNLOCK_CONVERTED = 101;
  * sniper's, so the officers' answer is still distance.
  */
 export const DOG_LASH_RANGE = 300;
-/** How far off the line a body may be and still be caught by it. */
-export const DOG_LASH_WIDTH = 26;
 /**
  * **Not in the spec, and it needs one.** Without a cooldown F is a key you hold
  * to infect everybody in the street inside a second and a half, which is not a
  * lash, it is a hose. Two thirds of a second is a rhythm you can feel and about
  * thirty reaches over the twenty seconds.
  */
-export const DOG_LASH_COOLDOWN_MS = 650;
-/** How long the lash stays on screen after it goes out. */
+export const DOG_LASH_COOLDOWN_MS = 850;
+/** How long an impact flash stays on screen after the arms have gone home. */
 export const DOG_LASH_SHOW_MS = 220;
+
+/**
+ * **The strike is telegraphed, and the telegraph is the whole point.**
+ *
+ * The tentacles on the thing's back coil for `DOG_LASH_WINDUP_MS`, a red ring
+ * grows on the ground where they are going to land, and only then do they go
+ * out. That ring is what makes the ability *dodgeable* rather than a hitscan
+ * nobody can answer — see `DOG_LASH_IMPACT_RADIUS`.
+ *
+ * **The aim point is locked when the key goes down and never re-read.** A ring
+ * that tracked the cursor would be a warning of nothing: whatever it showed
+ * you, the strike would still land wherever the mouse had got to. Locking it is
+ * what turns the ring from decoration into information.
+ *
+ * **420 is derived from the dodge, not picked by eye**, and the first value
+ * tried was 340 because 340 *looks* like a telegraph. Getting out of a
+ * `DOG_LASH_IMPACT_RADIUS` circle from dead centre means putting your own
+ * centre past 48 + a 12px body = **60px**, which at `PLAYER_SPEED` (160) takes
+ * **375ms** walking and 221ms sprinting. At 340 a walking player covers 54px —
+ * six short — so being caught in the middle of one could only ever be answered
+ * by a sprint, which is a telegraph most people cannot answer while they are
+ * also being shot at. At 420 a walk clears it with 7px to spare and a sprint is
+ * comfortable. A **civilian** covers 15px and cannot dodge at all, which is
+ * correct rather than a shortfall: they are the crowd this ability is for, and
+ * nothing about the ring was ever meant to save them.
+ *
+ * The cooldown covers windup + strike + snap-back with room to spare (850
+ * against 420 + 110 + 260 = 790), so one strike is fully back on the animal
+ * before the next coils. It was 650, which fired again mid-recovery — fine
+ * while the lash was an instant line, and wrong now that the limbs are the
+ * drawing.
+ */
+export const DOG_LASH_WINDUP_MS = 420;
+/** And how long they take to reach the spot once they let go. */
+export const DOG_LASH_STRIKE_MS = 110;
+/** Then back onto its back, which is a picture rather than a mechanic. */
+export const DOG_LASH_RECOVER_MS = 260;
+/**
+ * How wide the impact is — **and it is deliberately a circle, not a line.**
+ *
+ * The old lash swept a 26px corridor down its whole length and took the first
+ * body along it, which is a hitscan: there is nowhere to stand that is safe and
+ * nothing a warning could usefully have shown. A landing point with a radius is
+ * a *place*, and a place can be stepped out of — which is what the ring is
+ * drawn around and what the ability was asked to become.
+ *
+ * 48 against an officer's 12-pixel body: a couple of people caught if they are
+ * stood together, one if they are not.
+ */
+export const DOG_LASH_IMPACT_RADIUS = 48;
+/**
+ * How many of the back tentacles go out on a strike, of `DOG_MORPH_TENTACLES`.
+ *
+ * Not all of them, for the same reason `ZOMBIE_SPREAD_SHARE` is not 1: a body
+ * that throws its whole silhouette at one spot has no silhouette left, and the
+ * thing stops reading as a mass of limbs and starts reading as a firework. The
+ * three that go are picked off the strike's own id, so it is a different three
+ * each time and the drawing does not develop a favourite side.
+ */
+export const DOG_LASH_STRIKE_ARMS = 3;
+/**
+ * How far back an arm draws before it goes, as a share of its idle reach.
+ *
+ * The recoil is what makes the launch read as a launch. Without it the arms
+ * simply lengthen, which is the same picture as the wind-up of the
+ * transformation and says nothing about direction — a limb that draws back is a
+ * limb about to be thrown, and it is the half of the tell that is legible from
+ * behind the animal, where the ground ring may be off the edge of the screen.
+ *
+ * **0.9 rather than the 0.35 first written, and the rig is what said so.**
+ * A *gather* — the arm shortening to a third of itself while turning away — is
+ * what a limb loading actually does, and at this size it is invisible: the five
+ * arms that are not striking still fan out in every direction and bury it.
+ * Measured as the shift in where the mass of the drawing sits along the axis to
+ * the landing point, a 0.35 gather moved it **+0.3px** — nothing, and the wrong
+ * way. Drawn back to nearly its full length *pointing away from the target*,
+ * three arms make a bundle behind the animal that is plainly a thing being
+ * loaded.
+ */
+export const DOG_LASH_COIL = 0.9;
+/**
+ * The shove. **Everybody the strike catches is pushed, armoured or not** — the
+ * armour is about the infection, not about being hit by a limb the width of a
+ * leg.
+ *
+ * Applied as an impulse that decays over `DOG_LASH_PUSH_MS` rather than as a
+ * displacement: a body that jumps 30px between two ticks reads as a teleport,
+ * and one that covers it over a fifth of a second reads as having been hit.
+ * Small on purpose — this is a stagger, not a launcher blast, and the officers'
+ * answer to the transformed dog is still distance.
+ */
+export const DOG_LASH_PUSH = 210;
+export const DOG_LASH_PUSH_MS = 220;
+/**
+ * How fast a shove bleeds off — `e^-rate*t`, so about a tenth of it is left
+ * after a quarter of a second. Shared by anything that ever wants to knock a
+ * body about; the tentacle strike is the only caller today.
+ */
+export const KNOCKBACK_DECAY = 9;
 
 /**
  * The burst.
@@ -1228,6 +1325,38 @@ export const DOG_HEAD_COLOR = '#5b452f'; // warmer, the way a shepherd's face is
  * as the body failing.
  */
 export const DOG_TENTACLE_COLOR = '#7e2c30';
+/**
+ * The ring on the ground under a coiled strike. **Client-side only.**
+ *
+ * Red because it is the one colour on this map that already means "the dead",
+ * and because the ring has to be read in a fifth of a second by somebody who is
+ * also being shot at — a subtle telegraph is not a telegraph. It is drawn on
+ * the *ground*, under the bodies, so the officer standing in it is on top of
+ * their own warning rather than hidden by it.
+ *
+ * Two parts and they say different things: the rim is where the edge of the
+ * impact is, and the fill sweeping round it is how long there is left. A ring
+ * that only pulsed would say "danger here" without ever saying "now", which is
+ * the half a dodge actually needs.
+ */
+export const LASH_WARN_COLOR = '#d4373d';
+export const LASH_WARN_RIM = 2.6;
+/**
+ * A strike that hit nothing still has to have happened.
+ *
+ * A gouge in the road and two or three chips of it thrown up — the smallest
+ * thing that turns a miss from "the ability did nothing" into "it missed", and
+ * the reason a dodge is worth making rather than merely surviving. Thrown
+ * client-side off the strike landing, exactly as blood is thrown off `Shot.hit`
+ * and the gore off a birth host leaving the snapshot.
+ */
+export const LASH_CHIP_COUNT = 3;
+export const LASH_CHIP_MS = 620;
+export const LASH_CHIP_SPEED = 130;
+/** How long the gouge stays. Shorter than blood: it is a scuff, not a stain. */
+export const LASH_GOUGE_MS = 16000;
+export const LASH_GOUGE_COLOR = '#15181c';
+export const LASH_CHIP_COLOR = '#6a6255';
 export const DOG_DECAY_COLOR = '#8b8d74'; // hide gone off: sickly, pale, greenish
 export const DOG_ROT_COLOR = '#6d4232';
 export const DOG_MAW_COLOR = '#4a1418'; // down its throat, and inside the flank

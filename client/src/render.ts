@@ -89,6 +89,16 @@ import {
   DOG_ART_RADIUS,
   DOG_MORPH_ART_MUL,
   DOG_MORPH_TENTACLES,
+  DOG_LASH_STRIKE_ARMS,
+  DOG_LASH_COIL,
+  LASH_WARN_COLOR,
+  LASH_WARN_RIM,
+  LASH_CHIP_COUNT,
+  LASH_CHIP_MS,
+  LASH_CHIP_SPEED,
+  LASH_GOUGE_MS,
+  LASH_GOUGE_COLOR,
+  LASH_CHIP_COLOR,
   DOG_MAP_MARGIN,
   DOG_MAP_SIZE,
   DOG_MAX_HEALTH,
@@ -1843,7 +1853,7 @@ function drawDog(
   // Over the body, because they are coming *out* of it. After the head, so
   // one can cross the muzzle — a tentacle that respected the silhouette would
   // read as decoration painted on rather than as something tearing free.
-  if (morph > 0) drawTentacles(ctx, x, y, facing, r, morph, hashId(e.id), now);
+  if (morph > 0) drawTentacles(ctx, e.id, x, y, facing, r, morph, hashId(e.id), now);
 
   // **A corpse has no health to report.** The bar is drawn whenever health is
   // under the maximum, and a body is on zero — so every corpse in the city wore
@@ -1869,8 +1879,33 @@ function drawDog(
 }
 
 /**
- * The tentacles that come out of a transforming dog, and go on writhing for as
- * long as it is one.
+ * The strikes currently in the air, so the dog's own back tentacles can be the
+ * ones that go out.
+ *
+ * **Module state rather than a parameter**, and that is the cheap seam rather
+ * than a shortcut. `drawEntity` is called for every body in the city and for
+ * every corpse, so a seventh argument would be threaded through five call sites
+ * that have no idea what a tentacle is to reach one branch that does. The file
+ * already holds the blood decals and the baked sprites this way.
+ *
+ * Written once a frame by `main.ts`, before the entity pass, off the same
+ * snapshot the separate warning and impact passes read.
+ */
+let activeLashes: LashState[] = [];
+export function setLashes(list: LashState[]): void {
+  activeLashes = list;
+}
+
+/**
+ * The tentacles that come out of a transforming dog, go on writhing for as long
+ * as it is one, and are **the same limbs that go out when it strikes**.
+ *
+ * That last part is the whole reason this function knows about strikes at all.
+ * The lash used to be a line drawn from the middle of the animal by a pass of
+ * its own — which is a tracer with a curl in it, and reads as something the dog
+ * fired rather than as something the dog *did*. Three of the arms already on
+ * its back coiling and then throwing themselves at a spot is the ability the
+ * silhouette was already promising.
  *
  * **Live rather than baked**, unlike everything else on the animal. The dog's
  * parts are painted once into offscreen canvases because they are rigid shapes
@@ -1882,13 +1917,16 @@ function drawDog(
  * **No per-frame state.** Every tentacle's bearing, length and phase come off
  * the dog's own id and the clock, exactly as the saliva strands and the acid
  * churn do, so two dogs transforming side by side do not writhe in lockstep and
- * nothing has to be remembered between frames.
+ * nothing has to be remembered between frames. Which three arms strike comes
+ * off the *strike's* id the same way, so it is a different three each time and
+ * the drawing does not develop a favourite side.
  *
  * They grow with `morph` rather than appearing at the end of it: the wind-up is
  * *them ripping out*, so at 0.2 they are stubs and at 1 they are at full reach.
  */
 function drawTentacles(
   ctx: CanvasRenderingContext2D,
+  id: string,
   x: number,
   y: number,
   facing: number,
@@ -1898,6 +1936,10 @@ function drawTentacles(
   now: number,
 ): void {
   const count = DOG_MORPH_TENTACLES;
+  // At most one strike per animal is ever in the air — `DOG_LASH_COOLDOWN_MS`
+  // is longer than a whole strike takes — so the first match is the match.
+  const strike = activeLashes.find((l) => l.dogId === id) ?? null;
+
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -1913,11 +1955,22 @@ function drawTentacles(
     const ax = x + Math.cos(facing) * anchorAlong - Math.sin(facing) * anchorAcross;
     const ay = y + Math.sin(facing) * anchorAlong + Math.cos(facing) * anchorAcross;
 
-    const reach = r * (0.75 + (h * 7) % 0.75) * morph;
-    // Each on its own clock, so the mass of them churns rather than pulsing.
+    const idle = r * (0.75 + ((h * 7) % 0.75)) * morph;
+    // Its own clock, so the mass of them churns rather than pulsing together.
     const t = now * 0.004 + h * 6.3;
-    const segs = 4;
 
+    // Is this one of the arms that is going out? Hashed off the strike's id so
+    // the set changes from throw to throw, and off the arm's index so the same
+    // strike picks the same three on every frame of itself.
+    const striking =
+      strike !== null && hash2(strike.id * 7919, i) < DOG_LASH_STRIKE_ARMS / count;
+
+    if (striking && strike) {
+      drawStrikingArm(ctx, ax, ay, base, idle, r, morph, h, t, strike);
+      continue;
+    }
+
+    const segs = 4;
     ctx.beginPath();
     ctx.moveTo(ax, ay);
     let px = ax;
@@ -1928,21 +1981,13 @@ function drawTentacles(
       // the body and loose at the tip, and a constant bend per segment reads as
       // an arc of wire.
       dir += Math.sin(t + s * 1.3 + h) * 0.55 * (s / segs);
-      const step = (reach / segs) * (1.15 - s * 0.09);
+      const step = (idle / segs) * (1.15 - s * 0.09);
       px += Math.cos(dir) * step;
       py += Math.sin(dir) * step;
       ctx.lineTo(px, py);
     }
 
-    // Two passes: a dark one wider than the light one, so each has a contour
-    // and the mass of them does not merge into a single blob at a distance.
-    ctx.strokeStyle = 'rgba(24, 10, 12, 0.9)';
-    ctx.lineWidth = r * 0.3 * morph;
-    ctx.stroke();
-    ctx.strokeStyle = DOG_TENTACLE_COLOR;
-    ctx.lineWidth = r * 0.18 * morph;
-    ctx.stroke();
-
+    strokeTentacle(ctx, r * 0.3 * morph, r * 0.18 * morph, 1);
     // A wet tip, which is most of what makes it read as flesh rather than rope.
     ctx.beginPath();
     ctx.arc(px, py, r * 0.09 * morph, 0, TAU);
@@ -1950,6 +1995,132 @@ function drawTentacles(
     ctx.fill();
   }
   ctx.restore();
+}
+
+/**
+ * One arm through a strike: coiled back, thrown out, and reeled home.
+ *
+ * The three phases are three different curves and deliberately not one
+ * interpolation between two poses — what makes a throw read as a throw is that
+ * the coil goes the *wrong way* first. An arm that simply extended toward the
+ * target over the windup would telegraph nothing the ground ring is not already
+ * saying, and would look like the arm growing rather than being loaded.
+ *
+ * - **coiling** (`phase 0`): drawn back along its own bearing to
+ *   `DOG_LASH_COIL` of its idle reach, and swung *away* from the target, so the
+ *   animal visibly winds up. Eased on the square, so it is slow to start and
+ *   snatches back at the end — a linear coil is a limb being pulled by a rope.
+ * - **out** (`phase 1`): a straight run at the landing point over 110ms, with
+ *   the tip leading and the shaft still lagging behind it. Barely three ticks,
+ *   which is the point: the windup is the readable part and the strike itself
+ *   is meant to be too quick to answer.
+ * - **home** (`phase 2`): the tip walks back down the same line and the curl
+ *   comes back into it as it goes slack.
+ */
+function drawStrikingArm(
+  ctx: CanvasRenderingContext2D,
+  ax: number,
+  ay: number,
+  base: number,
+  idle: number,
+  r: number,
+  morph: number,
+  h: number,
+  t: number,
+  strike: LashState,
+): void {
+  const toTarget = Math.atan2(strike.y2 - ay, strike.x2 - ax);
+  const span = Math.hypot(strike.x2 - ax, strike.y2 - ay);
+
+  // How far down the line to the landing point the tip has got, and how much of
+  // the arm's own idle curl is still in it. `reach` of 0 is the coil.
+  let reach: number;
+  let slack: number;
+  if (strike.phase === 0) {
+    const e = strike.t * strike.t;
+    reach = -idle * DOG_LASH_COIL * e;
+    slack = 1 - e * 0.7;
+  } else if (strike.phase === 1) {
+    // Eased out rather than linear: the tip is quickest in the middle of the
+    // throw, which is what an arm does and what a lerp does not.
+    reach = span * (1 - (1 - strike.t) * (1 - strike.t));
+    slack = 0.25;
+  } else {
+    reach = span * (1 - strike.t) * (1 - strike.t);
+    slack = 0.25 + strike.t * 0.75;
+  }
+
+  // Which way the shaft leaves the body. Coiling it swings off the target;
+  // committed it lies along the line to it.
+  const away = base + (base - toTarget) * 0.35;
+  const lie =
+    strike.phase === 0 ? away + (toTarget - away) * (strike.t * strike.t) : toTarget;
+
+  const segs = 5;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  let px = ax;
+  let py = ay;
+  let dir = lie;
+  const len = Math.max(idle * DOG_LASH_COIL * 0.6, Math.abs(reach));
+  /**
+   * **The taper has to be normalised, or the arm never reaches the ring.**
+   *
+   * Segments get shorter toward the tip, which is what makes a limb read as
+   * tapering rather than as a chain of equal links — but the weights
+   * (`1.15 - s * 0.09`) sum to 4.40 across five segments, not 5. Divided by
+   * `segs` the arm therefore lands at **88% of `len`**, and since `len` at
+   * full extension is the whole span to the landing point, the tip came down a
+   * ninth of the throw short of the red circle everybody was told to dodge.
+   * Measured off the canvas before the fix: ink reached **0.91 of the span**
+   * against the 1.00 the ring is drawn at.
+   *
+   * The idle arms have the same shape and it does not matter there — how long
+   * an idle arm looks is an art decision with nothing to agree with — so the
+   * normalisation is here rather than shared.
+   */
+  let taper = 0;
+  for (let s = 1; s <= segs; s++) taper += 1.15 - s * 0.09;
+  for (let s = 1; s <= segs; s++) {
+    // The curl is scaled by how slack the arm is, so a limb under tension is
+    // straight and one that has been let go writhes. Same shape as the idle
+    // curl building along the length, and for the same reason.
+    dir += Math.sin(t + s * 1.3 + h) * 0.5 * (s / segs) * slack;
+    const step = (len / taper) * (1.15 - s * 0.09) * (reach < 0 ? -1 : 1);
+    px += Math.cos(dir) * step;
+    py += Math.sin(dir) * step;
+    ctx.lineTo(px, py);
+  }
+
+  // A striking arm is drawn thicker than an idle one — it is under load, and
+  // the extra weight is what picks the three of them out of the eight without
+  // needing a second colour.
+  strokeTentacle(ctx, r * 0.38 * morph, r * 0.24 * morph, 1);
+
+  ctx.beginPath();
+  ctx.arc(px, py, r * 0.13 * morph, 0, TAU);
+  ctx.fillStyle = 'rgba(214, 84, 88, 0.9)';
+  ctx.fill();
+}
+
+/**
+ * Two passes: a dark one wider than the light one, so each arm has a contour
+ * and the mass of them does not merge into a single blob at a distance.
+ */
+function strokeTentacle(
+  ctx: CanvasRenderingContext2D,
+  dark: number,
+  light: number,
+  alpha: number,
+): void {
+  ctx.strokeStyle = 'rgba(24, 10, 12, ' + (0.9 * alpha).toFixed(3) + ')';
+  ctx.lineWidth = dark;
+  ctx.stroke();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = DOG_TENTACLE_COLOR;
+  ctx.lineWidth = light;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
 }
 
 /** Two integers into a stable fraction. Same trick as `hashId`, one more input. */
@@ -2025,15 +2196,30 @@ export function drawTentacleDebris(
 }
 
 /**
- * A tentacle lashing out at somebody.
+ * The red ring where a strike is about to come down.
  *
- * Drawn from the dog to whatever it reached, with a curl in it so it is plainly
- * a limb rather than a tracer, and a splash at the far end when it caught
- * somebody — **which is the only readout there is** that it worked. The lash
- * infects rather than damaging, so there is no blood, no health bar moving and
- * nothing else on screen to say anything happened.
+ * **This is the ability's one concession to the people it is used on**, and it
+ * is drawn on the *ground* — under the bodies, with `drawBlood` and the tyre
+ * marks — for a reason that matters: the officer standing in it is the one
+ * person who most needs to see it, and a ring painted over the top of them
+ * would be a warning that hides the thing being warned.
+ *
+ * Three readings, and they answer different questions:
+ *
+ * - the **rim** is where the edge of the impact is, so "am I in it" is a
+ *   question about your own feet rather than about judging a distance;
+ * - the **sweep** filling round the rim is how long there is left, which is the
+ *   half a dodge actually needs — a ring that only pulsed would say "danger
+ *   here" and never say "now";
+ * - and the **wash** inside comes up as the sweep closes, so the thing reads as
+ *   loading even at the edge of vision where the rim is a couple of pixels.
+ *
+ * It is drawn through the coil and **held for the strike itself**, dimmer: the
+ * arms are in the air for 110ms, which is three ticks, and a ring that vanished
+ * the instant they let go would blink out before anybody registered it had
+ * completed. Gone the moment it lands.
  */
-export function drawLashes(
+export function drawLashWarnings(
   ctx: CanvasRenderingContext2D,
   list: LashState[],
   view: Viewport,
@@ -2041,51 +2227,267 @@ export function drawLashes(
 ): void {
   if (list.length === 0) return;
   ctx.save();
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-
   for (let i = 0; i < list.length; i++) {
     const l = list[i];
-    if (Math.max(l.x1, l.x2) < view.x - 60 || Math.min(l.x1, l.x2) > view.x + view.w + 60) continue;
-    if (Math.max(l.y1, l.y2) < view.y - 60 || Math.min(l.y1, l.y2) > view.y + view.h + 60) continue;
+    if (l.phase === 2) continue; // landed; the flash has it from here
+    if (!visible(view, l.x2, l.y2, l.r + 8)) continue;
 
-    const dx = l.x2 - l.x1;
-    const dy = l.y2 - l.y1;
-    const len = Math.hypot(dx, dy) || 1;
-    const px = -dy / len;
-    const py = dx / len;
-    // It **snaps back** as it fades rather than simply thinning: `t` runs 1 to
-    // 0, so the far end walks in toward the dog and the whole thing is drawn
-    // shorter every frame. A lash that faded in place would read as a beam.
-    const reach = len * (0.35 + 0.65 * l.t);
-    const tipX = l.x1 + (dx / len) * reach;
-    const tipY = l.y1 + (dy / len) * reach;
-    // One kink, sinusoidal on its own life, so it reads as something thrown.
-    const bow = Math.sin(now * 0.02 + i) * reach * 0.1 * l.t;
+    // One ramp for the whole tell: 0 as the arms coil, 1 as they arrive.
+    const load = l.phase === 0 ? l.t : 1;
+    const fading = l.phase === 1 ? 1 - l.t * 0.55 : 1;
 
+    // The wash inside. Deliberately faint — the ground under it has to stay
+    // readable, because the answer to the ring is to walk on it.
+    ctx.globalAlpha = (0.1 + load * 0.16) * fading;
+    ctx.fillStyle = LASH_WARN_COLOR;
     ctx.beginPath();
-    ctx.moveTo(l.x1, l.y1);
-    ctx.quadraticCurveTo(
-      (l.x1 + tipX) / 2 + px * bow,
-      (l.y1 + tipY) / 2 + py * bow,
-      tipX,
-      tipY,
-    );
-    ctx.strokeStyle = 'rgba(24, 10, 12, ' + (0.85 * l.t).toFixed(3) + ')';
-    ctx.lineWidth = 7;
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(150, 52, 58, ' + (0.95 * l.t).toFixed(3) + ')';
-    ctx.lineWidth = 4;
+    ctx.arc(l.x2, l.y2, l.r, 0, TAU);
+    ctx.fill();
+
+    // The rim, at the true impact radius.
+    ctx.globalAlpha = (0.42 + load * 0.5) * fading;
+    ctx.strokeStyle = LASH_WARN_COLOR;
+    ctx.lineWidth = LASH_WARN_RIM;
     ctx.stroke();
 
-    if (l.hit) {
+    // And the sweep closing round it. Starts at the top and goes clockwise,
+    // which is the one convention everybody already reads off a clock face.
+    ctx.globalAlpha = fading;
+    ctx.lineWidth = LASH_WARN_RIM * 1.8;
+    ctx.beginPath();
+    ctx.arc(l.x2, l.y2, l.r, -Math.PI / 2, -Math.PI / 2 + load * TAU);
+    ctx.stroke();
+
+    // A cross at the middle, so the spot is legible when the rim is off screen
+    // or under a crowd. Small enough not to be mistaken for a pickup.
+    ctx.globalAlpha = (0.3 + load * 0.5) * fading;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(l.x2 - 5, l.y2);
+    ctx.lineTo(l.x2 + 5, l.y2);
+    ctx.moveTo(l.x2, l.y2 - 5);
+    ctx.lineTo(l.x2, l.y2 + 5);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+/**
+ * What is left at the landing point once the arms have gone: a flash, and a
+ * deflect ring over anybody whose armour ate it.
+ *
+ * The limbs themselves are **not drawn here** — they are drawn with the dog by
+ * `drawTentacles`, because they are the same arms that idle on its back. What
+ * this pass is for is the part that belongs to the ground rather than to the
+ * animal, and it is over the bodies because an impact lands on top of whoever
+ * was standing there.
+ *
+ * The blood, the chips and the gouge are not here either: those are *thrown*
+ * once when a strike lands rather than drawn per frame, exactly as blood is
+ * thrown off `Shot.hit`. See `takeLashImpacts`.
+ */
+export function drawLashes(
+  ctx: CanvasRenderingContext2D,
+  list: LashState[],
+  view: Viewport,
+): void {
+  if (list.length === 0) return;
+  ctx.save();
+  for (let i = 0; i < list.length; i++) {
+    const l = list[i];
+    if (l.phase !== 2) continue;
+    if (!visible(view, l.x2, l.y2, l.r + 20)) continue;
+    const life = 1 - l.t;
+    if (life <= 0) continue;
+
+    // The impact itself: a bright ring thrown outward past the rim, so the
+    // spread reads as force rather than as the warning circle fading.
+    ctx.globalAlpha = life * life * 0.75;
+    ctx.strokeStyle = '#e8656a';
+    ctx.lineWidth = 2 + life * 4;
+    ctx.beginPath();
+    ctx.arc(l.x2, l.y2, l.r * (0.55 + (1 - life) * 0.7), 0, TAU);
+    ctx.stroke();
+
+    // And a deflect ring on each body whose armour turned it, which is the
+    // whole readout that a charge was spent on something. Bright and cold
+    // against the red, because it is the one good thing on screen.
+    for (let k = 0; k < l.hits.length; k++) {
+      const hit = l.hits[k];
+      if (hit.blocked === null) continue;
+      ctx.globalAlpha = life * 0.9;
+      ctx.strokeStyle = hit.blocked === 'shield' ? '#9fd8ff' : '#cfd6c4';
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
-      ctx.arc(tipX, tipY, 9 * l.t + 3, 0, TAU);
-      ctx.fillStyle = 'rgba(120, 190, 70, ' + (0.5 * l.t).toFixed(3) + ')';
-      ctx.fill();
+      ctx.arc(hit.x, hit.y, 11 + (1 - life) * 9, 0, TAU);
+      ctx.stroke();
     }
   }
+  ctx.globalAlpha = 1;
   ctx.restore();
+}
+
+/**
+ * Everything a landed strike throws that is not on the wire: blood on the
+ * people it caught, a gouge and chips where it caught nobody.
+ *
+ * **Thrown once per strike, never per frame**, which is what `LashState.id` is
+ * for. A strike is on the wire for the whole of its snap-back, so anything done
+ * off the flag rather than off the transition would be done twenty times — the
+ * same trap the roar's sound has, and solved the same way, on the edge.
+ *
+ * The set is bounded by the ids that are still on screen, so it empties itself
+ * as strikes finish rather than growing for the length of the round.
+ */
+const lashesResolved = new Set<number>();
+
+export function takeLashImpacts(list: LashState[], now: number): void {
+  for (let i = 0; i < list.length; i++) {
+    const l = list[i];
+    if (l.phase !== 2 || lashesResolved.has(l.id)) continue;
+    lashesResolved.add(l.id);
+
+    if (l.hits.length === 0) {
+      // Nothing there. A gouge in the road and a few chips of it thrown up —
+      // the smallest thing that turns "the ability did nothing" into "it
+      // missed", and the reason a dodge is worth making.
+      spawnLashScar(l.x2, l.y2, now);
+      continue;
+    }
+
+    for (let k = 0; k < l.hits.length; k++) {
+      const hit = l.hits[k];
+      // Along the line the limb came in on, so the spray goes on past them the
+      // way a round's does rather than fanning off a point.
+      spawnBlood(hit.x, hit.y, Math.atan2(hit.y - l.y1, hit.x - l.x1), now + k);
+    }
+  }
+
+  // Keep only ids still in the round. A strike that has finished cannot come
+  // back, so anything not in the list is safe to forget.
+  if (lashesResolved.size > 16) {
+    const live = new Set(list.map((l) => l.id));
+    for (const id of lashesResolved) if (!live.has(id)) lashesResolved.delete(id);
+  }
+}
+
+/** A new city has none of the old one's marks on it — see `clearBlood`. */
+export function clearLashScars(): void {
+  lashGouges.length = 0;
+  lashChips.length = 0;
+  lashesResolved.clear();
+}
+
+interface LashGouge {
+  x: number;
+  y: number;
+  r: number;
+  born: number;
+}
+interface LashChip {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  born: number;
+}
+const lashGouges: LashGouge[] = [];
+const lashChips: LashChip[] = [];
+
+/**
+ * A miss: a scuff in the road, and two or three chips of it thrown up.
+ *
+ * The chips are drawn with a **rising arc and a shadow under them**, which is
+ * the same trick the flamethrower's stream and the thrown tentacles use and for
+ * the same reason: on a top-down map, height only reads if something on the
+ * ground stays put underneath it. Three of them, small — this is punctuation on
+ * a miss, not an explosion.
+ */
+function spawnLashScar(x: number, y: number, now: number): void {
+  const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
+  for (let i = 0; i < 3; i++) {
+    lashGouges.push({
+      x: x + (rand() - 0.5) * 16,
+      y: y + (rand() - 0.5) * 16,
+      r: 3 + rand() * 6,
+      born: now,
+    });
+  }
+  for (let i = 0; i < LASH_CHIP_COUNT; i++) {
+    const a = rand() * TAU;
+    const speed = LASH_CHIP_SPEED * (0.4 + rand() * 0.9);
+    lashChips.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, born: now });
+  }
+}
+
+/** The scuff, on the ground with the blood. One path per band, filled once. */
+export function drawLashScars(
+  ctx: CanvasRenderingContext2D,
+  view: Viewport,
+  now: number,
+): void {
+  if (lashGouges.length === 0) return;
+  let write = 0;
+  for (let i = 0; i < lashGouges.length; i++) {
+    if (now - lashGouges[i].born < LASH_GOUGE_MS) lashGouges[write++] = lashGouges[i];
+  }
+  lashGouges.length = write;
+
+  // Two bands rather than the blood's four: a scuff on tarmac barely changes as
+  // it ages, so the fade has almost nothing to describe.
+  for (let band = 0; band < 2; band++) {
+    let any = false;
+    ctx.beginPath();
+    for (const g of lashGouges) {
+      const age = (now - g.born) / LASH_GOUGE_MS;
+      if ((age < 0.5 ? 0 : 1) !== band) continue;
+      if (!visible(view, g.x, g.y, g.r + 4)) continue;
+      ctx.moveTo(g.x + g.r, g.y);
+      ctx.arc(g.x, g.y, g.r, 0, TAU);
+      any = true;
+    }
+    if (!any) continue;
+    ctx.globalAlpha = band === 0 ? 0.5 : 0.26;
+    ctx.fillStyle = LASH_GOUGE_COLOR;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** And the chips, over the bodies, with the blood spray. */
+export function drawLashChips(ctx: CanvasRenderingContext2D, now: number): void {
+  if (lashChips.length === 0) return;
+  let write = 0;
+  for (let i = 0; i < lashChips.length; i++) {
+    const chip = lashChips[i];
+    const age = now - chip.born;
+    if (age >= LASH_CHIP_MS) continue;
+    lashChips[write++] = chip;
+
+    const life = 1 - age / LASH_CHIP_MS;
+    const t = age / 1000;
+    const drag = Math.exp(-t * 3.2);
+    const px = chip.x + chip.vx * ((1 - drag) / 3.2);
+    const py = chip.y + chip.vy * ((1 - drag) / 3.2);
+    // Up and back down over its life. Without the shadow this reads as the chip
+    // sliding off to one side rather than being thrown.
+    const lift = Math.sin((1 - life) * Math.PI) * 9;
+
+    ctx.globalAlpha = life * 0.35;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.ellipse(px, py, 1.6, 0.9, 0, 0, TAU);
+    ctx.fill();
+
+    ctx.globalAlpha = life;
+    ctx.fillStyle = LASH_CHIP_COLOR;
+    ctx.beginPath();
+    ctx.arc(px, py - lift, 1.5, 0, TAU);
+    ctx.fill();
+  }
+  lashChips.length = write;
+  ctx.globalAlpha = 1;
 }
 
 /**
