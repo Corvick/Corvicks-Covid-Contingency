@@ -23,6 +23,7 @@ import {
   WORLD_HEIGHT,
   ENTITY_RADIUS,
   ENTITY_MAX_HEALTH,
+  OFFICER_SPACING_PAD,
   TURNING_TELL_MS,
   HUMAN_COUNT,
   cityAreaScale,
@@ -117,7 +118,7 @@ import { doorRect, initDoors } from './doors.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { inAcidLobes } from '../../shared/acidshape.js';
 import { initDucks, type Duck } from './ducks.js';
-import type { Emplacement } from './emplacement.js';
+import type { Barricade, Emplacement } from './emplacement.js';
 import type { BackupVehicle } from './backup.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
@@ -436,6 +437,41 @@ export interface AiState {
   guardY: number | null;
   guardRadius: number;
   /**
+   * A spectator's RTS move-order: go here, then hold and watch the street.
+   *
+   * Sits above escort/guard/patrol in `updateNpcOfficer` but below the fight,
+   * so a commanded officer still defends itself and engages what it passes —
+   * an attack-move for free. Only ever set for grey AI officers, and only from
+   * a spectating socket; sticky until a new order replaces it. `null` means no
+   * order.
+   */
+  commandX: number | null;
+  commandY: number | null;
+  /**
+   * A sandbag wall this officer has been sent to build, and which way it lies.
+   *
+   * Read by a branch *above* the move order — a build order supersedes a move —
+   * and below the fight, like everything else here. `buildAt` is when the
+   * stacking finishes and is only set once he is stood at the spot, so being
+   * dragged off it starts the work again rather than banking it.
+   * `buildSetOutAt` is the one budget for the whole errand.
+   */
+  buildX: number | null;
+  buildY: number | null;
+  buildAngle: number;
+  buildAt: number;
+  buildSetOutAt: number;
+  /**
+   * Still carrying his one sandbag.
+   *
+   * Defaulted true for *everybody* and only ever read for a grey officer, the
+   * same trick `guardsDoors` and the rest of the door traits use — nothing has
+   * to be told that a civilian does not build sandbags, because nothing asks.
+   * `toWire` emits it as `bag` only for grey officers, which is what the
+   * spectator's command card counts.
+   */
+  hasSandbag: boolean;
+  /**
    * Carrying the survivor beacon to where it was called for.
    *
    * A separate destination from `guardX`/`guardY` on purpose: he walks to this
@@ -676,6 +712,12 @@ export interface World {
   /** Players who ran the bar dry and haven't recovered enough to sprint again. */
   exhausted: Set<string>;
   shots: Shot[];
+  /**
+   * Zombies that died this tick — cleared right after the snapshot goes out,
+   * exactly like `shots`. The client turns each into a ragdoll-and-grey corpse;
+   * nothing else is sent. Dogs are not in here (they keep `corpses`).
+   */
+  deaths: Array<{ id: string; x: number; y: number; a: number }>;
   entityGrid: SpatialGrid<Entity>;
   /**
    * Just the zombies, rebuilt beside `entityGrid`.
@@ -1025,6 +1067,15 @@ export interface World {
   /** Deployed pocket gunners, keyed by the officer manning each one. */
   emplacements: Map<string, Emplacement>;
   /**
+   * Bare sandbag walls the garrison built to a spectator's order.
+   *
+   * Kept beside the emplacements rather than folded into them: an emplacement
+   * whose gun is gone is a record that has to be deleted, and a wall is a thing
+   * that exists on its own. Everything about how it *behaves* is shared —
+   * `zombieAtSandbag`, the collision push-out and the drawing all handle both.
+   */
+  barricades: Map<string, Barricade>;
+  /**
    * How many zombies are currently onto each victim, keyed by victim id.
    *
    * Recounted once a tick off the walk that was already happening, the same
@@ -1306,6 +1357,14 @@ export function newAiState(now: number, x: number, y: number): AiState {
     guardX: null,
     guardY: null,
     guardRadius: VAN_GUARD_RADIUS,
+    commandX: null,
+    commandY: null,
+    buildX: null,
+    buildY: null,
+    buildAngle: 0,
+    buildAt: 0,
+    buildSetOutAt: 0,
+    hasSandbag: true,
     beaconX: null,
     beaconY: null,
     beaconPlantAt: 0,
@@ -1791,6 +1850,7 @@ export function createWorld(): World {
     stamina: new Map(),
     exhausted: new Set(),
     shots: [],
+    deaths: [],
     entityGrid: new SpatialGrid<Entity>(ENTITY_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     zombieGrid: new SpatialGrid<Entity>(ENTITY_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     wallGrid: new SpatialGrid<Wall>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
@@ -1850,6 +1910,7 @@ export function createWorld(): World {
     radioReplies: [],
     nextRadioScan: 0,
     emplacements: new Map(),
+    barricades: new Map(),
     targetClaims: new Map(),
     fires: [],
     pendingFires: [],
@@ -1972,11 +2033,15 @@ export function resetWorld(world: World): void {
   world.aimHeading.clear();
   world.chargeSince.clear();
   world.shots.length = 0;
+  world.deaths.length = 0;
   world.spectators.clear();
   world.gameOver = false;
   world.victory = false;
   world.paused = false;
   world.emplacements.clear();
+  // A wall is a coordinate, and a coordinate means nothing on a fresh map —
+  // exactly the trap `world.corpses` fell into.
+  world.barricades.clear();
   world.targetClaims.clear();
   // Keyed by building index, which means nothing on a map that no longer has
   // that building in it — the same trap `world.corpses` fell into with its
@@ -2181,8 +2246,12 @@ export function isMorphed(dog: DogState | undefined, now: number): boolean {
  * is exactly how a grenade came to delete a *player's dog* outright — `heli.ts`
  * removed any zombie it dropped, and a dog is a zombie. Anything that can take
  * an entity's health to zero calls this instead.
+ *
+ * `angle` is the direction the killing blow came *from* travelling — i.e. which
+ * way to shove a ragdolling body. Only a zombie death records one (for the
+ * client's corpse); everything else ignores it. Defaults to the body's facing.
  */
-export function killEntity(world: World, e: Entity, now: number): void {
+export function killEntity(world: World, e: Entity, now: number, angle?: number): void {
   if (world.dogs.has(e.id)) {
     const dog = world.dogState.get(e.id);
     // Already down and waiting to rise. Rounds keep landing on the body — the
@@ -2262,6 +2331,19 @@ export function killEntity(world: World, e: Entity, now: number): void {
     e.y = world.map.height / 2;
     releaseGrapples(world, e.id);
     return;
+  }
+
+  // A shot zombie leaves a corpse: the client ragdolls it a short way along the
+  // round, greys it, and — with the setting on — keeps it for the round. One
+  // transient record, exactly like a shot; the dog path above never reaches
+  // here, so this is shamblers and turned officers-gone-zombie only.
+  if (e.type === 'zombie') {
+    world.deaths.push({
+      id: e.id,
+      x: Math.round(e.x),
+      y: Math.round(e.y),
+      a: Math.round((angle ?? e.facing) * 100) / 100,
+    });
   }
 
   removeEntity(world, e.id);
@@ -2611,6 +2693,37 @@ export function breachSpawnPoint(world: World, along: number): { x: number; y: n
 let hordeCounter = 0;
 
 /**
+ * The nearest spot to (x, y) somebody could actually stand on and get to.
+ *
+ * Spirals out until it finds a cell that is both unblocked *and* in the map's
+ * main walkable component — reachable matters as much as clear, or an order can
+ * point at the inside of a sealed courtyard. Falls back to the raw point when
+ * there is nothing walkable anywhere near, which is the honest answer: the
+ * caller's order still goes out and still lapses on its own.
+ *
+ * Shared by the dog's roar and the spectator's move orders. It was the roar's
+ * private `roarTarget` first, and a second copy of it in `engine.ts` is exactly
+ * the duplication this file keeps warning about.
+ */
+export function walkableNear(world: World, x: number, y: number): { x: number; y: number } {
+  const px = clamp(x, 0, WORLD_WIDTH);
+  const py = clamp(y, 0, WORLD_HEIGHT);
+  if (!world.nav.isBlocked(px, py) && world.nav.isReachable(px, py)) return { x: px, y: py };
+
+  for (let ring = 1; ring <= 14; ring++) {
+    const radius = ring * 26;
+    const steps = ring * 8;
+    for (let i = 0; i < steps; i++) {
+      const angle = (i / steps) * Math.PI * 2;
+      const sx = clamp(px + Math.cos(angle) * radius, 0, WORLD_WIDTH);
+      const sy = clamp(py + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
+      if (!world.nav.isBlocked(sx, sy) && world.nav.isReachable(sx, sy)) return { x: sx, y: sy };
+    }
+  }
+  return { x: px, y: py };
+}
+
+/**
  * Walk `count` more zombies in at the breach — the roar's second half.
  *
  * They arrive on the same edge the outbreak did, which is the edge the dog
@@ -2730,14 +2843,22 @@ export function resolveCollisions(world: World): void {
 
   for (const a of world.entities.values()) {
     neighbours.clear();
-    world.entityGrid.queryCircle(a.x, a.y, a.radius * 2 + 8, neighbours);
+    // **The query has to cover the padded distance, not the bare radii.** At
+    // `a.radius * 2 + 8` it was exactly `2r + pad` for two officers — the pairs
+    // the padding exists to separate would have sat right on the boundary and
+    // been offered only by luck.
+    world.entityGrid.queryCircle(a.x, a.y, a.radius * 2 + 8 + OFFICER_SPACING_PAD, neighbours);
 
     for (const b of neighbours) {
       if (b.id <= a.id) continue; // each pair once
 
       const dx = b.x - a.x;
       const dy = b.y - a.y;
-      const minDist = a.radius + b.radius;
+      // Two officers stand a little further apart than their circles demand, so
+      // a group that has arrived somewhere reads as several people rather than
+      // as one mass. Nothing else in the city is affected.
+      const pad = a.type === 'officer' && b.type === 'officer' ? OFFICER_SPACING_PAD : 0;
+      const minDist = a.radius + b.radius + pad;
       let dist = Math.hypot(dx, dy);
       if (dist >= minDist) continue;
 
@@ -2850,7 +2971,12 @@ export function toWire(
   if (turnAt !== undefined && turnAt - now <= TURNING_TELL_MS) {
     state.turning = Math.round(Math.max(0, 1 - (turnAt - now) / TURNING_TELL_MS) * 100) / 100;
   }
-  if (e.type === 'officer' && !world.playerIds.has(e.id)) state.npc = true;
+  if (e.type === 'officer' && !world.playerIds.has(e.id)) {
+    state.npc = true;
+    // Whether the spectator's command card may still order a wall out of this
+    // one. Only grey officers carry a sandbag, so only they ever say so.
+    if (world.ai.get(e.id)?.hasSandbag) state.bag = true;
+  }
   if (world.bots.has(e.id)) state.bot = true;
   // The head is a second angle, and only a dog has one. Sent rounded like
   // `facing` — a body the client eases toward anyway, at 30Hz.

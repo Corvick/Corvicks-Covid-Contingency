@@ -149,15 +149,19 @@ export function drawWheel(
   ctx.restore();
 }
 
-/** Blue arrow shown while an ability is armed and waiting for a target. */
+/**
+ * Amber arrow shown while an order is armed and waiting for a target — the
+ * player's rally/beacon placement. The same warm gunsight amber as the
+ * crosshair rather than a UI blue, so the whole cursor family reads as one.
+ */
 export function drawTargetCursor(ctx: CanvasRenderingContext2D, x: number, y: number, now: number): void {
   const bob = Math.sin(now * 0.006) * 3;
 
   ctx.save();
   ctx.translate(x, y + bob);
 
-  ctx.fillStyle = '#38bdf8';
-  ctx.strokeStyle = '#0c4a6e';
+  ctx.fillStyle = '#e8a13a';
+  ctx.strokeStyle = '#3a2408';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.moveTo(0, 14); // tip points at the ground position
@@ -170,7 +174,7 @@ export function drawTargetCursor(ctx: CanvasRenderingContext2D, x: number, y: nu
   ctx.restore();
 
   // Ring marking the exact spot the order will land on.
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.8)';
+  ctx.strokeStyle = 'rgba(232, 161, 58, 0.85)';
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.ellipse(x, y + 18, 13, 5, 0, 0, Math.PI * 2);

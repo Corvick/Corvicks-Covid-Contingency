@@ -29,6 +29,10 @@ import {
   ACID_INSIDE_SIGHT,
   SCOPE_EASE_MS,
   TICK_RATE,
+  ENTITY_RADIUS,
+  BARRICADE_HALF_WIDTH,
+  BARRICADE_HALF_DEPTH,
+  SANDBAG_ROTATE_STEP,
 } from '../../shared/constants.js';
 import { acidLobes, inAcidLobes } from '../../shared/acidshape.js';
 import type {
@@ -50,6 +54,7 @@ import type {
   BlastState,
   DuckState,
   EmplacementState,
+  BarricadeState,
   BeaconState,
   FireState,
   MineState,
@@ -83,6 +88,11 @@ import {
   drawBlasts,
   drawDucks,
   drawEmplacements,
+  drawBarricades,
+  drawSandbagWall,
+  drawCommandCard,
+  commandCardSlots,
+  commandCardButtons,
   drawBackupVehicles,
   drawMines,
   drawZaps,
@@ -93,7 +103,9 @@ import {
   drawBurning,
   drawBlood,
   drawBloodSpray,
+  drawZombieCorpses,
   spawnBlood,
+  spawnCorpse,
   spawnBurst,
   clearBlood,
   clearDogMap,
@@ -243,6 +255,7 @@ let acidOccluders: Bush[] = [];
 let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
+let barricades: BarricadeState[] = [];
 let vehicles: BackupVehicleState[] = [];
 let mines: MineState[] = [];
 let corpses: CorpseState[] = [];
@@ -296,6 +309,113 @@ let hudWrittenAt = 0;
 let lastHudLine = '';
 
 const input = trackInput(canvas);
+
+/**
+ * Spectator RTS. A watcher can box-select grey NPC officers and right-click to
+ * order them somewhere; the officer paths there, engaging what it passes, then
+ * holds and scans the street. All of this is client-side except the one
+ * `command` message — selection, the marquee and the rings never leave here.
+ */
+const selectedOfficers = new Set<string>();
+/** The marquee mid-drag, in viewport (layout) pixels, or null. */
+let marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+let dragStart: { x: number; y: number } | null = null;
+/** Brief green markers where an order was given, in world coordinates. */
+const commandFx: Array<{ x: number; y: number; born: number }> = [];
+const COMMAND_FX_MS = 500;
+const DRAG_THRESHOLD = 5;
+
+/** Grey AI officers — not blue bots, olive soldiers or black SWAT. */
+function isGreyOfficer(s: EntityState): boolean {
+  return s.type === 'officer' && s.npc === true && !s.bot && !s.soldier && !s.swat;
+}
+
+/** A viewport pixel back to a world coordinate, on the spectator camera. */
+function spectatorWorld(sx: number, sy: number): { x: number; y: number } {
+  const { view, scale } = cameraFor(undefined);
+  return { x: view.x + sx / scale, y: view.y + sy / scale };
+}
+
+/**
+ * The command card, SC2-style: raised bottom-right whenever grey officers are
+ * selected. Which page is showing, and — while a wall is being sited — the
+ * ghost of it under the cursor.
+ *
+ * The ghost holds only its *angle*; its position is wherever the mouse is, so
+ * there is no second copy of the cursor to keep in step.
+ */
+let cardPage: 'root' | 'build' = 'root';
+let sandbagGhost: { angle: number } | null = null;
+
+/**
+ * How many walls the selection can still order.
+ *
+ * Counted off the wire's `bag` flag across the selected officers rather than
+ * tracked here: the server owns whether a sandbag has been spent, and a client
+ * tally would go stale the moment one was built, given up on, or its owner was
+ * eaten.
+ */
+function selectedSandbags(): number {
+  let n = 0;
+  for (const id of selectedOfficers) {
+    if (tracked.get(id)?.state.bag) n++;
+  }
+  return n;
+}
+
+/** Which card slot the cursor is over, or -1. */
+function cardHover(): number {
+  if (!spectating || selectedOfficers.size === 0) return -1;
+  const { slots } = commandCardSlots(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+  for (let i = 0; i < slots.length; i++) {
+    const s = slots[i];
+    if (
+      input.mouseX >= s.x &&
+      input.mouseX <= s.x + s.w &&
+      input.mouseY >= s.y &&
+      input.mouseY <= s.y + s.h
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Anywhere on the card's panel, buttons or not — the card swallows the click. */
+function overCard(): boolean {
+  if (!spectating || selectedOfficers.size === 0) return false;
+  const { frame } = commandCardSlots(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+  return (
+    input.mouseX >= frame.x &&
+    input.mouseX <= frame.x + frame.w &&
+    input.mouseY >= frame.y &&
+    input.mouseY <= frame.y + frame.h
+  );
+}
+
+/**
+ * Would a wall stood here be inside something?
+ *
+ * Sampled along the wall's length against the map's walls, which are plain
+ * AABBs, so it is a point-in-rect loop and costs nothing — and it only runs
+ * while a ghost is actually up. The server will nudge a bad spot to walkable
+ * ground rather than refusing outright, but a silently relocated wall is a
+ * worse answer than a red ghost saying "not there".
+ */
+function sandbagFits(x: number, y: number, angle: number): boolean {
+  if (!map) return false;
+  const ca = Math.cos(angle);
+  const sa = Math.sin(angle);
+  for (let i = 0; i < 5; i++) {
+    const along = (i / 4 - 0.5) * 2 * BARRICADE_HALF_WIDTH;
+    const px = x + ca * along;
+    const py = y + sa * along;
+    for (const w of map.walls) {
+      if (px >= w.x - 2 && px <= w.x + w.w + 2 && py >= w.y - 2 && py <= w.y + w.h + 2) return false;
+    }
+  }
+  return true;
+}
 
 /**
  * Is there a mast standing anywhere at all?
@@ -442,6 +562,7 @@ const { send, goOffline, goOnline } = connect((msg) => {
     blasts = msg.blasts;
     ducks = msg.ducks;
     emplacements = msg.emplacements;
+    barricades = msg.barricades;
     vehicles = msg.vehicles;
     mines = msg.mines;
     corpses = msg.corpses;
@@ -468,10 +589,27 @@ const { send, goOffline, goOnline } = connect((msg) => {
         // A round that found a body, and where it stopped. Nothing about blood
         // is on the wire — `hit` and the endpoint are already here for the
         // tracer, so the splatter is derived from what is being drawn anyway.
-        // A cure and a flame both "hit" and neither draws any.
+        // A cure and a flame both "hit" and neither draws any. `light` marks a
+        // pistol round, which leaves a smaller, sparser stain.
         if (shot.hit && shot.kind === undefined) {
-          spawnBlood(shot.x2, shot.y2, Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1), now);
+          spawnBlood(
+            shot.x2,
+            shot.y2,
+            Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1),
+            now,
+            shot.light === true,
+          );
         }
+      }
+    }
+    // Zombies that died this tick — one transient record each, like a shot. The
+    // client throws a ragdoll-and-grey corpse and deletes the fade ghost so the
+    // two don't both draw. Gated on the setting; off, the kill just fades out.
+    if (msg.deaths.length > 0 && settings.corpses && settings.blood) {
+      const now = performance.now();
+      for (const d of msg.deaths) {
+        tracked.delete(d.id);
+        spawnCorpse(d.x, d.y, d.a, now);
       }
     }
   }
@@ -728,6 +866,117 @@ canvas.addEventListener('contextmenu', () => {
   armedAbility = null;
 });
 
+// ---- spectator RTS: box-select grey officers, right-click to order them ----
+
+canvas.addEventListener('mousedown', (e) => {
+  if (!spectating) return;
+
+  if (e.button === 2) {
+    // A wall in hand is what right-click is for first — putting it down again
+    // rather than issuing a move order at the spot you were about to build on.
+    if (sandbagGhost) {
+      e.preventDefault();
+      sandbagGhost = null;
+      return;
+    }
+    if (selectedOfficers.size === 0) return;
+    e.preventDefault();
+    const at = spectatorWorld(input.mouseX, input.mouseY);
+    send({ type: 'command', ids: [...selectedOfficers], x: at.x, y: at.y });
+    commandFx.push({ x: at.x, y: at.y, born: performance.now() });
+    return;
+  }
+  if (e.button !== 0) return;
+
+  // **The card owns its own rectangle.** Checked before anything else, so a
+  // click on a button is never also the start of a box-drag through the city
+  // behind it — and a press on the panel's empty ground is swallowed too, or
+  // dragging off the card marquee-selects whatever is underneath the UI.
+  const hit = cardHover();
+  if (hit >= 0 || overCard()) {
+    const button = commandCardButtons(cardPage, selectedSandbags()).find((b) => b.slot === hit);
+    if (button && button.enabled) {
+      if (button.id === 'shovel') cardPage = 'build';
+      else if (button.id === 'back') {
+        cardPage = 'root';
+        sandbagGhost = null;
+      } else if (button.id === 'sandbag') sandbagGhost = { angle: 0 };
+    }
+    return;
+  }
+
+  // Siting a wall. One click, one wall: the ghost clears rather than staying in
+  // hand, so there is no mode left running that a later click could fall into.
+  if (sandbagGhost) {
+    const at = spectatorWorld(input.mouseX, input.mouseY);
+    send({
+      type: 'command',
+      ids: [...selectedOfficers],
+      x: at.x,
+      y: at.y,
+      build: 'sandbag',
+      angle: sandbagGhost.angle,
+    });
+    commandFx.push({ x: at.x, y: at.y, born: performance.now() });
+    sandbagGhost = null;
+    return;
+  }
+
+  dragStart = { x: input.mouseX, y: input.mouseY };
+  marquee = null;
+});
+
+canvas.addEventListener('mousemove', () => {
+  if (!spectating || !dragStart) return;
+  marquee = { x0: dragStart.x, y0: dragStart.y, x1: input.mouseX, y1: input.mouseY };
+});
+
+window.addEventListener('mouseup', (e) => {
+  if (e.button !== 0 || !spectating || !dragStart) return;
+  const moved = Math.hypot(input.mouseX - dragStart.x, input.mouseY - dragStart.y);
+  if (!e.shiftKey) selectedOfficers.clear();
+
+  if (moved < DRAG_THRESHOLD) {
+    // A plain click: the nearest grey officer under the cursor, or nothing.
+    const at = spectatorWorld(input.mouseX, input.mouseY);
+    let best: string | null = null;
+    let bestD = 26;
+    for (const entry of tracked.values()) {
+      const s = entry.state;
+      if (!isGreyOfficer(s)) continue;
+      const d = Math.hypot(s.x - at.x, s.y - at.y);
+      if (d < bestD) {
+        bestD = d;
+        best = s.id;
+      }
+    }
+    if (best) selectedOfficers.add(best);
+  } else {
+    // A marquee: every grey officer whose body falls inside it. The spectator
+    // camera has no rotation, so screen min/max map straight to world min/max.
+    const a = spectatorWorld(Math.min(dragStart.x, input.mouseX), Math.min(dragStart.y, input.mouseY));
+    const b = spectatorWorld(Math.max(dragStart.x, input.mouseX), Math.max(dragStart.y, input.mouseY));
+    for (const entry of tracked.values()) {
+      const s = entry.state;
+      if (!isGreyOfficer(s)) continue;
+      if (s.x >= a.x && s.x <= b.x && s.y >= a.y && s.y <= b.y) selectedOfficers.add(s.id);
+    }
+  }
+  dragStart = null;
+  marquee = null;
+});
+
+window.addEventListener('keydown', (e) => {
+  if (!spectating || selectedOfficers.size === 0) return;
+  // H holds the selection where it stands; R hands it back to its own AI. S is
+  // taken by the WASD pan, so hold is not on S.
+  if (e.code === 'KeyH') {
+    send({ type: 'command', ids: [...selectedOfficers], x: 0, y: 0, stop: true });
+  } else if (e.code === 'KeyR') {
+    send({ type: 'command', ids: [...selectedOfficers], x: 0, y: 0, release: true });
+  }
+});
+
 /**
  * Spectator wheel zoom, anchored on the cursor: whatever is under the pointer
  * stays under it, which is what makes zooming into a particular street feel
@@ -751,6 +1000,18 @@ canvas.addEventListener(
       return;
     }
     e.preventDefault();
+
+    /*
+     * **A wall in hand takes the wheel off the camera.** Checked before the
+     * zoom is banked, so siting a barricade is aiming *it* rather than aiming
+     * it while the ground slides about underneath. There is nothing else the
+     * wheel could mean at that moment, and a camera that moved as well would
+     * make a rotation impossible to judge.
+     */
+    if (sandbagGhost) {
+      sandbagGhost.angle += (e.deltaY > 0 ? 1 : -1) * SANDBAG_ROTATE_STEP;
+      return;
+    }
 
     // Zoom is applied once per frame rather than per event: a single notch can
     // deliver a burst of wheel events, and re-deriving the camera on each one
@@ -905,6 +1166,11 @@ const ENTITY_FIELDS = [
   'grappling',
   'infected',
   'npc',
+  // And the fifth. A grey officer has been on screen a long while by the time
+  // he spends his sandbag, so left out of this list the flag would arrive once
+  // and never clear — the command card would go on offering a wall out of an
+  // officer who has already built his.
+  'bag',
   'bot',
   'soldier',
   'materializing',
@@ -1867,6 +2133,20 @@ function render() {
   if (spectating) {
     applyZoom();
     panSpectator(frameDelta);
+    // Drop anything from the selection that has died, turned or otherwise
+    // stopped being sent.
+    for (const id of selectedOfficers) if (!tracked.has(id)) selectedOfficers.delete(id);
+    // With nothing selected the card goes, and anything it had in hand with it
+    // — a ghost outliving the officers who would build it is a mode with
+    // nobody left to obey it.
+    if (selectedOfficers.size === 0) {
+      cardPage = 'root';
+      sandbagGhost = null;
+    }
+  } else if (selectedOfficers.size > 0) {
+    selectedOfficers.clear();
+    cardPage = 'root';
+    sandbagGhost = null;
   }
   const { view, scale } = cameraFor(me);
   // **The one place the render scale exists.** Everything below this line —
@@ -1889,9 +2169,12 @@ function render() {
     // Under everything else: it is ground, and the bushes stand on it.
     drawPark(ctx, map.park, view);
     drawPond(ctx, map.pond, view);
-    // On the road, under the walls and everyone standing on it.
+    // On the road, under the walls and everyone standing on it. `drawBlood`
+    // also blits the shared permanent-stain layer, so it comes before anything
+    // that reads from it.
     drawBlood(ctx, view, now);
     // Bodies lie on the blood and under everyone still on their feet.
+    drawZombieCorpses(ctx, view, now);
     drawCorpses(ctx, corpses, view, now);
     drawWalls(ctx, map.walls, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
@@ -1903,6 +2186,9 @@ function render() {
     drawMines(ctx, mines, view, now);
     drawBeaconTowers(ctx, towers, view, now);
     drawEmplacements(ctx, emplacements, view);
+    // Beside the emplacements and drawn by the same function — as far as
+    // anything on screen goes, a wall is a wall with nobody behind it.
+    drawBarricades(ctx, barricades, view);
     drawFires(ctx, fires, view, now);
     drawPickups(ctx, pickups, view, now, scale);
   }
@@ -1938,6 +2224,15 @@ function render() {
     const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;
     drawEntity(ctx, s, isSelf, now, simpleEntities, scale);
+    // A spectator's RTS pick: a green ring outside the body.
+    if (spectating && selectedOfficers.has(s.id)) {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#4ade80';
+      ctx.lineWidth = 2 / scale;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, ENTITY_RADIUS.officer + 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     // Flame licks over the top of the body, not under it.
     if (s.burning && !simpleEntities) drawBurning(ctx, s, now);
     // The tracker's arrow orbits you, pointing at the nearest one.
@@ -1946,6 +2241,46 @@ function render() {
     }
   }
   ctx.globalAlpha = 1;
+
+  // The wall being sited, under the cursor and in the world it will stand in —
+  // at the size and angle it will actually be, so what is shown is what gets
+  // built. Amber where it fits, red where it does not.
+  if (sandbagGhost) {
+    const at = spectatorWorld(input.mouseX, input.mouseY);
+    const fits = sandbagFits(at.x, at.y, sandbagGhost.angle);
+    drawSandbagWall(
+      ctx,
+      {
+        x: at.x,
+        y: at.y,
+        angle: sandbagGhost.angle,
+        hw: BARRICADE_HALF_WIDTH,
+        hh: BARRICADE_HALF_DEPTH,
+      },
+      1,
+      0.55,
+      fits ? '#e8a13a' : '#b91c1c',
+    );
+  }
+
+  // A green ring blooming where a spectator just gave an order.
+  if (commandFx.length > 0) {
+    for (let i = commandFx.length - 1; i >= 0; i--) {
+      const fx = commandFx[i];
+      const t = (now - fx.born) / COMMAND_FX_MS;
+      if (t >= 1) {
+        commandFx.splice(i, 1);
+        continue;
+      }
+      ctx.globalAlpha = (1 - t) * 0.9;
+      ctx.strokeStyle = '#4ade80';
+      ctx.lineWidth = 2 / scale;
+      ctx.beginPath();
+      ctx.arc(fx.x, fx.y, 4 + t * 22, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
   mark('entities');
 
   // Napalm lingers, so it can't be culled on the round tracer's clock.
@@ -2024,6 +2359,19 @@ function render() {
   // Over the fog, under the HUD: it frames the world without dimming anything
   // you actually have to read.
   drawVignette(ctx, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+
+  // The spectator's selection marquee, in screen space over everything.
+  if (spectating && marquee) {
+    const x = Math.min(marquee.x0, marquee.x1);
+    const y = Math.min(marquee.y0, marquee.y1);
+    const w = Math.abs(marquee.x1 - marquee.x0);
+    const h = Math.abs(marquee.y1 - marquee.y0);
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.12)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  }
 
   // Going down, and coming back. Over the world and *under* the HUD, so the
   // counts and the panels stay readable through it.
@@ -2151,12 +2499,38 @@ function render() {
     }
   }
 
+  // The command card, over everything. Only while officers are selected: it is
+  // the selection's card, and an empty one would be furniture.
+  if (spectating && selectedOfficers.size > 0) {
+    drawCommandCard(
+      ctx,
+      cardPage,
+      selectedSandbags(),
+      selectedOfficers.size,
+      cardHover(),
+      VIEWPORT_WIDTH,
+      VIEWPORT_HEIGHT,
+    );
+  }
+
+  // The spectator gets a cursor too — the same amber gunsight, framed with
+  // corner brackets while grey officers are selected and a right-click would
+  // send them somewhere. Not over the card, which has its own hover, and not
+  // while a wall is in hand — the ghost *is* the cursor then.
+  if (spectating && !sandbagGhost && !overCard()) {
+    drawCrosshair(ctx, input.mouseX, input.mouseY, selectedOfficers.size > 0 && !dragStart);
+  }
 
   // Only written when it actually changes. Assigning the same string still
   // dirties layout, and these are counts that move a few times a second at most.
   const counts = `survivors ${survivors} · incubating ${infectedCount} · zombies ${zombieCount}`;
   const line = spectating
-    ? `SPECTATING (WASD pan · shift faster · scroll zoom) — ${counts}`
+    ? `SPECTATING — ${counts}` +
+      (sandbagGhost
+        ? ` · siting a wall · scroll to turn it · click to build · right-click cancels`
+        : selectedOfficers.size > 0
+          ? ` · ${selectedOfficers.size} officer${selectedOfficers.size > 1 ? 's' : ''} selected · right-click move · H hold · R release`
+          : ` · WASD pan · scroll zoom · drag-select grey officers`)
     // The cure gun is the only thing that tells you about yourself. The server
     // sends null unless one is in hand, so there is nothing to read otherwise.
     : inventory?.selfInfected === true

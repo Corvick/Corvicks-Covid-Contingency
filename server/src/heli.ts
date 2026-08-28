@@ -313,8 +313,9 @@ function detonate(world: World, x: number, y: number, now: number): void {
     e.health -= damage;
     if (e.health > 0) continue;
     // Was a bare delete, which took a *player's* dog off the map outright —
-    // a dog is a zombie, and this branch only ever asked about the type.
-    killEntity(world, e, now);
+    // a dog is a zombie, and this branch only ever asked about the type. The
+    // angle throws the corpse outward from the blast.
+    killEntity(world, e, now, Math.atan2(e.y - y, e.x - x));
   }
 }
 

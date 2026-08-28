@@ -1,5 +1,8 @@
-import type { EmplacementState } from '../../shared/types.js';
+import type { BarricadeState, EmplacementState } from '../../shared/types.js';
 import {
+  BARRICADE_HALF_DEPTH,
+  BARRICADE_HALF_WIDTH,
+  BARRICADE_HEALTH,
   EMPLACEMENT_AMMO,
   EMPLACEMENT_ARC,
   EMPLACEMENT_BLOOM,
@@ -59,7 +62,28 @@ export interface Emplacement {
   nextShotAt: number;
 }
 
+/**
+ * A bare sandbag wall, with no gun behind it and nobody manning it.
+ *
+ * Built to order by a grey officer a spectator sent, one per officer for the
+ * whole round. It is the gunner's bags with the gun taken away, and everything
+ * about how it behaves is shared with them rather than written twice:
+ * `zombieAtSandbag` tears it down, `resolveEmplacementCollisions` pushes bodies
+ * out of it, and the client draws it with the same `drawSandbagWall`.
+ *
+ * Deliberately **not in the nav grid**, the same rule the gunner's bags and the
+ * doors follow: routes are planned as though it were not there and whoever
+ * walks into one deals with it, which is what makes a zombie stand and claw at
+ * it rather than stroll round the end.
+ */
+export interface Barricade {
+  id: string;
+  box: OrientedBox;
+  health: number;
+}
+
 let counter = 0;
+let barricadeCounter = 0;
 
 /** Where the bags sit for a gun at (x, y) pointing along `angle`. */
 function bagsFor(x: number, y: number, angle: number): OrientedBox {
@@ -112,6 +136,24 @@ function dismount(world: World, gun: Emplacement, reason: string): void {
 }
 
 /**
+ * Stand a bare wall up at (x, y), lying along `angle`.
+ *
+ * `angle` is the wall's own bearing — the direction its long axis runs — which
+ * is what the spectator rotated the ghost to, so what is placed is what was
+ * shown. Note this differs from `bagsFor`, which is handed the *gun's* facing
+ * and turns it a right angle to lay the bags across the line of fire.
+ */
+export function placeBarricade(world: World, x: number, y: number, angle: number): Barricade {
+  const wall: Barricade = {
+    id: `barricade-${barricadeCounter++}`,
+    box: { x, y, hw: BARRICADE_HALF_WIDTH, hh: BARRICADE_HALF_DEPTH, angle },
+    health: BARRICADE_HEALTH,
+  };
+  world.barricades.set(wall.id, wall);
+  return wall;
+}
+
+/**
  * Sandbags in reach of a point, for anyone who needs to know they are there —
  * collision, and zombies looking for something to take apart.
  */
@@ -123,13 +165,28 @@ export function sandbagAt(world: World, x: number, y: number, reach: number): Em
   return null;
 }
 
-/** Push everything out of the bags. Cheap: there are almost never many. */
+/** The same question of a bare wall. Kept apart only because the records are. */
+export function barricadeAt(world: World, x: number, y: number, reach: number): Barricade | null {
+  for (const wall of world.barricades.values()) {
+    if (closestOnBox(wall.box, x, y).dist <= reach) return wall;
+  }
+  return null;
+}
+
+/**
+ * Push everything out of the bags — the gunners' and the bare walls alike.
+ * Cheap: there are almost never many of either.
+ */
 export function resolveEmplacementCollisions(world: World): void {
-  if (world.emplacements.size === 0) return;
   for (const gun of world.emplacements.values()) {
     if (!gun.bags) continue;
     for (const e of world.entities.values()) {
       resolveCircleBox(e, gun.bags);
+    }
+  }
+  for (const wall of world.barricades.values()) {
+    for (const e of world.entities.values()) {
+      resolveCircleBox(e, wall.box);
     }
   }
 }
@@ -157,14 +214,29 @@ export function damageEmplacement(world: World, gun: Emplacement, amount: number
  * Returns true when this zombie is busy doing that.
  */
 export function zombieAtSandbag(world: World, e: Entity, state: { nextWindowHitAt: number }, now: number): boolean {
-  const gun = sandbagAt(world, e.x, e.y, e.radius + SANDBAG_REACH);
-  if (!gun || !gun.bags) return false;
+  const reach = e.radius + SANDBAG_REACH;
+  const gun = sandbagAt(world, e.x, e.y, reach);
+  if (gun && gun.bags) {
+    e.facing = Math.atan2(gun.y - e.y, gun.x - e.x);
+    e.breaking = true;
+    if (now >= state.nextWindowHitAt) {
+      state.nextWindowHitAt = now + SANDBAG_HIT_INTERVAL_MS;
+      damageEmplacement(world, gun, SANDBAG_HIT_DAMAGE);
+    }
+    return true;
+  }
 
-  e.facing = Math.atan2(gun.y - e.y, gun.x - e.x);
+  // A bare wall is torn down the same way, at the same rate. One branch here
+  // rather than a second AI behaviour: as far as a zombie is concerned there is
+  // no difference between the two, and there should not be.
+  const wall = barricadeAt(world, e.x, e.y, reach);
+  if (!wall) return false;
+  e.facing = Math.atan2(wall.box.y - e.y, wall.box.x - e.x);
   e.breaking = true;
   if (now >= state.nextWindowHitAt) {
     state.nextWindowHitAt = now + SANDBAG_HIT_INTERVAL_MS;
-    damageEmplacement(world, gun, SANDBAG_HIT_DAMAGE);
+    wall.health -= SANDBAG_HIT_DAMAGE;
+    if (wall.health <= 0) world.barricades.delete(wall.id);
   }
   return true;
 }
@@ -260,6 +332,21 @@ export function emplacementsToWire(world: World): EmplacementState[] {
             },
           }
         : {}),
+    });
+  }
+  return out;
+}
+
+export function barricadesToWire(world: World): BarricadeState[] {
+  const out: BarricadeState[] = [];
+  for (const wall of world.barricades.values()) {
+    out.push({
+      x: Math.round(wall.box.x),
+      y: Math.round(wall.box.y),
+      angle: Math.round(wall.box.angle * 100) / 100,
+      hw: wall.box.hw,
+      hh: wall.box.hh,
+      hp: Math.max(0, wall.health / BARRICADE_HEALTH),
     });
   }
   return out;

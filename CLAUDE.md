@@ -154,6 +154,147 @@ which clears it. Start refuses only when there'd be no officers at all — a
 round of nothing but bots is the whole point of watching one. `?spectate` still
 exists for headless work and bypasses the front end entirely.
 
+**A spectator can command the grey officers, RTS-style.** Box-drag to select,
+right-click to send them somewhere, `H` to hold where they stand, `R` to hand
+them back to their own AI. Selected officers wear a green ring.
+
+- **All of it is client-side except the `command` message.** `selectedOfficers`,
+  the marquee, the rings and the order pulse never leave the browser. The one
+  wire message carries the officer ids, a world point, and `stop`/`release`.
+  It is an *order*, not anything about visibility — a spectator already sees the
+  whole board.
+- **`AiState.commandX`/`commandY`**, and the branch that reads them sits in
+  `updateNpcOfficer` **below the fight and above escort/guard/patrol**: a
+  commanded officer still defends itself and engages what it passes — an
+  attack-move, for free — but the order overrides everything calmer. On arrival
+  (`COMMAND_ARRIVE_DIST`) it holds and scans the street like a guard. Sticky:
+  no expiry, an order holds until replaced.
+- **A move order keeps the group's shape rather than piling it on one pixel.**
+  Handed the identical destination, five officers walk at the same point and
+  collision shoves them into a blob — which is the SC2 clustering nobody wants.
+  `commandOfficers` takes the centroid, keeps each officer's offset from it, and
+  scales the whole formation down: three picked from the top-right, the middle
+  and the centre-left arrive still arranged that way, only closer together.
+  - **Server-side, so the wire message is still one point.** The positions here
+    are the authoritative ones; the client's are interpolated and would put the
+    slots where the bodies are *drawn* rather than where they are.
+  - **`scale = clamp(cap / spread, minGap / closest, 1)`, and the floor is the
+    load-bearing term.** A cap on its own stacks ten officers onto one pixel,
+    collision flings them apart, and the formation this exists to keep is
+    destroyed on arrival. The floor is set at what `OFFICER_SPACING_PAD` gives
+    them, so the compressed shape is by construction one they can stand in. The
+    ceiling of 1 is what makes "already close together" mean *leave it exactly
+    as it is*.
+  - **The cap grows as `sqrt(n)`** (`COMMAND_FORMATION_SPREAD`), the same
+    `sqrt(area / count)` reasoning the garrison's spread uses — one flat figure
+    is loose for three officers and impossible for ten.
+  - **Every slot goes through `walkableNear`**, extracted out of the dog roar's
+    `roarTarget` into `world.ts` and shared, so a slot landing in a wall is
+    nudged rather than walked at.
+  - Measured, three staged in an L and sent across the map: bearings from the
+    group's centre **preserved to 0.0°**, spread **509px → 78px**, closest pair
+    of slots 70.7px against a 36px floor, centroid **0.0px** off the click. A
+    group already 43px across comes out 43px across, and a single officer lands
+    exactly on the click — its offset is zero, so nothing about that case
+    changed.
+- **Two officers stand `OFFICER_SPACING_PAD` further apart than their circles
+  demand**, so a group that has arrived reads as several people rather than one
+  mass. Officer-to-officer only. **The broadphase query had to widen with it** —
+  `a.radius * 2 + 8` was exactly the new `minDist`, so the pairs the padding
+  exists to separate would have sat on the boundary and been offered by luck.
+  Measured: two walked together settle at **36.0px** where they used to touch at
+  28.
+
+#### And a command card to build with
+
+Selecting grey officers raises an SC2-shaped card bottom-right —
+`drawCommandCard`, with `commandCardSlots` as its geometry. Five columns by
+three rows, mostly empty: a **shovel** bottom-left opens a build page whose
+**sandbag** is top-left and whose **back arrow** is bottom-right.
+
+- **`commandCardSlots` is the geometry and `drawCommandCard` is the paint**, the
+  same split `minimapFrame` / `drawMinimap` uses and for the same reason: a
+  button you can see and cannot press is what two copies of that arithmetic
+  produces.
+- **Every slot is drawn, filled or not.** A card that grew a box at a time would
+  move the buttons already on it — the same argument as the dog's empty fourth
+  hexagon, and now the second feature to lean on it.
+- **The card owns its own rectangle.** The hit test runs before the marquee, and
+  a press anywhere on the panel is swallowed even where there is no button, or
+  dragging off the card box-selects the city behind the UI.
+- **The count is read off the wire, not tallied here.** `EntityState.bag` is
+  true while a grey officer still has his one sandbag, and the client counts the
+  flag across the selection — the server owns whether one has been spent, and a
+  client tally would go stale the moment a wall went up, an order was given up
+  on, or its owner was eaten. **It is in `ENTITY_FIELDS`**, which has now caught
+  five flags.
+- **Every grey officer gets exactly one sandbag**, which is what bounds the
+  whole feature: a spectator can wall a street, not the city. `hasSandbag`
+  defaults **true** on every `AiState` and is only ever read for a grey officer
+  — the same trick the door traits use, so nothing has to be told that a
+  civilian does not build sandbags.
+- **The builder is the nearest officer *in the selection* who still has one.**
+  The card belongs to the selection, so it is never a stranger across the city
+  who gets pulled off a street, and the count means something the player can
+  act on. Nobody else in the group is disturbed by the order.
+- **The ghost holds only its angle**; its position is the cursor, so there is no
+  second copy of the pointer to keep in step. Amber where it fits, red where it
+  does not — sampled along the wall's length against `map.walls`, which are
+  AABBs, so it is a point-in-rect loop that only runs while a ghost is up. The
+  server nudges a bad spot to walkable ground rather than refusing, and a
+  silently relocated wall is a worse answer than a red ghost.
+- **A wall in hand takes the wheel off the camera.** Checked before the zoom is
+  banked, so siting a barricade is aiming *it* rather than aiming it while the
+  ground slides underneath — a camera that moved as well would make the rotation
+  impossible to judge. There is nothing else the wheel could mean at that
+  moment.
+- **`drawSandbagWall` is one definition with three callers** — the pocket
+  gunner's bags, a built barricade, and the ghost. The ghost's whole job is to
+  show exactly what is about to exist, so a second drawing of a sandbag would
+  defeat it.
+- **A `Barricade` is the gunner's bags with the gun taken away**, and it lives
+  in `emplacement.ts` beside them. `zombieAtSandbag`, `resolveEmplacementCollisions`
+  and the drawing all handle both, so a zombie tears a wall down with no new AI
+  branch — as far as one is concerned there is no difference between the two,
+  and there should not be. **Not in the nav grid**, the same rule the gunner's
+  bags and the doors follow. It is deliberately *not* a `nearestProtector`:
+  that is a judgement about a machine gun and this has none.
+- **One budget for the errand, never extended** (`BARRICADE_GIVE_UP_MS`), the
+  shape `HIDE_DEEPER_GIVE_UP_MS` and the beacon carrier both use — and **giving
+  up does not spend the sandbag**, so an unreachable spot costs a walk rather
+  than the wall. Being knocked off the spot mid-job restarts the stacking rather
+  than banking it, like the mast.
+- Measured on the harness: assigned to the nearest holder, the wall stands at
+  **0px off the spot at the exact angle asked for**, the builder's sandbag is
+  spent and the other two keep theirs; with none left the order is refused; a
+  non-spectator socket is ignored; giving up keeps the sandbag; and a zombie
+  held against one takes it from 900hp to 696 in seven seconds.
+- **Built like the guard branch, deliberately not the beacon carrier.**
+  `unstickTick` wants 38px/s to call a body un-stuck and a walking officer makes
+  40 (`HUMAN_WALK_SPEED * 1.15`), so it fires the instant one turns a corner and
+  walks it off on a blind breakout heading — the trap this file records for
+  anything that walks. `headingToward` already routes around walls with A*.
+  Measured: a commanded officer closes ~36px/s on an open target and reaches
+  within `COMMAND_ARRIVE_DIST`, then holds dead steady; a target clicked inside
+  geometry, it gets as close as it can and holds there.
+- **Grey means grey.** `type: 'officer'` with an `AiState` and not in
+  `world.bots` / `world.soldiers` / `world.swat` — the ambient garrison plus
+  the grey radio-dispatched crews. The client's predicate is the wire flags:
+  `npc && !bot && !soldier && !swat`. Commanding a dispatched crew just pulls it
+  off its sweep, which is the spectator's call.
+- **Only from a spectating socket**, checked server-side (`world.spectators.has`).
+  A player cannot command the garrison. This is one more thing an anonymous
+  socket with your tunnel URL could poke at — see the internet-play caveats — but
+  it cannot reset the world or touch a real player's unit, and the exposure is
+  smaller than "a spectator already sees everything".
+- **Keys are the client's** (`H`, `R`; `S` is taken by the WASD pan). The wire
+  carries the flag, not the keybinding.
+- **A spectator gets a drawn cursor now** — `canvas` is `cursor: none` and the
+  crosshair used to be inside the `!spectating` HUD block, so a watcher had no
+  pointer at all. It is `drawCrosshair`, framed with corner brackets
+  (`command`) while officers are selected so it reads as "a click sends them
+  here".
+
 **PLAY OFFLINE is the same lobby with `offline: true`**, which is why it needed
 almost no code: no chat, seats cycle closed→bot only, seats start `closed`, and
 a vacated seat goes back to `closed` rather than `open`. The one thing it
@@ -4288,13 +4429,59 @@ the dog, and all three are built the cheap way on purpose.
 - **Blood is derived, not sent.** `Shot.hit` already says a round found a body
   and `x2,y2` is exactly where it stopped, so the wire carries nothing new. A
   hit throws droplets along the round's line for half a second and leaves marks
-  on the road for forty. Every visible decal of a given age goes into **one
-  path filled once** — four alpha bands for two hundred marks — which is the
-  park's mistake avoided again, in red. `kind` gates it, so a cure and a flame
-  draw none.
+  on the road. Every visible *live* decal of a given age goes into **one path
+  filled once** — four alpha bands — which is the park's mistake avoided again,
+  in red. `kind` gates it, so a cure and a flame draw none.
+  - **A mark dries and then it stays.** `BLOOD_DECAL_MS` (40s) is the dry-down
+    now, not the whole life: for those forty seconds a mark fades wet → dull in
+    the live list, and then — with PERMANENT BLOOD on — it is stamped **once**
+    into `stainLayer` and dropped. `stainLayer` is a shared offscreen canvas at
+    `BLOOD_BAKE_SCALE` (0.5) of the world, blitted each frame for just the
+    sub-rect on screen, so a whole round's worth of blood costs one `drawImage`
+    plus only the marks still drying. Same bake-it-once trick as the grime tile
+    and the minimap. Sized off the *live* `WORLD_WIDTH`/`HEIGHT`, so it is built
+    lazily and rebuilt when the city size changes — never at import, for the
+    reason `TRACKER_RANGE` became a function. With the setting off it fades to
+    nothing and is culled, exactly as before, and turning both PERMANENT BLOOD
+    *and* ZOMBIE CORPSES off wipes the layer.
+  - **The bake happens before the blit, in the same `drawBlood` call.** A mark
+    crossing into the layer on the frame it leaves the live list would otherwise
+    be drawn nowhere for one frame — culled from the bands, missed by a blit
+    that already ran. A settling corpse has the same trap and `drawZombieCorpses`
+    dodges it by drawing the body one last time, an exact match for what the
+    blit shows next frame.
+  - **More variety, and pistols barely bleed.** A rifle hit is 3–7 ellipses
+    streaked downrange, sometimes a round pool, and a little fine cast-off flung
+    well past the body; sizes are `rand()**2`-weighted so most are small and a
+    few are not. A pistol (`Shot.light`, set server-side by weapon id, not
+    damage — a shotgun pellet is low per hit and still tears) is 1–2 small marks
+    and 40% of the spray. `BloodDecal` is an ellipse (`rx`/`ry`/`rot`) now
+    rather than a circle.
+- **Zombie corpses.** A shot shambler ragdolls `CORPSE_SLIDE_PX` along the
+  round over `CORPSE_SLIDE_MS`, its green lerps to `CORPSE_COLOR` over
+  `CORPSE_GREY_MS`, and then it settles into `stainLayer` beside the dried blood
+  and stays for the round. Off (ZOMBIE CORPSES, or BLOOD entirely) it just fades
+  out over `ENTITY_FADE_MS` as before.
+  - **`World.deaths` is a transient list exactly like `world.shots`** — cleared
+    right after the snapshot, a handful of entries at most and a burst of them
+    at the endgame. `killEntity` pushes `{id, x, y, a}` for a **zombie** death
+    only (`a` = the round's travel direction; the dog path returns before this).
+    The client throws the corpse off it and `tracked.delete(d.id)` kills the
+    160ms fade ghost so the two don't both draw. Dogs keep their own
+    `world.corpses`, which is on the wire and fog-exempt — a handful a round.
+  - **Drawn as a cheap flat sprawl** (`drawSprawled`), not through `drawEntity`
+    — `dead` there is dog-only, and a dedicated shape is cheaper to bake. Under
+    the walls, beside the dog corpses.
 - **The vignette is one cached image.** Built at viewport size and blitted,
   under the HUD and over the fog, so it frames the world without dimming
   anything you have to read.
+- **The cursor is a warm-amber gunsight** (`AIM_AMBER`), not a UI green or a
+  sci-fi cyan — a phosphor colour, deliberately. Every mark is stroked
+  **twice**, a dark underlay then the amber, so it holds on a white wall as
+  well as on the road; the old crosshair was pure white and vanished on light
+  buildings. `drawCrosshair` is four ticks, a broken ranging ring and a centre
+  pip; `drawReticle` (scope) and `drawTargetCursor` (armed order) were recoloured
+  to the same amber so the whole family reads as one.
 
 #### A dot has to be tellable from the road
 
@@ -4526,6 +4713,12 @@ Every row is a *client* decision — how the world is drawn, never what is in it
 — so nothing on it reaches the server and no two players can see a different
 game because of it. That is the line, and it is what decides what "resolution"
 is allowed to mean here.
+
+**PERMANENT BLOOD and ZOMBIE CORPSES** sit under BLOOD, which is their master
+switch — off takes both with it, and both dim when it is. Defaults on; the LOW
+preset turns them off, since each builds a cached layer and draws a few live
+shapes a frame. See **Art direction** for the `stainLayer` bake. Turning both
+off wipes the layer so the marks actually clear rather than freezing.
 
 **RESOLUTION changes how many pixels the frame is painted at, and nothing
 else.** `RENDER_SCALES` is 0.5 to 1.5 of the viewport — 960x540 up to

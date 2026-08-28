@@ -81,9 +81,29 @@ export interface Settings {
    *
    * Bounded and drawn in four unioned paths, so it is cheap — but it is the
    * only thing here that *accumulates* over a round, and somebody hunting for
-   * frames on a long game should be able to turn it off.
+   * frames on a long game should be able to turn it off. Master switch: off
+   * takes the corpses with it.
    */
   blood: boolean;
+
+  /**
+   * Blood dries to a stain that stays for the round rather than fading to
+   * nothing.
+   *
+   * Kept flat by baking every dried mark once into a single half-resolution
+   * offscreen layer and dropping it from the live list — the same trick the
+   * grime tile and the minimap use — so "keeps every mark" costs one extra
+   * blit, not an unbounded list. Off restores the old behaviour: a mark fades
+   * out over forty seconds and is gone.
+   */
+  permanentBlood: boolean;
+
+  /**
+   * A shot zombie ragdolls a short way, greys out, and stays as a corpse for
+   * the round. Bakes into the same layer the dried blood does. Off: a kill just
+   * fades out where it fell, as it always did.
+   */
+  corpses: boolean;
 
   /**
    * How many pixels the frame is painted at, as a multiple of the 1920x1080
@@ -138,6 +158,8 @@ export const DEFAULTS: Settings = {
   groundDetail: true,
   vignette: true,
   blood: true,
+  permanentBlood: true,
+  corpses: true,
   // Deliberately 1 rather than the sharpest on offer: the game is tuned and
   // measured at the viewport's own size, and a fresh install should see what
   // it was designed to look like *and* cost.
@@ -156,6 +178,10 @@ export const LOW: Settings = {
   groundDetail: false,
   vignette: false,
   blood: false,
+  // Off with the rest of the cosmetics: both build a cached layer and draw a
+  // few live shapes a frame, which is more than LOW wants to spend.
+  permanentBlood: false,
+  corpses: false,
   // The only row in the preset that is worth more than the rest put together
   // — 56% of the pixels, against fractions of a millisecond for the others.
   // 0.75 rather than the floor because LOW should still be playable to look

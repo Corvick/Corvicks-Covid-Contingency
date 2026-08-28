@@ -277,12 +277,18 @@ export function fire(
   // A piercing round carries on to the wall behind the last body it passes
   // through; an ordinary one stops in the first.
   const stopT = struck.length === 0 ? wallT : pierce > 1 ? wallT : last.t;
+  // A sidearm does not open a body up the way a rifle does, so the client
+  // throws a smaller, sparser blood mark for it. By weapon, not by damage: a
+  // shotgun pellet is low per hit and still tears. A grey officer firing with
+  // no `def` is pistol-grade and counts as light.
+  const light = !def || def.id === 'pistol' || def.id === 'dualPistols';
   world.shots.push({
     x1: Math.round(muzzleX),
     y1: Math.round(muzzleY),
     x2: Math.round(muzzleX + (endX - muzzleX) * stopT),
     y2: Math.round(muzzleY + (endY - muzzleY) * stopT),
     hit: struck.length > 0,
+    ...(light ? { light: true } : {}),
   });
 
   alertZombies(world, shooter.id, shooter.x, shooter.y, now);
@@ -426,8 +432,9 @@ function hit(
 
   // Whether that is a body removed, an officer put back in the middle of town
   // or a dog standing up out of one of its own is `killEntity`'s business —
-  // three copies of this used to disagree about it.
-  killEntity(world, victim, now);
+  // three copies of this used to disagree about it. `angle` is the round's
+  // travel direction, so a shot shambler ragdolls the way it was going.
+  killEntity(world, victim, now, angle);
 }
 
 /** Turns a zombie back into a civilian. */

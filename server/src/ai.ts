@@ -77,6 +77,10 @@ import {
   RALLY_BUILDING_SNAP,
   RALLY_ROOM_GIVE_UP_MS,
   INDOOR_ROUTE_DOOR_REACH,
+  COMMAND_ARRIVE_DIST,
+  BARRICADE_BUILD_MS,
+  BARRICADE_BUILD_REACH,
+  BARRICADE_GIVE_UP_MS,
   RALLY_LOOK_MIN_MS,
   RALLY_LOOK_MAX_MS,
   RALLY_LOOK_TURN_RATE,
@@ -345,7 +349,7 @@ import {
   utilitySlots,
   type Inventory,
 } from './inventory.js';
-import { zombieAtSandbag } from './emplacement.js';
+import { placeBarricade, zombieAtSandbag } from './emplacement.js';
 import { OUTSIDE } from './rooms.js';
 
 
@@ -4311,6 +4315,85 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         e.y += stepY;
       }
     }
+    return;
+  }
+
+  // A spectator has ordered a sandbag wall out of this one. Above the move
+  // order immediately below — a build supersedes a move — and below the fight,
+  // like every other standing order here: walking up to a spot with a pack on
+  // you is how the wall ends up unbuilt and the officer eaten.
+  if (state.buildX !== null && state.buildY !== null) {
+    // Started on the first tick he has the errand, so the budget covers the
+    // whole trip rather than the last approach.
+    if (state.buildSetOutAt === 0) state.buildSetOutAt = now;
+    const gap = Math.hypot(state.buildX - e.x, state.buildY - e.y);
+
+    // One budget, never extended — the shape `HIDE_DEEPER_GIVE_UP_MS` and the
+    // beacon carrier both use, and what bounds an officer sent at a spot he
+    // cannot reach. **Giving up does not spend the sandbag**: the trip cost him
+    // a walk, not the wall.
+    if (now - state.buildSetOutAt > BARRICADE_GIVE_UP_MS) {
+      state.buildX = null;
+      state.buildY = null;
+      state.buildAt = 0;
+      return;
+    }
+
+    if (gap > BARRICADE_BUILD_REACH) {
+      // Deliberately no `unstickTick` — see the move branch below for why.
+      const desired = widenCorners(
+        world,
+        e,
+        headingToward(world, e, state, state.buildX, state.buildY, now),
+      );
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+      // Knocked off the spot mid-job: the stacking starts again rather than
+      // banking what was done, the same rule the beacon's mast follows.
+      state.buildAt = 0;
+      return;
+    }
+
+    if (state.buildAt === 0) state.buildAt = now + BARRICADE_BUILD_MS;
+    e.facing = Math.atan2(state.buildY - e.y, state.buildX - e.x);
+    state.heading = e.facing;
+    if (now < state.buildAt) return;
+
+    placeBarricade(world, state.buildX, state.buildY, state.buildAngle);
+    state.hasSandbag = false;
+    state.buildX = null;
+    state.buildY = null;
+    state.buildAt = 0;
+    return;
+  }
+
+  // A spectator has ordered this officer somewhere. Above escort/guard/patrol
+  // so the order wins over whatever it was doing, and below the fight above so
+  // it still shoots what it passes — an attack-move, for free. Sticky: it holds
+  // and scans the street on arrival until a new order replaces it.
+  //
+  // Built like the guard branch below, deliberately *not* like the beacon
+  // carrier: `unstickTick` wants 38px/s to call a body un-stuck and a walking
+  // officer makes 40, so it fires the moment one turns a corner and walks it
+  // off on a blind breakout heading — the trap CLAUDE.md records for anything
+  // that walks. `headingToward` already routes around walls with A*.
+  if (state.commandX !== null && state.commandY !== null) {
+    const gap = Math.hypot(state.commandX - e.x, state.commandY - e.y);
+    if (gap > COMMAND_ARRIVE_DIST) {
+      const desired = widenCorners(
+        world,
+        e,
+        headingToward(world, e, state, state.commandX, state.commandY, now),
+      );
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+      return;
+    }
+    if (now >= state.nextLookAt) {
+      state.nextLookAt =
+        now + RALLY_LOOK_MIN_MS + Math.random() * (RALLY_LOOK_MAX_MS - RALLY_LOOK_MIN_MS);
+      state.lookHeading = Math.random() * Math.PI * 2;
+    }
+    state.heading = turnToward(state.heading, state.lookHeading, RALLY_LOOK_TURN_RATE * dt);
+    e.facing = state.heading;
     return;
   }
 

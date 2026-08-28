@@ -20,6 +20,7 @@ import type {
   Pond,
   DuckState,
   EmplacementState,
+  BarricadeState,
   FireState,
   BeaconState,
   MineState,
@@ -115,9 +116,14 @@ import {
   BLOOD_COLOR,
   BLOOD_DECAL_MAX,
   BLOOD_DECAL_MS,
+  BLOOD_BAKE_SCALE,
   BLOOD_SPRAY_MS,
   BLOOD_SPRAY_DROPS,
   BLOOD_SPRAY_SPEED,
+  CORPSE_SLIDE_PX,
+  CORPSE_SLIDE_MS,
+  CORPSE_GREY_MS,
+  CORPSE_COLOR,
   DOG_BIRTH_TWIST_FROM,
   DOG_FADE_FROM,
   DOG_RESPAWN_FADE_MS,
@@ -2412,12 +2418,22 @@ export function drawCorpses(
  * `Shot.hit` already says a round found a body and `x2,y2` is exactly where it
  * stopped, so the client has everything it needs and the wire carries nothing
  * new. A hit spawns two things with different lifetimes: droplets thrown along
- * the round's line, gone in half a second, and marks on the road that stay.
+ * the round's line, gone in half a second, and marks on the road.
+ *
+ * A mark spends `BLOOD_DECAL_MS` fading from wet to a dull stain in the live
+ * list. After that, with PERMANENT BLOOD on, it is stamped once into a shared
+ * half-resolution offscreen layer (`stainLayer`, which also holds settled
+ * zombie corpses) and dropped — so the per-frame cost is one blit plus only the
+ * marks that are still drying, however long the round runs. With permanence off
+ * it fades to nothing and is culled, exactly as before.
  */
 interface BloodDecal {
   x: number;
   y: number;
-  r: number;
+  /** An ellipse now: rifle marks streak downrange, pools are round. */
+  rx: number;
+  ry: number;
+  rot: number;
   born: number;
 }
 interface BloodDrop {
@@ -2432,28 +2448,138 @@ const bloodDrops: BloodDrop[] = [];
 
 /** How many alpha steps the decals are drawn in — see `drawBlood`. */
 const BLOOD_BANDS = 4;
+/** The alpha a mark has dried to by the time it is baked — the last live band. */
+const BLOOD_DRIED_ALPHA = 0.2;
 
-export function spawnBlood(x: number, y: number, angle: number, now: number): void {
+/**
+ * The shared permanent-stain layer: dried blood and settled corpses both bake
+ * here. Sized off the *live* world dimensions, so it is built lazily (never at
+ * import — `WORLD_WIDTH` is a `let` that the map sets) and rebuilt whenever the
+ * city size changes. Same bake-it-once trick as the grime tile and the minimap.
+ */
+let stainLayer: HTMLCanvasElement | null = null;
+let stainCtx: CanvasRenderingContext2D | null = null;
+/** Whether anything has actually been baked, so `drawBlood` knows to blit. */
+let stainDirty = false;
+
+function ensureStainLayer(): CanvasRenderingContext2D | null {
+  const w = Math.max(1, Math.round(WORLD_WIDTH * BLOOD_BAKE_SCALE));
+  const h = Math.max(1, Math.round(WORLD_HEIGHT * BLOOD_BAKE_SCALE));
+  if (!stainLayer || stainLayer.width !== w || stainLayer.height !== h) {
+    stainLayer = document.createElement('canvas');
+    stainLayer.width = w;
+    stainLayer.height = h;
+    stainCtx = stainLayer.getContext('2d');
+    stainDirty = false;
+  }
+  return stainCtx;
+}
+
+function clearStainLayer(): void {
+  if (stainLayer && stainCtx) stainCtx.clearRect(0, 0, stainLayer.width, stainLayer.height);
+  stainDirty = false;
+}
+
+/** Draw into the stain layer at world coordinates, at the layer's scale. */
+function bakeInto(sctx: CanvasRenderingContext2D, fn: (g: CanvasRenderingContext2D) => void): void {
+  sctx.save();
+  sctx.scale(BLOOD_BAKE_SCALE, BLOOD_BAKE_SCALE);
+  fn(sctx);
+  sctx.restore();
+  stainDirty = true;
+}
+
+function decalPath(g: CanvasRenderingContext2D, d: BloodDecal): void {
+  g.moveTo(d.x + d.rx * Math.cos(d.rot), d.y + d.rx * Math.sin(d.rot));
+  g.ellipse(d.x, d.y, d.rx, d.ry, d.rot, 0, TAU);
+}
+
+function bakeDecal(sctx: CanvasRenderingContext2D, d: BloodDecal): void {
+  bakeInto(sctx, (g) => {
+    g.globalAlpha = BLOOD_DRIED_ALPHA;
+    g.fillStyle = BLOOD_COLOR;
+    g.beginPath();
+    decalPath(g, d);
+    g.fill();
+    g.globalAlpha = 1;
+  });
+}
+
+export function spawnBlood(
+  x: number,
+  y: number,
+  angle: number,
+  now: number,
+  light = false,
+): void {
   if (!settings.blood) return;
   const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
-  // Marks on the ground, thrown on past the body along the round's line.
-  for (let i = 0; i < 4; i++) {
-    const spread = angle + (rand() - 0.5) * 1.5;
-    const d = rand() * 26;
+
+  // Fewer, smaller marks for a sidearm; a varied spread for a rifle.
+  const marks = light ? 1 + Math.floor(rand() * 2) : 3 + Math.floor(rand() * 5);
+  for (let i = 0; i < marks; i++) {
+    const spread = angle + (rand() - 0.5) * 1.4;
+    // Squared, so most land near the body and a few carry well downrange.
+    const dist = rand() ** 1.4 * (light ? 12 : 32);
+    const base = 1.5 + rand() ** 2 * (light ? 2.4 : 8.5);
+    const stretch = 1 + rand() * 1.4; // elongated along the round's line
     bloodDecals.push({
-      x: x + Math.cos(spread) * d + (rand() - 0.5) * 8,
-      y: y + Math.sin(spread) * d + (rand() - 0.5) * 8,
-      r: 2.2 + rand() * 5.5,
+      x: x + Math.cos(spread) * dist + (rand() - 0.5) * 8,
+      y: y + Math.sin(spread) * dist + (rand() - 0.5) * 8,
+      rx: base * stretch,
+      ry: base * (0.5 + rand() * 0.35),
+      rot: angle + (rand() - 0.5) * 0.6,
       born: now,
     });
   }
-  if (bloodDecals.length > BLOOD_DECAL_MAX) {
-    bloodDecals.splice(0, bloodDecals.length - BLOOD_DECAL_MAX);
+
+  // A rifle wound occasionally pools; a pistol never does.
+  if (!light && rand() < 0.16) {
+    const r = 8 + rand() * 7;
+    bloodDecals.push({
+      x: x + (rand() - 0.5) * 10,
+      y: y + (rand() - 0.5) * 10,
+      rx: r,
+      ry: r * (0.8 + rand() * 0.2),
+      rot: rand() * TAU,
+      born: now,
+    });
   }
 
-  for (let i = 0; i < BLOOD_SPRAY_DROPS; i++) {
+  // Fine cast-off flung well past the body, rifle only.
+  if (!light) {
+    const specks = Math.floor(rand() * 4);
+    for (let i = 0; i < specks; i++) {
+      const spread = angle + (rand() - 0.5) * 0.9;
+      const dist = 28 + rand() * 46;
+      const r = 0.7 + rand() * 1.5;
+      bloodDecals.push({
+        x: x + Math.cos(spread) * dist,
+        y: y + Math.sin(spread) * dist,
+        rx: r,
+        ry: r,
+        rot: 0,
+        born: now,
+      });
+    }
+  }
+
+  if (bloodDecals.length > BLOOD_DECAL_MAX) {
+    // Bake the overflow rather than lose it, so permanence still holds under a
+    // sustained stream that outpaces the dry-down.
+    const overflow = bloodDecals.length - BLOOD_DECAL_MAX;
+    if (settings.permanentBlood) {
+      const sctx = ensureStainLayer();
+      if (sctx) for (let i = 0; i < overflow; i++) bakeDecal(sctx, bloodDecals[i]);
+    }
+    bloodDecals.splice(0, overflow);
+  }
+
+  const drops = light ? Math.round(BLOOD_SPRAY_DROPS * 0.4) : BLOOD_SPRAY_DROPS;
+  const speedMul = light ? 0.6 : 1;
+  for (let i = 0; i < drops; i++) {
     const spread = angle + (rand() - 0.5) * 1.4;
-    const speed = BLOOD_SPRAY_SPEED * (0.35 + rand() * 0.9);
+    const speed = BLOOD_SPRAY_SPEED * speedMul * (0.35 + rand() * 0.9);
     bloodDrops.push({
       x,
       y,
@@ -2462,6 +2588,94 @@ export function spawnBlood(x: number, y: number, angle: number, now: number): vo
       born: now,
     });
   }
+}
+
+// ---------------------------------------------------------------- corpses
+/**
+ * A shot zombie, thrown a short way along the round and then greyed. After it
+ * settles it is baked into `stainLayer` and stays for the round; the transient
+ * `deaths` list on the wire is the only thing sent (like `shots`). Dogs keep
+ * their own `corpses` — this is shamblers only.
+ */
+interface ZombieCorpse {
+  x0: number;
+  y0: number;
+  a: number;
+  born: number;
+}
+const zombieCorpses: ZombieCorpse[] = [];
+
+export function spawnCorpse(x: number, y: number, a: number, now: number): void {
+  if (!settings.blood || !settings.corpses) return;
+  zombieCorpses.push({ x0: x, y0: y, a, born: now });
+}
+
+/** A flat sprawled body — cheap enough to draw live and to bake. */
+function drawSprawled(g: CanvasRenderingContext2D, x: number, y: number, a: number, color: string): void {
+  const r = ENTITY_RADIUS.zombie;
+  const ca = Math.cos(a);
+  const sa = Math.sin(a);
+  // Limbs flung at odd angles — a corpse's are not a matched pair.
+  g.strokeStyle = shade(color, -18);
+  g.lineCap = 'round';
+  g.lineWidth = r * 0.36;
+  g.beginPath();
+  g.moveTo(x, y);
+  g.lineTo(x + Math.cos(a + 2.5) * r * 1.5, y + Math.sin(a + 2.5) * r * 1.5);
+  g.moveTo(x, y);
+  g.lineTo(x + Math.cos(a - 1.7) * r * 1.7, y + Math.sin(a - 1.7) * r * 1.7);
+  g.moveTo(x - ca * r * 0.4, y - sa * r * 0.4);
+  g.lineTo(x + Math.cos(a - 2.7) * r * 1.6, y + Math.sin(a - 2.7) * r * 1.6);
+  g.stroke();
+  // Torso.
+  g.fillStyle = color;
+  g.beginPath();
+  g.ellipse(x, y, r * 1.15, r * 0.62, a, 0, TAU);
+  g.fill();
+  g.strokeStyle = shade(color, -28);
+  g.lineWidth = 1;
+  g.stroke();
+  // Head, lolled forward off the shoulders.
+  g.fillStyle = shade(color, 8);
+  g.beginPath();
+  g.arc(x + ca * r * 1.05, y + sa * r * 1.05, r * 0.44, 0, TAU);
+  g.fill();
+}
+
+export function drawZombieCorpses(ctx: CanvasRenderingContext2D, view: Viewport, now: number): void {
+  if (zombieCorpses.length === 0) return;
+  const settleMs = CORPSE_SLIDE_MS + CORPSE_GREY_MS;
+  let write = 0;
+  for (let i = 0; i < zombieCorpses.length; i++) {
+    const c = zombieCorpses[i];
+    const age = now - c.born;
+    const slide = Math.min(1, age / CORPSE_SLIDE_MS);
+    const ease = 1 - (1 - slide) ** 3;
+    const cx = c.x0 + Math.cos(c.a) * CORPSE_SLIDE_PX * ease;
+    const cy = c.y0 + Math.sin(c.a) * CORPSE_SLIDE_PX * ease;
+
+    if (age >= settleMs) {
+      // Settled and grey: bake once and retire. `drawBlood` blits the layer,
+      // and it ran before this — so draw the body one last time here too, an
+      // exact match for what the blit will show next frame, or it blinks out
+      // for one. Without the setting it just stops being drawn (main gates the
+      // spawn, so this branch rarely trips).
+      if (settings.corpses) {
+        const sctx = ensureStainLayer();
+        if (sctx) bakeInto(sctx, (g) => drawSprawled(g, cx, cy, c.a, CORPSE_COLOR));
+      }
+      if (visible(view, cx, cy, ENTITY_RADIUS.zombie * 2)) {
+        drawSprawled(ctx, cx, cy, c.a, CORPSE_COLOR);
+      }
+      continue;
+    }
+
+    zombieCorpses[write++] = c;
+    if (!visible(view, cx, cy, ENTITY_RADIUS.zombie * 2)) continue;
+    const grey = Math.min(1, age / CORPSE_GREY_MS);
+    drawSprawled(ctx, cx, cy, c.a, mix(ENTITY_COLOR.zombie, CORPSE_COLOR, grey));
+  }
+  zombieCorpses.length = write;
 }
 
 /**
@@ -2478,31 +2692,63 @@ export function spawnBurst(x: number, y: number, now: number): void {
   }
 }
 
-/** A new city has none of the old one's blood on it. */
+/** A new city has none of the old one's blood, corpses or baked stains on it. */
 export function clearBlood(): void {
   bloodDecals.length = 0;
   bloodDrops.length = 0;
+  zombieCorpses.length = 0;
+  clearStainLayer();
 }
 
 /**
  * The dried marks, under the bodies.
  *
- * Every visible decal of a given age goes into **one path, filled once**. Two
- * hundred separate translucent fills is the park's mistake again in red — the
- * cost of a translucent blob is paid per pixel per frame, and the union of a
- * group costs about what one of them does. Four bands is enough for the fade
- * to read as continuous.
+ * Every visible *live* decal of a given age goes into **one path, filled
+ * once** — two hundred separate translucent fills is the park's mistake again
+ * in red. Four bands is enough for the fade to read as continuous. Everything
+ * older has already dried into `stainLayer`, which is blitted first as a single
+ * image: that is what keeps a whole round's worth of blood flat.
  */
 export function drawBlood(ctx: CanvasRenderingContext2D, view: Viewport, now: number): void {
-  if (bloodDecals.length === 0) return;
+  // Turning permanence *and* corpses off is the cue to wipe the baked layer,
+  // so the stains actually clear rather than freezing.
+  const wantBake = settings.blood && (settings.permanentBlood || settings.corpses);
+  if (!wantBake && stainDirty) clearStainLayer();
 
-  // Cull the dead in the same walk rather than filtering into a new array
-  // thirty times a second.
+  // Retire dried marks *before* the blit, so a mark crossing into the baked
+  // layer shows up on the same frame it left the live list rather than
+  // flickering out for one. With permanence off they just vanish, as before.
+  // Only touch the layer when there is actually something to retire — an
+  // 18MB canvas should not be allocated the frame a round starts.
+  const sctx = settings.permanentBlood && bloodDecals.length > 0 ? ensureStainLayer() : null;
   let write = 0;
   for (let i = 0; i < bloodDecals.length; i++) {
-    if (now - bloodDecals[i].born < BLOOD_DECAL_MS) bloodDecals[write++] = bloodDecals[i];
+    const d = bloodDecals[i];
+    if (now - d.born < BLOOD_DECAL_MS) {
+      bloodDecals[write++] = d;
+    } else if (sctx) {
+      bakeDecal(sctx, d);
+    }
   }
   bloodDecals.length = write;
+
+  // The dried layer, blitted for just the sub-rect on screen. `ctx` is inside
+  // the world transform, so the destination is world coordinates.
+  if (stainDirty && stainLayer) {
+    const s = BLOOD_BAKE_SCALE;
+    const sx = Math.max(0, Math.floor(view.x * s));
+    const sy = Math.max(0, Math.floor(view.y * s));
+    const sw = Math.min(stainLayer.width - sx, Math.ceil(view.w * s) + 2);
+    const sh = Math.min(stainLayer.height - sy, Math.ceil(view.h * s) + 2);
+    if (sw > 0 && sh > 0) {
+      const smooth = ctx.imageSmoothingEnabled;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(stainLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
+      ctx.imageSmoothingEnabled = smooth;
+    }
+  }
+
+  if (bloodDecals.length === 0) return;
 
   for (let band = 0; band < BLOOD_BANDS; band++) {
     let any = false;
@@ -2510,16 +2756,15 @@ export function drawBlood(ctx: CanvasRenderingContext2D, view: Viewport, now: nu
     for (const d of bloodDecals) {
       const age = (now - d.born) / BLOOD_DECAL_MS;
       if (Math.min(BLOOD_BANDS - 1, Math.floor(age * BLOOD_BANDS)) !== band) continue;
-      if (!visible(view, d.x, d.y, d.r + 4)) continue;
-      ctx.moveTo(d.x + d.r, d.y);
-      ctx.arc(d.x, d.y, d.r, 0, TAU);
+      if (!visible(view, d.x, d.y, Math.max(d.rx, d.ry) + 4)) continue;
+      decalPath(ctx, d);
       any = true;
     }
     if (!any) continue;
-    // Fresh is nearly opaque and wet-looking; old is a stain. It never reaches
-    // nothing — a mark on tarmac does not disappear, it just stops being red.
+    // Fresh is nearly opaque and wet-looking; old is a stain, ending at the
+    // same alpha the baked layer holds it at.
     const t = band / (BLOOD_BANDS - 1);
-    ctx.globalAlpha = 0.62 - t * 0.42;
+    ctx.globalAlpha = 0.62 - t * (0.62 - BLOOD_DRIED_ALPHA);
     ctx.fillStyle = BLOOD_COLOR;
     ctx.fill();
   }
@@ -4575,6 +4820,68 @@ export function drawHelicopters(
  * under the entities so the officer working it stands on top of his own
  * emplacement rather than behind it.
  */
+/**
+ * A stack of sandbags, lying along `box.angle`.
+ *
+ * **One definition, three callers** — the pocket gunner's wall, a barricade the
+ * garrison built to a spectator's order, and the translucent ghost of one being
+ * placed. Written out three times they would drift, and the ghost's whole job is
+ * to show exactly what is about to exist.
+ *
+ * They wear down rather than vanish, so the colour dries out as they take
+ * punishment: you can see one is nearly gone before it goes. `tint` overrides
+ * that for the ghost, which is saying "here" or "not here" rather than
+ * reporting damage.
+ */
+export function drawSandbagWall(
+  ctx: CanvasRenderingContext2D,
+  box: { x: number; y: number; angle: number; hw: number; hh: number },
+  hp: number,
+  alpha = 1,
+  tint?: string,
+): void {
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.translate(box.x, box.y);
+  ctx.rotate(box.angle);
+  const worn = 0.35 + 0.65 * b0(hp);
+  ctx.fillStyle =
+    tint ??
+    `rgb(${Math.round(120 + 40 * worn)}, ${Math.round(104 + 30 * worn)}, ${Math.round(72 + 20 * worn)})`;
+  ctx.strokeStyle = 'rgba(31, 27, 20, 0.85)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(-box.hw, -box.hh, box.hw * 2, box.hh * 2, 4);
+  ctx.fill();
+  ctx.stroke();
+  // Three bags, so it reads as stacked rather than as a plank.
+  ctx.strokeStyle = 'rgba(31, 27, 20, 0.5)';
+  ctx.lineWidth = 1;
+  for (const t of [-0.34, 0.34]) {
+    ctx.beginPath();
+    ctx.moveTo(box.hw * t, -box.hh);
+    ctx.lineTo(box.hw * t, box.hh);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * The bare walls, with no gun behind them. Drawn with the emplacements and by
+ * the same function — as far as anything on screen is concerned the only
+ * difference is that nobody is manning this one.
+ */
+export function drawBarricades(
+  ctx: CanvasRenderingContext2D,
+  walls: BarricadeState[],
+  view: Viewport,
+): void {
+  for (const wall of walls) {
+    if (!visible(view, wall.x, wall.y, wall.hw + 20)) continue;
+    drawSandbagWall(ctx, wall, wall.hp);
+  }
+}
+
 export function drawEmplacements(
   ctx: CanvasRenderingContext2D,
   guns: EmplacementState[],
@@ -4583,32 +4890,7 @@ export function drawEmplacements(
   for (const gun of guns) {
     if (!visible(view, gun.x, gun.y, 120)) continue;
 
-    // Sandbags. They wear down rather than vanish, so the colour dries out as
-    // they take punishment — you can see one is nearly gone before it goes.
-    if (gun.bags) {
-      const b = gun.bags;
-      ctx.save();
-      ctx.translate(b.x, b.y);
-      ctx.rotate(b.angle);
-      const worn = 0.35 + 0.65 * b0(gun.bagHp);
-      ctx.fillStyle = `rgb(${Math.round(120 + 40 * worn)}, ${Math.round(104 + 30 * worn)}, ${Math.round(72 + 20 * worn)})`;
-      ctx.strokeStyle = 'rgba(31, 27, 20, 0.85)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.roundRect(-b.hw, -b.hh, b.hw * 2, b.hh * 2, 4);
-      ctx.fill();
-      ctx.stroke();
-      // Three bags, so it reads as stacked rather than as a plank.
-      ctx.strokeStyle = 'rgba(31, 27, 20, 0.5)';
-      ctx.lineWidth = 1;
-      for (const t of [-0.34, 0.34]) {
-        ctx.beginPath();
-        ctx.moveTo(b.hw * t, -b.hh);
-        ctx.lineTo(b.hw * t, b.hh);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
+    if (gun.bags) drawSandbagWall(ctx, gun.bags, gun.bagHp);
 
     // The gun: a squat mount with a barrel along the current traverse.
     ctx.save();
@@ -4986,38 +5268,49 @@ export function drawInventory(
 }
 
 /**
+ * The aiming marks are warm amber — the colour of a phosphor gunsight, and a
+ * deliberate step away from anything that reads as UI green or a sci-fi cyan.
+ * Every one is laid down twice: a dark underlay first so it holds on a white
+ * wall as readily as on the road, then the amber over it.
+ */
+const AIM_AMBER = '#e8a13a';
+const AIM_AMBER_DIM = 'rgba(232, 161, 58, 0.5)';
+const AIM_SHADOW = 'rgba(12, 8, 3, 0.6)';
+
+/**
  * The scoped reticle: a ranging circle with ticks, rather than the four stubs
  * of the ordinary crosshair. Deliberately larger — you are looking at a lot
  * more ground than usual and a small mark gets lost in it.
  */
 export function drawReticle(ctx: CanvasRenderingContext2D, x: number, y: number): void {
   ctx.save();
-  ctx.strokeStyle = 'rgba(34, 211, 238, 0.85)';
+
+  const marks = () => {
+    ctx.beginPath();
+    ctx.arc(x, y, 26, 0, Math.PI * 2);
+    ctx.moveTo(x + 2.2, y);
+    ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+    // Four arms into the ring, with a gap at the middle so the mark stays clear.
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      ctx.moveTo(x + dx * 7, y + dy * 7);
+      ctx.lineTo(x + dx * 26, y + dy * 26);
+    }
+    ctx.stroke();
+  };
+  ctx.strokeStyle = AIM_SHADOW;
+  ctx.lineWidth = 3;
+  marks();
+  ctx.strokeStyle = 'rgba(232, 161, 58, 0.9)';
   ctx.lineWidth = 1;
-
-  ctx.beginPath();
-  ctx.arc(x, y, 26, 0, Math.PI * 2);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.arc(x, y, 2.2, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Four arms into the ring, with a gap at the middle so the mark stays clear.
-  ctx.beginPath();
-  for (const [dx, dy] of [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ]) {
-    ctx.moveTo(x + dx * 7, y + dy * 7);
-    ctx.lineTo(x + dx * 26, y + dy * 26);
-  }
-  ctx.stroke();
+  marks();
 
   // Range ticks down the lower arm, the way a real scope carries them.
-  ctx.strokeStyle = 'rgba(34, 211, 238, 0.5)';
+  ctx.strokeStyle = AIM_AMBER_DIM;
   ctx.beginPath();
   for (let i = 1; i <= 3; i++) {
     const ty = y + 10 + i * 5;
@@ -5196,17 +5489,299 @@ export function drawSelfMarker(
   ctx.restore();
 }
 
-export function drawCrosshair(ctx: CanvasRenderingContext2D, x: number, y: number): void {
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-  ctx.lineWidth = 1.5;
+/**
+ * The ordinary hip-fire mark, and the spectator's pointer. A retro gunsight:
+ * four ticks with a centre gap, a broken ranging ring — the targeting-computer
+ * look without a full circle — and a centre pip. Amber, double-stroked.
+ *
+ * `command` is the spectator's variant with grey officers selected: the same
+ * mark inside four corner brackets, so it reads as "click sends them here".
+ */
+export function drawCrosshair(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  command = false,
+): void {
+  ctx.save();
+  ctx.lineCap = 'butt';
+
+  const strokes = () => {
+    ctx.beginPath();
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      ctx.moveTo(x + dx * 4, y + dy * 4);
+      ctx.lineTo(x + dx * 10, y + dy * 10);
+    }
+    // The broken ring, four arcs with a gap between each.
+    for (let i = 0; i < 4; i++) {
+      const a0 = i * (Math.PI / 2) + 0.34;
+      const a1 = a0 + Math.PI / 2 - 0.68;
+      ctx.moveTo(x + Math.cos(a0) * 13, y + Math.sin(a0) * 13);
+      ctx.arc(x, y, 13, a0, a1);
+    }
+    // Corner brackets, spectator-with-a-selection only.
+    if (command) {
+      for (const [dx, dy] of [
+        [1, 1],
+        [-1, 1],
+        [1, -1],
+        [-1, -1],
+      ]) {
+        ctx.moveTo(x + dx * 20, y + dy * 12);
+        ctx.lineTo(x + dx * 20, y + dy * 20);
+        ctx.lineTo(x + dx * 12, y + dy * 20);
+      }
+    }
+    ctx.stroke();
+  };
+
+  ctx.strokeStyle = AIM_SHADOW;
+  ctx.lineWidth = 3;
+  strokes();
+  ctx.strokeStyle = AIM_AMBER;
+  ctx.lineWidth = 1.3;
+  strokes();
+
+  ctx.fillStyle = AIM_AMBER;
+  ctx.strokeStyle = AIM_SHADOW;
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(x - 8, y);
-  ctx.lineTo(x - 3, y);
-  ctx.moveTo(x + 3, y);
-  ctx.lineTo(x + 8, y);
-  ctx.moveTo(x, y - 8);
-  ctx.lineTo(x, y - 3);
-  ctx.moveTo(x, y + 3);
-  ctx.lineTo(x, y + 8);
+  ctx.arc(x, y, 1.4, 0, TAU);
+  ctx.fill();
   ctx.stroke();
+  ctx.restore();
+}
+
+// -------------------------------------------------------- the command card
+/**
+ * The spectator's command card: an SC2-shaped grid bottom-right, raised while
+ * grey officers are selected.
+ *
+ * **`commandCardSlots` is the geometry and `drawCommandCard` is the paint**, the
+ * same split `minimapFrame` / `drawMinimap` already uses and for the same
+ * reason: the hit test and the drawing must be reading the same rectangles, and
+ * two copies of that arithmetic is how you get a button you can see and cannot
+ * press.
+ *
+ * Five columns by three rows, like SC2's. It is mostly empty on purpose — there
+ * is one order on it — and the shape is fixed rather than packed, so a button
+ * stays where it was the last time you looked for it. That is the same argument
+ * as the dog's four hexagons, one of which is an empty outline.
+ */
+export const CARD_COLS = 5;
+export const CARD_ROWS = 3;
+const CARD_SLOT = 46;
+const CARD_GAP = 4;
+const CARD_PAD = 8;
+const CARD_MARGIN = 18;
+
+export interface CardSlot {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  col: number;
+  row: number;
+}
+
+export function commandCardSlots(
+  vw: number,
+  vh: number,
+): { frame: { x: number; y: number; w: number; h: number }; slots: CardSlot[] } {
+  const w = CARD_COLS * CARD_SLOT + (CARD_COLS - 1) * CARD_GAP + CARD_PAD * 2;
+  const h = CARD_ROWS * CARD_SLOT + (CARD_ROWS - 1) * CARD_GAP + CARD_PAD * 2;
+  const frame = { x: vw - CARD_MARGIN - w, y: vh - CARD_MARGIN - h, w, h };
+  const slots: CardSlot[] = [];
+  for (let row = 0; row < CARD_ROWS; row++) {
+    for (let col = 0; col < CARD_COLS; col++) {
+      slots.push({
+        x: frame.x + CARD_PAD + col * (CARD_SLOT + CARD_GAP),
+        y: frame.y + CARD_PAD + row * (CARD_SLOT + CARD_GAP),
+        w: CARD_SLOT,
+        h: CARD_SLOT,
+        col,
+        row,
+      });
+    }
+  }
+  return { frame, slots };
+}
+
+/** Index into `slots` for a column and row. */
+export function cardIndex(col: number, row: number): number {
+  return row * CARD_COLS + col;
+}
+
+/** What is actually on the card, per page. */
+export type CardButtonId = 'shovel' | 'sandbag' | 'back';
+export interface CardButton {
+  id: CardButtonId;
+  slot: number;
+  label: string;
+  /** Shown small in the slot's top-right, or -1 for no badge. */
+  count: number;
+  enabled: boolean;
+}
+
+export function commandCardButtons(page: 'root' | 'build', sandbags: number): CardButton[] {
+  if (page === 'build') {
+    return [
+      {
+        id: 'sandbag',
+        slot: cardIndex(0, 0),
+        label: 'SANDBAG WALL',
+        count: sandbags,
+        enabled: sandbags > 0,
+      },
+      { id: 'back', slot: cardIndex(CARD_COLS - 1, CARD_ROWS - 1), label: 'BACK', count: -1, enabled: true },
+    ];
+  }
+  return [{ id: 'shovel', slot: cardIndex(0, CARD_ROWS - 1), label: 'BUILD', count: -1, enabled: true }];
+}
+
+function shovelIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, color: string): void {
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = 'round';
+  // Shaft, running corner to corner so the tool reads at this size.
+  ctx.beginPath();
+  ctx.moveTo(cx + 7, cy - 10);
+  ctx.lineTo(cx - 2, cy + 1);
+  ctx.stroke();
+  // The T-grip at the top.
+  ctx.beginPath();
+  ctx.moveTo(cx + 3, cy - 12);
+  ctx.lineTo(cx + 11, cy - 6);
+  ctx.stroke();
+  // Blade: a spade, point down.
+  ctx.beginPath();
+  ctx.moveTo(cx - 8, cy - 1);
+  ctx.lineTo(cx + 2, cy + 5);
+  ctx.lineTo(cx - 2, cy + 12);
+  ctx.lineTo(cx - 11, cy + 6);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function sandbagIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, color: string): void {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = 'rgba(12, 8, 3, 0.55)';
+  ctx.lineWidth = 1;
+  // Two courses of three, stacked and offset — a wall rather than a sack.
+  for (const [row, n] of [
+    [1, 3],
+    [-1, 2],
+  ] as Array<[number, number]>) {
+    for (let i = 0; i < n; i++) {
+      const bw = 8;
+      const x = cx - ((n * (bw + 2)) / 2 - 1) + i * (bw + 2);
+      const y = cy + row * 5 - 3;
+      ctx.beginPath();
+      ctx.roundRect(x, y, bw, 7, 2.5);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}
+
+function backIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, color: string): void {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx + 9, cy);
+  ctx.lineTo(cx - 7, cy);
+  ctx.moveTo(cx - 1, cy - 7);
+  ctx.lineTo(cx - 8, cy);
+  ctx.lineTo(cx - 1, cy + 7);
+  ctx.stroke();
+}
+
+export function drawCommandCard(
+  ctx: CanvasRenderingContext2D,
+  page: 'root' | 'build',
+  sandbags: number,
+  selected: number,
+  hover: number,
+  vw: number,
+  vh: number,
+): void {
+  const { frame, slots } = commandCardSlots(vw, vh);
+  const buttons = commandCardButtons(page, sandbags);
+
+  ctx.save();
+  ctx.lineJoin = 'round';
+
+  // The panel. Dark, with the same warm amber edge the cursor family uses, so
+  // the RTS furniture reads as one thing.
+  ctx.fillStyle = 'rgba(10, 12, 15, 0.86)';
+  ctx.strokeStyle = 'rgba(232, 161, 58, 0.45)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(frame.x + 0.5, frame.y + 0.5, frame.w - 1, frame.h - 1, 5);
+  ctx.fill();
+  ctx.stroke();
+
+  // Every slot is drawn, filled or not. A card that grew a box at a time would
+  // move the buttons already on it — the dog's empty fourth hexagon again.
+  for (let i = 0; i < slots.length; i++) {
+    const s = slots[i];
+    const button = buttons.find((b) => b.slot === i);
+    const hovered = button !== undefined && button.enabled && hover === i;
+
+    ctx.fillStyle = button ? (hovered ? 'rgba(58, 66, 78, 0.95)' : 'rgba(28, 32, 38, 0.9)') : 'rgba(18, 21, 25, 0.55)';
+    ctx.strokeStyle = button
+      ? hovered
+        ? 'rgba(232, 161, 58, 0.9)'
+        : 'rgba(232, 161, 58, 0.35)'
+      : 'rgba(90, 100, 115, 0.16)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(s.x + 0.5, s.y + 0.5, s.w - 1, s.h - 1, 3);
+    ctx.fill();
+    ctx.stroke();
+    if (!button) continue;
+
+    const cx = s.x + s.w / 2;
+    const cy = s.y + s.h / 2;
+    const color = button.enabled ? '#e8a13a' : '#5b6472';
+    if (button.id === 'shovel') shovelIcon(ctx, cx, cy, color);
+    else if (button.id === 'sandbag') sandbagIcon(ctx, cx, cy, color);
+    else backIcon(ctx, cx, cy, color);
+
+    // How many are left to build, in the slot's top-right. A number rather than
+    // a bar: this is a stock that only goes down, and a bar implies a ceiling
+    // it refills to.
+    if (button.count >= 0) {
+      ctx.fillStyle = 'rgba(8, 10, 13, 0.85)';
+      ctx.beginPath();
+      ctx.arc(s.x + s.w - 9, s.y + 9, 8, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = button.enabled ? '#e8a13a' : '#5b6472';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(button.count), s.x + s.w - 9, s.y + 9.5);
+    }
+  }
+
+  // A strip over the card: what is selected, or what the cursor is over.
+  const hoveredButton = buttons.find((b) => b.slot === hover);
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = hoveredButton ? '#e8a13a' : '#94a3b8';
+  ctx.fillText(
+    hoveredButton ? hoveredButton.label : `${selected} OFFICER${selected === 1 ? '' : 'S'}`,
+    frame.x + 2,
+    frame.y - 5,
+  );
+  ctx.restore();
 }

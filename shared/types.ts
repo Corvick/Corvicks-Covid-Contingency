@@ -18,6 +18,15 @@ export interface EntityState {
   infected?: boolean;
   /** AI-driven officer, drawn grey to separate it from players. */
   npc?: boolean;
+  /**
+   * A grey officer still carrying his one sandbag.
+   *
+   * Only sent for `npc` officers who have not spent it. The spectator's command
+   * card counts the flag across the selection to work out how many walls it can
+   * still order, and greys the icon out at zero — so this is the whole of what
+   * the card needs, without anything about *where* anybody is.
+   */
+  bag?: boolean;
   /** Standing in for a player rather than ambient — blue body, grey head. */
   bot?: boolean;
   /** Helicopter-dropped trooper: better shot, drawn in olive. */
@@ -313,6 +322,24 @@ export interface EmplacementState {
   bags?: { x: number; y: number; angle: number; hw: number; hh: number };
 }
 
+/**
+ * A bare sandbag wall a grey officer built to order — the pocket gunner's bags
+ * with no gun behind them.
+ *
+ * Drawn by the same `drawSandbagWall` the emplacement's are, so the two cannot
+ * drift apart, and solid to walking in the same way. There are never many: one
+ * per grey officer for the whole round.
+ */
+export interface BarricadeState {
+  x: number;
+  y: number;
+  angle: number;
+  hw: number;
+  hh: number;
+  /** Remaining health as a fraction, so it dries out as it is torn at. */
+  hp: number;
+}
+
 /** A duck, sent for drawing only — they are scenery that reacts, not entities. */
 export interface DuckState {
   x: number;
@@ -497,6 +524,14 @@ export interface Shot {
    * each other. Nothing else needs it, so nothing else pays for it.
    */
   who?: string;
+  /**
+   * A pistol-grade round rather than a rifle one. The client throws a smaller,
+   * sparser blood mark for it — a sidearm does not open a body up the way a
+   * rifle does. Absent (the common case over a round) means an ordinary round.
+   * Derived server-side from the weapon, not the damage: a shotgun pellet and a
+   * machine-gun round are low *per hit* and still tear.
+   */
+  light?: boolean;
 }
 
 export interface InputState {
@@ -806,6 +841,36 @@ export type ClientMessage =
   | { type: 'beaconPlace'; x: number; y: number }
   | { type: 'selectSlot'; slot: number }
   /**
+   * A spectator's RTS order to one or more grey NPC officers: go here and hold.
+   *
+   * Only honoured from a socket that is actually spectating — a player cannot
+   * command the garrison — and only for grey AI officers (not blue bots, olive
+   * soldiers or black SWAT). `stop` freezes them where they stand (x/y ignored);
+   * `release` clears the order so they go back to their own AI. Selection lives
+   * entirely on the client; this order is the only thing that reaches the
+   * server, and it is an order, not anything about visibility.
+   *
+   * A plain move keeps the group's **shape**: the server takes the centroid of
+   * the named bodies, keeps each one's offset from it, and scales the lot down
+   * — so `x`/`y` is where the *formation* goes, not where every officer goes.
+   * See `COMMAND_FORMATION_SPREAD`.
+   *
+   * `build` is the command card's one order: the nearest of `ids` who still has
+   * a sandbag walks to `x`/`y` and stacks one at `angle`. Nobody else in the
+   * selection is disturbed.
+   */
+  | {
+      type: 'command';
+      ids: string[];
+      x: number;
+      y: number;
+      stop?: boolean;
+      release?: boolean;
+      build?: 'sandbag';
+      /** Which way the wall lies, from the ghost the spectator rotated. */
+      angle?: number;
+    }
+  /**
    * Watch instead of play. `restart: false` joins the round already in
    * progress rather than starting a fresh one — which is what you want when
    * the point is to observe how a game actually unfolds.
@@ -894,6 +959,14 @@ export type ServerMessage =
       type: 'state';
       entities: EntityState[];
       shots: Shot[];
+      /**
+       * Zombies that died this tick, for one tick, exactly like `shots` — the
+       * client throws a ragdoll-and-grey corpse off each one and nothing more
+       * is sent. `a` is the direction to shove the body (the round's travel
+       * direction). Empty on almost every tick; a burst of a few at the endgame.
+       * Dogs are not here — they keep their own permanent `corpses` list.
+       */
+      deaths: Array<{ id: string; x: number; y: number; a: number }>;
       spectating: boolean;
       gameOver: boolean;
       victory: boolean;
@@ -929,6 +1002,8 @@ export type ServerMessage =
       ducks: DuckState[];
       /** Deployed pocket gunners: the gun, and the bags in front of it. */
       emplacements: EmplacementState[];
+      /** Bare sandbag walls a spectator had the garrison build. */
+      barricades: BarricadeState[];
       vehicles: BackupVehicleState[];
       mines: MineState[];
       /** Every dog put down this round, left where it fell. */

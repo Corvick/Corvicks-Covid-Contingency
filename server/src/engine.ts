@@ -40,6 +40,8 @@ import {
   PLAYER_SIGHT_RADIUS,
   DOG_SIGHT_RADIUS,
   ENTITY_RADIUS,
+  COMMAND_FORMATION_SPREAD,
+  OFFICER_SPACING_PAD,
   PATH_NODE_BUDGET_PER_TICK,
   STAMINA_MAX,
   STAMINA_DRAIN_PER_SEC,
@@ -90,7 +92,10 @@ import {
   spawnDog,
   speedAt,
   toWire,
+  walkableNear,
+  type AiState,
   type Entity,
+  type World,
 } from './world.js';
 import { dogHudFor, lashesToWire, startDogAbility, tentaclesToWire, updateDogs } from './dog.js';
 import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
@@ -98,6 +103,7 @@ import { processShooting, steerAim } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { ducksToWire, updateDucks } from './ducks.js';
 import {
+  barricadesToWire,
   emplacementsToWire,
   resolveEmplacementCollisions,
   updateEmplacements,
@@ -362,6 +368,134 @@ export function connect(id: string, sendTo: Send): void {
 }
 
 /**
+ * A spectator's order to a set of grey officers.
+ *
+ * Split out of `handle` because it is the one branch there with real geometry
+ * in it. Everything about *who may give it* stays at the call site; everything
+ * about what it means is here.
+ *
+ * **A move order preserves the group's shape.** Given the identical destination
+ * every officer walks at the same pixel, piles up, and is shoved into a blob by
+ * collision — which is precisely the clustering an RTS player does not want. So
+ * the centroid of the named bodies is taken, each keeps its offset from it, and
+ * the whole formation is scaled down until it fits. Computed here rather than
+ * on the client because the positions here are the authoritative ones, and it
+ * keeps the wire message to a single point.
+ */
+function commandOfficers(
+  world: World,
+  msg: Extract<ClientMessage, { type: 'command' }>,
+): void {
+  const units: Array<{ e: Entity; st: AiState }> = [];
+  for (const targetId of msg.ids.slice(0, 64)) {
+    const e = world.entities.get(targetId);
+    const st = world.ai.get(targetId);
+    if (!e || !st || e.type !== 'officer') continue;
+    if (world.bots.has(targetId) || world.soldiers.has(targetId) || world.swat.has(targetId)) {
+      continue;
+    }
+    units.push({ e, st });
+  }
+  if (units.length === 0) return;
+
+  if (msg.release) {
+    for (const { st } of units) {
+      st.commandX = null;
+      st.commandY = null;
+      st.buildX = null;
+      st.buildY = null;
+      st.buildAt = 0;
+    }
+    return;
+  }
+
+  if (msg.stop) {
+    for (const { e, st } of units) {
+      st.commandX = e.x;
+      st.commandY = e.y;
+      st.buildX = null;
+      st.buildY = null;
+      st.buildAt = 0;
+    }
+    return;
+  }
+
+  // The command card's build order. **The nearest of the *selected* officers
+  // who still has a sandbag** — the card belongs to the selection, so it is
+  // never a stranger across the city who gets pulled off a street. Nobody else
+  // in the group is disturbed by it.
+  if (msg.build === 'sandbag') {
+    let best: { e: Entity; st: AiState } | null = null;
+    let bestDist = Infinity;
+    for (const unit of units) {
+      if (!unit.st.hasSandbag) continue;
+      const dist = Math.hypot(unit.e.x - msg.x, unit.e.y - msg.y);
+      if (dist >= bestDist) continue;
+      bestDist = dist;
+      best = unit;
+    }
+    if (!best) return; // nobody in the selection has one left
+    const spot = walkableNear(world, msg.x, msg.y);
+    best.st.buildX = spot.x;
+    best.st.buildY = spot.y;
+    best.st.buildAngle = msg.angle ?? 0;
+    best.st.buildAt = 0;
+    best.st.buildSetOutAt = 0;
+    console.log(`[server] ${best.e.id} sent to build a wall at ${spot.x | 0},${spot.y | 0}`);
+    return;
+  }
+
+  // A plain move. One body lands exactly on the click — its offset is zero —
+  // so nothing about the single-unit case changes.
+  let cx = 0;
+  let cy = 0;
+  for (const { e } of units) {
+    cx += e.x;
+    cy += e.y;
+  }
+  cx /= units.length;
+  cy /= units.length;
+
+  let spread = 0;
+  for (const { e } of units) spread = Math.max(spread, Math.hypot(e.x - cx, e.y - cy));
+
+  let closest = Infinity;
+  for (let i = 0; i < units.length; i++) {
+    for (let j = i + 1; j < units.length; j++) {
+      closest = Math.min(closest, Math.hypot(units[i].e.x - units[j].e.x, units[i].e.y - units[j].e.y));
+    }
+  }
+
+  /*
+   * Three bounds, and the middle one is the load-bearing one.
+   *
+   * The cap draws a spread-out group in; the **floor** is what stops the cap
+   * stacking ten officers onto one pixel, which collision would then fling
+   * apart — destroying the very formation this exists to keep. It is set at the
+   * separation `OFFICER_SPACING_PAD` gives them, so the compressed shape is by
+   * construction one they can physically stand in. The ceiling of 1 is what
+   * makes "already close together" mean *leave it exactly as it is*.
+   */
+  const minGap = ENTITY_RADIUS.officer * 2 + OFFICER_SPACING_PAD;
+  const cap = COMMAND_FORMATION_SPREAD * Math.sqrt(units.length);
+  let scale = spread > cap ? cap / spread : 1;
+  if (Number.isFinite(closest) && closest > 0.001) {
+    scale = Math.max(scale, Math.min(1, minGap / closest));
+  }
+
+  for (const { e, st } of units) {
+    const spot = walkableNear(world, msg.x + (e.x - cx) * scale, msg.y + (e.y - cy) * scale);
+    st.commandX = spot.x;
+    st.commandY = spot.y;
+    // A move order calls off a build. He is being sent somewhere else, and a
+    // sandbag left half-ordered would have him turn round the moment he arrived.
+    st.buildX = null;
+    st.buildY = null;
+    st.buildAt = 0;
+  }
+}
+
+/**
  * One message from one connection.
  *
  * Takes a parsed message rather than bytes: a socket has to `JSON.parse` its
@@ -479,6 +613,15 @@ export function handle(id: string, msg: ClientMessage): void {
         } else {
           console.log(`[server] ${id} called the beacon in at ${msg.x | 0},${msg.y | 0}`);
         }
+      } else if (msg.type === 'command') {
+        // A spectator's RTS order to grey NPC officers. Honoured only from a
+        // socket that is actually spectating — a player cannot command the
+        // garrison — and only for grey AI officers: not blue bots, not the
+        // olive soldiers off a helicopter, not the black SWAT out of a van.
+        // Selection is entirely the client's; this is the whole of what
+        // reaches the server. Sticky until replaced; `stop` holds them where
+        // they stand. `slice` bounds a hand-crafted message.
+        if (world.spectators.has(id)) commandOfficers(world, msg);
       } else if (msg.type === 'spectate') {
         // Normally a fresh game to watch; `restart: false` drops into the one
         // already running, so a round can be observed as it actually plays out.
@@ -849,6 +992,20 @@ function visibleShots(viewer: Entity): Shot[] {
 }
 
 /**
+ * A body dropping is fogged for a player exactly as a shot is — a corpse
+ * appearing out of unseen ground is a small information leak. Spectators get
+ * the lot.
+ */
+function visibleDeaths(viewer: Entity): Array<{ id: string; x: number; y: number; a: number }> {
+  const sight = sightRadiusFor(viewer);
+  return world.deaths.filter(
+    (d) =>
+      Math.hypot(d.x - viewer.x, d.y - viewer.y) <= sight &&
+      hasLineOfSight(world, viewer.x, viewer.y, d.x, d.y, false, viewer.type),
+  );
+}
+
+/**
  * E is overloaded: a quick tap grabs (or swaps) whatever is underfoot, while
  * holding it past DROP_HOLD_MS throws away what you're carrying.
  */
@@ -1077,6 +1234,9 @@ function tick(): void {
       type: 'state',
       entities: spectating ? wholeBoard() : visibleTo(viewer, now),
       shots: spectating ? world.shots : visibleShots(viewer),
+      // A handful of records for one tick at most; the client throws a corpse
+      // off each. Fogged for a player like a shot is — see `visibleDeaths`.
+      deaths: spectating ? world.deaths : visibleDeaths(viewer),
       brokenWindows: world.brokenWindows,
       // Doors are static geometry the client already has; only their state
       // travels, and only for the ones near enough to matter.
@@ -1111,6 +1271,10 @@ function tick(): void {
       blasts: airBlasts,
       ducks: ducksToWire(world),
       emplacements: emplacementsToWire(world),
+      // Unfogged like the emplacements beside them: there are a handful in a
+      // whole round, and a wall you walked past should not blink out because
+      // you turned round.
+      barricades: barricadesToWire(world),
     vehicles: vehiclesToWire(world),
     mines: minesToWire(world, now),
     // Unfogged, deliberately: a handful in a whole round, and a body you walked
@@ -1133,6 +1297,7 @@ function tick(): void {
     });
   }
   world.shots.length = 0;
+  world.deaths.length = 0;
   mark('serialise+send');
 
   const elapsed = performance.now() - started;

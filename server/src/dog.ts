@@ -80,6 +80,7 @@ import {
   hasWallClearPath,
   spawnAtBreach,
   speedAt,
+  walkableNear,
   type Command,
   type Entity,
   type World,
@@ -860,23 +861,9 @@ export function startDogAbility(
  * building — that is where the people are.
  */
 function roarTarget(world: World, aimX: number, aimY: number): { x: number; y: number } {
-  const x = clamp(aimX, 0, WORLD_WIDTH);
-  const y = clamp(aimY, 0, WORLD_HEIGHT);
-  if (!world.nav.isBlocked(x, y) && world.nav.isReachable(x, y)) return { x, y };
-
-  for (let ring = 1; ring <= 14; ring++) {
-    const radius = ring * 26;
-    const steps = ring * 8;
-    for (let i = 0; i < steps; i++) {
-      const angle = (i / steps) * Math.PI * 2;
-      const px = clamp(x + Math.cos(angle) * radius, 0, WORLD_WIDTH);
-      const py = clamp(y + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
-      if (!world.nav.isBlocked(px, py) && world.nav.isReachable(px, py)) return { x: px, y: py };
-    }
-  }
-  // Nothing walkable anywhere near it. The order still goes out and still
-  // expires on its own; there is nothing better to point them at.
-  return { x, y };
+  // The spiral itself is `walkableNear` in `world.ts` now — the spectator's move
+  // orders want exactly the same answer, and two copies of it would drift.
+  return walkableNear(world, aimX, aimY);
 }
 
 /**

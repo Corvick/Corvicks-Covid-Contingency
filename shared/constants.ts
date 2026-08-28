@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.13.1';
+export const GAME_VERSION = '0.15.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2326,6 +2326,37 @@ export const SANDBAG_HIT_INTERVAL_MS = 620;
 /** How near a zombie has to be to start tearing at them. */
 export const SANDBAG_REACH = 22;
 
+/**
+ * A bare sandbag wall, built to order by a grey officer a spectator has told to
+ * — the pocket gunner's bags with no gun behind them.
+ *
+ * Everything about how it *behaves* is the emplacement's: it is see-through and
+ * bullets pass over it, it is solid to walking, it is deliberately not in the
+ * nav grid so a zombie stands and claws at it rather than routing round, and it
+ * goes through the same `zombieAtSandbag` and the same collision push-out. What
+ * is different is that it is smaller — a stack of bags rather than a gun
+ * position — and that it is not a `nearestProtector`, because that is a
+ * judgement about a machine gun and this has none.
+ *
+ * Every grey officer carries exactly one, which is what bounds the whole
+ * feature: a spectator can wall a street, not the city.
+ */
+export const BARRICADE_HALF_WIDTH = 26;
+export const BARRICADE_HALF_DEPTH = 9;
+export const BARRICADE_HEALTH = 900;
+/** How near the officer has to get before he starts stacking them. */
+export const BARRICADE_BUILD_REACH = 34;
+export const BARRICADE_BUILD_MS = 2600;
+/**
+ * One budget for the whole errand, never extended — the same shape as
+ * `HIDE_DEEPER_GIVE_UP_MS` and the beacon carrier, and what stops an officer
+ * sent at a spot he cannot reach walking at it for the rest of the round.
+ * Giving up deliberately does **not** spend the sandbag.
+ */
+export const BARRICADE_GIVE_UP_MS = 22000;
+/** How far one wheel notch turns the ghost while it is being placed. */
+export const SANDBAG_ROTATE_STEP = Math.PI / 12;
+
 // ------------------------------------------------------------- flamethrower
 /**
  * A thin stream of burning napalm. Short reach, sticks to what it touches, and
@@ -2831,6 +2862,36 @@ export const RALLY_ROOM_GIVE_UP_MS = 40000;
  * itself.
  */
 export const INDOOR_ROUTE_DOOR_REACH = 40;
+/**
+ * How near a spectator's move-order counts as arrived — at which point the
+ * officer holds and scans the street rather than pressing on. Same figure as
+ * the wander/guard arrival tests around it.
+ */
+export const COMMAND_ARRIVE_DIST = 26;
+/**
+ * How wide a commanded group is allowed to arrive, **per square root of its
+ * size** — so the cluster grows with the number of bodies in it rather than
+ * being one figure that is loose for three and impossible for ten. Same
+ * `sqrt(area / count)` reasoning the garrison's spread uses.
+ *
+ * A move order preserves the selection's *shape*: each officer keeps its offset
+ * from the group's centre, scaled down until the whole thing fits inside this.
+ * The scale is floored at what `OFFICER_SPACING_PAD` says they can physically
+ * stand in — a cap on its own would stack ten officers on one pixel, collision
+ * would fling them apart, and the formation this exists to keep would be
+ * destroyed on arrival — and ceilinged at 1, which is what makes "already close
+ * together" mean *leave it exactly as it is*.
+ */
+export const COMMAND_FORMATION_SPREAD = 45;
+/**
+ * Extra clearance between two officers, on top of their radii.
+ *
+ * Officer-to-officer only. Their circles used to touch exactly, so a group that
+ * had arrived somewhere read as one mass rather than as several people standing
+ * near each other. Civilians and zombies are untouched, and a squad's own
+ * station-keeping runs on `SQUAD_SLACK`, which is far too coarse to notice it.
+ */
+export const OFFICER_SPACING_PAD = 8;
 /** Idle fidgeting so a held crowd doesn't look like a row of statues. */
 export const RALLY_LOOK_MIN_MS = 900;
 export const RALLY_LOOK_MAX_MS = 3400;
@@ -3689,14 +3750,39 @@ export const GRIME_CRACKS = 7;
  * Capped, and every visible decal of a given age goes into **one path filled
  * once** rather than a fill each. Four hundred separate translucent fills is
  * the park's mistake again, in red.
+ *
+ * `BLOOD_DECAL_MS` is now the dry-down: a mark spends this long fading from wet
+ * to a dull stain, and then — with PERMANENT BLOOD on — it is baked once into a
+ * shared, half-resolution offscreen layer and dropped from the live list, so
+ * the per-frame cost stays flat however long the round runs. The cap is only
+ * the backstop on the still-drying set. With permanence off it fades to nothing
+ * and is culled, exactly as before.
  */
-export const BLOOD_DECAL_MAX = 200;
+export const BLOOD_DECAL_MAX = 320;
 export const BLOOD_DECAL_MS = 40000;
+/**
+ * The persistent stain layer (dried blood, and settled zombie corpses) is a
+ * canvas this fraction of the world on each axis. Blood and flat corpses are
+ * low-detail, so a 2x upscale on the blit is invisible; at the 5000x3700 max
+ * city this is a ~18MB canvas, and less for the smaller ones.
+ */
+export const BLOOD_BAKE_SCALE = 0.5;
 /** The wet part: droplets thrown along the round's line, gone in half a second. */
 export const BLOOD_SPRAY_MS = 520;
 export const BLOOD_SPRAY_DROPS = 9;
 export const BLOOD_SPRAY_SPEED = 190;
 export const BLOOD_COLOR = '#5c0d10';
+
+/**
+ * A shot zombie ragdolls a short way along the round before it drops, then its
+ * green fades to a corpse grey. After that it is a permanent mark for the round
+ * (baked into the same layer the dried blood is), unless ZOMBIE CORPSES is off,
+ * in which case a kill just fades out over `ENTITY_FADE_MS` as it always did.
+ */
+export const CORPSE_SLIDE_PX = 18;
+export const CORPSE_SLIDE_MS = 320;
+export const CORPSE_GREY_MS = 1100;
+export const CORPSE_COLOR = '#6b6b6b';
 
 /**
  * How dark the corners of the screen get. Under the HUD and over the fog, so

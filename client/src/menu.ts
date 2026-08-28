@@ -578,6 +578,8 @@ export function setupMenu(hooks: MenuHooks): Menu {
     ground: el<HTMLButtonElement>('opt-ground'),
     vignette: el<HTMLButtonElement>('opt-vignette'),
     blood: el<HTMLButtonElement>('opt-blood'),
+    permBlood: el<HTMLButtonElement>('opt-permblood'),
+    corpses: el<HTMLButtonElement>('opt-corpses'),
     dogLimits: el<HTMLButtonElement>('opt-doglimits'),
   };
 
@@ -602,6 +604,11 @@ export function setupMenu(hooks: MenuHooks): Menu {
     set(optRows.ground, settings.groundDetail ? 'ON' : 'OFF', settings.groundDetail);
     set(optRows.vignette, settings.vignette ? 'ON' : 'OFF', settings.vignette);
     set(optRows.blood, settings.blood ? 'ON' : 'OFF', settings.blood);
+    // Dim when the master switch is off — there is nothing for these to do.
+    optRows.permBlood.classList.toggle('dim', !settings.blood);
+    optRows.corpses.classList.toggle('dim', !settings.blood);
+    set(optRows.permBlood, settings.permanentBlood ? 'ON' : 'OFF', settings.permanentBlood);
+    set(optRows.corpses, settings.corpses ? 'ON' : 'OFF', settings.corpses);
     // Reads as the state of the *limits*, not of the switch — OFF is the
     // notable condition here, the same wording `NO FOG` uses for the same
     // reason: green is spent on the thing worth noticing.
@@ -645,6 +652,16 @@ export function setupMenu(hooks: MenuHooks): Menu {
   });
   optRows.blood.addEventListener('click', () => {
     applySettings({ blood: !settings.blood });
+    drawOptions();
+  });
+  optRows.permBlood.addEventListener('click', () => {
+    if (!settings.blood) return;
+    applySettings({ permanentBlood: !settings.permanentBlood });
+    drawOptions();
+  });
+  optRows.corpses.addEventListener('click', () => {
+    if (!settings.blood) return;
+    applySettings({ corpses: !settings.corpses });
     drawOptions();
   });
   /**
