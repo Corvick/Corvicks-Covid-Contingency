@@ -370,6 +370,108 @@ export function connect(id: string, sendTo: Send): void {
 }
 
 /**
+ * Push any two slots that landed too close to each other apart, and put the
+ * whole thing back on the click.
+ *
+ * **This is what replaced the old floor on the scale, and it is why a group can
+ * now arrive tight.** The scale is uniform, so one number had to serve two
+ * unrelated jobs: keep the formation small, and keep the closest pair legal.
+ * Floored at `minGap / closest` it did the second at the cost of the first —
+ * for a scatter of officers box-selected across a quarter of the city the
+ * closest pair is a few hundred pixels apart, and holding *that* pair at 36px
+ * holds everybody else hundreds of pixels apart with them. The two jobs are
+ * separated now: the cap decides how big, and this decides what is legal, so
+ * neither has to be conservative on the other's behalf.
+ *
+ * It is a relaxation rather than a solve — a handful of passes, each pushing an
+ * overlapping pair half apart — which is all this needs: the input is already
+ * roughly the right size, so only a few pairs are ever over, and a pass that
+ * cannot quite finish leaves a slot a little tight rather than leaving it in
+ * somebody's lap. Collision sorts out the remainder on arrival, which it did
+ * for the whole formation before this existed.
+ *
+ * **The re-centre at the end is a rigid translation**, so it cannot undo any of
+ * the separation, and it is what keeps the centroid exactly on the click — the
+ * property that makes an order land where it was given.
+ *
+ * At most 64 bodies (`msg.ids.slice(0, 64)`), so the pairwise walk is a few
+ * thousand operations once per order.
+ */
+function separateSlots(
+  slots: Array<{ x: number; y: number }>,
+  minGap: number,
+  clickX: number,
+  clickY: number,
+): void {
+  if (slots.length < 2) return;
+
+  for (let pass = 0; pass < SEPARATE_PASSES; pass++) {
+    let moved = false;
+    for (let i = 0; i < slots.length; i++) {
+      for (let j = i + 1; j < slots.length; j++) {
+        const a = slots[i];
+        const b = slots[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        if (d >= minGap) continue;
+        // Exactly on top of each other: there is no direction to push along, so
+        // one is invented off the pair's index. Deterministic rather than
+        // random — an order given twice from the same selection has to produce
+        // the same formation, or the group visibly reshuffles on a double
+        // right-click.
+        if (d < 0.001) {
+          const angle = ((i * 31 + j * 17) % 360) * (Math.PI / 180);
+          dx = Math.cos(angle);
+          dy = Math.sin(angle);
+          d = 1;
+        }
+        const push = (minGap - d) / 2;
+        const ux = (dx / d) * push;
+        const uy = (dy / d) * push;
+        a.x -= ux;
+        a.y -= uy;
+        b.x += ux;
+        b.y += uy;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+
+  let sx = 0;
+  let sy = 0;
+  for (const s of slots) {
+    sx += s.x;
+    sy += s.y;
+  }
+  const ox = clickX - sx / slots.length;
+  const oy = clickY - sy / slots.length;
+  for (const s of slots) {
+    s.x += ox;
+    s.y += oy;
+  }
+}
+
+/** How many relaxation passes `separateSlots` gets. */
+const SEPARATE_PASSES = 12;
+
+/**
+ * True is the formation as it was — a cap two and a half times what the bodies
+ * need, and floored on the closest pair rather than relaxed afterwards.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`:
+ * "the group arrives tight" means nothing without "and it did not before".
+ * `server/formationcheck.ts` reads it.
+ */
+let looseFormation = false;
+const LEGACY_FORMATION_SPREAD = 45;
+
+export function setLooseFormation(v: boolean): void {
+  looseFormation = v;
+}
+
+/**
  * A spectator's order to a set of grey officers.
  *
  * Split out of `handle` because it is the one branch there with real geometry
@@ -492,13 +594,6 @@ function commandOfficers(
   let spread = 0;
   for (const { e } of movers) spread = Math.max(spread, Math.hypot(e.x - cx, e.y - cy));
 
-  let closest = Infinity;
-  for (let i = 0; i < movers.length; i++) {
-    for (let j = i + 1; j < movers.length; j++) {
-      closest = Math.min(closest, Math.hypot(movers[i].e.x - movers[j].e.x, movers[i].e.y - movers[j].e.y));
-    }
-  }
-
   /*
    * Three bounds, and the middle one is the load-bearing one.
    *
@@ -510,14 +605,41 @@ function commandOfficers(
    * makes "already close together" mean *leave it exactly as it is*.
    */
   const minGap = ENTITY_RADIUS.officer * 2 + OFFICER_SPACING_PAD;
-  const cap = COMMAND_FORMATION_SPREAD * Math.sqrt(movers.length);
+  const per = looseFormation ? LEGACY_FORMATION_SPREAD : COMMAND_FORMATION_SPREAD;
+  const cap = per * Math.sqrt(movers.length);
   let scale = spread > cap ? cap / spread : 1;
-  if (Number.isFinite(closest) && closest > 0.001) {
-    scale = Math.max(scale, Math.min(1, minGap / closest));
+
+  const slots = movers.map(({ e }) => ({
+    x: msg.x + (e.x - cx) * scale,
+    y: msg.y + (e.y - cy) * scale,
+  }));
+
+  if (looseFormation) {
+    // The formation as it was: floored on the closest pair rather than pushed
+    // apart afterwards. See `separateSlots`.
+    let closest = Infinity;
+    for (let i = 0; i < movers.length; i++) {
+      for (let j = i + 1; j < movers.length; j++) {
+        closest = Math.min(
+          closest,
+          Math.hypot(movers[i].e.x - movers[j].e.x, movers[i].e.y - movers[j].e.y),
+        );
+      }
+    }
+    if (Number.isFinite(closest) && closest > 0.001) {
+      scale = Math.max(scale, Math.min(1, minGap / closest));
+    }
+    for (let i = 0; i < movers.length; i++) {
+      slots[i].x = msg.x + (movers[i].e.x - cx) * scale;
+      slots[i].y = msg.y + (movers[i].e.y - cy) * scale;
+    }
+  } else {
+    separateSlots(slots, minGap, msg.x, msg.y);
   }
 
-  for (const { e, st } of movers) {
-    const spot = walkableNear(world, msg.x + (e.x - cx) * scale, msg.y + (e.y - cy) * scale);
+  for (let i = 0; i < movers.length; i++) {
+    const { st } = movers[i];
+    const spot = walkableNear(world, slots[i].x, slots[i].y);
     st.commandX = spot.x;
     st.commandY = spot.y;
     // Only an override reaches a builder at all, and when it does it calls the

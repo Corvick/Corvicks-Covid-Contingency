@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.16.4';
+export const GAME_VERSION = '0.16.5';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3005,13 +3005,18 @@ export const COMMAND_ARRIVE_DIST = 26;
  *
  * A move order preserves the selection's *shape*: each officer keeps its offset
  * from the group's centre, scaled down until the whole thing fits inside this.
- * The scale is floored at what `OFFICER_SPACING_PAD` says they can physically
- * stand in — a cap on its own would stack ten officers on one pixel, collision
- * would fling them apart, and the formation this exists to keep would be
- * destroyed on arrival — and ceilinged at 1, which is what makes "already close
- * together" mean *leave it exactly as it is*.
+ * Ceilinged at 1, which is what makes "already close together" mean *leave it
+ * exactly as it is*, and the slots are pushed apart afterwards so none is closer
+ * than `OFFICER_SPACING_PAD` allows — see `commandOfficers`.
+ *
+ * **It is a multiple of what the bodies actually need.** `minGap / 2` is 18, so
+ * a disc of radius `18 * sqrt(n)` is about the tightest `n` officers can stand
+ * in at all; this is 1.2 of that, which leaves the shape readable without the
+ * group arriving as a street-wide smear. It was 45 — two and a half times the
+ * packing bound — which for a dozen officers box-selected across a quarter of
+ * the city meant a cluster over 300px across.
  */
-export const COMMAND_FORMATION_SPREAD = 45;
+export const COMMAND_FORMATION_SPREAD = 22;
 /**
  * Extra clearance between two officers, on top of their radii.
  *

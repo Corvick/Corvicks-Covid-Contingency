@@ -178,25 +178,22 @@ them back to their own AI. Selected officers wear a green ring.
   - **Server-side, so the wire message is still one point.** The positions here
     are the authoritative ones; the client's are interpolated and would put the
     slots where the bodies are *drawn* rather than where they are.
-  - **`scale = clamp(cap / spread, minGap / closest, 1)`, and the floor is the
-    load-bearing term.** A cap on its own stacks ten officers onto one pixel,
-    collision flings them apart, and the formation this exists to keep is
-    destroyed on arrival. The floor is set at what `OFFICER_SPACING_PAD` gives
-    them, so the compressed shape is by construction one they can stand in. The
-    ceiling of 1 is what makes "already close together" mean *leave it exactly
-    as it is*.
+  - **How big and what is legal are two jobs, and one number cannot do both** —
+    see **A wide selection arrives as a group, not as a street** below, which is
+    what replaced `scale = clamp(cap / spread, minGap / closest, 1)`. The scale
+    is now the cap alone, ceilinged at 1 — which is what makes "already close
+    together" mean *leave it exactly as it is* — and `separateSlots` pushes
+    apart anything that landed too near afterwards.
   - **The cap grows as `sqrt(n)`** (`COMMAND_FORMATION_SPREAD`), the same
     `sqrt(area / count)` reasoning the garrison's spread uses — one flat figure
     is loose for three officers and impossible for ten.
   - **Every slot goes through `walkableNear`**, extracted out of the dog roar's
     `roarTarget` into `world.ts` and shared, so a slot landing in a wall is
     nudged rather than walked at.
-  - Measured, three staged in an L and sent across the map: bearings from the
-    group's centre **preserved to 0.0°**, spread **509px → 78px**, closest pair
-    of slots 70.7px against a 36px floor, centroid **0.0px** off the click. A
-    group already 43px across comes out 43px across, and a single officer lands
-    exactly on the click — its offset is zero, so nothing about that case
-    changed.
+  - Measured: bearings from the group's centre held to **2.0°**, centroid
+    **0.0px** off the click, a group already 43px across comes out 43px across,
+    and a single officer lands exactly on the click — its offset is zero, so
+    nothing about that case ever changed.
 - **Two officers stand `OFFICER_SPACING_PAD` further apart than their circles
   demand**, so a group that has arrived reads as several people rather than one
   mass. Officer-to-officer only. **The broadphase query had to widen with it** —
@@ -204,6 +201,71 @@ them back to their own AI. Selected officers wear a green ring.
   exists to separate would have sat on the boundary and been offered by luck.
   Measured: two walked together settle at **36.0px** where they used to touch at
   28.
+
+#### A wide selection arrives as a group, not as a street
+
+Reported as *"the final formation needs to be much smaller when selecting grey
+officers over a large area and telling them to move to a location"*, and there
+were two faults under it — one obvious and one that had been quietly switching
+the whole feature off.
+
+**The scale is uniform, so one number was doing two unrelated jobs**: keep the
+formation small, and keep the closest pair far enough apart to stand. It was
+`clamp(cap / spread, minGap / closest, 1)`, and the floor is the half that goes
+wrong.
+
+- **Two officers who have already arrived somewhere together settle at exactly
+  `minGap`** — this file measures them at 36.0px. So `minGap / closest` is
+  **1**, the floor is 1, and the scale is 1: *nothing is compressed at all*. One
+  pair standing together anywhere in the selection was enough. Measured, twelve
+  officers with one such pair among them: **1060.7px across**, which is the
+  selection arriving exactly as wide as it was picked.
+- **And it cannot even do the job it was there for.** Handed a clump already
+  *tighter* than `minGap`, the floor computes above 1, clamps to 1, and again
+  disables the scaling — so nine officers in a huddle with one straggler a
+  thousand pixels off arrived at **1260px radius with the huddle still 17.8px
+  apart**. The rule was conservative in exactly the cases it was not needed and
+  absent in the one it was.
+- **`separateSlots` is the replacement**, and separating the two jobs is the
+  whole idea: the cap decides how big, a relaxation decides what is legal, and
+  neither has to be conservative on the other's behalf. A handful of passes,
+  each pushing an overlapping pair half apart, then a **rigid re-centre** on the
+  click — rigid, so it cannot undo any of the separation, and it is what keeps
+  the centroid exactly where the order was given.
+  - Two slots exactly on top of each other have no direction to push along, so
+    one is invented **off the pair's indices rather than at random**: an order
+    given twice from the same selection has to produce the same formation, or
+    the group visibly reshuffles on a double right-click.
+  - It is a relaxation and not a solve. The input is already roughly the right
+    size so only a few pairs are ever over, and a pass that cannot quite finish
+    leaves a slot a little tight rather than in somebody's lap — which collision
+    sorts out on arrival, as it did for the whole formation before any of this
+    existed. At most 64 bodies, once per order.
+- **`COMMAND_FORMATION_SPREAD` went 45 → 22**, which is the obvious half. `minGap
+  / 2` is 18, so `18 * sqrt(n)` is about the tightest `n` officers can stand in
+  at all; 45 was two and a half times that. It is 1.2 of it now, which leaves
+  the shape readable without the group arriving as a smear.
+
+`server/formationcheck.ts` is the harness — headless, no socket, no port, and
+it drives the real `handle` because the spectator gate is part of what is being
+measured. `setLooseFormation` is the gate and it is kept. Staged on a
+phyllotaxis spiral rather than at random, so both modes see identical input and
+the figures do not move between runs of the same code:
+
+| n | old radius / across | new radius / across | packing radius | new closest pair |
+|---|---|---|---|---|
+| 3 | 77.9 / 146.5 | **38.1 / 71.6** | 31.2 | 45.8 |
+| 6 | 110.2 / 202.9 | **53.9 / 99.2** | 44.1 | 36.8 |
+| 12 | 155.9 / 290.3 | **76.2 / 141.9** | 62.4 | 36.0 |
+| 20 | 201.2 / 384.5 | **98.4 / 188.0** | 80.5 | 36.0 |
+
+**The result no longer depends on how wide the selection was** — 900px and
+1800px scatters give the identical figures, which is the ask stated as a
+property. Plus the two faults above: a wide selection containing one arm's-length
+pair goes **1060.7 → 146.8px across**, and the clump-and-straggler **1260 → 69.6px
+radius with its closest pair going 17.8 → 36.0**. Bearings from the group's
+centre are held to 2.0°, the centroid lands 0.0px off the click, no pair is under
+36px anywhere, and nothing is squeezed below the packing bound.
 
 #### And a command card to build with
 
