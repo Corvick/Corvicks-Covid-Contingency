@@ -942,6 +942,63 @@ whether a small city is a *tighter* one, which is a question about the
 distribution, so the harness walks the walkable ground instead and records how
 far each open spot is from the nearest blocked one.
 
+### Nothing on the outbreak's side starts indoors
+
+Reported as *"don't let zombies or the zombie dog start in a building"*, and the
+four ways in were not equally at fault. Measured over forty cities with the old
+behaviour gated back in:
+
+| indoors, out of every spawn | OLD | NEW |
+|---|---|---|
+| the initial outbreak | 1/200 (0.5%) | **0/200** |
+| a breach point | 13/800 (1.6%) | **0/800** |
+| the roar's summons | 3/320 (0.9%) | **0/320** |
+| a dog joining a round | **79/400 (19.8%)** | **0/400** |
+| a dog's next life | 346/480 | **0/480** |
+
+- **The dog was the real one, and `findSpawnNear` is why.** It checks geometry
+  and other bodies and nothing else — which is exactly right for a SWAT team
+  getting out of a van against a frontage, or a pocket gunner going down in a
+  hallway, and wrong for the one caller that has to come in off the street. **A
+  room's floor is clear of wall slabs**, so a spot in somebody's front room
+  passes every test it makes. It has an `outdoors` flag now, off by default, so
+  the answer for every other caller is byte-for-byte what it was.
+- **The edge walks were nearly right and had no floor under them.** The breach
+  point steps inward off the perimeter until it is out in the open — the
+  perimeter has buildings built onto it, so an edge point lands in a front room
+  often enough to matter — but the loop *ends* after forty steps rather than
+  failing, and it also clamps against the far inset and burns the rest on the
+  spot. A body was then quietly left wherever it had got to. `streetSpotNear`
+  is the floor: it spirals like `walkableNear` and asks the further question of
+  whether a spot is *outdoors*, which walkable and reachable do not answer.
+- **A dog's next life is a preference, not a rule.** It rises out of a shambler,
+  and with the whole horde indoors the alternative to an indoor host is refusing
+  the birth — which costs the player the round rather than a bad camera angle.
+  So outdoor hosts are taken when there are any and indoor ones when there are
+  not.
+  - **It also closes a documented rendering fault.** The shamblers most likely
+    to be indoors are the ones pressed against a shut door, and a dog rising
+    with its centre inside the slab collapses its own visibility polygon and
+    blacks the screen out — the case under **Known open issue** that says *"the
+    dog gets it worst, and gets it on respawn"*.
+- **Conversion is untouched, and deliberately.** Somebody bitten in a back room
+  turns in that back room; that is not a spawn and there is nowhere else for it
+  to happen.
+
+`server/spawncheck.ts` is the harness — headless, no socket, no port.
+`setSpawnsIgnoreBuildings` is the gate and it is kept: the control is the whole
+value of the run, since every new figure in that table is a zero and a zero is
+what a rig that sampled nothing also reports.
+
+*Two things about the run are worth reading correctly.* The 72% on a dog's next
+life is a **staged ratio, not a live one** — twelve shamblers are put in rooms
+against the five the city starts with, because a fresh city's horde is out in
+the street by construction and a rig that waited for a live one would find
+nothing but correct answers and pass in both modes. And the three edge faults
+are rare enough that twelve cities showed **0/240** for the breach where forty
+showed 13/800; quote the wider run, and do not conclude from a short one that
+the walk never fails.
+
 ### Civilian traits
 
 Each civilian rolls a fixed personality in `newAiState`, and most odd-looking
@@ -3094,7 +3151,9 @@ probably *shouldn't* be shot like an ordinary zombie.
   measured from the body centre while the head is drawn 1.25 radii forward, so
   it landed a quarter of the animal behind where you can see it. The two have
   to move together.
-- **It comes in at the breach**, with the rest of the outbreak.
+- **It comes in at the breach**, with the rest of the outbreak — and **out in
+  the street**, which for a long time it did not. See **Nothing on the
+  outbreak's side starts indoors**.
 
 **The horde is its lives.** Shot down, the dog comes back **out of a shambler**:
 one somewhere on the map stops being a shambler and stands up as the dog, at

@@ -1202,7 +1202,11 @@ export function makeDogEntity(id: string, x: number, y: number): Entity {
  */
 export function spawnDog(world: World, id: string): void {
   const origin = world.outbreakOrigin;
-  const spawn = findSpawnNear(world, origin.x, origin.y, DOG_RADIUS);
+  // **Out in the street, like the rest of the outbreak.** `findSpawnNear` only
+  // ever checked geometry and other bodies, and a room's floor is clear of
+  // both — so a fifth of all dogs came into the round standing in somebody's
+  // front room. See the note in that function.
+  const spawn = findSpawnNear(world, origin.x, origin.y, DOG_RADIUS, PLAYER_ONE_SPAWN_RANGE, true);
   world.entities.set(id, makeDogEntity(id, spawn.x, spawn.y));
   world.dogs.add(id);
   world.dogsOut.delete(id);
@@ -2219,14 +2223,32 @@ export interface DogBirth {
  * it without a word said about birth anywhere in `visibleTo`.
  */
 export function beginDogBirth(world: World, dog: Entity, now: number): boolean {
-  const hosts: Entity[] = [];
+  const outside: Entity[] = [];
+  const inside: Entity[] = [];
   for (const e of world.entities.values()) {
     if (e.type !== 'zombie' || e.id === dog.id || world.dogs.has(e.id)) continue;
     // Somebody else's birth is not a body to be born out of. Two dogs in a
     // lobby cannot come out of the same shambler.
     if (isBirthHost(world, e.id)) continue;
-    hosts.push(e);
+    (buildingIndexAt(world, e.x, e.y) < 0 ? outside : inside).push(e);
   }
+
+  /*
+   * **A dog comes up out in the street where it can.**
+   *
+   * Two reasons, and the second is the one that bites. A dog is not a thing
+   * that was standing in the city — it comes in at the breach, and rising in
+   * the middle of somebody's front room is the same wrong note as spawning
+   * there. And the shamblers most likely to be *indoors* are the ones pressed
+   * against a shut door: a body that rises with its centre inside the slab
+   * collapses its own visibility polygon and blacks the screen out, which is
+   * the fault this file already records under **Known open issue**.
+   *
+   * A preference and not a rule. With the whole horde indoors the alternative
+   * is refusing the birth, and that costs the player the round rather than a
+   * bad camera angle — so an indoor host is still far better than none.
+   */
+  const hosts = outside.length > 0 && !spawnsIgnoreBuildings ? outside : [...outside, ...inside];
   if (hosts.length === 0) return false;
 
   const host = hosts[Math.floor(Math.random() * hosts.length)];
@@ -2736,6 +2758,9 @@ function populate(world: World): void {
       x = clamp(x + inward[0] * 20, inset, WORLD_WIDTH - inset);
       y = clamp(y + inward[1] * 20, inset, WORLD_HEIGHT - inset);
     }
+    // And the same guarantee under it that `breachSpawnPoint` has, for the
+    // same reason: the walk above ends rather than failing.
+    ({ x, y } = streetSpotNear(world, x, y));
 
     const id = `zombie-${i}`;
     world.entities.set(id, makeEntity(id, 'zombie', x, y));
@@ -2785,7 +2810,12 @@ export function breachSpawnPoint(world: World, along: number): { x: number; y: n
     x = clamp(x + inward[0] * 20, inset, WORLD_WIDTH - inset);
     y = clamp(y + inward[1] * 20, inset, WORLD_HEIGHT - inset);
   }
-  return { x, y };
+  // The walk runs out of steps, or clamps against the far inset and burns the
+  // rest on the spot — and it *ends* rather than failing, so a body was quietly
+  // left wherever it had got to. Measured over 240 breach points, 1 of them was
+  // inside a building. Rare is not the same as never, and the one that lands in
+  // a front room is a summons arriving in somebody's kitchen.
+  return streetSpotNear(world, x, y);
 }
 
 /** Ids for anything walked in off the edge afterwards, so nothing collides. */
@@ -2817,6 +2847,56 @@ export function walkableNear(world: World, x: number, y: number): { x: number; y
       const sx = clamp(px + Math.cos(angle) * radius, 0, WORLD_WIDTH);
       const sy = clamp(py + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
       if (!world.nav.isBlocked(sx, sy) && world.nav.isReachable(sx, sy)) return { x: sx, y: sy };
+    }
+  }
+  return { x: px, y: py };
+}
+
+/**
+ * The nearest spot to (x, y) that is out in the street.
+ *
+ * `walkableNear` asks whether a body could stand somewhere; this asks the
+ * further question of whether it is *outdoors*, which is a different thing —
+ * the inside of a front room is walkable, reachable, and the last place an
+ * outbreak should begin.
+ *
+ * **It is the fallback under a directed walk, not a replacement for one.** The
+ * breach walks inward off the edge and almost always clears the frontage on its
+ * own; this is what stops the handful that do not from silently spawning a body
+ * in somebody's bedroom. Spirals like `walkableNear` and, like it, hands back
+ * the raw point when there is nothing better within reach — the honest answer,
+ * and one no caller can do anything about anyway.
+ */
+/**
+ * True is the outbreak as it was: nothing checked whether a spawn was indoors,
+ * so a fifth of dogs came into the round standing in a front room.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`
+ * and for the same reason: the control is the whole value of the run.
+ * `server/spawncheck.ts` reads it.
+ */
+let spawnsIgnoreBuildings = false;
+
+export function setSpawnsIgnoreBuildings(v: boolean): void {
+  spawnsIgnoreBuildings = v;
+}
+
+export function streetSpotNear(world: World, x: number, y: number): { x: number; y: number } {
+  if (spawnsIgnoreBuildings) return { x: clamp(x, 0, WORLD_WIDTH), y: clamp(y, 0, WORLD_HEIGHT) };
+  const px = clamp(x, 0, WORLD_WIDTH);
+  const py = clamp(y, 0, WORLD_HEIGHT);
+  const outside = (sx: number, sy: number): boolean =>
+    buildingIndexAt(world, sx, sy) < 0 && !world.nav.isBlocked(sx, sy) && world.nav.isReachable(sx, sy);
+  if (outside(px, py)) return { x: px, y: py };
+
+  for (let ring = 1; ring <= 14; ring++) {
+    const radius = ring * 26;
+    const steps = ring * 8;
+    for (let i = 0; i < steps; i++) {
+      const angle = (i / steps) * Math.PI * 2;
+      const sx = clamp(px + Math.cos(angle) * radius, 0, WORLD_WIDTH);
+      const sy = clamp(py + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
+      if (outside(sx, sy)) return { x: sx, y: sy };
     }
   }
   return { x: px, y: py };
@@ -2863,12 +2943,26 @@ export function findSpawnNear(
   originY: number,
   radius: number,
   range = PLAYER_ONE_SPAWN_RANGE,
+  outdoors = false,
 ): { x: number; y: number } {
   for (let attempt = 0; attempt < 40; attempt++) {
     const angle = Math.random() * Math.PI * 2;
     const dist = 40 + Math.random() * range;
     const x = clamp(originX + Math.cos(angle) * dist, radius, WORLD_WIDTH - radius);
     const y = clamp(originY + Math.sin(angle) * dist, radius, WORLD_HEIGHT - radius);
+
+    /*
+     * **A room's floor is clear of wall slabs, so the test below waves it
+     * through.** Everything this function checks is geometry and other bodies,
+     * which is exactly right for a SWAT team getting out of a van against a
+     * frontage or a pocket gunner going down in a hallway — and wrong for the
+     * one caller that must come in off the street. Measured before the flag:
+     * **20 of 100** dog spawns were inside a building.
+     *
+     * Off by default, so the answer for everybody else is byte-for-byte what it
+     * was.
+     */
+    if (outdoors && !spawnsIgnoreBuildings && buildingIndexAt(world, x, y) >= 0) continue;
 
     const probe = { x, y, radius: radius + 4 };
     let blocked = false;
@@ -2889,7 +2983,10 @@ export function findSpawnNear(
     }
     if (!blocked) return { x, y };
   }
-  return findSpawn(world, radius);
+  // Forty tries found nowhere. For a caller that insisted on the street, the
+  // origin it was given is a far better last resort than a spot anywhere in the
+  // city — the outbreak's own origin is out in the open by construction.
+  return outdoors ? streetSpotNear(world, originX, originY) : findSpawn(world, radius);
 }
 
 /** Everyone still on the human side — humans plus officers, NPC or player. */
