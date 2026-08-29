@@ -493,6 +493,10 @@ export function setBotIgnoresAcid(v: boolean): void {
  * doorway cannot afford the person in front to shut it on them.
  */
 function underOrders(state: AiState): boolean {
+  // A spectator's move or build order counts too, and for the identical
+  // reason: an officer sent through a door has been handed somebody else's
+  // errand, and tidying up after itself on the way is not part of it.
+  if (state.commandX !== null || state.buildX !== null) return true;
   return state.mode === 'rallied' && !rallyIgnoresBuildings;
 }
 
@@ -531,6 +535,36 @@ let botDropsTheGun = false;
 
 export function setBotDropsTheGun(v: boolean): void {
   botDropsTheGun = v;
+}
+
+/**
+ * True is the city's own officers as they were: unable to work a door under any
+ * circumstance, so a spectator's order across a threshold ended with a body
+ * pressed against the front of a house.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`
+ * and for the same reason: the control is the whole value of the run. Nothing
+ * about it is a behaviour anybody wants back. `server/rtscheck.ts` reads it.
+ */
+let officersIgnoreDoors = false;
+
+export function setOfficersIgnoreDoors(v: boolean): void {
+  officersIgnoreDoors = v;
+}
+
+/**
+ * True is the sandbags as they were: invisible to routing for *everybody*, so
+ * anything alive that was sent past one walked into it and stayed there.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`
+ * and for the same reason: the control is the whole value of the run, and here
+ * it is doubly so — half of what has to be shown is that the *zombies* did not
+ * change. `server/sandbagnav.ts` reads it.
+ */
+let sandbagsIgnoredByRoutes = false;
+
+export function setSandbagsIgnoredByRoutes(v: boolean): void {
+  sandbagsIgnoredByRoutes = v;
 }
 
 function getAi(world: World, e: Entity, now: number): AiState {
@@ -602,7 +636,27 @@ export function computeFrozen(world: World): Set<string> {
  * per-tick budget, so a hundred chasers can't stall the loop.
  */
 function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: number, now: number): number {
-  if (hasWallClearPath(world, e.x, e.y, gx, gy)) {
+  /*
+   * **A sandbag wall is something to walk round if you are alive, and something
+   * to stand and tear at if you are not.**
+   *
+   * Reported as a civilian bumping into a lone wall instead of stepping round
+   * it, and a grey officer sent to the far side of one pressing into it for the
+   * rest of the round. The cause is the rule the bags were given when there was
+   * only the pocket gunner: routes are planned as though they were not there,
+   * and whoever walks into one deals with it. That is exactly right for a
+   * zombie — it is what makes one claw a wall down rather than stroll round the
+   * end, which is the entire point of building one — and exactly wrong for
+   * everybody else, who cannot take it apart and has no business trying.
+   *
+   * So it is one test on the type, in the one place that decides where a body
+   * walks. Nothing else in the game sees the difference: collision still pushes
+   * everybody out of the bags, the danger field is untouched, and a wall is
+   * still not part of the map for spawning or reachability.
+   */
+  const avoidSoft = !sandbagsIgnoredByRoutes && e.type !== 'zombie';
+
+  if (hasWallClearPath(world, e.x, e.y, gx, gy, avoidSoft)) {
     state.path = null;
     return Math.atan2(gy - e.y, gx - e.x);
   }
@@ -621,18 +675,25 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
     state.pathGoalY = gy;
     // Capped by what is *left* of the tick, not just by the per-search limit,
     // so a single awkward route cannot spend the whole frame on its own.
-    state.path = world.nav.findPath(e.x, e.y, gx, gy, Math.min(PATH_MAX_NODES, world.pathBudget));
+    state.path = world.nav.findPath(
+      e.x,
+      e.y,
+      gx,
+      gy,
+      Math.min(PATH_MAX_NODES, world.pathBudget),
+      avoidSoft,
+    );
     world.pathBudget -= Math.max(1, world.nav.lastExpanded);
     state.pathIndex = 0;
   }
 
   const path = state.path;
-  if (!path || state.pathIndex >= path.length) return slideToward(world, e, gx, gy);
+  if (!path || state.pathIndex >= path.length) return slideToward(world, e, gx, gy, avoidSoft);
 
   let waypoint = path[state.pathIndex];
   while (Math.hypot(waypoint.x - e.x, waypoint.y - e.y) < 22) {
     state.pathIndex++;
-    if (state.pathIndex >= path.length) return slideToward(world, e, gx, gy);
+    if (state.pathIndex >= path.length) return slideToward(world, e, gx, gy, avoidSoft);
     waypoint = path[state.pathIndex];
   }
   return Math.atan2(waypoint.y - e.y, waypoint.x - e.x);
@@ -643,16 +704,24 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
  * waiting on the per-tick budget. Walking blindly at the goal just grinds a
  * face into the nearest wall, so fan out until something ahead is walkable.
  */
-function slideToward(world: World, e: Entity, gx: number, gy: number): number {
+function slideToward(world: World, e: Entity, gx: number, gy: number, avoidSoft = false): number {
   const direct = Math.atan2(gy - e.y, gx - e.x);
   // The probe has to be reachable in a straight line, not merely empty. Testing
   // only the far end called a direction clear whenever the open ground on the
   // other side of a wall happened to be walkable — which is exactly how people
   // ended up grinding face-first into that wall.
+  //
+  // **Sandbags count here too, for anything alive.** This is where a body ends
+  // up when the search failed or the tick's budget was spent, and without it
+  // that is a body walking straight back into the wall the route was avoiding —
+  // which is the reported fault, arriving a second later by another road.
+  const shut = avoidSoft
+    ? (x: number, y: number) => world.nav.isBlockedOrSoft(x, y)
+    : (x: number, y: number) => world.nav.isBlocked(x, y);
   const clear = (angle: number) => {
     const px = e.x + Math.cos(angle) * 42;
     const py = e.y + Math.sin(angle) * 42;
-    return !world.nav.isBlocked(px, py) && world.nav.lineClear(e.x, e.y, px, py);
+    return !shut(px, py) && world.nav.lineClear(e.x, e.y, px, py, avoidSoft);
   };
 
   if (clear(direct)) return direct;
@@ -2339,12 +2408,16 @@ function beginDoorWork(
 
   state.doorIndex = index;
   state.doorAction = action;
-  // A bot stands in a player's slot, so it works a handle the way a player
-  // does: opening is a tap, and a tap is instant. The 1.1-2s a civilian takes
-  // is fumbling with a door in a panic, which is not what an officer clearing
-  // a building is doing. Only opening — bolting one and kicking one down are
-  // deliberate acts and take as long for a bot as for anybody.
-  const instant = action === 'open' && world.bots.has(e.id);
+  // An officer works a handle the way a player does: opening is a tap, and a
+  // tap is instant. The 1.1-2s a civilian takes is fumbling with a door in a
+  // panic, which is not what an officer clearing a building is doing. Only
+  // opening — bolting one and kicking one down are deliberate acts and take as
+  // long for an officer as for anybody.
+  //
+  // It reads on the *type* rather than on `world.bots`, which is what it used
+  // to say: a grey officer under a spectator's order is as much an officer as
+  // a bot is, and nothing else in the city reaches this with an officer in it.
+  const instant = action === 'open' && e.type === 'officer';
   state.doorBusyUntil =
     now +
     (instant
@@ -2546,21 +2619,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
   const pressed =
     !botDropsTheGun && world.bots.has(e.id) && nearestThreat(e, state) < BOT_SAFE_DIST;
 
-  // Mid-handle. Stand there and work it.
-  if (state.doorBusyUntil > 0) {
-    if (now < state.doorBusyUntil) {
-      if (!pressed) return true;
-      // Drop the boot and fall through to the fight. The work is lost rather
-      // than banked: half a kick is not a thing you can come back to, and
-      // banking it would let a bot chip a door down between engagements for
-      // free. It starts again from the top once the street is clear.
-      abandonDoorWork(world, e, state);
-      return false;
-    }
-    state.doorBusyUntil = 0;
-    finishDoorWork(world, e, state, now);
-    return true;
-  }
+  if (doorWorkTick(world, e, state, now, pressed)) return true;
 
   // Through the door we opened: shut it behind us, and lock it if we're
   // getting away from something.
@@ -2677,6 +2736,60 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     }
   }
 
+  return openDoorAhead(world, e, state, now, pressed);
+}
+
+/**
+ * Mid-handle: stand there and finish the job.
+ *
+ * Split out of `doorTick` because a commanded grey officer runs the opening
+ * half alone — see `openDoorAhead` — and must not walk away from a bolt it is
+ * halfway through drawing. Written twice, one of the two would eventually stop
+ * releasing the claim.
+ */
+function doorWorkTick(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+  pressed: boolean,
+): boolean {
+  if (state.doorBusyUntil <= 0) return false;
+  if (now < state.doorBusyUntil) {
+    if (!pressed) return true;
+    // Drop the boot and fall through to the fight. The work is lost rather
+    // than banked: half a kick is not a thing you can come back to, and
+    // banking it would let a bot chip a door down between engagements for
+    // free. It starts again from the top once the street is clear.
+    abandonDoorWork(world, e, state);
+    return false;
+  }
+  state.doorBusyUntil = 0;
+  finishDoorWork(world, e, state, now);
+  return true;
+}
+
+/**
+ * A shut door across the next step: work it, or find it refuses you.
+ *
+ * **The tail of `doorTick`, split off because it is the only half a commanded
+ * grey officer wants.** Reported as an officer right-clicked into a building
+ * from the street pressing itself against the front door — and the cause was
+ * that `updateNpcOfficer` has never called `doorTick` at all, so the city's
+ * own officers could not work a handle in any circumstance whatsoever. Handing
+ * them the whole of it would also hand them the *civilian* half — shutting one
+ * behind them, bolting it, walking back across a room to see to it — which is
+ * the same argument that has `closesDoors` cleared on a bot at spawn. So the
+ * order gets this function and nothing else: open what is in the way, and carry
+ * on to where you were sent.
+ */
+function openDoorAhead(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+  pressed: boolean,
+): boolean {
   const ahead = doorInTheWay(world, e, state, now);
   if (ahead < 0) return false;
 
@@ -2702,7 +2815,9 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // can only draw a bolt back from the side it is on, which is what makes
     // finding a bolted front door a real refusal for the crowd; an officer has
     // the tools and the authority, so `canWorkLockFrom` is simply not asked of
-    // a bot. It used to take the door off its hinges instead, which reads as
+    // one — a grey officer under a spectator's order included, which is why the
+    // test is the type rather than `world.bots`. It used to take the door off
+    // its hinges instead, which reads as
     // an officer wrecking the house he is there to clear — and the boot is
     // wanted for barricades rather than for ordinary locks.
     //
@@ -2713,7 +2828,7 @@ function doorTick(world: World, e: Entity, state: AiState, now: number, dt: numb
     // From the inside you can draw the bolt back — but only if you actually
     // mean to go through it. Somebody holed up, or who has been told to stay
     // in, does not unbolt the way out; between rooms is another matter.
-    if (world.bots.has(e.id) || canWorkLockFrom(world, ahead, e.x, e.y)) {
+    if (e.type === 'officer' || canWorkLockFrom(world, ahead, e.x, e.y)) {
       const wayOut = door.insideSign !== 0;
       const stayingPut = holedUp(state) || (wayOut && state.homeBuilding >= 0);
       if (stayingPut) {
@@ -4316,6 +4431,39 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
       }
     }
     return;
+  }
+
+  /*
+   * **An officer under orders works the door in front of it.**
+   *
+   * Reported as a grey officer right-clicked into a building from the street
+   * standing against the front door, and the cause was not the pathing: the
+   * route is planned as though every door were open — that is the rule doors
+   * follow everywhere — and `updateNpcOfficer` has never called `doorTick` at
+   * all. So the city's own officers could not work a handle under any
+   * circumstance, and an order across a threshold was an order they could not
+   * carry out.
+   *
+   * It is `openDoorAhead` rather than the whole of `doorTick` on purpose. The
+   * rest of that function is the civilian's half — shutting one behind you,
+   * bolting it, slamming one on a zombie, walking back across a room to see to
+   * it — and handing an officer that is the same mistake `closesDoors` being
+   * cleared on a bot at spawn already avoids: every one of them is an officer
+   * standing in a doorway instead of getting where it was sent.
+   *
+   * **Only while an order stands.** An ambient garrison officer wandering its
+   * patch has nowhere it needs through, and giving the whole city's officers a
+   * new appetite for doors is a much larger change than the one asked for.
+   *
+   * Below the fight above, like every other standing order here: a door is a
+   * job, and a zombie at your shoulder is not something you finish a job
+   * through.
+   */
+  if (!officersIgnoreDoors && (state.commandX !== null || state.buildX !== null)) {
+    // `pressed` is a bot's rule about dropping the boot, and a grey officer has
+    // no boot to drop — everything it can start here is instant or a second.
+    if (doorWorkTick(world, e, state, now, false)) return;
+    if (openDoorAhead(world, e, state, now, false)) return;
   }
 
   // A spectator has ordered a sandbag wall out of this one. Above the move

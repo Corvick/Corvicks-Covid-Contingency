@@ -13,6 +13,7 @@
  * below this line can tell which it is talking to.
  */
 import type {
+  BuildSiteState,
   ClientMessage,
   EntityState,
   PickupState,
@@ -104,6 +105,7 @@ import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { ducksToWire, updateDucks } from './ducks.js';
 import {
   barricadesToWire,
+  buildSitesToWire,
   emplacementsToWire,
   resolveEmplacementCollisions,
   updateEmplacements,
@@ -424,17 +426,30 @@ function commandOfficers(
   // who still has a sandbag** — the card belongs to the selection, so it is
   // never a stranger across the city who gets pulled off a street. Nobody else
   // in the group is disturbed by it.
+  //
+  // **And nobody already walking to a spot is offered a second one.** A
+  // sandbag is only spent when the wall goes up, so the man on his way to
+  // build one still reads as a holder — and being also the nearest, he was
+  // picked again, and the second order silently replaced the first. Reported
+  // as clicking the icon building a brand new wall and removing the old
+  // command, which is exactly what it did: a run of clicks could only ever
+  // produce one wall. Skipping him is the whole of what makes several.
   if (msg.build === 'sandbag') {
     let best: { e: Entity; st: AiState } | null = null;
     let bestDist = Infinity;
     for (const unit of units) {
       if (!unit.st.hasSandbag) continue;
+      if (unit.st.buildX !== null) continue;
       const dist = Math.hypot(unit.e.x - msg.x, unit.e.y - msg.y);
       if (dist >= bestDist) continue;
       bestDist = dist;
       best = unit;
     }
-    if (!best) return; // nobody in the selection has one left
+    // Nobody in the selection has one left, or everybody who has is already
+    // out on an errand. Refused rather than reassigned: taking a wall off one
+    // spot to put it on another is a worse answer than the order not landing,
+    // and the card's own count says so before the click is made.
+    if (!best) return;
     const spot = walkableNear(world, msg.x, msg.y);
     best.st.buildX = spot.x;
     best.st.buildY = spot.y;
@@ -445,24 +460,42 @@ function commandOfficers(
     return;
   }
 
-  // A plain move. One body lands exactly on the click — its offset is zero —
-  // so nothing about the single-unit case changes.
+  /*
+   * A plain move. One body lands exactly on the click — its offset is zero — so
+   * nothing about the single-unit case changes.
+   *
+   * **A man on his way to build a wall is not one of the movers.** Siting a
+   * barricade is a walk of several seconds, and a single stray right-click
+   * anywhere on the map used to throw that errand away with nothing said — the
+   * ghost went out, the sandbag was never spent, and the only sign was a wall
+   * that never appeared. It takes a *double* right-click to take him off it now,
+   * which the client detects and flags; everybody else in the selection moves on
+   * the first one either way.
+   *
+   * Filtered before the centroid rather than skipped after it, because the
+   * formation is a shape made out of the people who are actually going: leave a
+   * builder in the arithmetic and he pulls the whole group's slots toward a spot
+   * he is not walking to.
+   */
+  const movers = msg.override ? units : units.filter((u) => u.st.buildX === null);
+  if (movers.length === 0) return;
+
   let cx = 0;
   let cy = 0;
-  for (const { e } of units) {
+  for (const { e } of movers) {
     cx += e.x;
     cy += e.y;
   }
-  cx /= units.length;
-  cy /= units.length;
+  cx /= movers.length;
+  cy /= movers.length;
 
   let spread = 0;
-  for (const { e } of units) spread = Math.max(spread, Math.hypot(e.x - cx, e.y - cy));
+  for (const { e } of movers) spread = Math.max(spread, Math.hypot(e.x - cx, e.y - cy));
 
   let closest = Infinity;
-  for (let i = 0; i < units.length; i++) {
-    for (let j = i + 1; j < units.length; j++) {
-      closest = Math.min(closest, Math.hypot(units[i].e.x - units[j].e.x, units[i].e.y - units[j].e.y));
+  for (let i = 0; i < movers.length; i++) {
+    for (let j = i + 1; j < movers.length; j++) {
+      closest = Math.min(closest, Math.hypot(movers[i].e.x - movers[j].e.x, movers[i].e.y - movers[j].e.y));
     }
   }
 
@@ -477,18 +510,19 @@ function commandOfficers(
    * makes "already close together" mean *leave it exactly as it is*.
    */
   const minGap = ENTITY_RADIUS.officer * 2 + OFFICER_SPACING_PAD;
-  const cap = COMMAND_FORMATION_SPREAD * Math.sqrt(units.length);
+  const cap = COMMAND_FORMATION_SPREAD * Math.sqrt(movers.length);
   let scale = spread > cap ? cap / spread : 1;
   if (Number.isFinite(closest) && closest > 0.001) {
     scale = Math.max(scale, Math.min(1, minGap / closest));
   }
 
-  for (const { e, st } of units) {
+  for (const { e, st } of movers) {
     const spot = walkableNear(world, msg.x + (e.x - cx) * scale, msg.y + (e.y - cy) * scale);
     st.commandX = spot.x;
     st.commandY = spot.y;
-    // A move order calls off a build. He is being sent somewhere else, and a
-    // sandbag left half-ordered would have him turn round the moment he arrived.
+    // Only an override reaches a builder at all, and when it does it calls the
+    // errand off outright: he is being sent somewhere else, and a sandbag left
+    // half-ordered would have him turn round the moment he arrived.
     st.buildX = null;
     st.buildY = null;
     st.buildAt = 0;
@@ -1224,6 +1258,9 @@ function tick(): void {
   // Once only a handful of humans are left, point the way to each of them.
   const humans = humanPositions(world);
   const beacons = humans.length > 0 && humans.length <= BEACON_THRESHOLD ? humans : [];
+  // Filled by the first viewer who is actually watching, and never at all in a
+  // round nobody is — it is a walk of the AI map, which is most of the city.
+  let buildSites: BuildSiteState[] | null = null;
   mark('prep');
 
   for (const id of connections.keys()) {
@@ -1275,6 +1312,12 @@ function tick(): void {
       // whole round, and a wall you walked past should not blink out because
       // you turned round.
       barricades: barricadesToWire(world),
+      // The orders that have not become walls yet. Spectator-only: it is the
+      // spectator's own order coming back to be drawn as a ghost, and a player
+      // has no business seeing a marker for something that is not there.
+      // Computed once for the whole loop — the answer does not depend on who
+      // is looking — and not at all in a round nobody is watching.
+      buildSites: spectating ? (buildSites ??= buildSitesToWire(world)) : [],
     vehicles: vehiclesToWire(world),
     mines: minesToWire(world, now),
     // Unfogged, deliberately: a handful in a whole round, and a body you walked

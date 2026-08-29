@@ -340,6 +340,33 @@ export interface BarricadeState {
   hp: number;
 }
 
+/**
+ * A sandbag wall a grey officer has been sent to build and has not built yet.
+ *
+ * **The ghost stays up for the whole errand rather than for the instant of the
+ * click.** Ordering a wall is a walk and not a placement — the officer may be
+ * most of a street away — so an order that cleared the moment it was given left
+ * nothing on screen saying it had been given at all, and the only way to find
+ * out was to wait and see whether a wall appeared.
+ *
+ * Read off the authority that owns it rather than remembered on the client, for
+ * the same reason the card counts sandbags off the wire: a client-side copy goes
+ * stale the moment the wall goes up, the errand is given up on, or its owner is
+ * eaten.
+ *
+ * Spectators alone, and there are never many — one per grey officer for the
+ * whole round.
+ */
+export interface BuildSiteState {
+  /** Whose errand it is, so the card can tell who is already spoken for. */
+  id: string;
+  x: number;
+  y: number;
+  angle: number;
+  /** He has arrived and is stacking, as against still walking to it. */
+  working?: boolean;
+}
+
 /** A duck, sent for drawing only — they are scenery that reacts, not entities. */
 export interface DuckState {
   x: number;
@@ -917,6 +944,17 @@ export type ClientMessage =
       build?: 'sandbag';
       /** Which way the wall lies, from the ghost the spectator rotated. */
       angle?: number;
+      /**
+       * A double right-click: this move may take an officer off a wall he has
+       * been sent to build.
+       *
+       * A single one may not. Ordering a wall is a walk of several seconds, and
+       * a stray right-click anywhere on the map would otherwise throw the whole
+       * errand away with nothing said — so a plain move simply passes the
+       * builder by and moves everybody else. The gesture is the client's, like
+       * shift-queueing and the H and R keys; the wire carries what it meant.
+       */
+      override?: boolean;
     }
   /**
    * Watch instead of play. `restart: false` joins the round already in
@@ -1052,6 +1090,8 @@ export type ServerMessage =
       emplacements: EmplacementState[];
       /** Bare sandbag walls a spectator had the garrison build. */
       barricades: BarricadeState[];
+      /** Walls ordered and not yet built, drawn as ghosts. Spectators only. */
+      buildSites: BuildSiteState[];
       vehicles: BackupVehicleState[];
       mines: MineState[];
       /** Every dog put down this round, left where it fell. */

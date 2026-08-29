@@ -12,8 +12,100 @@ const keyMap: Record<string, keyof InputState> = {
   ArrowRight: 'right',
 };
 
+/**
+ * The arrows on their own, tracked separately from `state`.
+ *
+ * **A spectator's camera pans on these and not on WASD**, because W, A, S and D
+ * are four of the fifteen grid hotkeys on the command card — a watcher pressing
+ * S to look further down the street would be pressing the second button of the
+ * bottom row. A player is unaffected: `state` still takes both, and a body is
+ * driven with WASD as it always was.
+ */
+const arrowMap: Record<string, keyof InputState> = {
+  ArrowUp: 'up',
+  ArrowDown: 'down',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+};
+
+/**
+ * How deep the edge-scroll band is, in layout pixels, and how slowly the camera
+ * creeps at the inner lip of it.
+ *
+ * Ramped rather than flat because the band has to be wide enough to hit without
+ * aiming — and a wide band at full speed means the camera lurches away the
+ * moment you reach for anything near the edge of the screen. At the inner lip
+ * it barely moves; hard against the edge it matches a held arrow key.
+ */
+export const EDGE_SCROLL_BAND = 48;
+export const EDGE_SCROLL_MIN = 0.22;
+
+/** How hard one edge pushes, from a distance to it in layout pixels. */
+export function edgePush(near: number): number {
+  if (near >= EDGE_SCROLL_BAND) return 0;
+  const depth = 1 - Math.max(0, near) / EDGE_SCROLL_BAND;
+  return EDGE_SCROLL_MIN + (1 - EDGE_SCROLL_MIN) * depth;
+}
+
+/**
+ * Which way the spectator camera should be moving, and how fast, as a vector no
+ * longer than one.
+ *
+ * **Pure, and exported, so it can be measured without a frame.** rAF is
+ * throttled to nothing while the browser pane is not compositing, so the camera
+ * cannot be driven and watched from there; this is the whole of the decision
+ * with the drawing and the clock taken out of it. Same split as
+ * `commandCardSlots` against `drawCommandCard`, and `flameStreamSpine` against
+ * the stream.
+ *
+ * `edges` is false while the pointer is off the canvas or resting on the
+ * command card — see `panSpectator` for why both matter.
+ */
+export function spectatorPan(
+  arrows: InputState,
+  mouseX: number,
+  mouseY: number,
+  edges: boolean,
+): { x: number; y: number } {
+  let dx = 0;
+  let dy = 0;
+  if (arrows.up) dy -= 1;
+  if (arrows.down) dy += 1;
+  if (arrows.left) dx -= 1;
+  if (arrows.right) dx += 1;
+
+  if (edges) {
+    dx -= edgePush(mouseX);
+    dx += edgePush(VIEWPORT_WIDTH - 1 - mouseX);
+    dy -= edgePush(mouseY);
+    dy += edgePush(VIEWPORT_HEIGHT - 1 - mouseY);
+  }
+
+  // **Clamped to one, not normalised to one.** A held key contributes a whole
+  // unit, and dividing by the length is what keeps a diagonal the same speed as
+  // a straight line; an edge push contributes a *fraction*, and dividing that by
+  // its own length would scale it straight back up to full speed and throw the
+  // ramp away. So the vector is only shortened when it is longer than one —
+  // which is the two-key diagonal, and nothing else.
+  const len = Math.max(1, Math.hypot(dx, dy));
+  return { x: dx / len, y: dy / len };
+}
+
 export interface InputTracker {
   state: InputState;
+  /** The arrows alone — see `arrowMap`. What the spectator camera reads. */
+  arrows: InputState;
+  /**
+   * True while the pointer is actually over the canvas.
+   *
+   * Edge scrolling needs it and cannot be written without it: `mousemove` is
+   * bound to the canvas, so a pointer that leaves the window leaves `mouseX`
+   * and `mouseY` frozen at the last place it was — which, having left by the
+   * edge, is *inside the scroll band*. The camera would then slide in that
+   * direction for as long as the pointer was away, and come back to a view
+   * nobody asked for.
+   */
+  pointerOver: boolean;
   /**
    * Mouse position in *viewport* space — 0..1920 by 0..1080, whatever the
    * backbuffer is actually painted at. See `updateMouse`.
@@ -38,6 +130,8 @@ export interface InputTracker {
 export function trackInput(canvas: HTMLCanvasElement): InputTracker {
   const tracker: InputTracker = {
     state: { up: false, down: false, left: false, right: false },
+    arrows: { up: false, down: false, left: false, right: false },
+    pointerOver: false,
     mouseX: VIEWPORT_WIDTH / 2,
     mouseY: VIEWPORT_HEIGHT / 2,
     shooting: false,
@@ -69,6 +163,9 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
       if (!Number.isNaN(n)) tracker.slotPressed = n;
     }
 
+    const arrow = arrowMap[e.code];
+    if (arrow) tracker.arrows[arrow] = true;
+
     const key = keyMap[e.code];
     if (!key) return;
     tracker.state[key] = true;
@@ -78,6 +175,8 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
   window.addEventListener('keyup', (e) => {
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') tracker.sprint = false;
     if (e.code === 'KeyE') tracker.interact = false;
+    const arrow = arrowMap[e.code];
+    if (arrow) tracker.arrows[arrow] = false;
     const key = keyMap[e.code];
     if (key) tracker.state[key] = false;
   });
@@ -125,7 +224,16 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     tracker.mouseY = ((e.clientY - rect.top) / rect.height) * VIEWPORT_HEIGHT;
   }
 
-  canvas.addEventListener('mousemove', updateMouse);
+  canvas.addEventListener('mousemove', (e) => {
+    tracker.pointerOver = true;
+    updateMouse(e);
+  });
+  canvas.addEventListener('mouseenter', () => {
+    tracker.pointerOver = true;
+  });
+  canvas.addEventListener('mouseleave', () => {
+    tracker.pointerOver = false;
+  });
   canvas.addEventListener('mousedown', (e) => {
     if (e.button === 2) {
       // The server ignores this unless there is something to do with it, so a
@@ -147,6 +255,10 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     tracker.sprint = false;
     tracker.interact = false;
     tracker.state.up = tracker.state.down = tracker.state.left = tracker.state.right = false;
+    tracker.arrows.up = tracker.arrows.down = tracker.arrows.left = tracker.arrows.right = false;
+    // Alt-tabbing away with the pointer near an edge would otherwise leave the
+    // camera sliding for as long as the window was in the background.
+    tracker.pointerOver = false;
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 

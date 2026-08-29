@@ -73,6 +73,19 @@ export class NavGrid {
   readonly cols: number;
   readonly rows: number;
   private blocked: Uint8Array;
+  /**
+   * Cells blocked by something **destructible**: a sandbag wall, or a pocket
+   * gunner's bags.
+   *
+   * A second layer rather than more entries in `blocked`, because the two are
+   * not the same question. A wall is a wall to everybody. A sandbag wall is a
+   * thing to *walk round* if you are alive and a thing to *stand and tear at*
+   * if you are not — and the whole point of one is that a zombie claws it down
+   * rather than strolling past the end. So this layer is consulted by whoever
+   * is asking, not by the grid: `findPath` avoids it when told to, and nothing
+   * else in the game sees it at all.
+   */
+  private soft: Uint8Array;
   private gScore: Float64Array;
   private cameFrom: Int32Array;
   private stamp: Int32Array;
@@ -89,12 +102,14 @@ export class NavGrid {
     map: MapData,
     broken: ReadonlySet<number> = new Set(),
     blockers: readonly OrientedBox[] = [],
+    softBlockers: readonly OrientedBox[] = [],
   ) {
     this.cols = Math.ceil(map.width / NAV_CELL);
     this.rows = Math.ceil(map.height / NAV_CELL);
     const count = this.cols * this.rows;
 
     this.blocked = new Uint8Array(count);
+    this.soft = new Uint8Array(count);
     this.gScore = new Float64Array(count);
     this.cameFrom = new Int32Array(count);
     this.stamp = new Int32Array(count);
@@ -106,8 +121,15 @@ export class NavGrid {
     this.markPond(map);
     // Solid bodies that are not part of the map: a parked vehicle, in
     // practice. See `World.navBlockers`.
-    for (const box of blockers) this.markBox(box);
+    for (const box of blockers) this.markBox(box, this.blocked);
+    // And the ones that can be taken apart. See `soft`.
+    for (const box of softBlockers) this.markBox(box, this.soft);
     this.component = new Int32Array(count).fill(-1);
+    // **Components are labelled off `blocked` alone**, deliberately. A wall
+    // somebody built across a street must not make the ground behind it
+    // "unreachable" — `isReachable` is what decides where a body may be spawned
+    // and where an order may be sent, and a barricade is not a decision about
+    // either. It is also gone the moment a zombie has finished with it.
     this.labelComponents();
   }
 
@@ -197,7 +219,7 @@ export class NavGrid {
    *
    * Inflated like a wall is, so a route does not shave the paintwork.
    */
-  private markBox(box: OrientedBox): void {
+  private markBox(box: OrientedBox, into: Uint8Array): void {
     const cos = Math.cos(box.angle);
     const sin = Math.sin(box.angle);
     const hw = box.hw + NAV_INFLATE;
@@ -218,7 +240,7 @@ export class NavGrid {
         // Into the box's own frame, where it is an ordinary rect.
         if (Math.abs(dx * cos + dy * sin) > hw) continue;
         if (Math.abs(-dx * sin + dy * cos) > hh) continue;
-        this.blocked[r * this.cols + c] = 1;
+        into[r * this.cols + c] = 1;
       }
     }
   }
@@ -255,9 +277,28 @@ export class NavGrid {
     return this.blocked[this.cellAt(x, y)] === 1;
   }
 
+  /**
+   * The same question with the destructible obstacles counted in.
+   *
+   * Separate from `isBlocked` rather than a flag on it, because `isBlocked` has
+   * a great many callers — spawning, wander sampling, escape scoring, the step
+   * itself — and every one of them means "is there ground here", which a
+   * sandbag wall does not change. Only somebody deciding where to *walk* wants
+   * this one.
+   */
+  isBlockedOrSoft(x: number, y: number): boolean {
+    const cell = this.cellAt(x, y);
+    return this.blocked[cell] === 1 || this.soft[cell] === 1;
+  }
+
+  /** One cell, with the destructible layer counted in or not. */
+  private shut(cell: number, avoidSoft: boolean): boolean {
+    return this.blocked[cell] === 1 || (avoidSoft && this.soft[cell] === 1);
+  }
+
   /** Nearest open cell, spiralling outward — start/goal often sit in geometry. */
-  private nearestOpen(cell: number): number {
-    if (this.blocked[cell] === 0) return cell;
+  private nearestOpen(cell: number, avoidSoft: boolean): number {
+    if (!this.shut(cell, avoidSoft)) return cell;
     const c0 = cell % this.cols;
     const r0 = (cell / this.cols) | 0;
 
@@ -269,7 +310,7 @@ export class NavGrid {
           const c = c0 + dc;
           if (r < 0 || c < 0 || r >= this.rows || c >= this.cols) continue;
           const idx = r * this.cols + c;
-          if (this.blocked[idx] === 0) return idx;
+          if (!this.shut(idx, avoidSoft)) return idx;
         }
       }
     }
@@ -277,14 +318,14 @@ export class NavGrid {
   }
 
   /** True when a straight line stays on open cells — used to shortcut paths. */
-  lineClear(x1: number, y1: number, x2: number, y2: number): boolean {
+  lineClear(x1: number, y1: number, x2: number, y2: number, avoidSoft = false): boolean {
     const dx = x2 - x1;
     const dy = y2 - y1;
     const steps = Math.ceil(Math.hypot(dx, dy) / (NAV_CELL * 0.5));
     if (steps <= 0) return true;
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      if (this.blocked[this.cellAt(x1 + dx * t, y1 + dy * t)] === 1) return false;
+      if (this.shut(this.cellAt(x1 + dx * t, y1 + dy * t), avoidSoft)) return false;
     }
     return true;
   }
@@ -306,15 +347,22 @@ export class NavGrid {
    * cap returns null and the caller falls back to walking at the goal, which
    * is a case every call site already had to handle.
    */
-  findPath(sx: number, sy: number, tx: number, ty: number, maxNodes = PATH_MAX_NODES): Waypoint[] | null {
+  findPath(
+    sx: number,
+    sy: number,
+    tx: number,
+    ty: number,
+    maxNodes = PATH_MAX_NODES,
+    avoidSoft = false,
+  ): Waypoint[] | null {
     this.lastExpanded = 0;
-    const start = this.nearestOpen(this.cellAt(sx, sy));
-    const goal = this.nearestOpen(this.cellAt(tx, ty));
+    const start = this.nearestOpen(this.cellAt(sx, sy), avoidSoft);
+    const goal = this.nearestOpen(this.cellAt(tx, ty), avoidSoft);
     if (start < 0 || goal < 0) return null;
     if (start === goal) return [{ x: tx, y: ty }];
 
     const generation = ++this.generation;
-    const { cols, rows, blocked, gScore, cameFrom, stamp } = this;
+    const { cols, rows, blocked, soft, gScore, cameFrom, stamp } = this;
     const heap = this.heap;
     heap.clear();
 
@@ -337,7 +385,7 @@ export class NavGrid {
       const current = heap.pop();
       if (current === goal) {
         this.lastExpanded = expanded;
-        return this.reconstruct(current, generation, tx, ty);
+        return this.reconstruct(current, generation, tx, ty, avoidSoft);
       }
       if (++expanded > maxNodes) break;
       this.lastExpanded = expanded;
@@ -354,11 +402,14 @@ export class NavGrid {
           if (nc < 0 || nr < 0 || nc >= cols || nr >= rows) continue;
 
           const neighbour = nr * cols + nc;
-          if (blocked[neighbour] === 1) continue;
+          if (blocked[neighbour] === 1 || (avoidSoft && soft[neighbour] === 1)) continue;
 
           // No cutting diagonally past a corner.
           if (dc !== 0 && dr !== 0) {
-            if (blocked[cr * cols + nc] === 1 || blocked[nr * cols + cc] === 1) continue;
+            const a = cr * cols + nc;
+            const b = nr * cols + cc;
+            if (blocked[a] === 1 || blocked[b] === 1) continue;
+            if (avoidSoft && (soft[a] === 1 || soft[b] === 1)) continue;
           }
 
           const step = dc !== 0 && dr !== 0 ? SQRT2 * NAV_CELL : NAV_CELL;
@@ -376,7 +427,13 @@ export class NavGrid {
     return null;
   }
 
-  private reconstruct(goal: number, generation: number, tx: number, ty: number): Waypoint[] {
+  private reconstruct(
+    goal: number,
+    generation: number,
+    tx: number,
+    ty: number,
+    avoidSoft: boolean,
+  ): Waypoint[] {
     const raw: Waypoint[] = [];
     let cell = goal;
     while (cell !== -1 && this.stamp[cell] === generation) {
@@ -395,7 +452,13 @@ export class NavGrid {
     while (anchor < raw.length) {
       let furthest = anchor + 1;
       for (let probe = anchor + 1; probe < raw.length; probe++) {
-        if (this.lineClear(raw[anchor].x, raw[anchor].y, raw[probe].x, raw[probe].y)) furthest = probe;
+        // **The string-pull has to know about the soft layer too.** It is what
+        // drops waypoints you can simply walk past, and asked without it the
+        // smoothing cheerfully cuts the corner the search had just gone round —
+        // giving back a straight line through the very wall being avoided.
+        if (this.lineClear(raw[anchor].x, raw[anchor].y, raw[probe].x, raw[probe].y, avoidSoft)) {
+          furthest = probe;
+        }
       }
       if (furthest >= raw.length) break;
       smoothed.push(raw[furthest]);

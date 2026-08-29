@@ -1,4 +1,4 @@
-import type { BarricadeState, EmplacementState } from '../../shared/types.js';
+import type { BarricadeState, BuildSiteState, EmplacementState } from '../../shared/types.js';
 import {
   BARRICADE_HALF_DEPTH,
   BARRICADE_HALF_WIDTH,
@@ -44,7 +44,8 @@ import {
  *
  * The bags are see-through and rounds pass straight through them. They are
  * only an obstacle to walking, and — like a door — something a zombie will
- * stand and tear at rather than route around.
+ * stand and tear at rather than route around. Everything alive goes round; see
+ * the note on `Barricade` below.
  */
 export interface Emplacement {
   id: string;
@@ -71,10 +72,13 @@ export interface Emplacement {
  * `zombieAtSandbag` tears it down, `resolveEmplacementCollisions` pushes bodies
  * out of it, and the client draws it with the same `drawSandbagWall`.
  *
- * Deliberately **not in the nav grid**, the same rule the gunner's bags and the
- * doors follow: routes are planned as though it were not there and whoever
- * walks into one deals with it, which is what makes a zombie stand and claw at
- * it rather than stroll round the end.
+ * **In the nav grid's destructible layer, which a zombie does not read.** The
+ * old rule was the doors' — routes planned as though it were not there, and
+ * whoever walks into one deals with it — and that is still exactly what a
+ * zombie gets, because clawing a wall down rather than strolling round the end
+ * is the entire point of building one. Anything alive routes round it instead:
+ * it cannot take the thing apart, so pressing on it is nothing but a body stuck
+ * against a wall. See `headingToward`.
  */
 export interface Barricade {
   id: string;
@@ -126,6 +130,7 @@ export function deployEmplacement(world: World, owner: Entity, now: number): boo
     bags: bagsFor(spot.x, spot.y, angle),
     nextShotAt: 0,
   });
+  world.navDirty = true;
   return true;
 }
 
@@ -150,6 +155,8 @@ export function placeBarricade(world: World, x: number, y: number, angle: number
     health: BARRICADE_HEALTH,
   };
   world.barricades.set(wall.id, wall);
+  // A new thing to walk round. The main loop coalesces this to one rebuild.
+  world.navDirty = true;
   return wall;
 }
 
@@ -198,6 +205,8 @@ export function damageEmplacement(world: World, gun: Emplacement, amount: number
     if (gun.bagHealth <= 0) {
       gun.bags = null;
       gun.bagHealth = 0;
+      // The street is open again, and every route planned round it is stale.
+      world.navDirty = true;
     }
     return;
   }
@@ -236,7 +245,10 @@ export function zombieAtSandbag(world: World, e: Entity, state: { nextWindowHitA
   if (now >= state.nextWindowHitAt) {
     state.nextWindowHitAt = now + SANDBAG_HIT_INTERVAL_MS;
     wall.health -= SANDBAG_HIT_DAMAGE;
-    if (wall.health <= 0) world.barricades.delete(wall.id);
+    if (wall.health <= 0) {
+      world.barricades.delete(wall.id);
+      world.navDirty = true;
+    }
   }
   return true;
 }
@@ -332,6 +344,34 @@ export function emplacementsToWire(world: World): EmplacementState[] {
             },
           }
         : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * The walls that have been ordered and are still being walked to.
+ *
+ * Counted off `AiState` rather than kept as a list of its own, for the reason
+ * every other tally here is: an errand ends four ways — built, given up on, its
+ * owner turned, its owner eaten — and a list somebody has to remember to strike
+ * from is a list that holds a ghost over an empty street for the rest of the
+ * round. This cannot go stale, because it is the errand itself.
+ *
+ * One walk of the AI map, and only for a round somebody is watching.
+ */
+export function buildSitesToWire(world: World): BuildSiteState[] {
+  const out: BuildSiteState[] = [];
+  for (const [id, st] of world.ai) {
+    if (st.buildX === null || st.buildY === null) continue;
+    out.push({
+      id,
+      x: Math.round(st.buildX),
+      y: Math.round(st.buildY),
+      angle: Math.round(st.buildAngle * 100) / 100,
+      // `buildAt` is only set once he is within reach and stacking, so it is
+      // exactly the line between "on his way" and "putting it up".
+      working: st.buildAt > 0 ? true : undefined,
     });
   }
   return out;

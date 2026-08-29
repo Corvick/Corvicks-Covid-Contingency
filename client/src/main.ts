@@ -55,6 +55,7 @@ import type {
   DuckState,
   EmplacementState,
   BarricadeState,
+  BuildSiteState,
   BeaconState,
   FireState,
   MineState,
@@ -64,7 +65,7 @@ import type {
   Wall,
 } from '../../shared/types.js';
 import { connect, takeNetStats, pingStats } from './net.js';
-import { trackInput } from './input.js';
+import { trackInput, spectatorPan } from './input.js';
 import { playRoar } from './sound.js';
 import {
   drawBeacons,
@@ -89,10 +90,13 @@ import {
   drawDucks,
   drawEmplacements,
   drawBarricades,
+  drawBuildSites,
   drawSandbagWall,
   drawCommandCard,
   commandCardSlots,
   commandCardButtons,
+  cardSlotForKey,
+  type CardButtonId,
   drawBackupVehicles,
   drawMines,
   drawZaps,
@@ -262,6 +266,12 @@ let blasts: BlastState[] = [];
 let ducks: DuckState[] = [];
 let emplacements: EmplacementState[] = [];
 let barricades: BarricadeState[] = [];
+/**
+ * Walls ordered and not yet standing — the ghosts that stay put while an
+ * officer walks to the spot. Empty for anybody who is not spectating; the
+ * server does not send them at all.
+ */
+let buildSites: BuildSiteState[] = [];
 let vehicles: BackupVehicleState[] = [];
 let mines: MineState[] = [];
 let corpses: CorpseState[] = [];
@@ -326,10 +336,35 @@ const selectedOfficers = new Set<string>();
 /** The marquee mid-drag, in viewport (layout) pixels, or null. */
 let marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
 let dragStart: { x: number; y: number } | null = null;
-/** Brief green markers where an order was given, in world coordinates. */
-const commandFx: Array<{ x: number; y: number; born: number }> = [];
+/** Brief markers where an order was given, in world coordinates. */
+const commandFx: Array<{ x: number; y: number; born: number; override?: boolean }> = [];
 const COMMAND_FX_MS = 500;
+/**
+ * How quickly two right-clicks have to land to count as one gesture.
+ *
+ * **A single right-click may not take an officer off a wall he is walking to
+ * build.** That errand is a walk of several seconds, and a stray click anywhere
+ * on the map used to throw it away with nothing said — the ghost went out, the
+ * sandbag was never spent, and the only sign was a wall that never appeared. So
+ * cancelling one is a deliberate gesture, and everybody in the selection who is
+ * *not* building moves on the first click either way.
+ *
+ * Well under the 500ms an operating system calls a double-click, because this
+ * has to be a thing you meant rather than a thing two ordinary orders in a hurry
+ * can add up to.
+ */
+const DOUBLE_RIGHT_MS = 280;
+let lastRightAt = 0;
 const DRAG_THRESHOLD = 5;
+/**
+ * How much of the gunsight a spectator's pointer is.
+ *
+ * The full mark spans 42 layout pixels across the brackets, against a command
+ * card slot of 46 — so at 1 the pointer very nearly covered whichever button it
+ * was over. It is a pointer here rather than a sight, and it wants to be small
+ * enough to point *at* something.
+ */
+const SPECTATE_CURSOR_SCALE = 0.6;
 
 /** Grey AI officers — not blue bots, olive soldiers or black SWAT. */
 function isGreyOfficer(s: EntityState): boolean {
@@ -360,11 +395,19 @@ let sandbagGhost: { angle: number } | null = null;
  * tracked here: the server owns whether a sandbag has been spent, and a client
  * tally would go stale the moment one was built, given up on, or its owner was
  * eaten.
+ *
+ * **Less anybody already walking to a spot.** A sandbag is only spent when the
+ * wall goes up, so a man out on an errand still reads as a holder — and the
+ * server will not give him a second one, so counting him here would leave the
+ * button lit with an order behind it that cannot land. Off the wire on both
+ * counts, so the two halves cannot disagree about who is free.
  */
 function selectedSandbags(): number {
   let n = 0;
   for (const id of selectedOfficers) {
-    if (tracked.get(id)?.state.bag) n++;
+    if (!tracked.get(id)?.state.bag) continue;
+    if (buildSites.some((b) => b.id === id)) continue;
+    n++;
   }
   return n;
 }
@@ -385,6 +428,27 @@ function cardHover(): number {
     }
   }
   return -1;
+}
+
+/**
+ * Press a card button.
+ *
+ * One function because a button can be reached two ways now — the mouse and its
+ * grid hotkey — and a second copy of "what this button does" is how the two
+ * drift into a shovel that opens the build page when clicked and does nothing
+ * when typed.
+ */
+function pressCardButton(id: CardButtonId): void {
+  if (id === 'shovel') cardPage = 'build';
+  else if (id === 'back') {
+    cardPage = 'root';
+    sandbagGhost = null;
+  } else if (id === 'sandbag') {
+    // Pressing it with a wall already in hand keeps the bearing you have
+    // dialled in on the wheel rather than snapping it back to zero — the
+    // button is "another one of these", not "start again".
+    sandbagGhost ??= { angle: 0 };
+  }
 }
 
 /** Anywhere on the card's panel, buttons or not — the card swallows the click. */
@@ -570,6 +634,11 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
     ducks = msg.ducks;
     emplacements = msg.emplacements;
     barricades = msg.barricades;
+    // `?? []` because the two machines can be on different builds — the build
+    // stamp on the menu exists precisely because that happens — and a snapshot
+    // from a server that predates this field would otherwise take the renderer
+    // out on the first frame.
+    buildSites = msg.buildSites ?? [];
     vehicles = msg.vehicles;
     mines = msg.mines;
     corpses = msg.corpses;
@@ -891,8 +960,14 @@ canvas.addEventListener('mousedown', (e) => {
     if (selectedOfficers.size === 0) return;
     e.preventDefault();
     const at = spectatorWorld(input.mouseX, input.mouseY);
-    send({ type: 'command', ids: [...selectedOfficers], x: at.x, y: at.y });
-    commandFx.push({ x: at.x, y: at.y, born: performance.now() });
+    const clickedAt = performance.now();
+    const override = clickedAt - lastRightAt < DOUBLE_RIGHT_MS;
+    // Spent, so a third quick click is a fresh single rather than another
+    // override — otherwise holding the button down in a hurry cancels every
+    // build in the selection one after another.
+    lastRightAt = override ? 0 : clickedAt;
+    send({ type: 'command', ids: [...selectedOfficers], x: at.x, y: at.y, override });
+    commandFx.push({ x: at.x, y: at.y, born: clickedAt, override });
     return;
   }
   if (e.button !== 0) return;
@@ -904,18 +979,19 @@ canvas.addEventListener('mousedown', (e) => {
   const hit = cardHover();
   if (hit >= 0 || overCard()) {
     const button = commandCardButtons(cardPage, selectedSandbags()).find((b) => b.slot === hit);
-    if (button && button.enabled) {
-      if (button.id === 'shovel') cardPage = 'build';
-      else if (button.id === 'back') {
-        cardPage = 'root';
-        sandbagGhost = null;
-      } else if (button.id === 'sandbag') sandbagGhost = { angle: 0 };
-    }
+    if (button && button.enabled) pressCardButton(button.id);
     return;
   }
 
-  // Siting a wall. One click, one wall: the ghost clears rather than staying in
-  // hand, so there is no mode left running that a later click could fall into.
+  // Siting a wall. One click, one wall — **unless shift is held**, which keeps
+  // it in hand for the next one, the way an RTS queues a row of buildings.
+  // Without shift the ghost clears, so there is no mode left running that a
+  // later click could fall into; the order itself stays visible either way, as
+  // a ghost where the officer is walking to.
+  //
+  // It runs dry rather than repeating forever: the last officer in the
+  // selection who has a bag takes the last order, and the next click finds
+  // `selectedSandbags` at nought and puts the wall down.
   if (sandbagGhost) {
     const at = spectatorWorld(input.mouseX, input.mouseY);
     send({
@@ -927,7 +1003,10 @@ canvas.addEventListener('mousedown', (e) => {
       angle: sandbagGhost.angle,
     });
     commandFx.push({ x: at.x, y: at.y, born: performance.now() });
-    sandbagGhost = null;
+    // Counted against the wire's own answer, which is a tick behind — so the
+    // one just ordered is still in it. Holding shift with one left over puts
+    // the ghost down on its own, which is what the card would say anyway.
+    if (!e.shiftKey || selectedSandbags() <= 1) sandbagGhost = null;
     return;
   }
 
@@ -977,8 +1056,32 @@ window.addEventListener('mouseup', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (!spectating || selectedOfficers.size === 0) return;
-  // H holds the selection where it stands; R hands it back to its own AI. S is
-  // taken by the WASD pan, so hold is not on S.
+  // Typing into the lobby's chat or name box is not commanding anybody.
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+
+  /*
+   * **Grid hotkeys first**, so the card owns its own keys the way it already
+   * owns its own rectangle. QWERT / ASDFG / ZXCVB lies over the five columns
+   * and three rows exactly as they are drawn, and the letter is printed in each
+   * slot — a binding you have to be told about separately is one nobody uses.
+   *
+   * A key with no enabled button under it falls through, which is what leaves
+   * `R` free to hand a selection back today: its slot is empty on both pages.
+   * The day something is put there the card takes the key, which is the right
+   * way round — the card is the thing with a button on it.
+   */
+  const slot = cardSlotForKey(e.code);
+  if (slot >= 0) {
+    const button = commandCardButtons(cardPage, selectedSandbags()).find((b) => b.slot === slot);
+    if (button && button.enabled) {
+      pressCardButton(button.id);
+      e.preventDefault();
+      return;
+    }
+  }
+
+  // H holds the selection where it stands; R hands it back to its own AI.
   if (e.code === 'KeyH') {
     send({ type: 'command', ids: [...selectedOfficers], x: 0, y: 0, stop: true });
   } else if (e.code === 'KeyR') {
@@ -1650,32 +1753,55 @@ function heldItemId(): ItemId | null {
 }
 
 /**
- * WASD pans the spectator camera. The speed is in screen pixels per second and
- * divided by the current scale, so a key held for a second slides the view the
- * same distance across the screen whether the whole city is framed or you are
- * zoomed right into one street — panning at 7x zoom in world units would crawl.
+ * **The arrows pan the spectator camera, not WASD.** W, A, S and D are four of
+ * the fifteen grid hotkeys on the command card, and a watcher pressing S to
+ * look further down the street would be pressing the second button of the
+ * bottom row. `input.arrows` is tracked separately for exactly this; a player
+ * still drives a body with WASD, which reads `input.state`.
+ *
+ * The speed is in screen pixels per second and divided by the current scale, so
+ * a key held for a second slides the view the same distance across the screen
+ * whether the whole city is framed or you are zoomed right into one street —
+ * panning at 7x zoom in world units would crawl.
  */
 const SPECTATE_PAN_SPEED = 700;
 const SPECTATE_PAN_SPRINT = 2.5;
 
 function panSpectator(dt: number): void {
-  let dx = 0;
-  let dy = 0;
-  if (input.state.up) dy -= 1;
-  if (input.state.down) dy += 1;
-  if (input.state.left) dx -= 1;
-  if (input.state.right) dx += 1;
+  /*
+   * The arrows, plus the cursor against the edge of the screen the way every
+   * RTS does it. The arithmetic is `spectatorPan`, which is pure and exported
+   * so it can be measured without a frame — rAF is throttled to nothing in a
+   * pane that is not compositing, so the camera cannot be driven and watched.
+   *
+   * Edge scrolling is off unless the pointer is **actually over the canvas**.
+   * `mousemove` is bound to the canvas, so a pointer that has left the window
+   * leaves its last position frozen — and having left by an edge, that position
+   * is inside the band. Without it the camera would slide for as long as you
+   * were away and you would come back to a view nobody asked for.
+   *
+   * And off over **the command card**, which sits in the bottom-right corner
+   * and so lies across both the right and bottom bands. Reaching for a button
+   * must not send the city sliding out from under the officers you are about to
+   * give an order to. The card already owns its own rectangle for clicks; this
+   * is the same rule for a pointer resting on it.
+   */
+  const pan = spectatorPan(
+    input.arrows,
+    input.mouseX,
+    input.mouseY,
+    input.pointerOver && !overCard(),
+  );
 
   const scale = spectateFit() * spectateZoom;
   const w = VIEWPORT_WIDTH / scale;
   const h = VIEWPORT_HEIGHT / scale;
 
-  if (dx !== 0 || dy !== 0) {
-    const len = Math.hypot(dx, dy);
+  if (pan.x !== 0 || pan.y !== 0) {
     const speed = SPECTATE_PAN_SPEED * (input.sprint ? SPECTATE_PAN_SPRINT : 1);
     const step = (speed / scale) * (dt / 1000);
-    spectateX += (dx / len) * step;
-    spectateY += (dy / len) * step;
+    spectateX += pan.x * step;
+    spectateY += pan.y * step;
   }
 
   // Hold the centre to what the camera can actually show. Letting it run past
@@ -2222,6 +2348,10 @@ function render() {
     // Beside the emplacements and drawn by the same function — as far as
     // anything on screen goes, a wall is a wall with nobody behind it.
     drawBarricades(ctx, barricades, view);
+    // And the ones that have been ordered and are still being walked to. Beside
+    // the walls they are about to become, so a ghost and a wall stack in the
+    // same place in the scene and neither can hide the other.
+    if (buildSites.length > 0) drawBuildSites(ctx, buildSites, view, now);
     drawFires(ctx, fires, view, now);
     drawPickups(ctx, pickups, view, now, scale);
   }
@@ -2278,7 +2408,11 @@ function render() {
   // The wall being sited, under the cursor and in the world it will stand in —
   // at the size and angle it will actually be, so what is shown is what gets
   // built. Amber where it fits, red where it does not.
-  if (sandbagGhost) {
+  //
+  // Not while the cursor is over the card: the ghost *is* the cursor, and a
+  // wall sitting out in a street under a panel is a wall a click there would
+  // not build. The pointer comes back in its place — see `drawCrosshair` below.
+  if (sandbagGhost && !overCard()) {
     const at = spectatorWorld(input.mouseX, input.mouseY);
     const fits = sandbagFits(at.x, at.y, sandbagGhost.angle);
     drawSandbagWall(
@@ -2296,7 +2430,9 @@ function render() {
     );
   }
 
-  // A green ring blooming where a spectator just gave an order.
+  // A ring blooming where a spectator just gave an order — green for a move,
+  // amber for the double right-click that also calls a wall off, so taking one
+  // back is visibly a different thing from asking for one.
   if (commandFx.length > 0) {
     for (let i = commandFx.length - 1; i >= 0; i--) {
       const fx = commandFx[i];
@@ -2306,7 +2442,7 @@ function render() {
         continue;
       }
       ctx.globalAlpha = (1 - t) * 0.9;
-      ctx.strokeStyle = '#4ade80';
+      ctx.strokeStyle = fx.override ? '#e8a13a' : '#4ade80';
       ctx.lineWidth = 2 / scale;
       ctx.beginPath();
       ctx.arc(fx.x, fx.y, 4 + t * 22, 0, Math.PI * 2);
@@ -2550,12 +2686,35 @@ function render() {
     );
   }
 
-  // The spectator gets a cursor too — the same amber gunsight, framed with
-  // corner brackets while grey officers are selected and a right-click would
-  // send them somewhere. Not over the card, which has its own hover, and not
-  // while a wall is in hand — the ghost *is* the cursor then.
-  if (spectating && !sandbagGhost && !overCard()) {
-    drawCrosshair(ctx, input.mouseX, input.mouseY, selectedOfficers.size > 0 && !dragStart);
+  /*
+   * The spectator gets a cursor too — the same amber gunsight, framed with
+   * corner brackets while grey officers are selected and a right-click would
+   * send them somewhere.
+   *
+   * **Smaller than the one an officer aims with**, at `SPECTATE_CURSOR_SCALE`.
+   * The mark is sized for laying a weapon on a body; a spectator is not aiming
+   * at anything, and at full size the ring is wider than a command-card slot,
+   * so the pointer covered the button it was over.
+   *
+   * **And it is drawn over the card**, which it was not: the canvas is
+   * `cursor: none`, so hiding it there left a watcher with no pointer at all
+   * over the one part of the screen that is made of buttons — which is exactly
+   * the fault `drawCrosshair` was added to the spectator view to fix. The card
+   * hover highlight is a second reading of the same thing, not a replacement
+   * for it.
+   *
+   * The one place it is still left off is with a wall in hand out in the city:
+   * the ghost *is* the cursor then. Over the card it comes back, because the
+   * ghost is out in the world and the pointer is on a button.
+   */
+  if (spectating && (!sandbagGhost || overCard())) {
+    drawCrosshair(
+      ctx,
+      input.mouseX,
+      input.mouseY,
+      selectedOfficers.size > 0 && !dragStart,
+      SPECTATE_CURSOR_SCALE,
+    );
   }
 
   // Only written when it actually changes. Assigning the same string still
@@ -2564,10 +2723,10 @@ function render() {
   const line = spectating
     ? `SPECTATING — ${counts}` +
       (sandbagGhost
-        ? ` · siting a wall · scroll to turn it · click to build · right-click cancels`
+        ? ` · siting a wall · scroll to turn it · click to build · shift-click for several · right-click cancels`
         : selectedOfficers.size > 0
-          ? ` · ${selectedOfficers.size} officer${selectedOfficers.size > 1 ? 's' : ''} selected · right-click move · H hold · R release`
-          : ` · WASD pan · scroll zoom · drag-select grey officers`)
+          ? ` · ${selectedOfficers.size} officer${selectedOfficers.size > 1 ? 's' : ''} selected · right-click move · double right-click pulls one off a wall · H hold · R release`
+          : ` · arrows or screen edge pan · scroll zoom · drag-select grey officers`)
     // The cure gun is the only thing that tells you about yourself. The server
     // sends null unless one is in hand, so there is nothing to read otherwise.
     : inventory?.selfInfected === true

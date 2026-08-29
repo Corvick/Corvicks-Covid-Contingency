@@ -1534,8 +1534,34 @@ export function damageWindow(world: World, index: number, amount: number): boole
  * changed. Cheap enough at the rate glass actually breaks, and the main loop
  * coalesces it to at most one rebuild per tick.
  */
+/**
+ * The sandbag walls, as boxes for the nav grid's destructible layer.
+ *
+ * **Counted off the records rather than kept as a list**, for the reason every
+ * other tally here is: a wall arrives when an officer stacks one and leaves
+ * when a zombie has finished with it, and a list somebody has to remember to
+ * strike from is a list that steers the whole city round a wall that is no
+ * longer there. This cannot go stale, because it *is* the walls.
+ *
+ * Both kinds, because as far as anything walking is concerned there is no
+ * difference between a bare wall and the same bags with a gun behind them.
+ */
+function softNavBoxes(world: World): OrientedBox[] {
+  const out: OrientedBox[] = [];
+  for (const wall of world.barricades.values()) out.push(wall.box);
+  for (const gun of world.emplacements.values()) {
+    if (gun.bags) out.push(gun.bags);
+  }
+  return out;
+}
+
 export function rebuildNav(world: World): void {
-  world.nav = new NavGrid(world.map, new Set(world.brokenWindows), world.navBlockers);
+  world.nav = new NavGrid(
+    world.map,
+    new Set(world.brokenWindows),
+    world.navBlockers,
+    softNavBoxes(world),
+  );
   world.danger = new DangerField(world.map, world.nav);
   world.nextDangerRebuild = 0;
   world.navDirty = false;
@@ -1669,7 +1695,46 @@ export function hasLineOfSight(
  * route. Panes count: they're see-through but you still can't walk through
  * one, and treating them as open steered people face-first into them.
  */
-export function hasWallClearPath(world: World, x1: number, y1: number, x2: number, y2: number): boolean {
+/**
+ * Can a body walk from here to there in a straight line?
+ *
+ * `avoidSoft` adds the sandbag walls, and it is off by default because most
+ * callers are not asking about walking at all — a tentacle reaching over a wall
+ * of sandbags is not stopped by one. Only `headingToward` passes it, and only
+ * for something alive: see the note there.
+ */
+export function hasWallClearPath(
+  world: World,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  avoidSoft = false,
+): boolean {
+  /*
+   * **The nav grid alone would change nothing**, which is the lesson the parked
+   * vehicle already paid for and this is the second thing to lean on it.
+   * `headingToward` only asks the router when this function says the straight
+   * line is blocked — so a wall that is in the grid and not in here is a wall
+   * every route is planned around and nobody ever asks for a route past.
+   * Measured on the vehicle: 5 of 8 officers still failed to get by.
+   */
+  // Guarded on `size`, the way `speedAt` and `hasLineOfSight` guard on
+  // `world.acid.size`: this runs once per walking body per tick, and the
+  // ordinary case is a city with no sandbags anywhere in it. `Map.values()`
+  // allocates an iterator whether or not there is anything to iterate, and two
+  // of those five hundred times a tick is not nothing.
+  if (avoidSoft && world.barricades.size > 0) {
+    for (const wall of world.barricades.values()) {
+      if (segmentHitsBox(x1, y1, x2, y2, wall.box)) return false;
+    }
+  }
+  if (avoidSoft && world.emplacements.size > 0) {
+    for (const gun of world.emplacements.values()) {
+      if (gun.bags && segmentHitsBox(x1, y1, x2, y2, gun.bags)) return false;
+    }
+  }
+
   // Cheapest and almost always empty, so it goes first. A parked vehicle is
   // not a wall — it must not block sight or gunfire — but it is very much in
   // the way of a straight walk, and this is the only caller that asks about

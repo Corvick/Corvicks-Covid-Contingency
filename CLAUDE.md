@@ -233,7 +233,8 @@ three rows, mostly empty: a **shovel** bottom-left opens a build page whose
   defaults **true** on every `AiState` and is only ever read for a grey officer
   — the same trick the door traits use, so nothing has to be told that a
   civilian does not build sandbags.
-- **The builder is the nearest officer *in the selection* who still has one.**
+- **The builder is the nearest officer *in the selection* who still has one
+  and is not already out on an errand.**
   The card belongs to the selection, so it is never a stranger across the city
   who gets pulled off a street, and the count means something the player can
   act on. Nobody else in the group is disturbed by the order.
@@ -256,9 +257,11 @@ three rows, mostly empty: a **shovel** bottom-left opens a build page whose
   in `emplacement.ts` beside them. `zombieAtSandbag`, `resolveEmplacementCollisions`
   and the drawing all handle both, so a zombie tears a wall down with no new AI
   branch — as far as one is concerned there is no difference between the two,
-  and there should not be. **Not in the nav grid**, the same rule the gunner's
-  bags and the doors follow. It is deliberately *not* a `nearestProtector`:
-  that is a judgement about a machine gun and this has none.
+  and there should not be. **In the nav grid's destructible layer, which a
+  zombie does not read** — see **A sandbag wall is a thing to walk round unless
+  you can eat it** below; it used to be out of the grid altogether, the doors'
+  rule. It is deliberately *not* a `nearestProtector`: that is a judgement about
+  a machine gun and this has none.
 - **One budget for the errand, never extended** (`BARRICADE_GIVE_UP_MS`), the
   shape `HIDE_DEEPER_GIVE_UP_MS` and the beacon carrier both use — and **giving
   up does not spend the sandbag**, so an unreachable spot costs a walk rather
@@ -287,13 +290,227 @@ three rows, mostly empty: a **shovel** bottom-left opens a build page whose
   socket with your tunnel URL could poke at — see the internet-play caveats — but
   it cannot reset the world or touch a real player's unit, and the exposure is
   smaller than "a spectator already sees everything".
-- **Keys are the client's** (`H`, `R`; `S` is taken by the WASD pan). The wire
-  carries the flag, not the keybinding.
+- **Keys are the client's** (`H`, `R`, and the card's grid — see below). The
+  wire carries the flag, not the keybinding.
 - **A spectator gets a drawn cursor now** — `canvas` is `cursor: none` and the
   crosshair used to be inside the `!spectating` HUD block, so a watcher had no
   pointer at all. It is `drawCrosshair`, framed with corner brackets
   (`command`) while officers are selected so it reads as "a click sends them
   here".
+
+#### An order across a threshold is an order to go through the door
+
+Reported as a grey officer right-clicked into a building from the street
+standing against the front of it. The pathing was never the fault: routes are
+planned as though every door were open — that is the rule doors follow
+everywhere — and **`updateNpcOfficer` has never called `doorTick` at all**, so
+the city's own officers could not work a handle under any circumstance. An order
+across a threshold was an order they had no way to carry out.
+
+- **`openDoorAhead` is the tail of `doorTick` split off**, and it is the only
+  half an officer under orders wants. The rest of that function is the
+  civilian's — shutting one behind you, bolting it, slamming one on a zombie,
+  walking back across a room to see to it — and handing an officer that is the
+  same mistake `closesDoors` being cleared on a bot at spawn already avoids:
+  every one of them is an officer standing in a doorway instead of getting where
+  it was sent. `doorWorkTick` came out with it, so a bolt half drawn is not
+  walked away from.
+- **Only while an order stands** (`commandX` or `buildX`). An ambient garrison
+  officer has nowhere it needs through, and giving the whole city's officers a
+  new appetite for doors is a far larger change than the one asked for.
+- **Below the fight**, like every other standing order here: a door is a job,
+  and a zombie at your shoulder is not something you finish a job through.
+- **`underOrders` now covers a spectator's order**, which is what stops the
+  officer shutting the door behind itself on the way in — the same reasoning
+  already written there for a crowd shouted into a building.
+- **Two tests read `e.type === 'officer'` where they read `world.bots`.**
+  Opening is instant, and a lock is worked from whichever side it is on. Both
+  were already the rule for an officer, and both said "bot" because a bot was
+  the only officer that had ever reached them.
+- Measured on the harness over six cities, both behaviours on the same city and
+  the same door: **opened 0/6 → 6/6, got inside 0/6 → 6/6**, median 2.8s. The
+  old behaviour's closest approach to the spot is **65px** — about the width of
+  a wall, which is the report stated as a number. A door **bolted** as well is
+  drawn back and gone through 6/6.
+
+#### A wall you have ordered stays on the screen until it is built
+
+Three faults in one report: *"the ghost of sandbag should stay in place as long
+as an officer is trying to place it, and allow multiple to be built right now.
+Clicking the icon just makes you build a brand new one and removes the old
+command."*
+
+- **A sandbag is only spent when the wall goes up**, so the man already walking
+  to a spot still read as a holder — and being also the nearest, he was picked
+  again and the second order silently replaced his first. A run of clicks could
+  only ever produce one wall. `commandOfficers` skips anybody with a `buildX`
+  now, and **refuses rather than reassigns** when everybody who has a bag is
+  already out: taking a wall off one spot to put it on another is a worse answer
+  than the order not landing, and the card's count says so before the click.
+- **`BuildSiteState` on the wire is the ghost.** Between the click and the wall
+  there was nothing on screen at all — the ghost cleared with the mouse button
+  and the only way to know an order had landed was to wait and see whether a
+  wall appeared. It is counted off `AiState` rather than kept as a list, for the
+  reason every tally here is: an errand ends four ways — built, given up on, its
+  owner turned, its owner eaten — and a list somebody has to strike from is a
+  list that holds a ghost over an empty street for the rest of the round.
+  **Spectators only**, and built by the first viewer who is actually watching,
+  so a round nobody watches never walks the AI map for it.
+- **Three treatments, one `drawSandbagWall`.** Faint and dashed while he walks,
+  filled in and steady once he has arrived and is stacking (`buildAt`, which is
+  exactly that line), solid once it is a wall. The ghost's whole job is to show
+  what is about to exist, so a second drawing of a sandbag would defeat it — the
+  same argument the in-hand ghost already rests on.
+- **`selectedSandbags` subtracts the men on errands**, off the same wire, so the
+  button cannot be lit with an order behind it that the server will refuse.
+- **Shift-click keeps the wall in hand**, the way an RTS queues a row of
+  buildings. It runs dry on its own: the count is read against the wire, which
+  is a tick behind, so holding shift with one left over puts the ghost down.
+- **Pressing the icon with a wall already in hand keeps the bearing** you
+  dialled in on the wheel. It is "another one of these", not "start again".
+- **The in-hand ghost is not drawn while the cursor is over the card**, and the
+  pointer comes back in its place: the ghost *is* the cursor, and a wall sitting
+  out in a street under a panel is a wall a click there would not build.
+
+#### And the pointer is a pointer
+
+- **`SPECTATE_CURSOR_SCALE` (0.6).** The gunsight is sized for laying a weapon
+  on a body, and a spectator is not aiming at anything. Measured off the canvas,
+  the mark spans **42 layout pixels against a 46px card slot** at full size — it
+  very nearly covered whichever button it was over — and **26px** at 0.6.
+- **The stroke widths are deliberately not scaled.** A mark at two thirds the
+  size with two thirds the stroke is a *fainter* mark rather than a smaller one,
+  and the whole of what makes this legible on a white wall is that it is stroked
+  twice.
+- **It is drawn over the card**, which it was not. `canvas` is `cursor: none`,
+  so hiding it there left a watcher with no pointer at all over the one part of
+  the screen that is made of buttons — which is the exact fault `drawCrosshair`
+  was added to the spectator view to fix in the first place. The card's hover
+  highlight is a second reading of the same thing, not a replacement for it.
+
+`server/rtscheck.ts` is the harness for the two server halves — headless, no
+socket, no port. `setOfficersIgnoreDoors` is the gate and it is **kept**: the
+control is the whole value of the run. Put the sandbag bug back as well and it
+is **7 checks FAILED against 0**, with the console showing all three orders
+landing on `grey-0` and two walls out of three.
+
+*One thing about staging the sandbag half was the rig lying rather than the code
+failing.* Spread the three spots out one per officer and the nearest holder to
+each is a different man anyway — so the **bug passes the check outright**. They
+have to be clustered, which is the report itself: a spectator clicking a few
+spots along one stretch of street.
+
+`client/rtsrig.html` is the client half, and it lives under `client/src` so
+unlike the harnesses at `server/` root it is covered by `npx tsc --noEmit`. rAF
+is throttled to nothing while the browser pane is not compositing, so no frame
+of a real round can be put on screen from here; `getImageData` needs none, and
+`spectatorPan` was split out pure for the half that is not a drawing at all. It
+reports the pointer's span against the slot; that a ghost puts ink inside its
+own footprint and **0px outside it**, with the walking, stacking and built
+treatments reading as three different things; that **3 of 3 buttons show their
+grid key and 0 of 27 empty slots do**, with the grid in reading order; and the
+camera's arrows, ramp and the two cases that switch the edge off.
+
+*Its letter probe was the rig lying before it was ever the code, twice over.*
+"Ink in the slot" is answered by the icon alone, so the reading has to be the
+slot's own bottom-left corner — and "ink" cannot mean *unlike the road*, because
+the card paints a panel and every slot a fill over it, so an empty slot is
+already 34/255 off the road before anything is drawn in it. Measured that way it
+reported **27 empty slots are lettered**. What is actually being looked for is
+an amber glyph.
+
+#### The card has grid hotkeys, and they are what took the camera off WASD
+
+QWERT / ASDFG / ZXCVB lies over the five columns and three rows exactly as they
+are drawn. **The keyboard's own layout is the card's layout**, which is the whole
+idea of a grid binding: you learn one shape and every page of every card obeys
+it, rather than learning a letter per button.
+
+- **The letter is printed in the slot**, bottom-left. A binding you have to be
+  told about separately is one nobody uses, and the letter's *position on the
+  card* is the mnemonic — so seeing it in place is most of how the grid is
+  learned. The label strip names the key too, beside what the button does.
+- **`pressCardButton` is one function with two callers.** A button can be
+  reached by mouse and by key now, and a second copy of what it does is how the
+  two drift into a shovel that opens the build page when clicked and does
+  nothing when typed.
+- **A key with no enabled button under it falls through**, which is what leaves
+  `R` free to hand a selection back today: its slot is empty on both pages. The
+  day something is put there the card takes the key, which is the right way
+  round — the card is the thing with a button on it.
+- **It cost the spectator's WASD camera**, and that is not a side effect but the
+  reason the camera moved. W, A, S and D are four of these fifteen, and a
+  watcher pressing S to look further down the street would be pressing the
+  second button of the bottom row.
+
+#### So the camera is on the arrows, and on the edge of the screen
+
+- **`input.arrows` is tracked separately from `input.state`.** A player still
+  drives a body with WASD, which is `state`; only the spectator camera reads
+  `arrows`. One flag rather than a mode, so nothing has to ask which it is.
+- **Edge scrolling is `EDGE_SCROLL_BAND` (48px) deep and ramped**, from
+  `EDGE_SCROLL_MIN` at the inner lip to a full key's worth hard against the
+  edge. Flat was the alternative and is worse: the band has to be wide enough to
+  hit without aiming, and a wide band at full speed lurches the camera away the
+  moment you reach for anything near the edge of the screen.
+- **Only while the pointer is over the canvas**, which `input.pointerOver` is
+  for and which the feature cannot be written without. `mousemove` is bound to
+  the canvas, so a pointer that leaves the window leaves its last position
+  frozen — and having left by an edge, that position is *inside the band*. The
+  camera would slide for as long as you were away and you would come back to a
+  view nobody asked for. `blur` clears it too, for alt-tab.
+- **And never over the command card**, which sits in the bottom-right corner and
+  so lies across both the right and bottom bands. Reaching for a button must not
+  send the city sliding out from under the officers you are about to give an
+  order to. The card already owns its own rectangle for clicks; this is the same
+  rule for a pointer resting on it.
+- **The vector is clamped to one, not normalised to one**, and the difference is
+  the whole ramp. A held key contributes a whole unit, and dividing by the
+  length is what keeps a two-key diagonal the same speed as a straight line — an
+  edge push contributes a *fraction*, and dividing that by its own length scales
+  it straight back up to full speed. So it is only shortened when it is longer
+  than one.
+- **`spectatorPan` is pure and exported so it can be measured.** rAF is
+  throttled to nothing while the browser pane is not compositing, so the camera
+  cannot be driven and watched from here at all — a live spectator round read
+  `0 fps` with a 10-second frame gap. This is the same split as
+  `commandCardSlots` against `drawCommandCard`.
+
+#### A wall order is not thrown away by a stray right-click
+
+Reported as *"when placing sand bags have it so one right click does not
+override the placing of the sandbag command for the grey officer, only a double
+right click will have them change their orders."*
+
+- **A plain move goes round the builders.** Siting a barricade is a walk of
+  several seconds, and a single right-click anywhere on the map threw that
+  errand away with nothing said: the ghost went out, the sandbag was never
+  spent, and the only sign was a wall that never appeared.
+- **Everybody else moves on that same click**, which is what stops the exemption
+  becoming a stuck group. The filter is on the individual, not on the message.
+- **Filtered before the centroid, not skipped after it.** The formation is a
+  shape made out of the people who are actually going; leave a builder in the
+  arithmetic and he pulls the whole group's slots toward a spot he is not
+  walking to.
+- **`DOUBLE_RIGHT_MS` is 280**, well under the 500ms an operating system calls
+  a double-click, because this has to be a thing you meant rather than a thing
+  two ordinary orders in a hurry add up to. It is **spent** when it fires, so a
+  third quick click is a fresh single — otherwise hammering the button cancels
+  every build in the selection one after another.
+- **The gesture is the client's and the wire carries what it meant**
+  (`override`), the same shape as shift-queueing and the H and R keys.
+- **The order pulse goes amber for an override** where a move is green, so
+  taking a wall back is visibly a different thing from asking for one.
+- **`H` and `R` still call an errand off**, and are left alone: both are
+  explicit stand-down orders rather than a click that might have been meant for
+  the map.
+
+Measured in `rtscheck.ts`, staged with three men walking to three spots and **a
+fourth officer with no errand as the control** — without him, "nothing happened"
+is satisfied just as well by the whole order having been dropped. A single
+right-click leaves **3 of 3** wall orders exactly where they were and sends no
+builder anywhere, while the spare officer moves on that very message; the double
+takes all three off, sends them, and **does not spend the sandbags**.
 
 **PLAY OFFLINE is the same lobby with `offline: true`**, which is why it needed
 almost no code: no chat, seats cycle closed→bot only, seats start `closed`, and
@@ -2200,6 +2417,98 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
   having no damage figure; the set says so out loud so giving it one later
   doesn't send every bot after one.
 
+### A sandbag wall is a thing to walk round unless you can eat it
+
+Reported twice in one breath: *"civilians know how to navigate around sandbags…
+if it is just a single sandbag go around it and not bump into it"*, and *"I'll
+tell one to go to the other side of a barricade wall and they will just push up
+against the wall instead of going around it."*
+
+**The cause is a rule that was right when the only sandbags in the game were a
+machine gun's.** The bags were given the doors' rule — out of the nav grid
+entirely, routes planned as though they were not there, and whoever walks into
+one deals with it — and that is *exactly* right for a zombie, because clawing a
+wall down rather than strolling round the end is the entire point of building
+one. It is exactly wrong for everybody else, who cannot take the thing apart and
+has no business trying.
+
+- **A second layer on the nav grid, not more entries in the first.** `soft` sits
+  beside `blocked` and holds the destructible obstacles; `findPath` avoids it
+  when asked and nothing else in the game sees it at all. The two are different
+  questions — a wall is a wall to everybody, a sandbag wall is not — and
+  answering them with one array means picking which half of the city to break.
+- **`e.type !== 'zombie'`, in `headingToward`, and that is the whole rule.** One
+  test in the one function that decides where a body walks. The dog is a zombie
+  with a flag on it and is driven by hand anyway, so it needs no mention.
+- **Two readers, not one, which the parked vehicle already paid to learn.**
+  `headingToward` only asks the router when `hasWallClearPath` says the straight
+  line is blocked — so a wall in the grid and not in that predicate is a wall
+  every route is planned around and nobody ever asks for a route past. Measured
+  on the van: 5 of 8 officers still failed to get by.
+- **And `slideToward` is the third**, which the van did not need. That is where
+  a body ends up when the search failed or the tick's budget was spent, and it
+  fans out on `nav.isBlocked` — so without `isBlockedOrSoft` there it walks
+  straight back into the wall the route was avoiding. The reported fault,
+  arriving a second later by another road.
+- **The string-pull has to know too.** It is what drops waypoints you can walk
+  past, and asked without the soft layer it cheerfully cuts the corner the
+  search had just gone round, handing back a straight line through the very wall
+  being avoided.
+- **Components are still labelled off `blocked` alone.** `isReachable` decides
+  where a body may be spawned and where an order may be sent, and a wall
+  somebody built across a street is not a decision about either — it is also
+  gone the moment a zombie has finished with it.
+- **The boxes are counted off the records rather than kept as a list**, the same
+  shape as `buildSitesToWire`: a wall arrives when an officer stacks one and
+  leaves when a zombie has finished with it, and a list somebody has to remember
+  to strike from is a list that steers the whole city round a wall that is not
+  there. `navDirty` is set at all four of those moments — built, torn down,
+  emplacement deployed, its bags destroyed — and the tick coalesces it to one
+  rebuild, which at a handful of walls a round is a handful of rebuilds.
+- **Guarded on `size` in `hasWallClearPath`**, the way `speedAt` guards on
+  `world.acid.size`. It runs once per walking body per tick and the ordinary
+  case is a city with no sandbags in it at all; `Map.values()` allocates an
+  iterator whether or not there is anything in it, and two of those five hundred
+  times a tick is not nothing.
+
+`server/sandbagnav.ts` is the harness — headless, no socket, no port.
+`setSandbagsIgnoredByRoutes` is the gate and it is **kept**: the control is the
+whole value of the run, and here doubly so, since half of what has to be shown
+is that the horde did *not* change. Ten cities, one wall laid across a clear
+lane with room round it, both behaviours on the same city:
+
+| 340px lane, wall across the middle | OLD | NEW |
+|---|---|---|
+| commanded officer got to the far end | **0/10** | **10/10**, median 10.7s |
+| …ticks spent pressed on the wall | 488 | **49** |
+| civilian got to the far end | **0/10** | **10/10**, median 7.4s |
+| …ticks spent bumping into it | 510 | **36** |
+
+and the horde: a zombie's straight line is still clear through the bags
+**10/10** while the route for anything alive goes round **10/10**, and a zombie
+held at a wall still takes it from 900 to nothing.
+
+*Three things about measuring this were the rig lying rather than the code
+failing, and the third is the one worth remembering:*
+
+- **Each kind arrives by its own rule.** `COMMAND_ARRIVE_DIST` is 26 and
+  `RALLY_ARRIVE_DIST` is 46, so a civilian that had walked all the way round the
+  wall and stopped exactly where a rally order tells it to stop scored **0/6**,
+  at 44.7px against a 46px rule.
+- **A zombie claws the bags from arm's length and never touches them.** A 4px
+  contact test read *0 of 6 reached the wall* on runs that had taken it from 900
+  health to nothing — the rig contradicting itself in the same table. It is
+  `SANDBAG_REACH`.
+- **A barricade is 52px long, so a zombie walking at prey on the far side
+  slides round the end of it** — correct behaviour, and behaviour it has always
+  had. An unpinned run therefore measures whether the zombie happened to clip
+  the corner: the same code read 6/6 and 900 damage on one run and 2/6 and 0 on
+  the next. **And the OLD/NEW comparison built on it was a dice roll**, because
+  the two runs roll different zombie traits — CLAUDE.md's own rule about unpaired
+  runs, with the traits standing in for the city. It read 900 against 816 on code
+  that is identical for a zombie. The decision is checked exactly instead, on the
+  two inputs that make it, and the behaviour is pinned.
+
 ### The pocket gunner
 
 A utility that puts down a grey officer behind a machine gun and a wall of
@@ -2210,10 +2519,12 @@ sandbags, facing whichever way you were. `server/src/emplacement.ts` owns it.
   crew — which is why running dry needs nothing but deleting the record: what's
   left is already a grey officer with a pistol.
 - **The bags are see-through and bullets go over them.** They are not in
-  `hasLineOfSight` or in `fire`, only in collision — and, like doors,
-  deliberately **not in the nav grid**: routes are planned as though they
-  weren't there and whoever walks into one deals with it, which is what makes
-  zombies stand and tear at them instead of strolling round.
+  `hasLineOfSight` or in `fire`, only in collision — and in the nav grid's
+  **destructible layer**, which is read by anything alive and not by a zombie:
+  a zombie's routes are planned as though they weren't there and whoever walks
+  into one deals with it, which is what makes them stand and tear at them
+  instead of strolling round. See **A sandbag wall is a thing to walk round
+  unless you can eat it**.
 - **The bags are an oriented box**, not an axis-aligned rect, because they lie
   across whatever bearing the officer happened to be facing. `resolveCircleBox`
   and `closestOnBox` in `geometry.ts` are the whole of that.

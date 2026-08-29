@@ -21,6 +21,7 @@ import type {
   DuckState,
   EmplacementState,
   BarricadeState,
+  BuildSiteState,
   FireState,
   BeaconState,
   MineState,
@@ -34,6 +35,8 @@ import { ITEMS, type ItemId } from '../../shared/items.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { acidLobes } from '../../shared/acidshape.js';
 import {
+  BARRICADE_HALF_DEPTH,
+  BARRICADE_HALF_WIDTH,
   ENTITY_COLOR,
   ENTITY_RADIUS,
   ENTITY_MAX_HEALTH,
@@ -5284,6 +5287,55 @@ export function drawBarricades(
   }
 }
 
+/**
+ * The walls that have been ordered and are not there yet.
+ *
+ * **The one drawing that says an order is still being carried out.** A wall is
+ * a walk away, so between the click and the wall there was nothing on screen at
+ * all — the ghost cleared with the mouse button and the only way to know the
+ * order had landed was to wait and see. This is that ghost, left standing at
+ * the spot for as long as somebody is on his way to it.
+ *
+ * Deliberately `drawSandbagWall` like the built ones and the one in hand, so it
+ * is exactly the thing that is about to exist — the same argument that has the
+ * in-hand ghost drawn by it. What separates the three is treatment, not shape:
+ * faint and dashed while he is walking, filled in and steady once he has
+ * arrived and is stacking, and solid once it is a wall.
+ */
+export function drawBuildSites(
+  ctx: CanvasRenderingContext2D,
+  sites: BuildSiteState[],
+  view: Viewport,
+  now: number,
+): void {
+  for (const site of sites) {
+    if (!visible(view, site.x, site.y, BARRICADE_HALF_WIDTH + 24)) continue;
+    const box = {
+      x: site.x,
+      y: site.y,
+      angle: site.angle,
+      hw: BARRICADE_HALF_WIDTH,
+      hh: BARRICADE_HALF_DEPTH,
+    };
+    // Stacking reads as steady; walking breathes, so a spot nobody has reached
+    // yet cannot be mistaken for a wall that is simply pale.
+    const pulse = site.working ? 1 : 0.72 + 0.28 * Math.sin(now / 260);
+    drawSandbagWall(ctx, box, 1, (site.working ? 0.52 : 0.3) * pulse, '#e8a13a');
+
+    ctx.save();
+    ctx.translate(site.x, site.y);
+    ctx.rotate(site.angle);
+    ctx.strokeStyle = '#e8a13a';
+    ctx.globalAlpha = site.working ? 0.85 : 0.55;
+    ctx.lineWidth = 1.4;
+    if (!site.working) ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.roundRect(-box.hw, -box.hh, box.hw * 2, box.hh * 2, 4);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 export function drawEmplacements(
   ctx: CanvasRenderingContext2D,
   guns: EmplacementState[],
@@ -5898,12 +5950,20 @@ export function drawSelfMarker(
  *
  * `command` is the spectator's variant with grey officers selected: the same
  * mark inside four corner brackets, so it reads as "click sends them here".
+ *
+ * `scale` shrinks the whole mark. A gunsight is sized for aiming a weapon at a
+ * body, and a spectator is not aiming at anything — it is a *pointer*, and one
+ * that has to land on a card button a fraction of its own diameter across. The
+ * **stroke widths are left alone**: a mark at two thirds the size with two
+ * thirds the stroke is a fainter mark rather than a smaller one, and the whole
+ * of what makes this legible on a white wall is that it is stroked twice.
  */
 export function drawCrosshair(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   command = false,
+  scale = 1,
 ): void {
   ctx.save();
   ctx.lineCap = 'butt';
@@ -5916,15 +5976,15 @@ export function drawCrosshair(
       [0, 1],
       [0, -1],
     ]) {
-      ctx.moveTo(x + dx * 4, y + dy * 4);
-      ctx.lineTo(x + dx * 10, y + dy * 10);
+      ctx.moveTo(x + dx * 4 * scale, y + dy * 4 * scale);
+      ctx.lineTo(x + dx * 10 * scale, y + dy * 10 * scale);
     }
     // The broken ring, four arcs with a gap between each.
     for (let i = 0; i < 4; i++) {
       const a0 = i * (Math.PI / 2) + 0.34;
       const a1 = a0 + Math.PI / 2 - 0.68;
-      ctx.moveTo(x + Math.cos(a0) * 13, y + Math.sin(a0) * 13);
-      ctx.arc(x, y, 13, a0, a1);
+      ctx.moveTo(x + Math.cos(a0) * 13 * scale, y + Math.sin(a0) * 13 * scale);
+      ctx.arc(x, y, 13 * scale, a0, a1);
     }
     // Corner brackets, spectator-with-a-selection only.
     if (command) {
@@ -5934,9 +5994,9 @@ export function drawCrosshair(
         [1, -1],
         [-1, -1],
       ]) {
-        ctx.moveTo(x + dx * 20, y + dy * 12);
-        ctx.lineTo(x + dx * 20, y + dy * 20);
-        ctx.lineTo(x + dx * 12, y + dy * 20);
+        ctx.moveTo(x + dx * 20 * scale, y + dy * 12 * scale);
+        ctx.lineTo(x + dx * 20 * scale, y + dy * 20 * scale);
+        ctx.lineTo(x + dx * 12 * scale, y + dy * 20 * scale);
       }
     }
     ctx.stroke();
@@ -6017,6 +6077,36 @@ export function commandCardSlots(
 /** Index into `slots` for a column and row. */
 export function cardIndex(col: number, row: number): number {
   return row * CARD_COLS + col;
+}
+
+/**
+ * Grid hotkeys: the key under each slot, in reading order.
+ *
+ * **The keyboard's own layout is the card's layout**, which is the whole idea
+ * of a grid binding — you learn one shape and every page of every card obeys
+ * it, rather than learning a letter per button. Five columns and three rows is
+ * QWERT / ASDFG / ZXCVB, which is SC2's four-wide grid with the natural extra
+ * column on each row.
+ *
+ * A key only does anything when the slot under it holds an *enabled* button, so
+ * the fourteen empty ones cost nothing and `R` still hands a selection back to
+ * its own AI. The card wins the key the day something is put in that slot,
+ * which is the right way round — the card is the thing with a button on it, and
+ * the letter is printed on the button where the binding cannot be a secret.
+ *
+ * **This is what took the spectator's camera off WASD.** W, A, S and D are four
+ * of these fifteen, and a watcher pressing S to look down the street would
+ * otherwise be pressing the second button of the bottom row.
+ */
+export const CARD_GRID_KEYS: string[] = [
+  'KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT',
+  'KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG',
+  'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB',
+];
+
+/** Which slot a key code drives, or -1. */
+export function cardSlotForKey(code: string): number {
+  return CARD_GRID_KEYS.indexOf(code);
 }
 
 /** What is actually on the card, per page. */
@@ -6158,6 +6248,16 @@ export function drawCommandCard(
     else if (button.id === 'sandbag') sandbagIcon(ctx, cx, cy, color);
     else backIcon(ctx, cx, cy, color);
 
+    // The grid hotkey, bottom-left. Printed on the button rather than listed
+    // somewhere else, because a binding you have to be told about separately is
+    // a binding nobody uses — and the letter's *position on the card* is the
+    // mnemonic, so seeing it in place is most of how the grid is learned.
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = button.enabled ? 'rgba(232, 161, 58, 0.75)' : 'rgba(91, 100, 114, 0.75)';
+    ctx.fillText(CARD_GRID_KEYS[i].slice(3), s.x + 4, s.y + s.h - 4);
+
     // How many are left to build, in the slot's top-right. A number rather than
     // a bar: this is a stock that only goes down, and a bar implies a ceiling
     // it refills to.
@@ -6181,7 +6281,9 @@ export function drawCommandCard(
   ctx.textBaseline = 'bottom';
   ctx.fillStyle = hoveredButton ? '#e8a13a' : '#94a3b8';
   ctx.fillText(
-    hoveredButton ? hoveredButton.label : `${selected} OFFICER${selected === 1 ? '' : 'S'}`,
+    hoveredButton
+      ? `${hoveredButton.label}  [${CARD_GRID_KEYS[hoveredButton.slot].slice(3)}]`
+      : `${selected} OFFICER${selected === 1 ? '' : 'S'}`,
     frame.x + 2,
     frame.y - 5,
   );
