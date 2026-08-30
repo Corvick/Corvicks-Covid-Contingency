@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.18.2';
+export const GAME_VERSION = '0.19.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2246,13 +2246,21 @@ export const SPRINT_MULTIPLIER = 1.7;
 
 // ------------------------------------------------------------- bot officers
 /**
- * A bot officer stands in a player's slot, so it moves at a player's pace
- * rather than a civilian's — this is deliberately *not* part of the NPC speed
- * scale, which is tuned so civilians lose races with zombies. A bot is
- * supposed to win them.
+ * **A bot officer moves at exactly a player's pace, walking and sprinting
+ * alike.** It stands in a player's slot, so this is deliberately *not* part of
+ * the NPC speed scale, which is tuned so civilians lose races with zombies — a
+ * bot is supposed to win them.
+ *
+ * They used to be `PLAYER_SPEED * 0.72` and `* SPRINT_MULTIPLIER * 0.85`, and
+ * the file said "moves at a player's pace" while doing no such thing: a bot
+ * walked at 115 against a player's 160 and sprinted at 231 against 272. Asked
+ * for outright — *"make bots speed equal to players when walking and equal to
+ * players when sprinting"* — and it is now the same two expressions
+ * `updatePlayers` uses, so `BOOTS_SPEED_MUL` stacks on top identically for
+ * both and there is one figure to change rather than two.
  */
-export const BOT_WALK_SPEED = PLAYER_SPEED * 0.72;
-export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER * 0.85;
+export const BOT_WALK_SPEED = PLAYER_SPEED;
+export const BOT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER;
 /**
  * Inside this, stop shooting, turn, and run. Deliberately tight: an officer
  * that breaks off at the first sight of one is an officer that never fights,

@@ -37,9 +37,11 @@ import {
   type World,
   type Entity,
 } from './src/world.js';
-import { computeFrozen, updateAi, setLegacyBotCombat } from './src/ai.js';
+import { computeFrozen, updateAi, setLegacyBotCombat, setBotsAtOldPace } from './src/ai.js';
 import {
   TICK_RATE,
+  PLAYER_SPEED,
+  setCityPopulation,
   PATH_NODE_BUDGET_PER_TICK,
   ZOMBIE_RADIUS,
   BOT_DOOR_LISTEN_RANGE,
@@ -362,12 +364,113 @@ function kiteSpeedRun(seed: number): number | null {
   return moving > 0 ? travelled / (moving * (TICK_MS / 1000)) : null;
 }
 
+// ------------------------------------------------------------- the pace
+
+/**
+ * **What a bot actually walks at**, measured off the ground it covers rather
+ * than read out of the constant it is supposed to equal.
+ *
+ * Nothing else is alive, so the only thing the bot can be doing is patrolling,
+ * and it patrols at `botWalkSpeed`. `speedAt` still applies bushes, so the
+ * reading is the median over cities rather than any one run — a bot that walked
+ * its whole run through a hedge is the city talking.
+ */
+function walkPaceRun(seed: number): number | null {
+  const { world, bot } = withSeed(seed, stagedWorld);
+  const spot = openSpot(world);
+  if (!spot) return null;
+  bot.x = spot.x;
+  bot.y = spot.y;
+  const state = world.ai.get('bot-0');
+  if (state) {
+    state.lastX = bot.x;
+    state.lastY = bot.y;
+    state.unstickX = bot.x;
+    state.unstickY = bot.y;
+  }
+  world.pickups.clear();
+
+  let now = Date.now();
+  let travelled = 0;
+  let moving = 0;
+  for (let i = 0; i < 300; i++) {
+    const wasX = bot.x;
+    const wasY = bot.y;
+    now += TICK_MS;
+    tick(world, now, TICK_MS / 1000);
+    const moved = Math.hypot(bot.x - wasX, bot.y - wasY);
+    if (moved > 0.5) {
+      travelled += moved;
+      moving++;
+    }
+  }
+  return moving > 0 ? travelled / (moving * (TICK_MS / 1000)) : null;
+}
+
+// --------------------------------------------------- what it costs the round
+
+interface Round {
+  /** Bot officers still on their feet at the end. */
+  alive: number;
+  bots: number;
+  /** …and how many of the four were ever bitten. */
+  bitten: number;
+  zombies: number;
+  survivors: number;
+}
+
+/**
+ * **A whole round, paired on one seeded city.**
+ *
+ * Levelling a bot's pace with a player's is a balance change and not a bug
+ * fix, so what it costs is worth a number rather than an opinion. Bots alive is
+ * a count out of four rather than a share of a diverging population, which is
+ * what makes it survive the pairing better than the rolling metrics in
+ * `circles.ts` did.
+ */
+function roundRun(seed: number): Round {
+  const world = withSeed(seed, () => {
+    const w = createWorld();
+    w.botOfficerCount = 4;
+    resetWorld(w);
+    return w;
+  });
+  const ids = [...world.entities.keys()].filter((id) => world.bots.has(id));
+  const bitten = new Set<string>();
+
+  let now = Date.now();
+  for (let i = 0; i < ROUND_TICKS; i++) {
+    now += TICK_MS;
+    tick(world, now, TICK_MS / 1000);
+    for (const id of ids) if (world.pendingInfections.has(id)) bitten.add(id);
+  }
+
+  let zombies = 0;
+  let survivors = 0;
+  for (const e of world.entities.values()) {
+    if (e.type === 'zombie') zombies++;
+    else if (e.type === 'human') survivors++;
+  }
+  let alive = 0;
+  for (const id of ids) {
+    const e = world.entities.get(id);
+    if (e && e.type === 'officer') alive++;
+  }
+  return { alive, bots: ids.length, bitten: bitten.size, zombies, survivors };
+}
+
 // ------------------------------------------------------------- driver
 
 const ways: Record<string, Way[]> = { OLD: [], NEW: [] };
 const bashes: Record<string, Bash[]> = { OLD: [], NEW: [] };
 const paces: Record<string, number[]> = { OLD: [], NEW: [] };
+const walks: Record<string, number[]> = { OLD: [], NEW: [] };
 let skipped = 0;
+
+/** Ticks and size of the paired live rounds at the bottom. */
+const ROUND_TICKS = Number(process.env.ROUND_TICKS ?? 3600); // 120s
+const ROUND_RUNS = Number(process.env.ROUND_RUNS ?? 10);
+const ROUND_POP = Number(process.env.ROUND_POP ?? 300);
 
 for (let run = 0; run < RUNS; run++) {
   for (const mode of ['OLD', 'NEW'] as const) {
@@ -381,6 +484,11 @@ for (let run = 0; run < RUNS; run++) {
     const c = kiteSpeedRun(5000 + run);
     if (c !== null) paces[mode].push(c);
     else skipped++;
+    setBotsAtOldPace(mode === 'OLD');
+    const d = walkPaceRun(6000 + run);
+    if (d !== null) walks[mode].push(d);
+    else skipped++;
+    setBotsAtOldPace(false);
   }
 }
 
@@ -409,4 +517,37 @@ console.log(`\npace while giving ground  (${RUNS} cities each)`);
 for (const mode of ['OLD', 'NEW'] as const) {
   console.log(`  ${mode}  median ${f1(med(paces[mode]))} px/s   (n=${paces[mode].length})`);
 }
+console.log(`\npace on open ground, nothing else alive  (${RUNS} cities each)`);
+for (const mode of ['OLD', 'NEW'] as const) {
+  console.log(
+    `  ${mode}  median ${f1(med(walks[mode]))} px/s` +
+      `   (a player walks at ${PLAYER_SPEED}, n=${walks[mode].length})`,
+  );
+}
 if (skipped > 0) console.log(`\n(${skipped} stagings skipped)`);
+
+// A balance change wants an outcome, not a pace. Last, because it is the slow
+// half of the run.
+setCityPopulation(ROUND_POP);
+setLegacyBotCombat(false);
+const rounds: Record<string, Round[]> = { OLD: [], NEW: [] };
+for (let run = 0; run < ROUND_RUNS; run++) {
+  for (const mode of ['OLD', 'NEW'] as const) {
+    setBotsAtOldPace(mode === 'OLD');
+    rounds[mode].push(roundRun(9000 + run));
+  }
+}
+setBotsAtOldPace(false);
+console.log(
+  `\nwhat it costs the round  (${ROUND_RUNS} paired cities, ${ROUND_POP} civilians, ${(ROUND_TICKS / TICK_RATE) | 0}s)`,
+);
+for (const mode of ['OLD', 'NEW'] as const) {
+  const rs = rounds[mode];
+  const bots = rs.reduce((a, r) => a + r.bots, 0);
+  console.log(
+    `  ${mode}  bots alive ${rs.reduce((a, r) => a + r.alive, 0)}/${bots}` +
+      `   ever bitten ${rs.reduce((a, r) => a + r.bitten, 0)}` +
+      `   zombies med ${med(rs.map((r) => r.zombies))}` +
+      `   survivors med ${med(rs.map((r) => r.survivors))}`,
+  );
+}

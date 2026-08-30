@@ -4993,10 +4993,12 @@ survivor has turned" when the opposite happened would be simply wrong.
 ### Bot officers
 
 Blue body, grey head — a separate `bot` wire flag, not the ambient grey `npc`
-one. They stand in a player's slot, so they move at **player speed**
-(`BOT_WALK_SPEED`, `BOT_SPRINT_SPEED`) and carry their own stamina; this is
-deliberately outside the NPC speed scale, which is tuned so civilians *lose*
-races with zombies. A bot is meant to win them.
+one. They stand in a player's slot, so they move at **exactly player speed**
+(`BOT_WALK_SPEED` = `PLAYER_SPEED`, `BOT_SPRINT_SPEED` = that times
+`SPRINT_MULTIPLIER`) and carry their own stamina; this is deliberately outside
+the NPC speed scale, which is tuned so civilians *lose* races with zombies. A
+bot is meant to win them. It only became *exactly* true recently — see **A bot
+moves at a player's pace**.
 
 - **Bolting is latched and judged on the nearest zombie in sight, not the one
   being shot at.** Those are often different, and a bot trading fire across the
@@ -5521,13 +5523,19 @@ one seeded city per run. Twelve cities each way:
 
 | | OLD | NEW |
 |---|---|---|
-| a pack outside the near door: **got out** | **1/7** | **6/7**, median 2.3s |
-| …by the other door | 1/7 | **6/7** |
-| …ticks loitering at the door it heard | **2834** | **799** |
-| a shield and a zombie on its chest: **bashes** | **0** | **28** |
+| a pack outside the near door: **got out** | **3/7** | **6/7**, median 1.7s |
+| …by the other door | 3/7 | **6/7** |
+| …ticks loitering at the door it heard | **2110** | **635** |
+| a shield and a zombie on its chest: **bashes** | **0** | **35** |
 | …runs that bashed at all | 0/12 | **11/12** |
-| …furthest the zombie was shoved | 8.4px | **47.4px** |
-| pace while giving ground | 107.3 px/s | **144.1 px/s** |
+| …furthest the zombie was shoved | 13.1px | **46.7px** |
+| pace while giving ground | 133.1 px/s | **186.4 px/s** |
+
+Those two pace figures are both higher than they were when this was first
+measured (107.3 / 144.1), and the door row moved with them — the gate here does
+not cover **A bot moves at a player's pace** below, which raised the underlying
+speeds under both columns. What the row still says is what it is for: giving
+ground costs a quarter of the pace on one side of it and nothing on the other.
 
 *One thing about staging the door was the rig lying rather than the code
 failing, and it is worth knowing before re-running it.* **The entering case
@@ -5536,6 +5544,70 @@ cannot be staged honestly.** Two zombies in the room put the loot inside
 bot never walks at the door at all — measured that way the rig read **0/8 in
 both modes** and was reporting the loot scan rather than the door. It is staged
 as *leaving* instead, which is also what "escape routes" actually says.
+
+#### A bot moves at a player's pace
+
+The file has said "a bot officer stands in a player's slot, so it moves at a
+player's pace" since bots existed, and it was not true: `BOT_WALK_SPEED` was
+`PLAYER_SPEED * 0.72` and `BOT_SPRINT_SPEED` was `* SPRINT_MULTIPLIER * 0.85`,
+so a bot walked at **115 against a player's 160** and sprinted at **231 against
+272**. Asked for outright: *"make bots speed equal to players when walking and
+equal to players when sprinting"*. They are the same two expressions
+`updatePlayers` uses now, so `BOOTS_SPEED_MUL` stacks identically on both and
+there is one figure to change rather than two.
+
+- **It is a different animal against the horde, and the numbers are worth
+  having.** A zombie's steady pace is `ZOMBIE_SPEED` × 0.92-1.3, so **94-133
+  px/s**, with `ZOMBIE_LUNGE_MULTIPLIER` taking a burst to 199 for 850ms. At
+  115 a walking bot was slower than the quick end of the horde; at 160 it
+  outpaces every one of them at a walk, and only a lunge catches it. Sprinting
+  at 272 nothing catches it at all.
+- **One written-down reason went stale with it, and the rule it justified is
+  kept.** "Running out of breath ends a bolt" was argued from a winded bot
+  dropping to `BOT_WALK_SPEED`, "which is slower than a zombie, so `closest`
+  never grows and it can never satisfy `BOT_SAFE_DIST`". That is simply no
+  longer so. The rule stays on the other argument, which is the one that
+  actually matters: a bot that can always break off is a bot that never fights,
+  and four officers who stop fighting are what lose the city — see **Fighting is
+  how a bot survives**.
+- **Worth knowing before the next pathing report.** Turn radius is
+  `speed / HUMAN_TURN_RATE`, so a sprinting bot's is **34px** where the
+  waypoint-acceptance radius in `headingToward` is 22. That was already true at
+  231 (29px) and is not a new class of fault, but it is the shape of thing
+  **Going round in circles** is about, and if a sprinting bot is ever seen
+  orbiting a waypoint, that pair of numbers is where to look.
+
+`server/botfight.ts` carries it, with `setBotsAtOldPace` as its own gate —
+separate from `setLegacyBotCombat` on purpose, because "how fast" and "what it
+does" are two decisions and folding them together would make either measurement
+read as the other.
+
+| | OLD | NEW |
+|---|---|---|
+| pace on open ground, nothing else alive | 113.5 px/s | **155.8 px/s** |
+
+That is measured off the ground actually covered rather than read out of the
+constant, which is why neither figure is exactly 115 or 160: `speedAt` still
+applies bushes, and a patrolling bot crosses them.
+
+**What it costs the round**, which a balance change deserves rather than an
+opinion. Ten paired cities, 300 civilians, 120s, four bots each:
+
+| | OLD | NEW |
+|---|---|---|
+| bots alive at the end | **11/40** | **19/40** |
+| bots ever bitten | 4 | 2 |
+| zombies alive, median | 198 | 187 |
+| survivors, median | 91 | 99 |
+
+**Nearly twice as many officers come through, and the city is no worse for it** —
+which is not the trade **Fighting is how a bot survives** found when bots were
+made to *break off* more readily. The difference is that this buys survival
+without buying disengagement: a faster officer wins the same fights sooner and
+gets clear of the ones it loses, where a shorter bolt distance bought nothing
+and cost containment. Bots alive is a count out of four rather than a share of a
+diverging population, which is what makes it survive the pairing where the
+rolling metrics in `circles.ts` did not.
 
 #### A charge rifle is how a bot sees the infected
 

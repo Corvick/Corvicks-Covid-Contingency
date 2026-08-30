@@ -579,6 +579,23 @@ export function setLegacyBotCombat(v: boolean): void {
 }
 
 /**
+ * True is a bot officer at the pace it used to move at — 0.72 of a player
+ * walking and 0.85 of one sprinting. `server/botfight.ts` reads it. Its own
+ * gate rather than part of `legacyBotCombat`, because "how fast" and "what it
+ * does" are two decisions and folding them together would make either
+ * measurement read as the other.
+ */
+let botsAtOldPace = false;
+
+export function setBotsAtOldPace(v: boolean): void {
+  botsAtOldPace = v;
+}
+
+/** What the two speeds were before they were levelled with a player's. */
+const OLD_BOT_WALK = BOT_WALK_SPEED * 0.72;
+const OLD_BOT_SPRINT = BOT_SPRINT_SPEED * 0.85;
+
+/**
  * True is the city's own officers as they were: unable to work a door under any
  * circumstance, so a spectator's order across a threshold ended with a body
  * pressed against the front of a house.
@@ -6492,13 +6509,20 @@ function botStaminaTick(
     state.botStamina = Math.min(STAMINA_MAX, state.botStamina + STAMINA_REGEN_PER_SEC * dt);
     if (state.botWinded && state.botStamina >= STAMINA_RECOVERY_THRESHOLD) state.botWinded = false;
   }
-  const base = sprinting && !state.botWinded ? BOT_SPRINT_SPEED : BOT_WALK_SPEED;
+  const base = botsAtOldPace
+    ? sprinting && !state.botWinded
+      ? OLD_BOT_SPRINT
+      : OLD_BOT_WALK
+    : sprinting && !state.botWinded
+      ? BOT_SPRINT_SPEED
+      : BOT_WALK_SPEED;
   return base * (booted ? BOOTS_SPEED_MUL : 1);
 }
 
 /** A bot's ordinary pace, boots included. */
 function botWalkSpeed(inv: Inventory): number {
-  return BOT_WALK_SPEED * (inv.utilities.includes('combatBoots') ? BOOTS_SPEED_MUL : 1);
+  const base = botsAtOldPace ? OLD_BOT_WALK : BOT_WALK_SPEED;
+  return base * (inv.utilities.includes('combatBoots') ? BOOTS_SPEED_MUL : 1);
 }
 
 /**
@@ -6675,11 +6699,15 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // running until they are properly clear rather than the instant they are
     // one pixel past the line.
     //
-    // **Running out of breath ends it too**, and that is not a refinement — a
-    // winded bot drops to BOT_WALK_SPEED, which is slower than a zombie, so
-    // `closest` never grows and it can never satisfy BOT_SAFE_DIST. It would
-    // jog away from something faster than it, not firing, for the rest of the
-    // round. Out of sprint means turn round and make the fight expensive.
+    // **Running out of breath ends it too.** The reason written here used to be
+    // that a winded bot drops to BOT_WALK_SPEED, which was slower than a
+    // zombie, so `closest` never grew and BOT_SAFE_DIST could never be
+    // satisfied — it would jog away from something faster than it, not firing,
+    // for the rest of the round. **That reason is gone**: a bot walks at
+    // PLAYER_SPEED now, which outpaces every zombie in the game. The rule is
+    // kept anyway, and on the other argument: a bot that can always break off
+    // is a bot that never fights, and four officers who stop fighting are what
+    // lose the city — see "Fighting is how a bot survives".
     //
     // **Breaking off sooner was tried, and it is the wrong answer** — see
     // "Fighting is how a bot survives" in CLAUDE.md. Both a bolt distance that
