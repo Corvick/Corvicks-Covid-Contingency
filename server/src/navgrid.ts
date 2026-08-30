@@ -65,6 +65,16 @@ class MinHeap {
 const SQRT2 = Math.SQRT2;
 
 /**
+ * Gate for `server/circles.ts`: true is the old `findPath`, which answered a
+ * search it could not finish with `null` and left the caller to walk blindly at
+ * the goal. Off in every real round.
+ */
+let noPartialPaths = false;
+export function setNoPartialPaths(v: boolean): void {
+  noPartialPaths = v;
+}
+
+/**
  * Coarse A* navigation grid built from the map's walls. Scratch arrays are
  * reused across searches and validated by a generation stamp, so a search
  * never pays to clear ~60k cells.
@@ -343,9 +353,24 @@ export class NavGrid {
   /**
    * `maxNodes` is how far this one search may look, defaulting to the whole
    * per-search cap. The caller passes what is left of the *tick's* budget, so
-   * one awkward route cannot spend the whole frame — a search that hits the
-   * cap returns null and the caller falls back to walking at the goal, which
-   * is a case every call site already had to handle.
+   * one awkward route cannot spend the whole frame.
+   *
+   * **A search that does not reach the goal answers with the best route it
+   * did find, rather than with nothing.** It used to return `null`, and the
+   * one caller then fell through to `slideToward`, which walks at a fixed
+   * angular offset from the *goal bearing* — and a fixed offset from a bearing
+   * that rotates as you move is a circle round the goal. Reported as officers
+   * going round in small circles: a grey officer ordered across the map (a
+   * 5000px route is far past `PATH_MAX_NODES`, so the search never finished
+   * and never would) and a bot orbiting the corner of a building it was trying
+   * to loot. `unstickTick` cannot see it either — that measures displacement
+   * over 420ms, and a body is most of the way round a 15px circle by then.
+   *
+   * The partial is followed and then re-searched from its far end, which is
+   * ordinary time-sliced A*: each search starts closer, and the route is
+   * walked in stages. `null` now means only "not one step of progress was
+   * found", which is a goal in a sealed component or in geometry — and that is
+   * a case every call site already had to handle.
    */
   findPath(
     sx: number,
@@ -380,15 +405,30 @@ export class NavGrid {
     cameFrom[start] = -1;
     heap.push(start, heuristic(start));
 
+    // The nearest the search ever got, so a run that cannot finish still has
+    // something to hand back. Ties go to the cheaper route, or a search that
+    // fans out sideways picks whichever equally-near cell it happened to touch
+    // last and the "partial" wanders.
+    let best = start;
+    let bestH = heuristic(start);
+    let bestG = 0;
+
     let expanded = 0;
     while (heap.size > 0) {
       const current = heap.pop();
       if (current === goal) {
         this.lastExpanded = expanded;
-        return this.reconstruct(current, generation, tx, ty, avoidSoft);
+        return this.reconstruct(current, generation, tx, ty, avoidSoft, true);
       }
       if (++expanded > maxNodes) break;
       this.lastExpanded = expanded;
+
+      const h = heuristic(current);
+      if (h < bestH || (h === bestH && gScore[current] < bestG)) {
+        best = current;
+        bestH = h;
+        bestG = gScore[current];
+      }
 
       const cc = current % cols;
       const cr = (current / cols) | 0;
@@ -424,7 +464,12 @@ export class NavGrid {
         }
       }
     }
-    return null;
+    // Out of nodes, or the goal is walled off from here. Either way the best
+    // node found is real ground on a real route, and walking to it is progress
+    // where walking at the goal is a circle. `best === start` means nothing was
+    // found at all, which is the one case still worth answering with nothing.
+    if (noPartialPaths || best === start) return null;
+    return this.reconstruct(best, generation, tx, ty, avoidSoft, false);
   }
 
   private reconstruct(
@@ -433,6 +478,12 @@ export class NavGrid {
     tx: number,
     ty: number,
     avoidSoft: boolean,
+    /**
+     * The last cell *is* the goal, so it can carry the caller's exact point.
+     * False for a partial, where overwriting it would put a waypoint back at
+     * the very spot the search could not reach.
+     */
+    exact: boolean,
   ): Waypoint[] {
     const raw: Waypoint[] = [];
     let cell = goal;
@@ -444,7 +495,7 @@ export class NavGrid {
       cell = this.cameFrom[cell];
     }
     raw.reverse();
-    raw[raw.length - 1] = { x: tx, y: ty };
+    if (exact) raw[raw.length - 1] = { x: tx, y: ty };
 
     // String-pull: drop waypoints we can simply walk past.
     const smoothed: Waypoint[] = [];
@@ -464,6 +515,6 @@ export class NavGrid {
       smoothed.push(raw[furthest]);
       anchor = furthest;
     }
-    return smoothed.length > 0 ? smoothed : [{ x: tx, y: ty }];
+    return smoothed.length > 0 ? smoothed : [raw[raw.length - 1] ?? { x: tx, y: ty }];
   }
 }

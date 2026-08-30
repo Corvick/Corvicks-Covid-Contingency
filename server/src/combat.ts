@@ -872,18 +872,33 @@ export function chargeProgress(world: World, id: string, inv: Inventory, now: nu
  * use, and the way out when three of them have you against a wall.
  */
 function shieldBash(world: World, shooter: Entity, now: number): void {
-  if (now < (world.bashReadyAt.get(shooter.id) ?? 0)) return;
-
   // Shoving a body off you is work. Without a cost the bash is free crowd
   // control on a cooldown, and the cooldown alone never makes you choose
   // between shoving and running — the same bar pays for both now.
   const stamina = world.stamina.get(shooter.id) ?? STAMINA_MAX;
   if (world.exhausted.has(shooter.id) || stamina < SHIELD_BASH_STAMINA) return;
+  if (!shieldShove(world, shooter, now)) return;
   const left = stamina - SHIELD_BASH_STAMINA;
   world.stamina.set(shooter.id, left);
   // Bashing yourself to a standstill latches the same exhaustion sprinting
   // does, so it costs you the getaway as well as the shove.
   if (left <= STAMINA_SPRINT_FLOOR) world.exhausted.add(shooter.id);
+}
+
+/**
+ * The shove itself, with the cooldown and the animation, and nothing about who
+ * paid for it.
+ *
+ * **Split out because a bot's reserve is not `world.stamina`.** That map is
+ * per-connection and is maintained by `updatePlayers`; a bot carries its own
+ * `botStamina` on its AiState, and writing a bot's id into the player map
+ * would drain a pool nothing refills — three bashes and the bot would be in
+ * `world.exhausted` for the rest of the round. So the caller pays in whatever
+ * currency it has and this does the shoving. Returns false when the cooldown
+ * has not come round.
+ */
+export function shieldShove(world: World, shooter: Entity, now: number): boolean {
+  if (now < (world.bashReadyAt.get(shooter.id) ?? 0)) return false;
 
   world.bashReadyAt.set(shooter.id, now + SHIELD_BASH_COOLDOWN_MS);
   // Drives the shove animation on the client. Set whether or not anything was
@@ -915,6 +930,7 @@ function shieldBash(world: World, shooter: Entity, now: number): void {
     // Shoved off a victim as well as backwards.
     for (const session of world.grapples.values()) session.zombieIds.delete(e.id);
   }
+  return true;
 }
 
 /**

@@ -70,7 +70,9 @@ Server modules and what each owns:
   leaving anybody to assume it is `buildings[0]`. Nothing it lays down is
   narrower than a body can walk down — see **A building is somewhere you can get
   into**
-- `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string pulling
+- `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string
+  pulling. A search that cannot reach the goal hands back its best partial route
+  rather than nothing — see **Going round in circles**
 - `rooms.ts` — which room every indoor spot is in, the way out of each, and who
   is in it. Static for the round; occupancy is recounted once a tick
 - `rumour.ts` — where zombies have been *seen*, decaying. What the crowd knows,
@@ -1784,6 +1786,17 @@ in there"*. The report is exact, and there were three separate causes.
   walks blindly at the goal. **That is the wall-pressing, exactly.** Measured
   over six cities, one route from the street to the deepest room of each was
   found on **43 of 72** attempts.
+
+  **That figure is history and the harness now prints 61/61**, because
+  `findPath` hands back its best partial rather than nothing — see **Going
+  round in circles**. Nothing above changes: a partial to a room six partitions
+  in still ends well short of it, and the three legs are still what gets
+  anybody there. What it did move is the *control*: the old bare-coordinate
+  behaviour reads 23/61 inside where it used to read 107/120, since a body that
+  used to slide blindly at the goal and occasionally stumble through a door now
+  walks to the nearest reachable spot outside and stops. The shipping side is
+  unchanged — 55/61 inside and 55/61 holed up, against the 117/120 and 148/168
+  quoted below.
 - **And there was no "stay in there" at all.** Arriving set nothing; the
   `rallied` hold is a spot, not a room, and it was reached by 0 of 72.
 
@@ -5437,6 +5450,93 @@ the standing-around part and just reroutes.
   refusing doors, it is refusing *that* door. It set a watch and covered the
   slab in 8 of the 29.
 
+#### Another way round, when there is something behind the door
+
+Asked for as *"if a bot officer hears zombies on the other side of the door it
+should look for other escape routes"*, and the listening above was only ever
+half an answer: it backed off, covered a door that was never going to open,
+gave the errand up after `BOT_DOOR_WATCH_MS` and walked off — with a second
+door into the same building standing twenty feet along the frontage.
+
+- **The door is recorded as refused**, which is the mechanism that already
+  existed for finding one bolted. `wayIntoBuilding` skips it, so a bot walking
+  to loot inside re-routes on the very next tick with no new code at all.
+- **The refusal alone only covers going *in*, and that is the half that is easy
+  to miss.** Coming *out*, the goal is a patrol target in the street; doors are
+  not in the nav grid, so the route is drawn straight back at the same handle
+  whatever is written on the door. `otherWayThrough` is that half: the nearest
+  un-refused exterior door of the building it is in, offered as somewhere to be.
+- **The point is `DOOR_OUTSIDE_STEP` onto the street, not the doorway itself.**
+  A patrol target that reads as indoors is thrown away on the next tick — the
+  rule that walks a bot out of a house it has stripped — so a target *in* a
+  doorway would be discarded before a step was taken toward it.
+- **The route drawn through the refused door goes with it**, and so does the
+  escape destination: a way out with a pack behind it is not a way out.
+- **Covering the threshold is still the answer when there is nothing else**,
+  which is the case `doorWatchTick` was written for. It is now the fallback
+  rather than the only move.
+- **The refusal is not forever, and the decay is the existing cap.**
+  `refusedDoors` holds six and shifts, so a door heard through early in a round
+  drops off the list as later ones are added. There is no clock on it; if that
+  ever matters, that is where to put one.
+
+#### Giving ground costs nothing, and the shield is a weapon
+
+Two more from the same report. Both are absences rather than wrong lines, which
+is why `setLegacyBotCombat` is kept: "the bot bashed" means nothing without
+"and it never did before".
+
+- **`BOT_KITE_SPEED_MUL` is no longer applied to anything.** A quarter off a
+  bot's pace for moving in a direction other than the one the gun points was
+  asked to go: *"officers are too slow when kiting and need to be the same
+  speed as if it were a player"* — and a player who backs off pays nothing for
+  it. The constant is **kept and unused on purpose**: it is wanted for
+  *players*, later, once the game is balanced enough to charge everyone for it,
+  and on that day it belongs in `updatePlayers` and in the bot's give-ground
+  branch alike. `doorWatchTick` lost it too, backing off a threshold being the
+  same act.
+- **A bot with a riot shield now bashes with it.** It went up the moment it was
+  picked up and then only ever soaked grabs; the one *active* thing it does
+  needed a right-click, and a bot has no right button — so it had the half of
+  the item that costs a utility slot and none of the half that gets it out of a
+  corner.
+  - **`shieldShove` is split out of `shieldBash` and shared**, so the range,
+    the arc, the push, the stagger and the "shoved off a victim as well as
+    backwards" rule are one definition.
+  - **What is not shared is the bill.** `world.stamina` is the per-connection
+    player map maintained by `updatePlayers`; a bot's reserve is `botStamina`
+    on its AiState. Writing a bot's id into the player map would drain a pool
+    nothing refills — three bashes and it would sit in `world.exhausted` for
+    the rest of the round.
+  - **Only when there is something to shove.** A player may bash thin air and
+    pay for it; a bot choosing to is a bot spending its getaway on nothing.
+  - **Three call sites, all of them where the facing is fresh** — after the
+    fight branch swings the aim, after `botGunUpWhileMoving` mid-bolt, and the
+    same in the post-grapple flight. `shieldShove` picks who it hits off
+    `e.facing`, so a bash aimed where the officer's feet were pointing hits
+    nobody.
+
+`server/botfight.ts` is the harness — headless, no socket, no port, paired on
+one seeded city per run. Twelve cities each way:
+
+| | OLD | NEW |
+|---|---|---|
+| a pack outside the near door: **got out** | **1/7** | **6/7**, median 2.3s |
+| …by the other door | 1/7 | **6/7** |
+| …ticks loitering at the door it heard | **2834** | **799** |
+| a shield and a zombie on its chest: **bashes** | **0** | **28** |
+| …runs that bashed at all | 0/12 | **11/12** |
+| …furthest the zombie was shoved | 8.4px | **47.4px** |
+| pace while giving ground | 107.3 px/s | **144.1 px/s** |
+
+*One thing about staging the door was the rig lying rather than the code
+failing, and it is worth knowing before re-running it.* **The entering case
+cannot be staged honestly.** Two zombies in the room put the loot inside
+`BOT_LOOT_MIN_CLEARANCE` of them, so `lootWanted` refuses the errand and the
+bot never walks at the door at all — measured that way the rig read **0/8 in
+both modes** and was reporting the loot scan rather than the door. It is staged
+as *leaving* instead, which is also what "escape routes" actually says.
+
 #### A charge rifle is how a bot sees the infected
 
 `chargeInfectedTick`. It is the one gun in the city that can shoot somebody
@@ -5475,6 +5575,86 @@ Measured over two 120s runs with the bots handed a charge rifle each, against
 the same runs with nothing in the slot: wind-ups **2 and 1 bots** against 0 and
 0, ticks spent charging **1714 and 160** against 0, peak charge **4/4 bars**,
 and infected removed before they turned **5 and 2** against 0 and 0.
+
+### Going round in circles
+
+Reported as *"I see them go in circles sometimes as if they are stuck"*, with
+two sightings: a bot officer orbiting the corner of a building it was trying to
+loot — which stopped the moment another officer took the last item out of that
+building — and a grey officer *"moving in a circle in place"* after an RTS move
+order to a far part of the map.
+
+**A fixed angular offset from a bearing that rotates as you move is a circle.**
+That is the whole of it. `slideToward` is what steers a body when there is no
+route: it walks at the goal if the line is clear and otherwise fans out
++0.55, -0.55, +1.1, -1.1 … taking the first that is open. With both sides open
+it therefore always went the same way round — and since the *goal bearing* turns
+as the body moves, walking at a constant offset from it is an orbit of the goal.
+The body circles at a radius of `speed / HUMAN_TURN_RATE` — 14px for a bot at
+115px/s, 5px for a grey officer at 40 — which is exactly "a small circle" and
+"in place".
+
+- **And nothing could see it.** `unstickTick` measures displacement over one
+  `UNSTICK_CHECK_MS` window (420ms), and a body is most of the way round a
+  15px circle by then, so an orbit passes the stuck test on every single check.
+  The grey officer's command branch does not call it at all — deliberately, and
+  for reasons that still hold.
+- **`findPath` now answers with the best partial route rather than with
+  nothing.** It used to return `null` when it ran out of nodes, and `null` is
+  what hands the walk to `slideToward`. A route across the map is far past
+  `PATH_MAX_NODES` — the search never finished and never would — so a *far*
+  order was an order that could only ever be steered blindly. The nearest node
+  the search reached is real ground on a real route; the partial is followed and
+  re-searched from its far end, which is ordinary time-sliced A*.
+  - Ties on the heuristic go to the cheaper route, or a search that fans out
+    sideways hands back whichever equally-near cell it happened to touch last
+    and the "partial" wanders.
+  - `reconstruct` takes an `exact` flag with it: the last cell of a *complete*
+    path is overwritten with the caller's own goal point, and doing that to a
+    partial would put a waypoint back at the very spot the search could not
+    reach.
+  - `null` now means only "not one step of progress was found" — a goal in a
+    sealed component or inside geometry — which is a case every call site
+    already handled.
+- **`slideToward` breaks the tie on the heading it already has.** With both
+  ways round open it keeps the side it is committed to, which turns the same
+  fan-out into wall-following: round the obstacle rather than round the goal.
+- **A route walked to its end re-searches at once.** `REPATH_INTERVAL_MS` (700)
+  should throttle a route that *might* be improvable, not one that has run out —
+  and with partials, running out is now the ordinary way a long walk proceeds.
+  Waiting 700ms at the end of each stage is 700ms of `slideToward`. It cannot
+  spin: a search that finds nothing leaves `state.path` null, which is not
+  exhaustion, so the throttle takes over again.
+
+`server/circles.ts` is the harness — headless, no socket, no port.
+`setLegacyRouting` is the gate and it drives `setNoPartialPaths` with it, so
+one switch covers all three. Both modes run on the same seeded city.
+
+| a grey officer ordered to the far corner, 8 cities, 60s | OLD | NEW |
+|---|---|---|
+| ticks inside a window of walking with nothing to show | **1488 of 12600 (11.8%)** | **0 (0.0%)** |
+| runs that spent over 2s going nowhere | 1/7 | **0/7** |
+| ticks with no route at all | 36% | **0%** |
+
+**Two things this does not show, and both are worth being straight about.**
+
+- **The bot-at-a-corner case is not reproduced.** Staged after a rifle in the
+  deepest room of the corner complex — the route that genuinely fails — a bot
+  arrives 8/8 in both modes and the going-nowhere share is 1.8% either way. The
+  mechanism is the same one and the fix removes it, but that is reasoning rather
+  than a measurement.
+- **The live figure moves in both directions and settles nothing.** Four paired
+  cities of a real round, counting every officer alive: one run read **13.5% →
+  10.4%** and the next **10.0% → 12.4%**. Same seed either side, but the two
+  behaviours make the round diverge — 78,110 officer-ticks against 65,229 — so
+  what is being compared by the end is two different outbreaks. At this sample
+  size it is noise. The staged row above is the one that says anything.
+
+*And the metric had to be relative rather than a pixel figure.* A grey officer
+walks at 40px/s where a bot walks at 115, so "200px covered in three seconds"
+is a threshold the officer cannot reach at a dead sprint in a straight line —
+it scored **0 circling ticks** on a body doing nothing else. What is being asked
+is what share of the ground covered actually stuck.
 
 ### Pickups carry ammo
 
@@ -6555,7 +6735,9 @@ shield-specific window rather than more charges.
 
 The shield is **worn, not held**: it costs a utility slot like kevlar, goes up
 the moment you pick it up, and stays where you put it while you get on with
-your guns. It turns a grab away outright from whichever side it covers —
+your guns. **A bot officer bashes with it too** — see **Giving ground costs
+nothing, and the shield is a weapon**; `shieldShove` is the shared half and the
+stamina is the half that is not. It turns a grab away outright from whichever side it covers —
 `SHIELD_FRONT_ARC` in front while up, `SHIELD_BACK_ARC` behind while slung —
 spending one of `SHIELD_POINTS` and buying the same `KEVLAR_IMMUNE_MS` breather
 the vest does. Being caught from the *other* side is the whole cost of it.

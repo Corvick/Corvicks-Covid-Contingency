@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.18.1';
+export const GAME_VERSION = '0.18.2';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2348,6 +2348,15 @@ export const BOT_GIVE_GROUND_BIAS = 110;
  * recorded against a winded bot. So the bolt keeps its pace and gains the gun;
  * what it pays instead is the sprint reserve it was already paying.
  */
+/**
+ * **Unused, and kept on purpose.** Asked for as "officers are too slow when
+ * kiting and need to be the same speed as if it were a player" — a bot stands
+ * in a player's slot, and a player who backs off pays nothing for it, so
+ * neither does a bot. What this is wanted for is *players*, later, once the
+ * game is balanced enough to charge everyone for moving in a direction other
+ * than the one they are pointing; on that day it belongs in `updatePlayers`
+ * and in the bot's give-ground branch alike.
+ */
 export const BOT_KITE_SPEED_MUL = 0.75;
 /**
  * Where a hunting bot wants to be relative to the nearest zombie. Inside
@@ -2413,6 +2422,15 @@ export const BOT_DOOR_STANDOFF = 130;
 export const BOT_DOOR_WATCH_MS = 2600;
 /** Then leave that door alone. Long enough to have gone somewhere else. */
 export const BOT_DOOR_SNUB_MS = 15000;
+
+/**
+ * How far onto the street a "go round to the other door" target is put.
+ *
+ * Far enough that `buildingIndexAt` calls it outdoors, which is what a patrol
+ * target has to be — a point in the doorway itself is read as indoors and the
+ * patrol branch throws it away on the very next tick.
+ */
+export const DOOR_OUTSIDE_STEP = 46;
 
 /** Don't pop a second smoke the instant the first one lands. */
 export const BOT_SMOKE_COOLDOWN_MS = 9000;

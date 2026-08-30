@@ -235,7 +235,7 @@ import {
   BOT_DOOR_STANDOFF,
   BOT_DOOR_WATCH_MS,
   BOT_DOOR_SNUB_MS,
-  BOT_KITE_SPEED_MUL,
+  DOOR_OUTSIDE_STEP,
   BOT_HUNT_STANDOFF,
   BOT_SCOPE_SIGHT,
   BOT_SCOPE_STANDOFF,
@@ -247,6 +247,9 @@ import {
   STAMINA_DRAIN_PER_SEC,
   STAMINA_REGEN_PER_SEC,
   STAMINA_SPRINT_FLOOR,
+  SHIELD_BASH_RANGE,
+  SHIELD_BASH_ARC,
+  SHIELD_BASH_STAMINA,
   STAMINA_RECOVERY_THRESHOLD,
   BOOTS_SPEED_MUL,
   BOOTS_STAMINA_MUL,
@@ -351,6 +354,7 @@ import {
 } from './inventory.js';
 import { placeBarricade, zombieAtSandbag } from './emplacement.js';
 import { OUTSIDE } from './rooms.js';
+import { setNoPartialPaths } from './navgrid.js';
 
 
 
@@ -393,7 +397,7 @@ import {
   type Entity,
   type World,
 } from './world.js';
-import { fire, fireHeld, forgetsTheShooter } from './combat.js';
+import { fire, fireHeld, forgetsTheShooter, shieldShove } from './combat.js';
 
 import { requestBeacon } from './heli.js';
 
@@ -549,6 +553,32 @@ export function setBotForgetsItsFootsteps(v: boolean): void {
 }
 
 /**
+ * True is routing as it was before **Going round in circles**: a search that
+ * could not reach the goal answered with nothing, a fan-out that always went
+ * the same way round, and a route walked to its end waiting out
+ * `REPATH_INTERVAL_MS` before asking for the next one. `server/circles.ts`
+ * reads it, and it drives `setNoPartialPaths` so one switch covers all three.
+ */
+let legacyRouting = false;
+
+export function setLegacyRouting(v: boolean): void {
+  legacyRouting = v;
+  setNoPartialPaths(v);
+}
+
+/**
+ * True is a bot officer's fight as it was, in the three ways it was reported
+ * as wrong: a quarter off its pace for giving ground, a riot shield it wore
+ * and never used, and a door it heard something behind and then stood in front
+ * of rather than walking round to the other one. `server/botdoor.ts` reads it.
+ */
+let legacyBotCombat = false;
+
+export function setLegacyBotCombat(v: boolean): void {
+  legacyBotCombat = v;
+}
+
+/**
  * True is the city's own officers as they were: unable to work a door under any
  * circumstance, so a spectator's order across a threshold ended with a body
  * pressed against the front of a house.
@@ -673,14 +703,24 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
   }
 
   const goalMoved = Math.hypot(gx - state.pathGoalX, gy - state.pathGoalY) > 60;
-  const needsPath = !state.path || state.pathIndex >= state.path.length || goalMoved;
+  /**
+   * A route that has been walked to its end is not the same as one that might
+   * be improvable, and `REPATH_INTERVAL_MS` should only throttle the second.
+   * `findPath` hands back the best partial when it cannot reach the goal, so
+   * running out of waypoints is now the ordinary way a long walk proceeds —
+   * and waiting 700ms at the end of each stage is 700ms of `slideToward`. It
+   * cannot spin: a search that finds nothing leaves `state.path` null, which
+   * is not exhaustion, so the throttle takes over again.
+   */
+  const exhausted = state.path !== null && state.pathIndex >= state.path.length;
+  const needsPath = !state.path || exhausted || goalMoved;
 
   // The budget is in *nodes*, not in searches. Capping the count alone let ten
   // worst-case routes land on one tick and cost 200ms between them — see
   // PATH_NODE_BUDGET_PER_TICK. Charged after the fact, because how far a search
   // has to look is not knowable before it runs: one over-budget search is
   // allowed to finish, and it is the *next* caller that is turned away.
-  if (needsPath && now >= state.nextPathAt && world.pathBudget > 0) {
+  if (needsPath && ((exhausted && !legacyRouting) || now >= state.nextPathAt) && world.pathBudget > 0) {
     state.nextPathAt = now + REPATH_INTERVAL_MS;
     state.pathGoalX = gx;
     state.pathGoalY = gy;
@@ -699,12 +739,16 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
   }
 
   const path = state.path;
-  if (!path || state.pathIndex >= path.length) return slideToward(world, e, gx, gy, avoidSoft);
+  if (!path || state.pathIndex >= path.length) {
+    return slideToward(world, e, gx, gy, avoidSoft, state.heading);
+  }
 
   let waypoint = path[state.pathIndex];
   while (Math.hypot(waypoint.x - e.x, waypoint.y - e.y) < 22) {
     state.pathIndex++;
-    if (state.pathIndex >= path.length) return slideToward(world, e, gx, gy, avoidSoft);
+    if (state.pathIndex >= path.length) {
+      return slideToward(world, e, gx, gy, avoidSoft, state.heading);
+    }
     waypoint = path[state.pathIndex];
   }
   return Math.atan2(waypoint.y - e.y, waypoint.x - e.x);
@@ -715,7 +759,18 @@ function headingToward(world: World, e: Entity, state: AiState, gx: number, gy: 
  * waiting on the per-tick budget. Walking blindly at the goal just grinds a
  * face into the nearest wall, so fan out until something ahead is walkable.
  */
-function slideToward(world: World, e: Entity, gx: number, gy: number, avoidSoft = false): number {
+function slideToward(
+  world: World,
+  e: Entity,
+  gx: number,
+  gy: number,
+  avoidSoft = false,
+  /**
+   * Where the body is already going, used only to break a tie between the two
+   * ways round. Optional so the one call that has no state can leave it out.
+   */
+  heading?: number,
+): number {
   const direct = Math.atan2(gy - e.y, gx - e.x);
   // The probe has to be reachable in a straight line, not merely empty. Testing
   // only the far end called a direction clear whenever the open ground on the
@@ -736,8 +791,33 @@ function slideToward(world: World, e: Entity, gx: number, gy: number, avoidSoft 
   };
 
   if (clear(direct)) return direct;
-  for (const offset of [0.55, -0.55, 1.1, -1.1, 1.7, -1.7, 2.4, -2.4]) {
-    if (clear(direct + offset)) return direct + offset;
+
+  /*
+   * **Which way round is decided by which way you are already going, and that
+   * is what stops this being a circle.**
+   *
+   * It used to try +0.55, -0.55, +1.1, -1.1 … and take the first that was
+   * clear, so with both sides open it always went the same way round. A fixed
+   * angular offset from a bearing that *rotates as you move* is an orbit: the
+   * body circles the goal at a constant offset and never arrives. That is the
+   * small circle reported at a building corner, and it is why the tie-break
+   * matters rather than the order of the list. Keeping the side already
+   * committed to turns the same fan-out into wall-following, which gets round
+   * the obstacle instead of round the goal.
+   */
+  for (const mag of [0.55, 1.1, 1.7, 2.4]) {
+    const left = direct + mag;
+    const right = direct - mag;
+    const okLeft = clear(left);
+    const okRight = clear(right);
+    if (okLeft && okRight) {
+      if (heading === undefined || legacyRouting) return left;
+      return Math.abs(angleDelta(left, heading)) <= Math.abs(angleDelta(right, heading))
+        ? left
+        : right;
+    }
+    if (okLeft) return left;
+    if (okRight) return right;
   }
   return direct;
 }
@@ -2869,6 +2949,54 @@ function openDoorAhead(
   if (world.bots.has(e.id) && heardBehindDoor(world, e, ahead)) {
     state.doorIgnore = ahead;
     state.doorIgnoreUntil = now + BOT_DOOR_SNUB_MS;
+
+    /*
+     * **Another way round comes before standing there.**
+     *
+     * Asked for as *"if a bot officer hears zombies on the other side of the
+     * door it should look for other escape routes"*. Hearing something and
+     * covering the threshold is a good answer when the door is the only way
+     * through, and it was the *only* answer: the bot backed off, watched an
+     * unopened door for BOT_DOOR_WATCH_MS and then gave the whole errand up,
+     * with a second door into the same building standing open twenty feet
+     * along the frontage.
+     *
+     * Recorded as refused, which is the mechanism that already exists for
+     * finding one bolted: `wayIntoBuilding` skips it, so the very next tick
+     * asks for the other door instead. The route drawn through this one goes
+     * with it — doors are not in the nav grid, so a stale path is a path that
+     * walks straight back to the handle — and so does the escape destination,
+     * since a way out with a pack behind it is not a way out.
+     */
+    if (!legacyBotCombat) {
+      if (!state.refusedDoors.includes(ahead)) state.refusedDoors.push(ahead);
+      if (state.refusedDoors.length > 6) state.refusedDoors.shift();
+      state.path = null;
+      state.escapeX = null;
+      state.escapeY = null;
+      state.escapeUntil = 0;
+
+      // There is another way through: go to it, and do not stand about. Only
+      // when the building has nothing else does covering the door become the
+      // plan — which is the case the watch was written for.
+      const spec = world.map.doors[ahead];
+      const other = spec && !spec.interior ? otherWayThrough(world, e, state, spec.building) : null;
+      if (other) {
+        // **The refusal alone only covers going *in*.** `wayIntoBuilding`
+        // is consulted by `indoorHeadingToward`, so a bot walking to loot in
+        // there re-routes on the refusal by itself. Coming *out* has no such
+        // thing to consult: the goal is a patrol target in the street, doors
+        // are not in the nav grid, and the route is drawn straight back at the
+        // handle whatever is written on the door. So the other door becomes
+        // where it is going — on the street side of the slab, or the patrol
+        // branch reads an indoor destination and re-rolls it on the next tick.
+        state.wanderX = other.x;
+        state.wanderY = other.y;
+        state.pauseUntil = 0;
+        return false;
+      }
+    }
+
     // Running for it, and this door is not the way. Standing to cover it is
     // for a bot with the time to; one already breaking contact just goes
     // somewhere else, and the snub above is what keeps it from trying again.
@@ -3615,6 +3743,49 @@ function wayIntoBuilding(
     if (score < bestScore) {
       bestScore = score;
       best = { x: spec.x, y: spec.y };
+    }
+  }
+  return best;
+}
+
+/**
+ * Somewhere to stand on the *street* side of another way through this
+ * building — the nearest exterior door that has not been refused.
+ *
+ * The offset is what makes it usable as a patrol target: a point in the
+ * doorway itself reads as indoors to `buildingIndexAt`, and the patrol branch
+ * throws an indoor destination away on the next tick.
+ */
+function otherWayThrough(
+  world: World,
+  e: Entity,
+  state: AiState,
+  building: number,
+): { x: number; y: number } | null {
+  let best: { x: number; y: number } | null = null;
+  let bestScore = Infinity;
+  for (const index of world.map.buildings[building]?.doors ?? []) {
+    const spec = world.map.doors[index];
+    const runtime = world.doors[index];
+    if (!spec || spec.interior) continue;
+    if (state.refusedDoors.includes(index)) continue;
+    if (!world.nav.isReachable(spec.x, spec.y)) continue;
+
+    const sign = runtime ? runtime.insideSign : 0;
+    if (sign === 0) continue;
+    const nx = spec.horiz ? 0 : sign;
+    const ny = spec.horiz ? sign : 0;
+    const px = spec.x - nx * DOOR_OUTSIDE_STEP;
+    const py = spec.y - ny * DOOR_OUTSIDE_STEP;
+    if (world.nav.isBlocked(px, py)) continue;
+
+    let score = Math.hypot(spec.x - e.x, spec.y - e.y);
+    for (const threat of state.threatPoints) {
+      if (Math.hypot(threat.x - px, threat.y - py) < DOOR_BLOCK_RADIUS) score += 900;
+    }
+    if (score < bestScore) {
+      bestScore = score;
+      best = { x: px, y: py };
     }
   }
   return best;
@@ -5734,6 +5905,58 @@ function gunnerTick(
 }
 
 /**
+ * **A shield is something a bot uses, not only something it wears.**
+ *
+ * It went up the moment it was picked up and then sat there soaking grabs; the
+ * one *active* thing it does — shoving whatever is at arm's length off you and
+ * staggering it — needed a right-click, and a bot has no right button. So it
+ * had the half of the item that costs a utility slot and none of the half that
+ * gets it out of a corner.
+ *
+ * The shove itself is `shieldShove`, shared with the player's tap, so the
+ * range, the arc, the push, the stagger and the "shoved off a victim" rule are
+ * one definition. What is *not* shared is the bill: `world.stamina` is the
+ * player map and a bot's reserve lives on its own AiState, so this pays out of
+ * that. Written the other way a bot would drain a pool nothing refills and be
+ * in `world.exhausted` for the rest of the round.
+ *
+ * Called from the two places the facing is fresh — after the fight branch has
+ * swung the aim, and after `botGunUpWhileMoving` has put it back on the target
+ * mid-bolt — because `shieldShove` picks who it hits off `e.facing`, and a
+ * bash aimed at where the officer's feet were pointing hits nobody.
+ */
+function botShieldBash(
+  world: World,
+  e: Entity,
+  state: AiState,
+  inv: Inventory,
+  now: number,
+): void {
+  if (legacyBotCombat) return;
+  if (inv.shield <= 0 || !inv.shieldUp) return;
+  if (state.botWinded || state.botStamina < SHIELD_BASH_STAMINA) return;
+
+  let any = false;
+  for (const other of world.entityGrid.queryCircle(e.x, e.y, SHIELD_BASH_RANGE, new Set<Entity>())) {
+    if (other.type !== 'zombie') continue;
+    const dx = other.x - e.x;
+    const dy = other.y - e.y;
+    const d = Math.hypot(dx, dy);
+    if (d > SHIELD_BASH_RANGE || d === 0) continue;
+    if (Math.abs(angleDelta(Math.atan2(dy, dx), e.facing)) > SHIELD_BASH_ARC) continue;
+    any = true;
+    break;
+  }
+  // Only when there is something to shove. A player may bash thin air and pay
+  // for it; a bot deciding to do that is a bot spending its getaway on nothing.
+  if (!any) return;
+  if (!shieldShove(world, e, now)) return;
+
+  state.botStamina = Math.max(0, state.botStamina - SHIELD_BASH_STAMINA);
+  if (state.botStamina <= STAMINA_SPRINT_FLOOR) state.botWinded = true;
+}
+
+/**
  * How near the closest thing it is aware of is. `threatPoints` is already
  * line-of-sight filtered and refreshed on the perception tick, so this is a
  * walk of a short list rather than another spatial query — and it takes in
@@ -6061,7 +6284,9 @@ function doorWatchTick(
   // Off the threshold, facing it the whole way back.
   if (Math.hypot(spec.x - e.x, spec.y - e.y) < BOT_DOOR_STANDOFF) {
     const back = aim + Math.PI;
-    const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv) * BOT_KITE_SPEED_MUL, e.type);
+    // Backing off a doorway is giving ground, and giving ground is not slower
+    // than walking — see the kite branch.
+    const speed = speedAt(world, e.x, e.y, botWalkSpeed(inv), e.type);
     const stepX = Math.cos(back) * speed * dt;
     const stepY = Math.sin(back) * speed * dt;
     if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
@@ -6383,7 +6608,6 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const speed =
         botStaminaTick(state, true, dt, inv) * (boosted ? ESCAPE_SPEED_MULTIPLIER : 1);
 
-      if (unstickTick(world, e, state, now, dt, speed)) return;
       const to = escapeDestination(world, e, state, now);
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
@@ -6404,6 +6628,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // officer ever gets; turning your back on it was the old behaviour, and
       // it is how the same zombie got a second grab.
       if (!botDropsTheGun) botGunUpWhileMoving(world, e, state, inv, zombie, dt, now);
+      // Something on you as you break contact is exactly what the shield is
+      // for, and the facing is fresh by here.
+      botShieldBash(world, e, state, inv, now);
       return;
     }
   }
@@ -6519,6 +6746,9 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // Below the step rather than above it, because `step` ends by tying the
       // facing to the legs and this is what unties them again.
       if (!botDropsTheGun) botGunUpWhileMoving(world, e, state, inv, zombie, dt, now);
+      // Something on you as you break contact is exactly what the shield is
+      // for, and the facing is fresh by here.
+      botShieldBash(world, e, state, inv, now);
       return;
     }
 
@@ -6567,6 +6797,11 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     e.facing = turnToward(e.facing, aim, BOT_TURN_RATE * dt);
     if (botForgetsItsFootsteps) state.heading = e.facing;
 
+    // Shove whatever has closed to arm's length before doing anything else with
+    // the tick — the gun is the wrong tool at 60px and the shield is the right
+    // one.
+    botShieldBash(world, e, state, inv, now);
+
     const ideal = botIdealRange(inv);
 
     // Planting the heavy MG is worth more than anything else it could be
@@ -6613,7 +6848,17 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // left every reader of it a whole fight out of date. `doorTick` runs off
       // it at the top of the next tick.
       if (!botForgetsItsFootsteps) state.heading = bearing;
-      const speed = speedAt(world, e.x, e.y, pace * BOT_KITE_SPEED_MUL, e.type);
+      /*
+       * **Giving ground costs nothing extra.** `BOT_KITE_SPEED_MUL` used to be
+       * applied here — a quarter off for moving in a direction other than the
+       * one the gun is pointing — and a bot is a player's officer, where a
+       * player backing off pays no such thing. Asked for as exactly that:
+       * "officers are too slow when kiting and need to be the same speed as if
+       * it were a player". The constant is kept and unused on purpose; it is
+       * wanted for *players* once the game is balanced enough to charge them
+       * for it, and at that point it belongs in `updatePlayers` and here alike.
+       */
+      const speed = speedAt(world, e.x, e.y, legacyBotCombat ? pace * 0.75 : pace, e.type);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
       // Slide along whichever axis is open rather than stopping dead.
