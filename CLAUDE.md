@@ -67,7 +67,9 @@ Server modules and what each owns:
   claimed in order — park, corner complex, big buildings, edge buildings, then
   ordinary blocks yield to all of it — so anything that must get its spot goes
   early. `MapData.cornerBuilding` names the complex outright rather than
-  leaving anybody to assume it is `buildings[0]`
+  leaving anybody to assume it is `buildings[0]`. Nothing it lays down is
+  narrower than a body can walk down — see **A building is somewhere you can get
+  into**
 - `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string pulling
 - `rooms.ts` — which room every indoor spot is in, the way out of each, and who
   is in it. Static for the round; occupancy is recounted once a tick
@@ -968,11 +970,30 @@ a game on 8080 alone. Measured over six cities at each of five settings:
 
 | pop | city | buildings | street clearance p5/p50 | narrowest doorway | van parks | crew out | garrison |
 |---|---|---|---|---|---|---|---|
-| 500 | 5000x3700 | 84-89 | 8 / 74 | 46 | 36/36 | 36/36 | 12 |
-| 400 | 4472x3309 | 63-65 | 8 / 80 | 46 | 36/36 | 36/36 | 9-10 |
-| 300 | 3873x2866 | 53-55 | 8 / 80 | 46 | 36/36 | 36/36 | 7-8 |
-| 200 | 3162x2340 | 34-38 | 8 / 80-86 | 46 | 36/36 | 36/36 | 5-6 |
-| 100 | 3000x2220 | 24-26 | 8 / 86-90 | 46 | 36/36 | 36/36 | 4-5 |
+| 500 | 5000x3700 | 80-81 | 8 / 74 | 56 | 36/36 | 36/36 | 15-17 |
+| 400 | 4472x3309 | 59-60 | 8 / 80 | 56 | 36/36 | 36/36 | 14 |
+| 300 | 3873x2866 | 40-45 | 8 / 80-86 | 56 | 36/36 | 36/36 | 11-12 |
+| 200 | 3162x2340 | 26-27 | 8 / 86 | 56 | 36/36 | 36/36 | 9 |
+| 100 | 3000x2220 | 24-25 | 8 / 86 | 56 | 36/36 | 36/36 | 8 |
+
+**Two of those columns moved with "A building is somewhere you can get into"
+below and one of them did not.** Measured on the same harness against `mapgen`
+before that change: buildings **80 / 64 / 52 / 35 / 26**, doorway **46** at every
+setting, garrison **15 / 14 / 11 / 9 / 8**.
+
+- **Buildings are unchanged at 500 and lose the last row or column below it.**
+  `cols`/`rows` are rounded *up* so the street grid runs out to the boundary,
+  which leaves those blocks standing partly off the map — and the old rule
+  clamped the *footprint* back inside the perimeter, which stacked it on the
+  block next door. At 200 that was **162 of 444 buildings standing inside
+  another one**. What comes off the count is that, not city.
+- **The doorway went 46 → 56 because `repairEnclosures` now has nothing to
+  cut.** 46 is the width of the opening that pass makes; 56 is a natural
+  two-tile doorway, and it is the narrowest anywhere in 30 of 30 cities.
+- **The garrison column was already stale and this did not touch it.** It reads
+  the same either side of the change; the 12 / 9-10 / 7-8 / 5-6 / 4-5 written
+  here before predates the garrison count going 4-7 → 10-14 under **The garrison
+  is spread evenly**.
 
 Garrison is the city's own officers, not counting the bots standing in for
 absent players. Ranges are across repeated runs — the map is not seeded, so
@@ -1003,6 +1024,72 @@ outlier of two rects that happen to nearly touch, and it bounces between 0 and
 whether a small city is a *tighter* one, which is a question about the
 distribution, so the harness walks the walkable ground instead and records how
 far each open spot is from the nearest blocked one.
+
+### A building is somewhere you can get into
+
+Reported off two screenshots — *"no more buildings generating like this. Humans
+and zombies can't fit in certain spots"* — and there were **three** faults under
+it, all of them the same shape: geometry laid out so that what was left between
+two walls was narrower than a body.
+
+The unit is `n * TILE - WALL_THICKNESS`, which is what a run of `n` tiles leaves
+to walk in: **46px at two tiles and 18px at one**. A zombie is 28px across and
+the dog is 38, so one tile is not a corridor. Worse, `NAV_INFLATE` is 10 a side,
+so an 18px slot is *entirely* blocked in the nav grid — which is precisely why
+`repairEnclosures` never noticed any of this. That pass looks for indoor ground
+that is **not blocked and not reachable**, and a slot nothing fits down is
+blocked, so it was skipped as scenery in every city it ever ran on.
+
+- **The T carve left a one-tile stem.** `buildingAt` bites `cw = floor(w / 3)`
+  columns off *both* ends of the top rows, so the stem is `w - 2 * cw` — and at
+  `w = 5` that is one tile. Every carve is capped by what it leaves behind now
+  (`MIN_LIMB`, and `limb()` which knows how many bites are being taken out of
+  the run), and a building too narrow to give one is left a rectangle.
+- **A block building was clamped into the block next door.** `cols` and `rows`
+  are rounded *up* so the street grid runs out to the boundary, which leaves the
+  last row and column standing partly off the map; the old rule clamped the
+  *footprint* back inside the perimeter, which shoves it bodily into its
+  neighbour. Measured, buildings overlapping by up to **104px**, with one's
+  walls cutting slivers out of the other's rooms. The **block** is clipped
+  instead and the footprint sized against what is left of it; a block clipped to
+  a strip gets no building rather than a squeezed one.
+- **And nothing was keeping a building off the perimeter.** A block building
+  landing 34px short of the boundary wall, or a big building 30px short, leaves
+  an alley you can see down and cannot walk down — and if the building's only
+  door is on that side, the whole thing is a room nothing in the game can reach.
+  Measured, one such was **28.4k px²**. `STREET_MIN` is the inset, and it is on
+  the placement of ordinary blocks and big buildings and on the *along* axis of
+  an edge building. It is deliberately not on the axis an edge building is built
+  onto: flush into the perimeter is what one is for, and it puts its door on the
+  side facing the city.
+
+`server/roomfit.ts` is the harness — headless, no socket, no port.
+`setNarrowGeometryAllowed` is the gate and it is kept. It reads the *finished*
+walls rather than the generator's own room grid, the same argument `rooms.ts`
+rests on, and asks the complaint as a property: **floor a body cannot be on,
+because nothing that fits can reach it.** Thirty cities, 4px grid, a 14px body:
+
+| | OLD | NEW |
+|---|---|---|
+| spots nothing can get into | **183** | **0** |
+| …indoors | 118 | 0 |
+| …slots of street | 65 | 0 |
+| in a building standing inside another | 38 | 0 |
+| buildings standing inside another | 48 of 2515 | **0 of 2426** |
+| cities with any | 29 of 30 | **0 of 30** |
+| worst single one | 24.8k px² | — |
+
+*Two things about measuring this were the rig lying rather than the code
+failing, and the first is the one worth keeping.* **Floor a body's *centre*
+cannot be at is not floor a body cannot be on** — that is the band within one
+radius of every wall in the game, i.e. the skirting board, and measuring it put
+**a quarter of every city's indoor floor** in the wrong in both modes. Each
+floor cell has to be asked whether it lies under a body standing somewhere that
+both fits and can be walked to. And the dead cells then have to be **joined up**,
+because there is a noise floor and it is every right angle in the city: a corner
+leaves `(1 - PI/4) * R²` of floor no disc covers, about 42px², four times a
+room — counted as bare area that put **679 of 679 buildings** in the wrong and
+told nobody anything.
 
 ### Nothing on the outbreak's side starts indoors
 
@@ -5244,6 +5331,81 @@ code, and the first is new:
   that can shoot, that run ends early, and the ground made reads 441px against
   604px — which looks like the kite escaping *worse* when all it says is that the
   run was shorter.
+
+#### The gun is where it is aiming; the legs are where it is going
+
+Reported as *"bot officers going up to doors and then walking away from them not
+opening them"*, and *"he didn't leave through the door when zombies came in, he
+just stood next to the door even though he can open it instantly"*. One field,
+two readers, and a bot with a zombie in view could not work a door at all.
+
+**`state.heading` means "where the next step goes" and the fight branch was
+using it to hold the aim.** The line was `state.heading = turnToward(e.facing,
+aim, ...)` followed by `e.facing = state.heading` — so for every tick a zombie
+was in view, the field pointed at the zombie. `doorInTheWay` and
+`doorBeingUsed` are the two readers that matter and both probe along it for a
+slab across the next step, so a bot backing away from a pack into a shut front
+door was probing **at the pack** and never found the door behind it. It stood
+there, pressed on the slab, for the rest of the round. The aim is written to
+`e.facing` alone now, which is what `botTakeShot` has always read anyway.
+
+- **And the kite branch never wrote the field at all.** Giving ground moves the
+  body by hand rather than through `step`, so it is the one place that has to
+  keep the heading honest itself, and it did not — which is why *bolting* never
+  showed the bug (a bolt goes through `step`, and `step` sets it) and giving
+  ground always did. The band matters when reproducing this: past
+  `BOT_BOLT_DIST` and inside `backAt`.
+- **`gunnerTick` moved to `e.facing` with it.** It waits for the swing to land
+  before putting the crew down, and the swing is the facing; asked of the legs
+  it would deploy a machine gun covering the street the officer came from. It is
+  called before the fight branch, so it read the same number either way — the
+  change is that it goes on being right now the two have been separated.
+- **The city's own grey officers still fold the two together** in
+  `updateNpcOfficer`, and are left alone. The same latent trap is there, but the
+  only door an ambient officer ever works is one under a spectator's order, and
+  that branch sits below the fight.
+
+`server/botdoor.ts` is the harness — headless, no socket, no port.
+`setBotForgetsItsFootsteps` is the gate and it is kept. Both modes run in one
+process **on the same city**, which is not optional: `resetWorld` generates a
+fresh unseeded map and `populate` rolls fresh traits, so alternating run by run
+measures the city and not the code — unpaired, this rig read the old behaviour
+at 5/24 on one run and 13/24 on the next with nothing changed in between.
+`Math.random` is stubbed for the length of the staging, which pins the map, the
+doors, the traits and the spawn.
+
+| a bot backed into its own front door by a zombie, 24 cities | OLD | NEW |
+|---|---|---|
+| reached the door | 24/24 | 24/24 |
+| **opened it** | **0/24** | **24/24**, median 0.2s |
+| went through it | 0/24 | **24/24** |
+| ticks pressed on a shut slab | **9426** | **0** |
+| heading against its own footsteps | **180.0°** | **0.0°** |
+
+**The control is a bot walking to a rifle behind a shut door with nothing alive
+in the city: 24/24 either way**, which is what says the fix is about the fight
+rather than about doors.
+
+*Three things about staging it were the rig lying rather than the code failing,
+and the third is new:*
+
+- **The gun decides the band.** `backAt` is
+  `min(botIdealRange * 0.8, NPC_OFFICER_RETREAT_DIST)`, so whatever
+  `giveStartingItem` rolled decided whether the staged range was one the bot
+  gives ground at or one it walks *in* from. Left to the roll, most runs were
+  measuring an advance. The rig empties the bag and hands it a bolt action.
+- **The bot has to start facing the zombie.** Left on whatever `populate`
+  rolled, a bot whose heading happened to point at the door opened it on the
+  first tick before it had perceived anything at all — and none of those is the
+  reported moment.
+- **The clock is read after each staging, not once for the whole rig.** This is
+  `botkite.ts`'s warning one turn further on: `resetWorld` stamps every fresh
+  AiState with the real `Date.now()`, and a run takes a second or two of wall
+  time, so a single `now0` taken at the top falls behind the real clock by more
+  than a run is long. By the third city the bot's `nextSenseAt` is in the rig's
+  future for the whole run, it perceives nothing, and that reads exactly like
+  the bug under test. Measured that way, seeds that plainly worked one at a time
+  came back "never reached the door".
 
 #### An officer listens before it opens a door
 

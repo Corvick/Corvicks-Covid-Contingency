@@ -538,6 +538,17 @@ export function setBotDropsTheGun(v: boolean): void {
 }
 
 /**
+ * True is a bot officer as it was: `state.heading` overwritten with where the
+ * *gun* is pointing the moment a zombie comes into view, and never written at
+ * all while it gives ground. `server/botdoor.ts` is what reads it.
+ */
+let botForgetsItsFootsteps = false;
+
+export function setBotForgetsItsFootsteps(v: boolean): void {
+  botForgetsItsFootsteps = v;
+}
+
+/**
  * True is the city's own officers as they were: unable to work a door under any
  * circumstance, so a spectator's order across a threshold ended with a body
  * pressed against the front of a house.
@@ -5707,8 +5718,9 @@ function gunnerTick(
 ): boolean {
   if (!inv.utilities.includes('pocketGunner')) return false;
   // Facing it is the aiming. Wait until the swing has landed, or the crew ends
-  // up covering the street they came from.
-  if (Math.abs(angleDelta(state.heading, aim)) > 0.3) return false;
+  // up covering the street they came from — and it is `e.facing` that is the
+  // swing, `state.heading` being where the officer's feet are going.
+  if (Math.abs(angleDelta(e.facing, aim)) > 0.3) return false;
 
   const was = inv.activeSlot;
   inv.activeSlot = GUN_SLOTS + 1 + inv.utilities.indexOf('pocketGunner');
@@ -6542,8 +6554,18 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
     // legs were going by then. Seeded from the legs, the gun snapped back down
     // the street the bot had been running along and swung round again from
     // there, which is a whole turn wasted at the worst possible moment.
-    state.heading = turnToward(e.facing, aim, BOT_TURN_RATE * dt);
-    e.facing = state.heading;
+    //
+    // **And it is written to the facing alone. `state.heading` is the legs and
+    // nothing else may borrow it**, which is what this line used to do — the
+    // aim was stamped into it every tick a zombie was in view, so for the whole
+    // of a fight the field meaning "where the next step goes" pointed at the
+    // zombie. `doorInTheWay` and `doorBeingUsed` are the two readers that
+    // matter: both probe along `state.heading` for a slab across the next step,
+    // so a bot backing away from a pack into a shut door was probing *at the
+    // pack* and never found the door behind it. Reported as an officer standing
+    // beside a door it could have opened instantly while the room filled up.
+    e.facing = turnToward(e.facing, aim, BOT_TURN_RATE * dt);
+    if (botForgetsItsFootsteps) state.heading = e.facing;
 
     const ideal = botIdealRange(inv);
 
@@ -6585,6 +6607,12 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const pace = state.botGiving
         ? botStaminaTick(state, true, dt, inv)
         : botWalkSpeed(inv);
+      // **Where the legs are going, written down.** This branch moves the body
+      // itself rather than going through `step`, so it is the one place that
+      // has to keep `state.heading` honest by hand — and it never did, which
+      // left every reader of it a whole fight out of date. `doorTick` runs off
+      // it at the top of the next tick.
+      if (!botForgetsItsFootsteps) state.heading = bearing;
       const speed = speedAt(world, e.x, e.y, pace * BOT_KITE_SPEED_MUL, e.type);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;

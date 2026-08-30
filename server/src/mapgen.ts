@@ -54,6 +54,59 @@ type Rng = () => number;
 /** Width of every doorway, in tiles. */
 const GAP = 2;
 
+/**
+ * The narrowest run of tiles that is still somewhere a body can stand.
+ *
+ * A limb `n` tiles across has walls down both sides, each `WALL_THICKNESS`
+ * thick and centred on the tile line, so what is left to walk in is
+ * `n * TILE - WALL_THICKNESS`: **46px at two tiles and 18px at one**. The
+ * widest ordinary body is a zombie at 28px across and the dog is 38, so one
+ * tile is not a corridor — it is a room nothing can get into, blocked over its
+ * whole length by `NAV_INFLATE` besides, and invisible to `repairEnclosures`,
+ * which only ever looks at ground a body could already stand on. Two tiles is
+ * the same 46px that pass cuts a doorway at, and the narrowest opening
+ * anywhere in the city.
+ *
+ * It is a floor on the *limbs a carve leaves behind*, never on the notch it
+ * takes out: a notch is street, open on two sides, and a shallow dent in a
+ * frontage is fine.
+ */
+const MIN_LIMB = 2;
+
+/**
+ * The smallest ordinary block building worth putting up. A block clipped by
+ * the map's edge to less than this is left empty — see `buildingAt`.
+ */
+const MIN_BLOCK_TILES = 4;
+
+/**
+ * The narrowest gap worth leaving between a building and the perimeter.
+ *
+ * The wall runs `WALL_THICKNESS / 2` proud of the footprint, so a gap of this
+ * leaves 51px to walk down — a shade over the 46px doorway everything in the
+ * city already fits through. Anything under it is an alley a body can be seen
+ * standing beside and cannot get into, which is the same complaint as a
+ * one-tile limb wearing different clothes: measured, a block building landing
+ * 34px off the boundary with its only door on that side left a **28.4k px²**
+ * room nothing in the game could reach.
+ *
+ * It is not a rule about buildings generally — `edgeBuildingAt` is built flush
+ * into the perimeter on purpose and puts its door on the side facing the city.
+ * It is a rule about leaving a gap at all.
+ */
+const STREET_MIN = MIN_LIMB * TILE;
+
+/**
+ * Gate for `server/roomfit.ts`: put both of the shapes reported as
+ * "buildings people and zombies cannot fit into" back, and measure them. The
+ * one-tile limb below, and the clamp in `buildingAt` that stood one building
+ * inside another. Off in every real round.
+ */
+let narrowGeometry = false;
+export function setNarrowGeometryAllowed(on: boolean): void {
+  narrowGeometry = on;
+}
+
 function clampTo(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
@@ -222,6 +275,16 @@ function tilesToRects(tiles: Set<string>, w: number, h: number, originX: number,
   return rects;
 }
 
+/**
+ * How deep a bite may be taken out of a run of `extent` tiles, when `bites` of
+ * them are taken out of it. 0 means there is not enough run to carve at all
+ * and the caller leaves the shape alone.
+ */
+function limb(want: number, extent: number, bites = 1): number {
+  if (narrowGeometry) return want;
+  return Math.min(want, Math.floor((extent - MIN_LIMB) / bites));
+}
+
 function buildingAt(
   walls: Wall[],
   windows: WindowPane[],
@@ -230,28 +293,75 @@ function buildingAt(
   rand: Rng,
   blockX: number,
   blockY: number,
-): Building {
+): Building | null {
   // Vary the footprint across whatever the block allows, rather than keying
   // off a fixed floor that collapses to a single size on smaller blocks.
   const maxTiles = Math.floor(BLOCK_SIZE / TILE);
   const minTiles = Math.min(5, maxTiles - 1);
   const span = Math.max(1, maxTiles - minTiles);
-  const w = minTiles + Math.floor(rand() * span);
-  const h = minTiles + Math.floor(rand() * span);
+  const wantW = minTiles + Math.floor(rand() * span);
+  const wantH = minTiles + Math.floor(rand() * span);
 
-  // Stagger and rounding can push a block past the edge — keep the footprint
-  // inside the perimeter, flush against it if need be.
+  /**
+   * **A building is placed inside its own block, never clamped into the next
+   * one.** `cols` and `rows` are rounded up so the street grid runs all the
+   * way out to the boundary, which leaves the last row and column standing
+   * partly off the map — and the old rule was to clamp the *footprint* back
+   * inside the perimeter, which shoves it bodily into the block above or
+   * beside it. Measured over four cities: buildings overlapping by up to 104px,
+   * with one's walls cutting slivers out of the other's rooms that nothing can
+   * get into, and a street between them with no gap left in it at all.
+   *
+   * So the *block* is clipped instead and the footprint sized against what is
+   * left of it. A block clipped down to a strip gets no building rather than a
+   * squeezed one; the perimeter is lined by `edgeBuildingAt` anyway, which is
+   * built for it.
+   */
   const lo = BOUNDARY_THICKNESS;
-  const originX = clampTo(
-    blockX + Math.floor(rand() * Math.max(1, BLOCK_SIZE - w * TILE)),
-    lo,
-    WORLD_WIDTH - lo - w * TILE,
-  );
-  const originY = clampTo(
-    blockY + Math.floor(rand() * Math.max(1, BLOCK_SIZE - h * TILE)),
-    lo,
-    WORLD_HEIGHT - lo - h * TILE,
-  );
+  if (narrowGeometry) {
+    const w = wantW;
+    const h = wantH;
+    const originX = clampTo(
+      blockX + Math.floor(rand() * Math.max(1, BLOCK_SIZE - w * TILE)),
+      lo,
+      WORLD_WIDTH - lo - w * TILE,
+    );
+    const originY = clampTo(
+      blockY + Math.floor(rand() * Math.max(1, BLOCK_SIZE - h * TILE)),
+      lo,
+      WORLD_HEIGHT - lo - h * TILE,
+    );
+    return shellBuilding(walls, windows, buildings, doors, rand, originX, originY, w, h);
+  }
+
+  const x0 = Math.max(blockX, lo + STREET_MIN);
+  const y0 = Math.max(blockY, lo + STREET_MIN);
+  const spanX = Math.min(blockX + BLOCK_SIZE, WORLD_WIDTH - lo - STREET_MIN) - x0;
+  const spanY = Math.min(blockY + BLOCK_SIZE, WORLD_HEIGHT - lo - STREET_MIN) - y0;
+  const w = Math.min(wantW, Math.floor(spanX / TILE));
+  const h = Math.min(wantH, Math.floor(spanY / TILE));
+  if (w < MIN_BLOCK_TILES || h < MIN_BLOCK_TILES) return null;
+
+  const originX = x0 + Math.floor(rand() * Math.max(1, spanX - w * TILE));
+  const originY = y0 + Math.floor(rand() * Math.max(1, spanY - h * TILE));
+  return shellBuilding(walls, windows, buildings, doors, rand, originX, originY, w, h);
+}
+
+/**
+ * The body of `buildingAt`, once the footprint and where it stands are
+ * settled: carve it, wall it and hang its doors.
+ */
+function shellBuilding(
+  walls: Wall[],
+  windows: WindowPane[],
+  buildings: Building[],
+  doors: Door[],
+  rand: Rng,
+  originX: number,
+  originY: number,
+  w: number,
+  h: number,
+): Building {
 
   const tiles = new Set<string>();
   for (let y = 0; y < h; y++) {
@@ -259,21 +369,33 @@ function buildingAt(
   }
 
   // Carve the rectangle into an L or T often enough to keep blocks varied.
+  //
+  // **Every carve is capped by what it leaves behind, not by what it takes
+  // out.** The T bites both ends of the top rows, so its stem is `w - 2 * cw`
+  // tiles wide — and at `cw = floor(w / 3)` a five-tile building came out with
+  // a **one-tile** stem, which is the shape reported as a building people and
+  // zombies cannot get into. See MIN_LIMB. A building too narrow to give one is
+  // left a rectangle rather than carved badly.
   const shape = rand();
   if (shape < 0.3) {
-    const cw = Math.max(2, Math.floor(w / 2));
-    const ch = Math.max(2, Math.floor(h / 2));
+    const cw = limb(Math.max(2, Math.floor(w / 2)), w);
+    const ch = limb(Math.max(2, Math.floor(h / 2)), h);
     const ox = rand() < 0.5 ? 0 : w - cw;
     const oy = rand() < 0.5 ? 0 : h - ch;
-    for (let y = oy; y < oy + ch; y++) {
-      for (let x = ox; x < ox + cw; x++) tiles.delete(`${x},${y}`);
+    if (cw > 0 && ch > 0) {
+      for (let y = oy; y < oy + ch; y++) {
+        for (let x = ox; x < ox + cw; x++) tiles.delete(`${x},${y}`);
+      }
     }
   } else if (shape < 0.5) {
-    const cw = Math.max(2, Math.floor(w / 3));
-    const ch = Math.max(2, Math.floor(h / 2));
-    for (let y = 0; y < ch; y++) {
-      for (let x = 0; x < cw; x++) tiles.delete(`${x},${y}`);
-      for (let x = w - cw; x < w; x++) tiles.delete(`${x},${y}`);
+    // Two bites out of one run, so the stem has to survive both of them.
+    const cw = limb(Math.max(2, Math.floor(w / 3)), w, 2);
+    const ch = limb(Math.max(2, Math.floor(h / 2)), h);
+    if (cw > 0 && ch > 0) {
+      for (let y = 0; y < ch; y++) {
+        for (let x = 0; x < cw; x++) tiles.delete(`${x},${y}`);
+        for (let x = w - cw; x < w; x++) tiles.delete(`${x},${y}`);
+      }
     }
   }
 
@@ -747,6 +869,19 @@ function opposite(side: 'north' | 'east' | 'south' | 'west'): 'north' | 'east' |
   return 'east';
 }
 
+/**
+ * Somewhere along one axis for a body of `size`, kept a walkable street clear
+ * of the perimeter at both ends. Falls back to the middle when the map is too
+ * small to give one, which it never is at any setting the slider reaches.
+ */
+function inset(rand: Rng, size: number, extent: number): number {
+  if (narrowGeometry) return MAP_MARGIN + rand() * (extent - MAP_MARGIN * 2 - size);
+  const lo = MAP_MARGIN + STREET_MIN;
+  const hi = extent - MAP_MARGIN - STREET_MIN - size;
+  if (hi <= lo) return Math.max(MAP_MARGIN, (extent - size) / 2);
+  return lo + rand() * (hi - lo);
+}
+
 function overlapsAny(x: number, y: number, r: number, boxes: Wall[], pad: number): boolean {
   for (const box of boxes) {
     if (
@@ -1135,8 +1270,11 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     const tw = bigTileLo + Math.floor(rand() * bigTileSpan);
     const th = bigTileLo + Math.floor(rand() * bigTileSpan);
     for (let attempt = 0; attempt < 60; attempt++) {
-      const ox = MAP_MARGIN + rand() * (WORLD_WIDTH - MAP_MARGIN * 2 - tw * TILE);
-      const oy = MAP_MARGIN + rand() * (WORLD_HEIGHT - MAP_MARGIN * 2 - th * TILE);
+      // Inset off the perimeter, like the block buildings — a landmark landing
+      // 30px off the boundary wall leaves an alley you can see down and not
+      // walk down. See STREET_MIN.
+      const ox = inset(rand, tw * TILE, WORLD_WIDTH);
+      const oy = inset(rand, th * TILE, WORLD_HEIGHT);
       const box = { x: ox, y: oy, w: tw * TILE, h: th * TILE };
       const clashes = landmarks.some(
         (b) =>
@@ -1170,21 +1308,24 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
       let oy: number;
       let inward: 'north' | 'east' | 'south' | 'west';
 
+      // Flush into the perimeter on the axis it is built onto — that is the
+      // whole point of one — and inset off the *other* two corners, or it
+      // leaves a 22px slot of street between its end and the boundary.
       if (side === 0) {
-        ox = B + rand() * (WORLD_WIDTH - B * 2 - tw * TILE);
+        ox = inset(rand, tw * TILE, WORLD_WIDTH);
         oy = B;
         inward = 'south';
       } else if (side === 1) {
         ox = WORLD_WIDTH - B - tw * TILE;
-        oy = B + rand() * (WORLD_HEIGHT - B * 2 - th * TILE);
+        oy = inset(rand, th * TILE, WORLD_HEIGHT);
         inward = 'west';
       } else if (side === 2) {
-        ox = B + rand() * (WORLD_WIDTH - B * 2 - tw * TILE);
+        ox = inset(rand, tw * TILE, WORLD_WIDTH);
         oy = WORLD_HEIGHT - B - th * TILE;
         inward = 'north';
       } else {
         ox = B;
-        oy = B + rand() * (WORLD_HEIGHT - B * 2 - th * TILE);
+        oy = inset(rand, th * TILE, WORLD_HEIGHT);
         inward = 'east';
       }
 
@@ -1222,7 +1363,8 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
       // The park and every landmark were reserved before this loop ran.
       if (hitsLandmark(blockX, blockY, BLOCK_SIZE)) continue;
       if (rand() < EMPTY_LOT_CHANCE) continue;
-      buildings.push(buildingAt(walls, windows, buildings, doors, rand, blockX, blockY));
+      const built = buildingAt(walls, windows, buildings, doors, rand, blockX, blockY);
+      if (built) buildings.push(built);
     }
   }
 
