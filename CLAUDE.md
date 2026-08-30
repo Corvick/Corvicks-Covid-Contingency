@@ -2680,6 +2680,47 @@ from one place and no call site had to learn about it.
   one: **2 rounds over 302 grappled ticks, taking the dog 90 → 40hp** — the
   anti-dog accuracy applies here too, which is exactly when it should.
 
+### A body dies once
+
+Reported as *"shotguns are producing 2 corpses"*, and it was seven.
+
+**`world.entityGrid` is rebuilt once a tick, and `removeEntity` takes a body out
+of `world.entities` without touching it.** So every pellet after the one that
+killed still found the corpse in the broadphase, spent its damage on it, and
+came back to `killEntity` — which pushed another death record each time, and
+the client draws one sprawled body per record, all on the same pixel.
+
+- **The guard is the entity list, not a flag**, and it sits at the top of
+  `killEntity`: it is the same question every caller is really asking — is this
+  body still in the world — so it covers the blast, the fire and the lash
+  without any of them learning about it. The two paths that keep an entity in
+  the world after death, the player and the dog, are guarded below by their own
+  state and are untouched.
+- **And `fire` skips a body that is already gone**, which is the half nobody
+  reported. Left in the candidate list, the rest of the shell is absorbed by
+  something that is not there any more instead of carrying on to whatever is
+  behind it — so a shotgun fired into a queue killed exactly one of them.
+
+`server/deathcheck.ts` is the harness — headless, no socket, no port.
+`setKillsCanRepeat` is the gate and it is kept.
+
+| an 8-pellet shell into one zombie | OLD | NEW |
+|---|---|---|
+| corpses left | **7-8** | **1** |
+| a second zombie behind it | survived | **went down** |
+
+Two pistols leave one corpse, and forty rifle rounds into a body with 400 health
+leave one.
+
+*One thing about staging it was the rig lying rather than the code failing, and
+it is the trap this file already records one step further along.* Staged at a
+fixed spot the rig reported **0 corpses out of 8 pellets with the target's
+health untouched at 400**, on about half of all runs. The entity grid *was*
+rebuilt — that is the version of this trap already written down — and the
+geometry still ate the shot: `fire` runs its own hitscan against the walls, so a
+lane that happens to cross a shop front on this city stops every round short and
+the whole measurement is the map. It finds a clear lane now.
+
 ### Turning
 
 Being bitten and *turning* are separate things, and only the second one shows.
@@ -5382,6 +5423,21 @@ rare for some zombies to fall completely sideways"*.
   head off the centre line because it is lying on its cheek. The angle jitter
   comes right down with it: at the ordinary spread a "stacked" pair of legs
   scissors open and it stops reading as sideways.
+- **The swing is biased away from square, not flat across the arc.** A flat
+  draw puts as many bodies within a couple of degrees of the centre line as at
+  the far edge — and one of those is indistinguishable from a body that fell
+  straight back, so a good share of the falls *meant* to read as diagonal read
+  as nothing at all. Cubing pushes the draw toward the ends and leaves the sign
+  alone.
+- **It went 1 in 5 across 40° to 2 in 5 across 70°.** At the first figures most
+  of what you saw was a street of bodies lying the same way with the occasional
+  one slightly off: the variation was there and it was not doing any work.
+- **A body on its side gets a longer far arm than looks right.** It comes off
+  the shoulder at a hundred degrees, so most of its length is spent going *back*
+  across the body rather than out from it — at the short end of the ordinary
+  jitter its tip finished barely past the torso and the arm all but disappeared
+  into it, which is the missing-arm complaint again in a different pose.
+  Measured: **1.03 body radii, where the torso is 1.15 long.**
 - **It costs nothing.** The pose is three hashes and the drawing is the same
   handful of strokes it always was.
 
@@ -5389,9 +5445,11 @@ Measured on `client/corpserig.html`:
 
 | | |
 |---|---|
-| falls diagonally | **19.0%** of 40,000 seeds |
+| falls diagonally | **37.8%** of 40,000 seeds |
 | falls flat on its side | **3.99%** |
-| widest the head swings | **20.1°**, so a 40° arc |
+| widest the head swings | **35.5°**, so a 70° arc |
+| median diagonal fall | **30.8°** |
+| share of the arc's furthest fifth | **57.4%** against the nearest fifth's 7.3% |
 | head where the pose says, measured from the knees | within **1.7°** |
 | legs left on the round | drift **11.1°** against the arms' **17.7°** |
 | a sideways body's limb ink on one side | **0.95–1.00** |

@@ -2357,7 +2357,45 @@ export function isMorphed(dog: DogState | undefined, now: number): boolean {
  * way to shove a ragdolling body. Only a zombie death records one (for the
  * client's corpse); everything else ignores it. Defaults to the body's facing.
  */
+/**
+ * True is the world as it was: a body already taken out could be killed again,
+ * and every pellet after the fatal one pushed another corpse.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`:
+ * "one death, one corpse" means nothing without "and it was seven".
+ * `server/deathcheck.ts` reads it.
+ */
+let killsCanRepeat = false;
+
+export function setKillsCanRepeat(v: boolean): void {
+  killsCanRepeat = v;
+}
+
+/** Whether a body is still in the world, for anything that may hit it twice. */
+export function stillAlive(world: World, id: string): boolean {
+  return killsCanRepeat || world.entities.has(id);
+}
+
 export function killEntity(world: World, e: Entity, now: number, angle?: number): void {
+  /*
+   * **A body can only die once, and a shotgun is what proves it could die
+   * eight times.**
+   *
+   * `world.entityGrid` is rebuilt once a tick, and `removeEntity` takes a body
+   * out of `world.entities` without touching it — so every pellet after the one
+   * that killed still found the corpse in the broadphase, spent its damage on
+   * it, and came back here. Measured: **7 death records for one zombie** off a
+   * single eight-pellet shell, which the client turns into seven corpses
+   * stacked on the same pixel. Reported as a shotgun producing two.
+   *
+   * The guard is the *entity list*, not a flag: it is the same question every
+   * caller is really asking — is this body still in the world — and it covers
+   * the blast, the fire and the lash without any of them learning about it. The
+   * two paths that keep an entity in the world after death, the player and the
+   * dog, are guarded below by their own state and are unaffected.
+   */
+  if (!stillAlive(world, e.id)) return;
+
   if (world.dogs.has(e.id)) {
     const dog = world.dogState.get(e.id);
     // Already down and waiting to rise. Rounds keep landing on the body — the

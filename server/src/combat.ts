@@ -50,6 +50,7 @@ import {
   isInGrapple,
   isWindowIntact,
   killEntity,
+  stillAlive,
   newAiState,
   rollSpeedMul,
   type Entity,
@@ -260,6 +261,11 @@ export function fire(
   const candidates = world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>());
   for (const other of candidates) {
     if (other.id === shooter.id) continue;
+    // **Already dead and gone this tick.** The broadphase is a tick old, so the
+    // body a previous pellet killed is still in it — and left in, the rest of
+    // the shell is absorbed by something that is not there any more instead of
+    // carrying on to whatever is behind it.
+    if (!stillAlive(world, other.id)) continue;
     // Rounds pass through the living, with one exception: the charge rifle
     // will take down somebody already bitten. It is the one gun in the city
     // that can, which is what makes carrying it a decision — everything else

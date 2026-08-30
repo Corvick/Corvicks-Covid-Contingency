@@ -3081,11 +3081,17 @@ const CORPSE_LEG_LEN_JITTER = 0.14;
  * only the torso, head and arms swing: from above, the give-away that a corpse
  * fell diagonally is exactly that its legs point one way and its head another.
  *
- * `CORPSE_DIAGONAL_ARC` is half the arc, so 0.35 is a head that can land
- * anywhere across about 40 degrees.
+ * `CORPSE_DIAGONAL_ARC` is half the arc, so 0.62 is a head that can land
+ * anywhere across about 70 degrees.
+ *
+ * **It went 1 in 5 across 40 degrees to 2 in 5 across 70**, because at the
+ * first figures most of what you saw was a street of bodies lying the same way
+ * with the occasional one slightly off — the variation was there and it was not
+ * doing any work. A body that fell hard over is now an ordinary sight rather
+ * than something to notice.
  */
-const CORPSE_DIAGONAL_CHANCE = 0.2;
-const CORPSE_DIAGONAL_ARC = 0.35;
+const CORPSE_DIAGONAL_CHANCE = 0.4;
+export const CORPSE_DIAGONAL_ARC = 0.62;
 /** Flat on its side. Rare on purpose — it is the one that catches the eye. */
 const CORPSE_SIDEWAYS_CHANCE = 0.04;
 /**
@@ -3117,9 +3123,20 @@ export function corpsePose(seed: number): { tilt: number; sideways: boolean; sig
   const sideways = hash2(seed * 5.91 + 3.7, 2.71) < CORPSE_SIDEWAYS_CHANCE;
   const diagonal = hash2(seed * 13.77 + 1.3, 5.53) < CORPSE_DIAGONAL_CHANCE;
   const swing = hash2(seed * 3.13 + 2.9, 9.21) * 2 - 1;
+  /*
+   * **The swing is biased away from square, not flat across the arc.**
+   *
+   * A flat draw puts as many bodies within a couple of degrees of the centre
+   * line as at the far edge — and one of those is indistinguishable from a body
+   * that fell straight back, so a good share of the falls that were *meant* to
+   * read as diagonal read as nothing at all. Cubing pushes the draw toward the
+   * ends while leaving the sign alone, so the ones that go over mostly go over
+   * far enough to see. A body on its side has gone as far as it can and takes
+   * the same arc.
+   */
+  const swung = Math.sign(swing) * (1 - (1 - Math.abs(swing)) ** 3) * CORPSE_DIAGONAL_ARC;
   return {
-    // A body on its side has gone over as far as it can go; the arc is spent.
-    tilt: sideways ? swing * CORPSE_DIAGONAL_ARC : diagonal ? swing * CORPSE_DIAGONAL_ARC : 0,
+    tilt: sideways || diagonal ? swung : 0,
     sideways,
     sign: hash2(seed * 7.77 + 4.2, 1.61) < 0.5 ? -1 : 1,
   };
@@ -3212,7 +3229,14 @@ function drawSprawled(
     ? [
         // rootX, rootY, base angle, base length, angle jitter, length jitter, root bearing
         [shoulderX, shoulderY, s * 0.95, 1.5, 0.2, CORPSE_ARM_LEN_JITTER, upper],
-        [shoulderX, shoulderY, s * 1.85, 1.35, 0.2, CORPSE_ARM_LEN_JITTER, upper],
+        // **The far arm is longer here than it looks it should be, and its
+        // length varies less.** It comes off the shoulder at a hundred degrees,
+        // so most of its length is spent going *back* across the body rather
+        // than out from it — at the short end of the ordinary jitter its tip
+        // finished barely past the torso and the arm all but disappeared into
+        // it, which is the missing-arm complaint again in a different pose.
+        // Measured: it reached 1.03 body radii where the torso is 1.15 long.
+        [shoulderX, shoulderY, s * 1.85, 1.55, 0.2, 0.12, upper],
         [hipX, hipY, s * 2.62, 1.55, 0.1, CORPSE_LEG_LEN_JITTER, lower],
         [hipX, hipY, s * 2.88, 1.45, 0.1, CORPSE_LEG_LEN_JITTER, lower],
       ]
