@@ -5284,6 +5284,74 @@ the dog, and all three are built the cheap way on purpose.
   - **Drawn as a cheap flat sprawl** (`drawSprawled`), not through `drawEntity`
     — `dead` there is dog-only, and a dedicated shape is cheaper to bake. Under
     the walls, beside the dog corpses.
+  - **It has four limbs, and for a long time it had three.** See **A corpse has
+    four limbs and no two fall the same way** below.
+#### A corpse has four limbs and no two fall the same way
+
+Reported off a screenshot, *"zombie corpse missing arm"*, and the drawing said
+exactly that. It was three strokes at deliberately mismatched angles — `a + 2.5`,
+`a - 1.7` and `a - 2.7` — which is a left leg, a right arm and a right leg, and
+leaves **the whole forward-left quadrant empty**. From above that does not read
+as a body flung about; it reads as one with an arm torn off. The asymmetry the
+comment beside it was after belongs in the lengths and angles, not in the count.
+
+- **The arms come off the shoulders and the legs off the hips**, rather than
+  three of the four coming off the middle. It costs nothing and it is what makes
+  an arm reach forward of the torso like an arm, instead of coming out level
+  with the hips and reading as a third leg.
+- **Every limb is hashed off the corpse's own seed, never rolled**, the same
+  rule and the same reason as the dog's saliva strands and the acid's churn.
+  `drawSprawled` runs on every frame the body is on screen *and* once more when
+  it is baked into `stainLayer` — a `Math.random()` anywhere in it is a corpse
+  whose arms twitch until it settles and then jump as it is baked.
+- **The seed is on the record, not derived from where it is drawn.** A corpse
+  *slides* `CORPSE_SLIDE_PX` along the round before it settles, so limbs hashed
+  off the live `x, y` would rearrange themselves every frame of that slide.
+- **The arms swing about twice as far as the legs** (`CORPSE_ARM_JITTER` 0.55
+  against `CORPSE_LEG_JITTER` 0.26, and the same ratio on length). Arms are the
+  loose end of a dropped body and land wherever they were thrown; hips are held
+  together by the pelvis, and two legs that fell in wildly different directions
+  read as a doll rather than as a person. Much beyond this the arms start
+  crossing the head and the legs start crossing the arms.
+
+`client/corpserig.html` is the rig, under `client/src` so unlike the harnesses
+at `server/` root it is covered by `npx tsc --noEmit`. rAF is throttled to
+nothing while the browser pane is not compositing, so no frame of a real round
+can be put on screen from here; `getImageData` needs none. It sweeps **reach per
+bearing** out of the body's centre — the same sweep `acidcheck` walks round a
+cloud — and looks for each limb's peak in its own sector.
+`setThreeLimbedCorpse` is the gate and it is kept.
+
+| | OLD | NEW |
+|---|---|---|
+| limbs found, per body | **3** | **4** |
+| the left arm | **null on 4 of 4** | found on 9 of 9 |
+| widest bare run, median | 121° | **83°** |
+| arm swing across seeds | — | **48°** |
+| leg swing across seeds | — | **20°** |
+| distinct drawings from 6 seeds | — | **6** |
+| same seed drawn twice | — | identical |
+
+*Two things about the rig were the rig lying rather than the code failing, and
+both are the sort that read as an off-by-one in the drawing:*
+
+- **The head is not a limb.** It sits at 0° and reaches `1.49r` on its own,
+  which clears the limb threshold — so counting runs of long reach gives limbs
+  *plus one*, and the rig first reported "4 limbs, not 3" of the old drawing and
+  "5, not 4" of the new. The claim is made on the per-limb peaks instead, which
+  come back `null` for a limb that is not there.
+- **A flat ±42° window round each base overlaps for the two legs**, which are
+  only 62° apart across the back — so one leg's search found the *other* leg's
+  tail and the rig reported a leg that had swung 41° on a drawing whose legs
+  cannot move more than 15. It read the legs as swinging exactly as far as the
+  arms. The sectors are the midpoints between neighbouring limbs now.
+
+*And one figure is worth reading correctly.* The **worst** bare run barely moves
+— 125° to 110° — because an arm thrown well forward leaves a wide span between
+it and the leg behind it. That is a limb in an unusual place, not a limb that is
+missing, which is why the check is on the limb count and the run is compared on
+medians.
+
 - **The vignette is one cached image.** Built at viewport size and blitted,
   under the HUD and over the fog, so it frames the world without dimming
   anything you have to read.

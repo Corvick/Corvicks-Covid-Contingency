@@ -3007,30 +3007,127 @@ interface ZombieCorpse {
   y0: number;
   a: number;
   born: number;
+  /**
+   * Which way this one's limbs fell.
+   *
+   * **On the record rather than derived from the position it is drawn at**, and
+   * that is load-bearing: a corpse *slides* along the round for
+   * `CORPSE_SLIDE_MS` before it settles, so limbs hashed off the live `x, y`
+   * would rearrange themselves every frame of the slide and then again at the
+   * moment it is baked into `stainLayer` — a body twitching its arms while it
+   * comes to rest, and a visible pop when it stops.
+   */
+  seed: number;
 }
 const zombieCorpses: ZombieCorpse[] = [];
 
 export function spawnCorpse(x: number, y: number, a: number, now: number): void {
   if (!settings.blood || !settings.corpses) return;
-  zombieCorpses.push({ x0: x, y0: y, a, born: now });
+  // Hashed off where and when it fell, so it is fixed for the life of the body
+  // and no two that fall together land the same way.
+  zombieCorpses.push({ x0: x, y0: y, a, born: now, seed: hash2(x * 0.37 + y, now * 0.013) });
 }
 
-/** A flat sprawled body — cheap enough to draw live and to bake. */
-function drawSprawled(g: CanvasRenderingContext2D, x: number, y: number, a: number, color: string): void {
+/**
+ * True is the corpse as it was drawn: three limbs, and a hole where an arm
+ * should be.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`:
+ * "it has four limbs now" means nothing without "and it had three before".
+ * `client/corpserig.html` reads it.
+ */
+let threeLimbedCorpse = false;
+
+export function setThreeLimbedCorpse(v: boolean): void {
+  threeLimbedCorpse = v;
+}
+
+/**
+ * How far a limb may fall from where it nominally sits, in radians and in body
+ * radii of length.
+ *
+ * **The arms move about twice as much as the legs**, which is the asymmetry
+ * that makes a row of bodies read as bodies. Arms are the loose end of a
+ * dropped body — they land wherever they were thrown — where hips are held
+ * together by the pelvis, so two legs that fell in wildly different directions
+ * read as a doll rather than as a person. Beyond about this much the arms start
+ * crossing the head, and the legs start crossing the arms.
+ */
+const CORPSE_ARM_JITTER = 0.55;
+const CORPSE_LEG_JITTER = 0.26;
+const CORPSE_ARM_LEN_JITTER = 0.3;
+const CORPSE_LEG_LEN_JITTER = 0.14;
+
+/**
+ * A flat sprawled body — cheap enough to draw live and to bake.
+ *
+ * **Four limbs, and the fourth was simply missing.** It was written as three
+ * strokes at deliberately mismatched angles — `a + 2.5`, `a - 1.7` and
+ * `a - 2.7` — which is a left leg, a right arm and a right leg, and leaves the
+ * whole forward-left quadrant empty. From above that does not read as a body
+ * flung about; it reads as one with an arm torn off, and it was reported as
+ * exactly that. The asymmetry that was wanted is in the *lengths and angles*,
+ * not in the count.
+ *
+ * **The arms come off the shoulders and the legs off the hips**, rather than
+ * three of the four coming off the middle. It costs nothing and it is what
+ * makes an arm reach forward of the torso like an arm instead of coming out
+ * level with the hips and reading as a third leg.
+ *
+ * **Every limb is hashed off the body's own seed, never rolled.** This is
+ * called on every frame the corpse is on screen and once more when it is baked
+ * into `stainLayer`; a `Math.random()` anywhere in here is a corpse whose arms
+ * twitch until it settles and then jump as it is baked. Same rule and same
+ * reason as the dog's saliva strands and the acid's churn.
+ */
+function drawSprawled(
+  g: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  a: number,
+  color: string,
+  seed = 0,
+): void {
   const r = ENTITY_RADIUS.zombie;
   const ca = Math.cos(a);
   const sa = Math.sin(a);
-  // Limbs flung at odd angles — a corpse's are not a matched pair.
+  // -1..1 from the body's seed and the limb's index.
+  const jit = (i: number): number => hash2(seed * 97 + i, i * 7.13 + 3.1) * 2 - 1;
+
+  const shoulderX = x + ca * r * 0.5;
+  const shoulderY = y + sa * r * 0.5;
+  const hipX = x - ca * r * 0.42;
+  const hipY = y - sa * r * 0.42;
+
+  // Limbs flung at odd angles — a corpse's are not a matched pair. The base
+  // bearings are the three the drawing always had plus the arm it was missing;
+  // what each one does around its own is the seed's business.
+  const limbs: Array<[number, number, number, number, number, number]> = [
+    // rootX, rootY, base angle, base length, angle jitter, length jitter
+    [shoulderX, shoulderY, 1.25, 1.45, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER],
+    [shoulderX, shoulderY, -1.7, 1.7, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER],
+    [hipX, hipY, 2.5, 1.5, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER],
+    [hipX, hipY, -2.7, 1.6, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER],
+  ];
+
   g.strokeStyle = shade(color, -18);
   g.lineCap = 'round';
   g.lineWidth = r * 0.36;
   g.beginPath();
-  g.moveTo(x, y);
-  g.lineTo(x + Math.cos(a + 2.5) * r * 1.5, y + Math.sin(a + 2.5) * r * 1.5);
-  g.moveTo(x, y);
-  g.lineTo(x + Math.cos(a - 1.7) * r * 1.7, y + Math.sin(a - 1.7) * r * 1.7);
-  g.moveTo(x - ca * r * 0.4, y - sa * r * 0.4);
-  g.lineTo(x + Math.cos(a - 2.7) * r * 1.6, y + Math.sin(a - 2.7) * r * 1.6);
+  for (let i = 0; i < limbs.length; i++) {
+    // The arm that was missing is the first entry, so gating it here is the
+    // whole of the control.
+    if (threeLimbedCorpse && i === 0) continue;
+    const [rx, ry, base, len, spread, lenSpread] = limbs[i];
+    const angle = threeLimbedCorpse ? a + base : a + base + jit(i) * spread;
+    const reach = r * (threeLimbedCorpse ? len : len + jit(i + 10) * lenSpread);
+    // The three it always had came off the middle; the old drawing is the
+    // control, so it keeps its own roots.
+    const ox = threeLimbedCorpse ? (i === 3 ? x - ca * r * 0.4 : x) : rx;
+    const oy = threeLimbedCorpse ? (i === 3 ? y - sa * r * 0.4 : y) : ry;
+    g.moveTo(ox, oy);
+    g.lineTo(ox + Math.cos(angle) * reach, oy + Math.sin(angle) * reach);
+  }
   g.stroke();
   // Torso.
   g.fillStyle = color;
@@ -3067,10 +3164,10 @@ export function drawZombieCorpses(ctx: CanvasRenderingContext2D, view: Viewport,
       // spawn, so this branch rarely trips).
       if (settings.corpses) {
         const sctx = ensureStainLayer();
-        if (sctx) bakeInto(sctx, (g) => drawSprawled(g, cx, cy, c.a, CORPSE_COLOR));
+        if (sctx) bakeInto(sctx, (g) => drawSprawled(g, cx, cy, c.a, CORPSE_COLOR, c.seed));
       }
       if (visible(view, cx, cy, ENTITY_RADIUS.zombie * 2)) {
-        drawSprawled(ctx, cx, cy, c.a, CORPSE_COLOR);
+        drawSprawled(ctx, cx, cy, c.a, CORPSE_COLOR, c.seed);
       }
       continue;
     }
@@ -3078,7 +3175,7 @@ export function drawZombieCorpses(ctx: CanvasRenderingContext2D, view: Viewport,
     zombieCorpses[write++] = c;
     if (!visible(view, cx, cy, ENTITY_RADIUS.zombie * 2)) continue;
     const grey = Math.min(1, age / CORPSE_GREY_MS);
-    drawSprawled(ctx, cx, cy, c.a, mix(ENTITY_COLOR.zombie, CORPSE_COLOR, grey));
+    drawSprawled(ctx, cx, cy, c.a, mix(ENTITY_COLOR.zombie, CORPSE_COLOR, grey), c.seed);
   }
   zombieCorpses.length = write;
 }
