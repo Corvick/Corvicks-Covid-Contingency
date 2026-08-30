@@ -31,7 +31,15 @@ import {
   ENTITY_RADIUS,
   GROUND_COLOR,
 } from '../../shared/constants.js';
-import { clearBlood, drawZombieCorpses, setThreeLimbedCorpse, spawnCorpse } from './render.js';
+import {
+  CORPSE_KNEE,
+  clearBlood,
+  corpsePose,
+  corpseSeed,
+  drawZombieCorpses,
+  setThreeLimbedCorpse,
+  spawnCorpse,
+} from './render.js';
 import { settings } from './settings.js';
 
 const canvas = document.getElementById('rig') as HTMLCanvasElement;
@@ -98,8 +106,33 @@ interface Sweep {
   runs: number;
   /** How many of the four limbs were found at all. */
   limbs: number;
+  /**
+   * Where the head ended up, in degrees off the round's own bearing.
+   *
+   * **Found by colour rather than by shape.** The head is drawn `shade(+8)`
+   * against the torso's base and the limbs' `-18`, so it is the lightest thing
+   * on the body by a wide margin — which makes "where is the head" one pass
+   * over the pixels already read back, and needs no assumption about where it
+   * was expected to be.
+   */
+  headAt: number;
   /** Where each limb's peak reach is, in degrees off the body's facing. */
   peaks: Array<number | null>;
+  /** The peak of every run of long reach, the head's own run excluded. */
+  runPeaks: number[];
+  /** Where the head is from the body's centre, in degrees off the round. */
+  headFromCentre: number;
+  /**
+   * Of the bearings a limb reaches along, the share on whichever side has more
+   * of them — the head's own excluded.
+   *
+   * **This is what says a body is on its side**, and counting runs is not. The
+   * head and the nearest arm merge into a single run on a body lying over, so
+   * "four limbs, all one sign" cannot be read off the runs at all: it came back
+   * as two runs on a drawing doing exactly what it should. A share of the
+   * *circle* is immune to whether two limbs happen to touch.
+   */
+  oneSided: number;
   /** Ink anywhere at all, as a floor under everything else. */
   ink: number;
 }
@@ -115,6 +148,24 @@ interface Result {
   distinct: number;
   /** Widest bare run, median, old then new. */
   gapMedian: [number, number];
+  /** Share of bodies falling each way, over a great many seeds. */
+  shareDiagonal: number;
+  shareSideways: number;
+  /** The widest the head ever swings, in degrees. */
+  widestTilt: number;
+  /** Measured off the pixels: head swung, legs left on the round's bearing. */
+  headSwing: number[];
+  legHold: number[];
+  /** Mean of those, against the arms with the tilt taken back off them. */
+  legDrift: number;
+  armDrift: number;
+  /** A body on its side: are all four limbs out the same way? */
+  sidewaysOneSided: number;
+  sidewaysTried: number;
+  /** What the sweep saw on each of them, so a failure names itself. */
+  sidewaysRuns: Array<{ head: number; runs: number[]; oneSided: number }>;
+  /** The same reading on the bodies that fell the ordinary way — the control. */
+  uprightOneSided: number;
   /** The same seed twice: a corpse must not redraw itself differently. */
   stable: boolean;
 }
@@ -127,6 +178,17 @@ const result: Result = {
   legSwing: 0,
   distinct: 0,
   gapMedian: [0, 0],
+  shareDiagonal: 0,
+  shareSideways: 0,
+  widestTilt: 0,
+  headSwing: [],
+  legHold: [],
+  legDrift: 0,
+  armDrift: 0,
+  sidewaysOneSided: 0,
+  sidewaysTried: 0,
+  sidewaysRuns: [],
+  uprightOneSided: 0,
   stable: false,
 };
 
@@ -184,7 +246,18 @@ function sweep(a: number, three: boolean, seedX: number, seedT: number): Sweep {
     return lit((iy * w + ix) * 4);
   };
 
-  const out: Sweep = { covered: 0, widestGap: 0, runs: 0, limbs: 0, peaks: [], ink: 0 };
+  const out: Sweep = {
+    covered: 0,
+    widestGap: 0,
+    runs: 0,
+    limbs: 0,
+    headAt: 0,
+    headFromCentre: 0,
+    oneSided: 0,
+    peaks: [],
+    runPeaks: [],
+    ink: 0,
+  };
   for (let i = 0; i < w * w; i++) if (lit(i * 4)) out.ink++;
 
   const reach: number[] = [];
@@ -239,6 +312,78 @@ function sweep(a: number, three: boolean, seedX: number, seedT: number): Sweep {
     out.peaks.push(best >= LIMB_AT ? bestAt : null);
   }
   out.limbs = out.peaks.filter((v) => v !== null).length;
+
+  // The head: the lightest pixels in the box, and where their centre lies.
+  let brightest = 0;
+  for (let i = 0; i < w * w; i++) brightest = Math.max(brightest, d[i * 4]);
+  let hx = 0;
+  let hy = 0;
+  let hn = 0;
+  for (let j = 0; j < w; j++) {
+    for (let i = 0; i < w; i++) {
+      if (d[(j * w + i) * 4] < brightest - 4) continue;
+      hx += i;
+      hy += j;
+      hn++;
+    }
+  }
+  /*
+   * **Measured from the knees, not from the body's centre**, and that was a
+   * fault in this rig before it was anything else.
+   *
+   * The whole upper body swings *about the pivot*, so from anywhere in front of
+   * it the head appears to move further than the tilt — it is on the far end of
+   * a lever. Measured from the centre, a 17 degree tilt read as 29, and the rig
+   * reported the head "18.8 degrees out" of a drawing that was placing it
+   * exactly where the pose said. From the pivot the two agree by construction,
+   * which is what makes this a check on the drawing rather than on the
+   * arithmetic that was expected of it.
+   */
+  const px = cx - Math.cos(a) * R * CORPSE_KNEE;
+  const py = cy - Math.sin(a) * R * CORPSE_KNEE;
+  const headX = hn === 0 ? cx : bx + hx / hn;
+  const headY = hn === 0 ? cy : by + hy / hn;
+  out.headAt = hn === 0 ? 0 : wrap(((Math.atan2(headY - py, headX - px) - a) * 180) / Math.PI);
+  out.headFromCentre = hn === 0 ? 0 : wrap(((Math.atan2(headY - cy, headX - cx) - a) * 180) / Math.PI);
+
+  /*
+   * Every limb's peak, run by run, without assuming where the limbs are — a
+   * body on its side puts all four out the same way and fits none of the
+   * sectors.
+   *
+   * **The head is dropped by where it actually is, not by a band round the
+   * front.** A fixed band works only for a body that fell square: tilt the
+   * upper half and lay the head off the centre line, as a body on its side has
+   * it, and the head can sit well past 25 degrees — sometimes on the *opposite*
+   * side from the limbs, which read as a limb out the other way and failed 1
+   * sideways body in 6 on a drawing doing exactly what it should. The head is
+   * found by colour a few lines above, so where it is is already known.
+   */
+  for (let i = 0; i < BEARINGS; i++) {
+    if (!has[i] || has[(i + BEARINGS - 1) % BEARINGS]) continue;
+    let best = -1;
+    let bestAt = 0;
+    for (let k = 0; k < BEARINGS; k++) {
+      const b = (i + k) % BEARINGS;
+      if (!has[b]) break;
+      if (reach[b] > best) {
+        best = reach[b];
+        bestAt = wrap((b / BEARINGS) * 360);
+      }
+    }
+    if (Math.abs(wrap(bestAt - out.headFromCentre)) > HEAD_BAND) out.runPeaks.push(bestAt);
+  }
+
+  let plus = 0;
+  let minus = 0;
+  for (let b = 0; b < BEARINGS; b++) {
+    if (!has[b]) continue;
+    const deg = wrap((b / BEARINGS) * 360);
+    if (Math.abs(wrap(deg - out.headFromCentre)) <= HEAD_BAND) continue;
+    if (deg > 0) plus++;
+    else minus++;
+  }
+  out.oneSided = plus + minus === 0 ? 0 : Math.max(plus, minus) / (plus + minus);
   return out;
 }
 
@@ -342,27 +487,260 @@ try {
   if (!result.stable) {
     result.errors.push('the same seed drew two different bodies');
   }
+
+  /*
+   * How they fall, counted rather than squinted at.
+   *
+   * **Off `corpsePose` rather than off the canvas**, which is why that function
+   * is pure and exported: one in five is a claim about a distribution, and a
+   * distribution is a thing to count over thousands of draws. The pixels are
+   * then asked the separate question of whether the drawing does what the pose
+   * says.
+   */
+  const N = 40_000;
+  let diag = 0;
+  let side = 0;
+  for (let i = 0; i < N; i++) {
+    const pose = corpsePose(i / N);
+    if (pose.sideways) side++;
+    else if (pose.tilt !== 0) diag++;
+    result.widestTilt = Math.max(result.widestTilt, Math.abs((pose.tilt * 180) / Math.PI));
+  }
+  result.shareDiagonal = diag / N;
+  result.shareSideways = side / N;
+
+  if (Math.abs(result.shareDiagonal - 0.2) > 0.03) {
+    result.errors.push(`diagonal falls are ${(result.shareDiagonal * 100).toFixed(1)}%, not about 20`);
+  }
+  if (Math.abs(result.shareSideways - 0.04) > 0.012) {
+    result.errors.push(`sideways falls are ${(result.shareSideways * 100).toFixed(2)}%, not about 4`);
+  }
+  if (result.widestTilt > 21 || result.widestTilt < 18) {
+    result.errors.push(`the head swings up to ${f1(result.widestTilt)} degrees, not about 20`);
+  }
+
+  /*
+   * And the drawing does what the pose says: the head swings off the round and
+   * the legs stay on it.
+   *
+   * **The legs are the half that matters.** A body rotated bodily would show the
+   * head swung just as well — what says the pivot is at the knees is that the
+   * legs did *not* come with it, and they are measured in sectors taken off the
+   * round's own bearing rather than off the body's.
+   */
+  const armCarried: number[] = [];
+  for (let born = 1; born < 4000 && result.headSwing.length < 8; born++) {
+    const sx = canvas.width / 2 + 11;
+    const sy = canvas.height / 2;
+    const pose = corpsePose(corpseSeed(sx, sy, born));
+    if (pose.sideways || Math.abs(pose.tilt) < 0.2) continue;
+    const s = sweep(0, false, 11, born);
+    const tiltDeg = (pose.tilt * 180) / Math.PI;
+    result.headSwing.push(Number((s.headAt - tiltDeg).toFixed(1)));
+    // How far each limb sits from where it would be on a body that fell square,
+    // measured against the *round's* bearing. The arms carry the tilt; the legs
+    // are not supposed to.
+    for (const k of LEGS) {
+      const peak = s.peaks[k];
+      if (peak !== null) result.legHold.push(Number(wrap(peak - BASES[k]).toFixed(1)));
+    }
+    for (const k of ARMS) {
+      const peak = s.peaks[k];
+      if (peak !== null) armCarried.push(Number(wrap(peak - BASES[k] - tiltDeg).toFixed(1)));
+    }
+  }
+  if (result.headSwing.length === 0) {
+    result.errors.push('no diagonal body could be staged');
+  }
+  if (result.headSwing.some((v) => Math.abs(v) > 6)) {
+    result.errors.push(
+      `the head is not where the pose says: worst ${f1(Math.max(...result.headSwing.map(Math.abs)))} degrees out`,
+    );
+  }
+  /*
+   * **The legs are checked against the arms on the same bodies, not against a
+   * tolerance**, and that is not a softening — it is the only reading that
+   * discriminates.
+   *
+   * A leg is rooted at the hip, and the hip *does* come round with the torso
+   * even though the leg's own bearing does not, so a peak taken from the body's
+   * centre carries a few degrees of that however the drawing behaves. An
+   * absolute bound would therefore have to be loose enough to be worth little.
+   * What cannot be faked is the comparison: subtract the tilt from the arms and
+   * they sit as still as the legs do. Rotate the whole body instead and the
+   * legs pick up the tilt, and this reading opens by twenty degrees.
+   */
+  const mean = (xs: number[]): number =>
+    xs.length === 0 ? 0 : xs.reduce((s2, v) => s2 + Math.abs(v), 0) / xs.length;
+  result.legDrift = Number(mean(result.legHold).toFixed(1));
+  result.armDrift = Number(mean(armCarried).toFixed(1));
+  if (result.legDrift > result.armDrift + 8) {
+    result.errors.push(
+      `the legs came round with the body: legs ${f1(result.legDrift)} against arms ${f1(result.armDrift)} degrees`,
+    );
+  }
+
+  // A body on its side puts all four limbs out the same way.
+  for (let born = 1; born < 200_000 && result.sidewaysTried < 6; born++) {
+    const sx = canvas.width / 2 + 11;
+    const sy = canvas.height / 2;
+    const pose = corpsePose(corpseSeed(sx, sy, born));
+    if (!pose.sideways) continue;
+    result.sidewaysTried++;
+    const s = sweep(0, false, 11, born);
+    /*
+     * **Read off the runs, not off the sectors.** The sectors are where a limb
+     * sits on a body that fell square; a body on its side has all four out the
+     * same way and fits two of them, so a sector search finds two limbs and two
+     * nulls and the check reads 0 of 6 on a drawing doing exactly what it
+     * should. Three runs rather than four is expected and is the point: the two
+     * legs are drawn stacked, and stacked is what a merged run looks like.
+     */
+    result.sidewaysRuns.push({
+      head: Number(s.headFromCentre.toFixed(0)),
+      runs: s.runPeaks.map((v) => Number(v.toFixed(0))),
+      oneSided: Number(s.oneSided.toFixed(2)),
+    });
+    /*
+     * **0.9, not 1.0**, and the reason is the head rather than the limbs. It is
+     * a disc of 0.44r sitting 1.05r out and laid off the centre line, so it
+     * subtends the best part of fifty degrees from the body's middle and its
+     * far edge escapes the band that excludes it on some poses. That shows up
+     * as a few bearings of "the other side" on a body whose limbs are all one
+     * way. The measured separation is enormous either way — 0.95 to 1.00
+     * against the ordinary body's 0.54 — so where in that gap the line goes
+     * changes nothing.
+     */
+    if (s.oneSided > 0.9) result.sidewaysOneSided++;
+  }
+  if (result.sidewaysTried === 0) {
+    result.errors.push('no sideways body could be staged');
+  }
+  if (result.sidewaysOneSided !== result.sidewaysTried) {
+    result.errors.push(
+      `${result.sidewaysOneSided}/${result.sidewaysTried} sideways bodies have every limb one side`,
+    );
+  }
+  /*
+   * **The control, and it is the whole of what the figure above is worth.** An
+   * ordinary body has two limbs each way, so this reading sits near a half on
+   * one; without it, "every limb is on one side" is satisfied just as well by a
+   * measurement that always says so.
+   */
+  result.uprightOneSided = Number(
+    (result.now.reduce((s2, v) => s2 + v.oneSided, 0) / result.now.length).toFixed(2),
+  );
+  if (result.uprightOneSided > 0.8) {
+    result.errors.push(
+      `CONTROL: an ordinary body reads ${f1(result.uprightOneSided * 100)}% one-sided too`,
+    );
+  }
 } catch (err) {
   result.errors.push(String(err));
 }
 
-// Leave something on screen to look at as well as something to read: the old
-// drawing down the left, the new one across the rest, blown up.
-clear();
-ctx.setTransform(5, 0, 0, 5, 0, 0);
-clearBlood();
-setThreeLimbedCorpse(true);
-for (let row = 0; row < 4; row++) spawnCorpse(26, 24 + row * 34, row * 0.9, 0);
-drawZombieCorpses(ctx, { x: 0, y: 0, w: canvas.width, h: canvas.height }, SETTLED);
-clearBlood();
-setThreeLimbedCorpse(false);
-for (let col = 0; col < 4; col++) {
-  for (let row = 0; row < 4; row++) {
-    spawnCorpse(96 + col * 60, 24 + row * 34, row * 0.9, col * 3137 + row * 11);
+// ------------------------------------------------------------- the sheet
+/*
+ * Something to look at as well as something to read.
+ *
+ * Three rows — straight back, diagonal, on its side — several bodies of each,
+ * blown up, with the line of the round drawn under each so "the legs kept the
+ * bearing they were shot along and the head swung off it" is a thing you can
+ * see rather than one you have to take on trust. Then a strip at the size they
+ * actually are in a round, which is the reading that decides whether any of it
+ * is visible at all.
+ *
+ * The poses are found by searching `born` values through `corpseSeed`, not by
+ * forcing a seed: that is the same path a real death takes, so a pose the sheet
+ * cannot find is one a round would never produce either.
+ */
+function bornFor(x: number, y: number, want: (p: ReturnType<typeof corpsePose>) => boolean): number[] {
+  const out: number[] = [];
+  for (let n = 1; n < 400_000 && out.length < 7; n++) {
+    if (want(corpsePose(corpseSeed(x, y, n)))) out.push(n);
   }
+  return out;
 }
-drawZombieCorpses(ctx, { x: 0, y: 0, w: canvas.width, h: canvas.height }, SETTLED);
-ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+function sheet(): void {
+  clear();
+  setThreeLimbedCorpse(false);
+  const g = ctx;
+  const rows: Array<{ label: string; want: (p: ReturnType<typeof corpsePose>) => boolean }> = [
+    { label: 'STRAIGHT BACK — about 4 in 5', want: (p) => !p.sideways && p.tilt === 0 },
+    { label: 'DIAGONAL — about 1 in 5, head swung up to 20 degrees off the round', want: (p) => !p.sideways && p.tilt !== 0 },
+    { label: 'FLAT ON ITS SIDE — about 1 in 25', want: (p) => p.sideways },
+  ];
+
+  const BIG = 4.2;
+  let ry = 110;
+  for (const row of rows) {
+    g.font = 'bold 15px sans-serif';
+    g.fillStyle = '#e8a13a';
+    g.textAlign = 'left';
+    g.textBaseline = 'alphabetic';
+    g.fillText(row.label, 24, ry - 78);
+
+    for (let i = 0; i < 7; i++) {
+      const bx = 150 + i * 232;
+      const a = 0.3 + i * 0.16;
+      // **The seed is hashed off where the body was *spawned*, and a corpse
+      // slides before it settles — so the search has to run at the spawn point,
+      // not at the spot it comes to rest on.** Searched at the resting place,
+      // every row drew whatever pose that seed happened to be, and the sheet
+      // showed three rows of the same thing with the labels lying about them.
+      const sx = bx - Math.cos(a) * CORPSE_SLIDE_PX;
+      const sy = ry - Math.sin(a) * CORPSE_SLIDE_PX;
+      const borns = bornFor(sx, sy, row.want);
+      if (borns.length === 0) continue;
+      const born = borns[i % borns.length];
+
+      // The round's own line, so the fall can be read against it.
+      g.strokeStyle = 'rgba(232, 161, 58, 0.32)';
+      g.setLineDash([5, 5]);
+      g.lineWidth = 1.5;
+      g.beginPath();
+      g.moveTo(bx - Math.cos(a) * 96, ry - Math.sin(a) * 96);
+      g.lineTo(bx + Math.cos(a) * 96, ry + Math.sin(a) * 96);
+      g.stroke();
+      g.setLineDash([]);
+
+      clearBlood();
+      g.save();
+      g.translate(bx, ry);
+      g.scale(BIG, BIG);
+      g.translate(-bx, -ry);
+      spawnCorpse(sx, sy, a, born);
+      drawZombieCorpses(g, { x: -1e4, y: -1e4, w: 1e5, h: 1e5 }, born + SETTLED);
+      g.restore();
+
+      const pose = corpsePose(corpseSeed(sx, sy, born));
+      g.font = '11px sans-serif';
+      g.fillStyle = '#94a3b8';
+      g.fillText(
+        pose.sideways
+          ? `on its side, ${((pose.tilt * 180) / Math.PI).toFixed(0)} deg`
+          : `${((pose.tilt * 180) / Math.PI).toFixed(0)} deg off the round`,
+        bx - 54,
+        ry + 96,
+      );
+    }
+    ry += 244;
+  }
+
+  g.font = 'bold 15px sans-serif';
+  g.fillStyle = '#e8a13a';
+  g.fillText('AND AT THE SIZE THEY ARE IN A ROUND', 24, ry - 52);
+  clearBlood();
+  for (let i = 0; i < 60; i++) {
+    const bx = 52 + (i % 20) * 86;
+    const by = ry - 20 + Math.floor(i / 20) * 56;
+    spawnCorpse(bx, by, (i * 1.7) % (Math.PI * 2), i * 977 + 13);
+  }
+  drawZombieCorpses(g, { x: -1e4, y: -1e4, w: 1e5, h: 1e5 }, 1e6);
+}
+
+sheet();
 
 (window as unknown as { rigResult: Result }).rigResult = result;
 console.log(JSON.stringify(result, null, 1));

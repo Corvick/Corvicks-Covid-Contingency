@@ -3021,11 +3021,23 @@ interface ZombieCorpse {
 }
 const zombieCorpses: ZombieCorpse[] = [];
 
+/**
+ * The seed a body falling here and now gets.
+ *
+ * Its own function, and exported, so a rig can ask which pose a given `born`
+ * will produce and lay one of each side by side. The alternative was a second
+ * spawn that takes a seed, which is a drawing parameter nothing in the game
+ * would ever pass.
+ */
+export function corpseSeed(x: number, y: number, now: number): number {
+  return hash2(x * 0.37 + y, now * 0.013);
+}
+
 export function spawnCorpse(x: number, y: number, a: number, now: number): void {
   if (!settings.blood || !settings.corpses) return;
   // Hashed off where and when it fell, so it is fixed for the life of the body
   // and no two that fall together land the same way.
-  zombieCorpses.push({ x0: x, y0: y, a, born: now, seed: hash2(x * 0.37 + y, now * 0.013) });
+  zombieCorpses.push({ x0: x, y0: y, a, born: now, seed: corpseSeed(x, y, now) });
 }
 
 /**
@@ -3059,6 +3071,61 @@ const CORPSE_ARM_LEN_JITTER = 0.3;
 const CORPSE_LEG_LEN_JITTER = 0.14;
 
 /**
+ * How a body went down: mostly straight back along the round, sometimes at an
+ * angle to it, rarely flat on its side.
+ *
+ * **The pivot is the knees.** A body that is shot does not slide backwards
+ * flat — the feet stay where they were standing and everything above them goes
+ * over, so a fall that is not square to the round is a body that has *twisted*
+ * about its own legs. That is why the legs keep the bearing of the round and
+ * only the torso, head and arms swing: from above, the give-away that a corpse
+ * fell diagonally is exactly that its legs point one way and its head another.
+ *
+ * `CORPSE_DIAGONAL_ARC` is half the arc, so 0.35 is a head that can land
+ * anywhere across about 40 degrees.
+ */
+const CORPSE_DIAGONAL_CHANCE = 0.2;
+const CORPSE_DIAGONAL_ARC = 0.35;
+/** Flat on its side. Rare on purpose — it is the one that catches the eye. */
+const CORPSE_SIDEWAYS_CHANCE = 0.04;
+/**
+ * How far behind the body's centre the knees are, in body radii.
+ *
+ * Exported so a rig can measure the swing from the pivot the swing is about.
+ * From anywhere else the head appears to move *further* than the tilt — it is
+ * on the far end of a lever — which is right on screen and useless as a
+ * reading.
+ */
+export const CORPSE_KNEE = 0.9;
+/** A body seen edge-on is narrower across and its head is off the centre line. */
+const CORPSE_SIDEWAYS_NARROW = 0.72;
+const CORPSE_SIDEWAYS_HEAD_OFF = 0.2;
+
+/**
+ * Which of the three a given corpse is, and how far over it went.
+ *
+ * **Pure and exported so it can be measured without a canvas** — the same split
+ * as `flameStreamSpine` against the flame, and `commandCardSlots` against the
+ * card. A share of one in five is a claim about a distribution, which is a
+ * thing to count over thousands of seeds rather than to squint at.
+ *
+ * Three independent draws off the one seed. They have to be independent or the
+ * rare sideways fall arrives correlated with the diagonal one and stops being
+ * its own event.
+ */
+export function corpsePose(seed: number): { tilt: number; sideways: boolean; sign: number } {
+  const sideways = hash2(seed * 5.91 + 3.7, 2.71) < CORPSE_SIDEWAYS_CHANCE;
+  const diagonal = hash2(seed * 13.77 + 1.3, 5.53) < CORPSE_DIAGONAL_CHANCE;
+  const swing = hash2(seed * 3.13 + 2.9, 9.21) * 2 - 1;
+  return {
+    // A body on its side has gone over as far as it can go; the arc is spent.
+    tilt: sideways ? swing * CORPSE_DIAGONAL_ARC : diagonal ? swing * CORPSE_DIAGONAL_ARC : 0,
+    sideways,
+    sign: hash2(seed * 7.77 + 4.2, 1.61) < 0.5 ? -1 : 1,
+  };
+}
+
+/**
  * A flat sprawled body — cheap enough to draw live and to bake.
  *
  * **Four limbs, and the fourth was simply missing.** It was written as three
@@ -3079,6 +3146,13 @@ const CORPSE_LEG_LEN_JITTER = 0.14;
  * into `stainLayer`; a `Math.random()` anywhere in here is a corpse whose arms
  * twitch until it settles and then jump as it is baked. Same rule and same
  * reason as the dog's saliva strands and the acid's churn.
+ *
+ * **And how it went down comes off the same seed** — see `corpsePose`. One in
+ * five falls at an angle to the round, pivoting about the knees so the legs
+ * keep the bearing they were shot along and the head swings off it; one in
+ * twenty-five lands flat on its side, which from above is both arms out the
+ * same side, both legs stacked, and a torso that has gone narrow because you
+ * are looking at it edge-on.
  */
 function drawSprawled(
   g: CanvasRenderingContext2D,
@@ -3094,21 +3168,60 @@ function drawSprawled(
   // -1..1 from the body's seed and the limb's index.
   const jit = (i: number): number => hash2(seed * 97 + i, i * 7.13 + 3.1) * 2 - 1;
 
-  const shoulderX = x + ca * r * 0.5;
-  const shoulderY = y + sa * r * 0.5;
-  const hipX = x - ca * r * 0.42;
-  const hipY = y - sa * r * 0.42;
+  const pose = threeLimbedCorpse ? { tilt: 0, sideways: false, sign: 1 } : corpsePose(seed);
+  // The half of the body that went over, and the half that stayed where it was
+  // standing. They are the same bearing on four bodies in five.
+  const upper = a + pose.tilt;
+  const lower = a;
 
-  // Limbs flung at odd angles — a corpse's are not a matched pair. The base
-  // bearings are the three the drawing always had plus the arm it was missing;
-  // what each one does around its own is the seed's business.
-  const limbs: Array<[number, number, number, number, number, number]> = [
-    // rootX, rootY, base angle, base length, angle jitter, length jitter
-    [shoulderX, shoulderY, 1.25, 1.45, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER],
-    [shoulderX, shoulderY, -1.7, 1.7, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER],
-    [hipX, hipY, 2.5, 1.5, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER],
-    [hipX, hipY, -2.7, 1.6, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER],
-  ];
+  /*
+   * The knees, and the body swung about them.
+   *
+   * Everything above the pivot rotates: the torso, the head, the shoulders and
+   * so the arms — while the legs keep the bearing of the round. Rotating the
+   * *centre* about the pivot is all it takes, because every one of those is
+   * placed off the centre along `upper` anyway.
+   */
+  const kneeX = x - ca * r * CORPSE_KNEE;
+  const kneeY = y - sa * r * CORPSE_KNEE;
+  const cx = kneeX + Math.cos(upper) * r * CORPSE_KNEE;
+  const cy = kneeY + Math.sin(upper) * r * CORPSE_KNEE;
+  const cu = Math.cos(upper);
+  const su = Math.sin(upper);
+
+  const shoulderX = cx + cu * r * 0.5;
+  const shoulderY = cy + su * r * 0.5;
+  const hipX = cx - cu * r * 0.42;
+  const hipY = cy - su * r * 0.42;
+
+  /*
+   * Limbs flung at odd angles — a corpse's are not a matched pair. The base
+   * bearings are the three the drawing always had plus the arm it was missing;
+   * what each one does around its own is the seed's business.
+   *
+   * **A body on its side puts them all out the same way**, which is what it
+   * looks like from above and is the whole of how that pose reads. The two arms
+   * keep well apart from each other so they are plainly two arms rather than
+   * one thick one — and the two legs are drawn close together, because a body
+   * lying on its side has one leg on top of the other. The angle jitter comes
+   * right down with them: at the ordinary spread a "stacked" pair of legs
+   * scissors open and it stops reading as sideways.
+   */
+  const s = pose.sign;
+  const limbs: Array<[number, number, number, number, number, number, number]> = pose.sideways
+    ? [
+        // rootX, rootY, base angle, base length, angle jitter, length jitter, root bearing
+        [shoulderX, shoulderY, s * 0.95, 1.5, 0.2, CORPSE_ARM_LEN_JITTER, upper],
+        [shoulderX, shoulderY, s * 1.85, 1.35, 0.2, CORPSE_ARM_LEN_JITTER, upper],
+        [hipX, hipY, s * 2.62, 1.55, 0.1, CORPSE_LEG_LEN_JITTER, lower],
+        [hipX, hipY, s * 2.88, 1.45, 0.1, CORPSE_LEG_LEN_JITTER, lower],
+      ]
+    : [
+        [shoulderX, shoulderY, 1.25, 1.45, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER, upper],
+        [shoulderX, shoulderY, -1.7, 1.7, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER, upper],
+        [hipX, hipY, 2.5, 1.5, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER, lower],
+        [hipX, hipY, -2.7, 1.6, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER, lower],
+      ];
 
   g.strokeStyle = shade(color, -18);
   g.lineCap = 'round';
@@ -3118,8 +3231,9 @@ function drawSprawled(
     // The arm that was missing is the first entry, so gating it here is the
     // whole of the control.
     if (threeLimbedCorpse && i === 0) continue;
-    const [rx, ry, base, len, spread, lenSpread] = limbs[i];
-    const angle = threeLimbedCorpse ? a + base : a + base + jit(i) * spread;
+    const [rx, ry, base, len, spread, lenSpread, from] = limbs[i];
+    // Arms off the half that went over, legs off the half that did not.
+    const angle = threeLimbedCorpse ? a + base : from + base + jit(i) * spread;
     const reach = r * (threeLimbedCorpse ? len : len + jit(i + 10) * lenSpread);
     // The three it always had came off the middle; the old drawing is the
     // control, so it keeps its own roots.
@@ -3129,18 +3243,37 @@ function drawSprawled(
     g.lineTo(ox + Math.cos(angle) * reach, oy + Math.sin(angle) * reach);
   }
   g.stroke();
-  // Torso.
+  // Torso, on the half of the body that went over. **Narrower on its side**:
+  // the ellipse is a chest seen from above, and a chest seen edge-on is not as
+  // wide. It is a small change and it is most of what tells the two apart at a
+  // glance, the limbs being the other half.
   g.fillStyle = color;
   g.beginPath();
-  g.ellipse(x, y, r * 1.15, r * 0.62, a, 0, TAU);
+  g.ellipse(
+    cx,
+    cy,
+    r * 1.15,
+    r * 0.62 * (pose.sideways ? CORPSE_SIDEWAYS_NARROW : 1),
+    upper,
+    0,
+    TAU,
+  );
   g.fill();
   g.strokeStyle = shade(color, -28);
   g.lineWidth = 1;
   g.stroke();
-  // Head, lolled forward off the shoulders.
+  // Head, lolled forward off the shoulders — and off the centre line as well
+  // for a body on its side, which is a head lying on its cheek.
+  const off = pose.sideways ? pose.sign * CORPSE_SIDEWAYS_HEAD_OFF : 0;
   g.fillStyle = shade(color, 8);
   g.beginPath();
-  g.arc(x + ca * r * 1.05, y + sa * r * 1.05, r * 0.44, 0, TAU);
+  g.arc(
+    cx + cu * r * 1.05 - su * r * off,
+    cy + su * r * 1.05 + cu * r * off,
+    r * 0.44,
+    0,
+    TAU,
+  );
   g.fill();
 }
 

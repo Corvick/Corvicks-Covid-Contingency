@@ -5352,6 +5352,75 @@ it and the leg behind it. That is a limb in an unusual place, not a limb that is
 missing, which is why the check is on the limb count and the run is compared on
 medians.
 
+#### And not all of them fall the same way
+
+Asked for as *"20% or so of zombies fall a bit diagonally — imagine their knees
+are the pivot point and their heads can fall in a ~40 degree arc"*, with *"very
+rare for some zombies to fall completely sideways"*.
+
+- **The pivot is the knees, and that is the whole of why it reads.** A body that
+  is shot does not slide backwards flat: the feet stay where they were standing
+  and everything above them goes over. So a fall that is not square to the round
+  is a body that has *twisted about its own legs* — which from above means the
+  legs still point along the round and the head does not, and that mismatch is
+  the give-away. Rotating the whole body instead would look like a corpse that
+  had been picked up and put down at an angle.
+- **`upper` and `lower`.** The torso, head, shoulders and so the arms take
+  `a + tilt`; the legs keep `a`. Rotating the drawing's *centre* about the knee
+  point is all it takes, because everything above is placed off that centre
+  along `upper` anyway.
+- **`corpsePose` is pure and exported**, the same split as `flameStreamSpine`
+  against the flame: "one in five" is a claim about a distribution, and a
+  distribution is a thing to count over tens of thousands of draws rather than
+  to squint at. Three independent hashes off the one seed — they have to be
+  independent, or the rare sideways fall arrives correlated with the diagonal
+  one and stops being its own event.
+- **A body on its side is all four limbs out the same way**, both arms well
+  apart from each other so they still read as two, the two legs drawn close
+  together because one is lying on top of the other, a torso narrowed to
+  `CORPSE_SIDEWAYS_NARROW` because a chest seen edge-on is not as wide, and the
+  head off the centre line because it is lying on its cheek. The angle jitter
+  comes right down with it: at the ordinary spread a "stacked" pair of legs
+  scissors open and it stops reading as sideways.
+- **It costs nothing.** The pose is three hashes and the drawing is the same
+  handful of strokes it always was.
+
+Measured on `client/corpserig.html`:
+
+| | |
+|---|---|
+| falls diagonally | **19.0%** of 40,000 seeds |
+| falls flat on its side | **3.99%** |
+| widest the head swings | **20.1°**, so a 40° arc |
+| head where the pose says, measured from the knees | within **1.7°** |
+| legs left on the round | drift **11.1°** against the arms' **17.7°** |
+| a sideways body's limb ink on one side | **0.95–1.00** |
+| …an ordinary body's, the control | **0.54** |
+
+*Four things about measuring this were the rig lying rather than the code
+failing, and the first two are the useful ones:*
+
+- **The head is on the far end of a lever, so it moves further than the tilt.**
+  Measured from the body's centre a 17° tilt reads as 29°, and the rig reported
+  the head "18.8° out" of a drawing placing it exactly where the pose said. It
+  is measured from the knees now — the pivot the swing is about — where the two
+  agree by construction. `CORPSE_KNEE` is exported for it.
+- **Counting runs of long reach cannot answer "all four limbs one side".** On a
+  body lying over, the head and the nearest arm merge into a single run, so the
+  reading came back as two runs and scored **0 of 6** on a drawing doing exactly
+  what it should. What the claim is actually about is a *share of the circle*,
+  which is immune to whether two limbs happen to touch: 0.95–1.00 against an
+  ordinary body's 0.54.
+- **A leg's hip does come round with the torso even though its bearing does
+  not**, so a peak taken from the body's centre carries a few degrees of tilt
+  however the drawing behaves. The legs are compared against the *arms on the
+  same bodies* with the tilt taken back off them, rather than against a
+  tolerance loose enough to be worth nothing.
+- **The seed is hashed off where a body was *spawned*, and a corpse slides
+  before it settles.** The sheet searched for poses at the resting place and
+  drew them from the spawn point, so all three rows showed whatever pose that
+  seed happened to be with the labels lying about them.
+
 - **The vignette is one cached image.** Built at viewport size and blitted,
   under the HUD and over the fog, so it frames the world without dimming
   anything you have to read.
