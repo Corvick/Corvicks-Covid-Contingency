@@ -5349,11 +5349,25 @@ comment beside it was after belongs in the lengths and angles, not in the count.
   *slides* `CORPSE_SLIDE_PX` along the round before it settles, so limbs hashed
   off the live `x, y` would rearrange themselves every frame of that slide.
 - **The arms swing about twice as far as the legs** (`CORPSE_ARM_JITTER` 0.55
-  against `CORPSE_LEG_JITTER` 0.26, and the same ratio on length). Arms are the
-  loose end of a dropped body and land wherever they were thrown; hips are held
-  together by the pelvis, and two legs that fell in wildly different directions
-  read as a doll rather than as a person. Much beyond this the arms start
-  crossing the head and the legs start crossing the arms.
+  against `CORPSE_LEG_JITTER` 0.26). Arms are the loose end of a dropped body
+  and land wherever they were thrown; hips are held together by the pelvis, and
+  two legs that fell in wildly different directions read as a doll rather than
+  as a person. Much beyond this the arms start crossing the head and the legs
+  start crossing the arms.
+- **The *angles* are drawn per limb and the *lengths* per pair**, which is the
+  whole of what makes a body read as sprawled rather than deformed. A person's
+  arms are the same length as each other; what a fall randomises is where they
+  end up pointing. They were 1.45 and 1.7 with a third of a radius either way on
+  top and drawn independently, so one arm could come out at 1.15 radii and the
+  other at 2.0 — reported off a screenshot as *"arms need to be the same
+  length"*. One draw for both arms, one for both legs, and the pair still
+  varies **0.44 radii between bodies**.
+- **`corpseLimbs` is that table, pure and exported**, the same split as
+  `corpsePose` beside it: "the two arms are the same length" is an exact
+  statement about two numbers, and recovering an arm's drawn length from pixels
+  means working back from a shoulder position and a bearing — the same claim
+  answered less certainly. Measured over 20,000 seeds of every pose: **0 bodies
+  with uneven arms, 0 with uneven legs**.
 
 `client/corpserig.html` is the rig, under `client/src` so unlike the harnesses
 at `server/` root it is covered by `npx tsc --noEmit`. rAF is throttled to
@@ -5432,12 +5446,13 @@ rare for some zombies to fall completely sideways"*.
 - **It went 1 in 5 across 40° to 2 in 5 across 70°.** At the first figures most
   of what you saw was a street of bodies lying the same way with the occasional
   one slightly off: the variation was there and it was not doing any work.
-- **A body on its side gets a longer far arm than looks right.** It comes off
-  the shoulder at a hundred degrees, so most of its length is spent going *back*
-  across the body rather than out from it — at the short end of the ordinary
-  jitter its tip finished barely past the torso and the arm all but disappeared
-  into it, which is the missing-arm complaint again in a different pose.
-  Measured: **1.03 body radii, where the torso is 1.15 long.**
+- **A body on its side has its pair's length draw damped rather than
+  dropped.** The far arm comes off the shoulder at a hundred degrees, so most of
+  its length is spent going *back* across the body rather than out from it — at
+  the short end of the ordinary draw its tip finished barely past the torso and
+  the arm all but disappeared into it, which is the missing-arm complaint again
+  in a different pose. Measured: **1.03 body radii, where the torso is 1.15
+  long.** Damping keeps the two equal to each other and neither tucking away.
 - **It costs nothing.** The pose is three hashes and the drawing is the same
   handful of strokes it always was.
 

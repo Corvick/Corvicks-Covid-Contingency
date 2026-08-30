@@ -35,6 +35,7 @@ import {
   CORPSE_DIAGONAL_ARC,
   CORPSE_KNEE,
   clearBlood,
+  corpseLimbs,
   corpsePose,
   corpseSeed,
   drawZombieCorpses,
@@ -181,6 +182,18 @@ interface Result {
   /** Mean of those, against the arms with the tilt taken back off them. */
   legDrift: number;
   armDrift: number;
+  /**
+   * Bodies whose two arms are not the same length, and whose two legs are not.
+   *
+   * **Read off `corpseLimbs` rather than off the canvas**, which is why that
+   * table is exported. It is an exact statement about two numbers; recovering
+   * an arm's drawn length from pixels means working back from a shoulder
+   * position and a bearing, which is the same claim answered less certainly.
+   */
+  unevenArms: number;
+  unevenLegs: number;
+  /** How much the pair's own length varies between bodies, in radii. */
+  armLenRange: number;
   /** A body on its side: are all four limbs out the same way? */
   sidewaysOneSided: number;
   sidewaysTried: number;
@@ -209,6 +222,9 @@ const result: Result = {
   legHold: [],
   legDrift: 0,
   armDrift: 0,
+  unevenArms: 0,
+  unevenLegs: 0,
+  armLenRange: 0,
   sidewaysOneSided: 0,
   sidewaysTried: 0,
   sidewaysRuns: [],
@@ -594,6 +610,33 @@ try {
    * then asked the separate question of whether the drawing does what the pose
    * says.
    */
+  /*
+   * A person's arms are the same length as each other, and so are their legs.
+   * Swept over every kind of body — square, diagonal and on its side — because
+   * the sideways pose builds its own table and could drift apart on its own.
+   */
+  let armLo = Infinity;
+  let armHi = -Infinity;
+  for (let i = 0; i < 20_000; i++) {
+    const seed = i / 20_000;
+    const limbs = corpseLimbs(seed, corpsePose(seed));
+    if (Math.abs(limbs[0].length - limbs[1].length) > 1e-9) result.unevenArms++;
+    if (Math.abs(limbs[2].length - limbs[3].length) > 1e-9) result.unevenLegs++;
+    armLo = Math.min(armLo, limbs[0].length);
+    armHi = Math.max(armHi, limbs[0].length);
+  }
+  result.armLenRange = Number((armHi - armLo).toFixed(3));
+  if (result.unevenArms > 0) {
+    result.errors.push(`${result.unevenArms} bodies have arms of different lengths`);
+  }
+  if (result.unevenLegs > 0) {
+    result.errors.push(`${result.unevenLegs} bodies have legs of different lengths`);
+  }
+  // Equal to each other, not equal on every body — or the variety goes with it.
+  if (result.armLenRange < 0.2) {
+    result.errors.push(`arm length barely varies between bodies: ${f1(result.armLenRange)} radii`);
+  }
+
   const N = 40_000;
   let diag = 0;
   let side = 0;

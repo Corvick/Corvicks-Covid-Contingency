@@ -3067,8 +3067,27 @@ export function setThreeLimbedCorpse(v: boolean): void {
  */
 const CORPSE_ARM_JITTER = 0.55;
 const CORPSE_LEG_JITTER = 0.26;
-const CORPSE_ARM_LEN_JITTER = 0.3;
+/**
+ * How much longer or shorter than nominal a pair of limbs is, in body radii.
+ *
+ * **A pair, not a limb.** Both arms take one draw and both legs take another,
+ * because a person's arms are the same length as each other — it is the *angle*
+ * a fall randomises, not the anatomy. Drawn independently they were 1.45 and
+ * 1.7 with a third of a radius either way on top, so one arm could come out at
+ * 1.15 and the other at 2.0, and a body reads as deformed rather than sprawled.
+ */
+const CORPSE_ARM_LEN_JITTER = 0.22;
 const CORPSE_LEG_LEN_JITTER = 0.14;
+/**
+ * How long a limb is before that draw, in body radii.
+ *
+ * One figure per pair, for the same reason. The arms' was 1.45 and 1.7 and is
+ * the average of the two; the far arm on a body lying on its side keeps its own
+ * because of where it points — see `corpseLimbs`.
+ */
+const CORPSE_ARM_LEN = 1.58;
+const CORPSE_LEG_LEN = 1.55;
+const CORPSE_SIDEWAYS_ARM_LEN = 1.55;
 
 /**
  * How a body went down: mostly straight back along the round, sometimes at an
@@ -3142,6 +3161,76 @@ export function corpsePose(seed: number): { tilt: number; sideways: boolean; sig
   };
 }
 
+/** The drawing as it was, for `setThreeLimbedCorpse`: bearing, length. */
+const LEGACY_LIMBS: Array<[number, number]> = [
+  [1.25, 1.45],
+  [-1.7, 1.7],
+  [2.5, 1.5],
+  [-2.7, 1.6],
+];
+
+/** One limb, in the body's own frame: off the shoulder or the hip. */
+export interface CorpseLimb {
+  /** Bearing off `upper` for an arm, off `lower` for a leg. */
+  angle: number;
+  /** In body radii. */
+  length: number;
+  hip: boolean;
+}
+
+/**
+ * Where a given body's four limbs ended up — two arms, then two legs.
+ *
+ * **Pure and exported so a claim about them can be measured**, the same split
+ * as `corpsePose` beside it and `commandCardSlots` against the card. "The two
+ * arms are the same length" is an exact statement about two numbers, and
+ * reading it back off pixels — where an arm's drawn length has to be recovered
+ * from a shoulder position and a bearing — would be answering it the hard way
+ * and less certainly.
+ *
+ * **The lengths are drawn per pair and the angles per limb.** A person's arms
+ * are the same length as each other; what a fall randomises is where they end
+ * up pointing. Drawn independently, as they were, one arm could come out at
+ * 1.15 radii and the other at 2.0 and the body read as deformed rather than
+ * sprawled.
+ */
+export function corpseLimbs(
+  seed: number,
+  pose: { tilt: number; sideways: boolean; sign: number },
+): CorpseLimb[] {
+  const jit = (i: number): number => hash2(seed * 97 + i, i * 7.13 + 3.1) * 2 - 1;
+  // One draw for both arms, one for both legs.
+  const armLen = jit(10) * CORPSE_ARM_LEN_JITTER;
+  const legLen = jit(11) * CORPSE_LEG_LEN_JITTER;
+  const s = pose.sign;
+
+  if (pose.sideways) {
+    return [
+      { angle: s * 0.95, length: CORPSE_SIDEWAYS_ARM_LEN + armLen * 0.55, hip: false },
+      /*
+       * **The far arm keeps its own bearing and takes the same length**, and it
+       * is the length that has to be watched here rather than the pair. It
+       * comes off the shoulder at a hundred degrees, so most of it is spent
+       * going *back* across the body rather than out from it — at the short end
+       * of the ordinary draw its tip finished barely past the torso and the arm
+       * all but disappeared into it, which is the missing-arm complaint again
+       * in a different pose. Measured: 1.03 body radii, against a torso 1.15
+       * long. The pair's draw is damped rather than dropped, so the two stay
+       * equal to each other and neither tucks away.
+       */
+      { angle: s * 1.85, length: CORPSE_SIDEWAYS_ARM_LEN + armLen * 0.55, hip: false },
+      { angle: s * 2.62, length: CORPSE_LEG_LEN + legLen, hip: true },
+      { angle: s * 2.88, length: CORPSE_LEG_LEN + legLen, hip: true },
+    ];
+  }
+  return [
+    { angle: 1.25 + jit(0) * CORPSE_ARM_JITTER, length: CORPSE_ARM_LEN + armLen, hip: false },
+    { angle: -1.7 + jit(1) * CORPSE_ARM_JITTER, length: CORPSE_ARM_LEN + armLen, hip: false },
+    { angle: 2.5 + jit(2) * CORPSE_LEG_JITTER, length: CORPSE_LEG_LEN + legLen, hip: true },
+    { angle: -2.7 + jit(3) * CORPSE_LEG_JITTER, length: CORPSE_LEG_LEN + legLen, hip: true },
+  ];
+}
+
 /**
  * A flat sprawled body — cheap enough to draw live and to bake.
  *
@@ -3182,9 +3271,6 @@ function drawSprawled(
   const r = ENTITY_RADIUS.zombie;
   const ca = Math.cos(a);
   const sa = Math.sin(a);
-  // -1..1 from the body's seed and the limb's index.
-  const jit = (i: number): number => hash2(seed * 97 + i, i * 7.13 + 3.1) * 2 - 1;
-
   const pose = threeLimbedCorpse ? { tilt: 0, sideways: false, sign: 1 } : corpsePose(seed);
   // The half of the body that went over, and the half that stayed where it was
   // standing. They are the same bearing on four bodies in five.
@@ -3224,28 +3310,7 @@ function drawSprawled(
    * right down with them: at the ordinary spread a "stacked" pair of legs
    * scissors open and it stops reading as sideways.
    */
-  const s = pose.sign;
-  const limbs: Array<[number, number, number, number, number, number, number]> = pose.sideways
-    ? [
-        // rootX, rootY, base angle, base length, angle jitter, length jitter, root bearing
-        [shoulderX, shoulderY, s * 0.95, 1.5, 0.2, CORPSE_ARM_LEN_JITTER, upper],
-        // **The far arm is longer here than it looks it should be, and its
-        // length varies less.** It comes off the shoulder at a hundred degrees,
-        // so most of its length is spent going *back* across the body rather
-        // than out from it — at the short end of the ordinary jitter its tip
-        // finished barely past the torso and the arm all but disappeared into
-        // it, which is the missing-arm complaint again in a different pose.
-        // Measured: it reached 1.03 body radii where the torso is 1.15 long.
-        [shoulderX, shoulderY, s * 1.85, 1.55, 0.2, 0.12, upper],
-        [hipX, hipY, s * 2.62, 1.55, 0.1, CORPSE_LEG_LEN_JITTER, lower],
-        [hipX, hipY, s * 2.88, 1.45, 0.1, CORPSE_LEG_LEN_JITTER, lower],
-      ]
-    : [
-        [shoulderX, shoulderY, 1.25, 1.45, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER, upper],
-        [shoulderX, shoulderY, -1.7, 1.7, CORPSE_ARM_JITTER, CORPSE_ARM_LEN_JITTER, upper],
-        [hipX, hipY, 2.5, 1.5, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER, lower],
-        [hipX, hipY, -2.7, 1.6, CORPSE_LEG_JITTER, CORPSE_LEG_LEN_JITTER, lower],
-      ];
+  const limbs = corpseLimbs(seed, pose);
 
   g.strokeStyle = shade(color, -18);
   g.lineCap = 'round';
@@ -3255,16 +3320,19 @@ function drawSprawled(
     // The arm that was missing is the first entry, so gating it here is the
     // whole of the control.
     if (threeLimbedCorpse && i === 0) continue;
-    const [rx, ry, base, len, spread, lenSpread, from] = limbs[i];
+    const limb = limbs[i];
+    const rootX = limb.hip ? hipX : shoulderX;
+    const rootY = limb.hip ? hipY : shoulderY;
     // Arms off the half that went over, legs off the half that did not.
-    const angle = threeLimbedCorpse ? a + base : from + base + jit(i) * spread;
-    const reach = r * (threeLimbedCorpse ? len : len + jit(i + 10) * lenSpread);
+    const angle = (limb.hip ? lower : upper) + limb.angle;
     // The three it always had came off the middle; the old drawing is the
-    // control, so it keeps its own roots.
-    const ox = threeLimbedCorpse ? (i === 3 ? x - ca * r * 0.4 : x) : rx;
-    const oy = threeLimbedCorpse ? (i === 3 ? y - sa * r * 0.4 : y) : ry;
+    // control, so it keeps its own roots and its own bearings.
+    const ox = threeLimbedCorpse ? (i === 3 ? x - ca * r * 0.4 : x) : rootX;
+    const oy = threeLimbedCorpse ? (i === 3 ? y - sa * r * 0.4 : y) : rootY;
+    const at = threeLimbedCorpse ? a + LEGACY_LIMBS[i][0] : angle;
+    const reach = r * (threeLimbedCorpse ? LEGACY_LIMBS[i][1] : limb.length);
     g.moveTo(ox, oy);
-    g.lineTo(ox + Math.cos(angle) * reach, oy + Math.sin(angle) * reach);
+    g.lineTo(ox + Math.cos(at) * reach, oy + Math.sin(at) * reach);
   }
   g.stroke();
   // Torso, on the half of the body that went over. **Narrower on its side**:
