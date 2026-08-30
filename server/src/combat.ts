@@ -8,6 +8,7 @@ import {
   GUNSHOT_ALERT_RADIUS,
   ZOMBIE_LAST_SEEN_MS,
   ZOMBIE_PROVOKED_MS,
+  ZOMBIE_RETALIATE_CHANCE,
   PLAYER_ONE_SHOT_KILL,
   MUZZLE_OFFSET_MUL,
   WINDOW_BULLET_DAMAGE,
@@ -116,6 +117,20 @@ function alertZombies(
     state.path = null;
     state.nextPathAt = 0;
   }
+}
+
+/**
+ * True is the grudge as it was before the zombie was given a choice: every shot
+ * turns it, and the prey it walked away from may pull it straight back.
+ *
+ * Kept rather than deleted with the measurement, like `setSettledStandsStill`:
+ * "it decides once" means nothing without "and it used to decide twice a
+ * second". `server/provoke.ts` reads it.
+ */
+let zombieAlwaysTakesTheBait = false;
+
+export function setZombieAlwaysTakesTheBait(v: boolean): void {
+  zombieAlwaysTakesTheBait = v;
 }
 
 /**
@@ -365,12 +380,9 @@ function hit(
         state = newAiState(now, victim.x, victim.y);
         world.ai.set(victim.id, state);
       }
-      const toShooter = Math.atan2(shooter.y - victim.y, shooter.x - victim.x);
-      state.heading = toShooter;
-      victim.facing = toShooter;
-
       // Taking a round staggers them for a moment. A heavy rifle round puts
-      // them down harder and for longer than a pistol does.
+      // them down harder and for longer than a pistol does. This happens
+      // whatever it decides below — being shot hurts either way.
       const slowMs = def?.slowMs ?? SHOT_SLOW_MS;
       state.slowUntil = Math.max(state.slowUntil, now + slowMs);
       state.slowMul = Math.min(state.slowMul || 1, def?.slowMul ?? SHOT_SLOW_MULTIPLIER);
@@ -390,6 +402,13 @@ function hit(
        * — with three people firing, "commit to the one that shot at them
        * originally" is only meaningful if later shooters cannot take it over.
        */
+      if (zombieForgetsTheShooter || zombieAlwaysTakesTheBait) {
+        // Both controls keep the flinch on every round, which is what they had.
+        const spin = Math.atan2(shooter.y - victim.y, shooter.x - victim.x);
+        state.heading = spin;
+        victim.facing = spin;
+      }
+
       if (zombieForgetsTheShooter) {
         // The old behaviour, for the harness only: a coin toss per round that
         // landed, and a pause rather than a decision.
@@ -413,9 +432,54 @@ function hit(
         return;
       }
 
+      /*
+       * **And being shot is a decision, taken once.**
+       *
+       * The grudge above fixed a zombie being re-decided by every round in a
+       * burst. What it did not fix is the other half of the same complaint,
+       * reported later: shoot a zombie that is *chasing somebody* and it turns
+       * toward you for a tick and is then pulled straight back, because a
+       * zombie chasing somebody is by definition inside the pouncing-distance
+       * carve-out that lets a provoked one take a body at its elbow. Turn,
+       * pulled back, turn, pulled back.
+       *
+       * So it decides: come, or carry on. The roll happens **once**, here, when
+       * the grudge is set — never per round, which is the trap the grudge
+       * itself was written to get out of — and it only happens at all when
+       * there is something to weigh the shot against. A zombie with nothing in
+       * front of it always turns.
+       */
       const held = state.provokedBy !== null && now < state.provokedUntil;
-      if (!held) state.provokedBy = shooter.id;
-      if (state.provokedBy === shooter.id) {
+      if (!held) {
+        const prey =
+          state.targetId !== null && state.targetId !== shooter.id
+            ? world.entities.get(state.targetId)
+            : undefined;
+        const busy = prey !== undefined && (prey.type === 'human' || prey.type === 'officer');
+        state.provokedBy = shooter.id;
+        // Set here as well as below, so a zombie that decides to carry on is
+        // not asked again by the very next round of the same burst.
+        state.provokedUntil = now + ZOMBIE_PROVOKED_MS;
+        state.provokedTook =
+          zombieAlwaysTakesTheBait || !busy || Math.random() < ZOMBIE_RETALIATE_CHANCE;
+        state.provokedFrom =
+          !zombieAlwaysTakesTheBait && state.provokedTook && busy ? state.targetId : null;
+      }
+      if (state.provokedBy === shooter.id && state.provokedTook) {
+        /*
+         * **The spin round is part of the decision, not part of the wound.**
+         *
+         * It used to happen on every round that landed, above all of this — and
+         * on a zombie that then carried on chasing, that spin *is* the reported
+         * twitch: the body snaps a hundred and eighty degrees toward the shot
+         * and swings back over the next few ticks with nothing having changed.
+         * A zombie that has decided to carry on does not look up; one that is
+         * coming for you turns to face you, which it was going to do anyway.
+         */
+        const toShooter = Math.atan2(shooter.y - victim.y, shooter.x - victim.x);
+        state.heading = toShooter;
+        victim.facing = toShooter;
+
         state.provokedUntil = now + ZOMBIE_PROVOKED_MS;
         state.lastSeenX = shooter.x;
         state.lastSeenY = shooter.y;

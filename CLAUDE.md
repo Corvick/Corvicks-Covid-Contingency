@@ -1219,6 +1219,9 @@ own.
   reported flip-flop: it ends in a grab, with the grudge still standing
   underneath it when that resolves. Taking it does **not** cost the remembered
   spot, or the exception becomes another way to lose the grudge.
+  - **And one exception to the exception**: the body it decided to leave. See
+    **It decides once, and the twitch was the flinch** below — the carve-out
+    handing a chased civilian straight back is the whole of the second report.
 - **The noise is a nudge, not a grudge.** `alertZombies` still sends everything
   in `GUNSHOT_ALERT_RADIUS` (900) toward the bang with no commitment, and a meal
   in front of them still wins — hearing a shot is not the same as being shot,
@@ -1288,6 +1291,62 @@ and every one of them made the two modes look alike:*
   And staged at 150px it sat exactly on `ZOMBIE_LUNGE_RANGE`, the one distance
   the new rule deliberately lets through, so the rig measured the carve-out and
   the *new* behaviour scored worse than the old.
+
+#### It decides once, and the twitch was the flinch
+
+Reported later, and it is the same complaint from the other side: *"when I shoot
+a zombie that is chasing a civilian it twitches in my direction but then
+immediately goes back to chasing the civilian. The zombie needs to decide if
+it's going to be distracted and chase me or keep chasing the civilian, not this
+back and forth."*
+
+**Two causes, and the grudge above is what made the first one certain.** Every
+round that landed set the grudge, so the zombie *always* turned — and a zombie
+chasing somebody is by definition inside the pouncing-distance carve-out, so
+`senseTarget` handed the prey back on the very next perception tick. Turn,
+pulled back, turn. Measured with the old behaviour gated in: **105 of 105 runs
+turned and turned back, a median of 4 times each, and 0 of 105 ever actually
+came** — 408 ticks facing the shooter against 20,062 on the prey.
+
+- **`ZOMBIE_RETALIATE_CHANCE` is the decision, and it is the old 45% roll put
+  back in the one shape that is not the trap the grudge was written to escape.**
+  That roll was made *per round that landed*; this one is made **once**, when
+  the grudge is set, and latched in `provokedTook` for as long as the grudge
+  stands. A burst cannot re-ask it, and a zombie that decided to carry on goes
+  on carrying on.
+- **It only rolls when there is something to weigh the shot against.** A zombie
+  with nothing in front of it always turns — there is no decision to make.
+- **`provokedFrom` is the body it walked away from**, and it is the one thing
+  the pouncing carve-out does not cover. Everybody else at arm's length is still
+  fair game, which is what keeps the carve-out doing its own job; the prey it
+  just decided to leave is the one that must not pull it back.
+- **The spin round is part of the decision, not part of the wound**, and this is
+  the half that is literally the reported *twitch*. `hit` snapped the body a
+  hundred and eighty degrees toward the shot on every round that landed, above
+  everything else — so on a zombie that then carried on chasing, that spin is a
+  body whipping round and swinging back with nothing having changed. The
+  stagger still lands either way: being shot hurts whatever it decides.
+
+| a zombie chasing prey 105px off, shot once | OLD | NEW |
+|---|---|---|
+| turned and turned back | **105/105 runs** | **0/107** |
+| …how many times, median | **4** | **0** |
+| came for the shooter | **0/105** | **52/107** |
+| ticks facing the shooter | 408 of 20,470 | 11,336 of 23,326 |
+
+`server/provoke.ts` carries it, beside the grudge's own measurement.
+`setZombieAlwaysTakesTheBait` is the second gate there and it is kept.
+
+*Two things about measuring it were the rig lying rather than the code failing:*
+
+- **The twitch is not visible in `targetId` at all.** `hit` clears the target
+  and the next perception tick hands the prey straight back, so a rig sampling
+  between ticks sees "prey" on both sides of it and scored the *old* behaviour
+  **0 twitches out of 7**. What is on screen is the *body* — the flinch, and the
+  chase swinging it back — so that is what is counted.
+- **Staged on a clear disc it staged 6 runs in 40**, which for a coin toss is
+  not a sample. All three bodies are pinned on one line, so what the run needs
+  is a clear *lane*, not a clear `SHOT_GAP + 160` disc: 120 of 120 now.
 
 ### Word of a chase travels exactly one hop
 

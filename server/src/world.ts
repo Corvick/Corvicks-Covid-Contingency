@@ -309,6 +309,27 @@ export interface AiState {
    */
   provokedBy: string | null;
   provokedUntil: number;
+  /**
+   * Whether it took the bait, decided **once** when the grudge was set.
+   *
+   * Reported as *"it twitches in my direction but then immediately goes back to
+   * chasing the civilian"* — the zombie turned on every shot and was then
+   * pulled straight back by the prey at its elbow, which is a decision made and
+   * unmade twice a second. Latched here so that a zombie which decided to
+   * ignore you goes on ignoring you, and one which decided to come does not get
+   * talked out of it. `ZOMBIE_RETALIATE_CHANCE` is the roll.
+   */
+  provokedTook: boolean;
+  /**
+   * The prey it walked away from to come for the shooter.
+   *
+   * A provoked zombie will still take somebody who walks into its face at
+   * pouncing distance — that carve-out is why the grudge is not absurd. But the
+   * body it just *decided to leave* is exactly the one thing that must not pull
+   * it back, and a zombie chasing somebody is by definition right on top of
+   * them. Everybody else is still fair game.
+   */
+  provokedFrom: string | null;
   wanderX: number;
   wanderY: number;
   pauseUntil: number;
@@ -1320,6 +1341,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     lastSeenY: null,
     provokedBy: null,
     provokedUntil: 0,
+    provokedTook: false,
+    provokedFrom: null,
     wanderX: x,
     wanderY: y,
     pauseUntil: 0,

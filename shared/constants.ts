@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.17.2';
+export const GAME_VERSION = '0.18.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2696,6 +2696,19 @@ export const ZOMBIE_PROVOKED_MS = 12000;
  * Comfortably wider than a grab so it does not depend on landing on the exact
  * remembered pixel — the memory is dropped at 30px of it.
  */
+/**
+ * Whether a zombie that is *already chasing somebody* turns on whoever shot it.
+ *
+ * **Rolled once, when the grudge is set, and never again while it stands.** A
+ * chance rolled per round that landed is what the grudge replaced — a burst
+ * re-deciding the same zombie several times a second — and this is the same
+ * figure put back in the one shape that is not that: a decision, latched, for
+ * as long as `ZOMBIE_PROVOKED_MS`.
+ *
+ * A zombie with nothing in front of it does not roll at all: there is nothing
+ * to weigh a shot against, and it always turns.
+ */
+export const ZOMBIE_RETALIATE_CHANCE = 0.5;
 export const ZOMBIE_PROVOKED_SNIFF = 70;
 
 // ---------------------------------------------------------------- NPC officers

@@ -52,7 +52,7 @@ import {
   type Entity,
 } from './src/world.js';
 import { computeFrozen, updateAi } from './src/ai.js';
-import { fire, setZombieForgetsTheShooter } from './src/combat.js';
+import { fire, setZombieAlwaysTakesTheBait, setZombieForgetsTheShooter } from './src/combat.js';
 import { ITEMS } from '../shared/items.js';
 import {
   TICK_RATE,
@@ -68,6 +68,8 @@ const RUNS = Number(process.env.RUNS ?? 12);
 const TICKS = Number(process.env.TICKS ?? 240);
 /** How far the shooter stands off. Inside sight, so neither mode is blind. */
 const SHOT_GAP = 380;
+/** Runs for the choice half — it is a coin toss, so a handful says nothing. */
+const CHOICE_RUNS = Number(process.env.CHOICE_RUNS ?? 120);
 /**
  * Where the decoy stands: half way to the shooter, and this far off to one side.
  *
@@ -356,3 +358,174 @@ for (const old of [true, false]) {
 }
 
 setZombieForgetsTheShooter(false);
+
+// ------------------------------------------------- and it decides just once
+/*
+ * **A zombie already chasing somebody is the case the grudge did not cover.**
+ *
+ * Reported as *"it twitches in my direction but then immediately goes back to
+ * chasing the civilian"*. The grudge turned it on every shot, and the
+ * pouncing-distance carve-out — the thing that stops a provoked zombie walking
+ * *through* a body at arm's length — handed its prey straight back, because a
+ * zombie chasing somebody is by definition at arm's length from them. Turn,
+ * pulled back, turn.
+ *
+ * Staged differently from the run above on purpose: there the decoy stands well
+ * off the route and the question is whether the zombie is tempted away. Here
+ * the zombie is **already chasing the prey and right on top of it**, which is
+ * the only geometry the report is about.
+ */
+interface Choice {
+  hit: boolean;
+  /** Took the bait: ended up facing the shooter rather than the prey. */
+  took: boolean;
+  /**
+   * Times it turned toward the shooter and turned back to the prey.
+   *
+   * **Read off the body's own heading, not off `targetId`.** The twitch is a
+   * single tick in the target — `hit` clears it and the next perception tick
+   * hands the prey straight back — so a rig sampling `targetId` between ticks
+   * never sees it at all and scored the *old* behaviour 0 twitches out of 7.
+   * What is actually on screen is the body: `hit` snapped it a hundred and
+   * eighty degrees toward the shot and the chase swung it back over the next
+   * few ticks. That is the report, and it is what this counts.
+   */
+  twitches: number;
+  /** Ticks facing the prey, and facing the shooter, after the shot. */
+  onPrey: number;
+  onShooter: number;
+}
+
+/** How near the prey the zombie is staged — inside `ZOMBIE_LUNGE_RANGE`. */
+const CHASE_GAP = Math.round(ZOMBIE_LUNGE_RANGE * 0.7);
+
+/**
+ * Ground with a clear lane along it, rather than a clear disc around it.
+ *
+ * All three bodies are pinned on one line, so a disc of `SHOT_GAP + 160` is
+ * asking for far more room than the run uses — and most cities do not have one.
+ * It staged **6 runs in 40** that way, which for a coin toss is not a sample.
+ */
+function openLane(world: World, back: number, forward: number): { x: number; y: number } | null {
+  for (let i = 0; i < 6000; i++) {
+    const x = 400 + Math.random() * (world.map.width - 800);
+    const y = 400 + Math.random() * (world.map.height - 800);
+    let clear = true;
+    for (let d = -back; d <= forward && clear; d += 14) {
+      for (const off of [-24, 0, 24]) {
+        if (world.nav.isBlocked(x + d, y + off)) {
+          clear = false;
+          break;
+        }
+      }
+    }
+    if (clear) return { x, y };
+  }
+  return null;
+}
+
+function choiceRun(): Choice | null {
+  const world = emptyCity();
+  const spot = openLane(world, SHOT_GAP + 50, CHASE_GAP + 50);
+  if (!spot) return null;
+  const now0 = Date.now();
+
+  const shooter = makeEntity('shooter', 'officer', spot.x - SHOT_GAP, spot.y);
+  world.entities.set('shooter', shooter);
+  const z = makeEntity('z', 'zombie', spot.x, spot.y);
+  world.entities.set('z', z);
+  world.ai.set('z', newAiState(now0, z.x, z.y));
+  // Directly away from the shooter, so "went for the prey" and "went for the
+  // shooter" are opposite headings and cannot be confused.
+  const prey = makeEntity('prey', 'human', spot.x + CHASE_GAP, spot.y);
+  world.entities.set('prey', prey);
+  world.ai.set('prey', newAiState(now0, prey.x, prey.y));
+  rebuildEntityGrid(world);
+
+  const out: Choice = { hit: false, took: false, twitches: 0, onPrey: 0, onShooter: 0 };
+  const st = world.ai.get('z')!;
+  let now = now0;
+  let shotAt = -1;
+  let last: string | null = null;
+  let leftPrey = false;
+
+  for (let i = 0; i < TICKS; i++) {
+    pin(world, shooter, spot.x - SHOT_GAP, spot.y, now);
+    pin(world, prey, spot.x + CHASE_GAP, spot.y, now);
+    pin(world, z, spot.x, spot.y, now);
+    tick(world, now, TICK_MS / 1000);
+    now += TICK_MS;
+
+    /*
+     * **Fire once it has actually settled onto the prey**, not at a fixed tick.
+     * Perception runs at 10Hz staggered per entity, so a fixed tick catches it
+     * before it has looked — the rig fired on 7 runs of 40 and reported the
+     * other 33 as nothing rather than as unstaged.
+     *
+     * One round, because a burst is the thing the grudge already fixed and this
+     * is about a single shot.
+     */
+    if (shotAt < 0) {
+      if (i > 20 && st.targetId === 'prey') {
+        fire(world, shooter, 0, 0, now, ITEMS.boltRifle);
+        // `provokedBy` is the honest "the round landed" signal: it is set on
+        // every path, whichever way the zombie then decides.
+        out.hit = st.provokedBy === 'shooter';
+        shotAt = i;
+        last = 'prey';
+      }
+      continue;
+    }
+    if (!out.hit) break;
+
+    // Which way the body is actually pointing — toward the prey, or back at the
+    // shooter. They are opposite by construction, so this cannot be ambiguous.
+    const toPrey = Math.abs(wrapPi(z.facing - 0));
+    const toShooter = Math.abs(wrapPi(z.facing - Math.PI));
+    const facing = toPrey < 0.6 ? 'prey' : toShooter < 0.6 ? 'shooter' : null;
+    if (facing === 'prey') out.onPrey++;
+    if (facing === 'shooter') out.onShooter++;
+    if (facing !== null && facing !== last) {
+      if (facing === 'prey' && leftPrey) out.twitches++;
+      if (facing === 'shooter') leftPrey = true;
+      last = facing;
+    }
+  }
+  out.took = out.onShooter > out.onPrey;
+  return out;
+}
+
+/** Into -PI..PI. */
+function wrapPi(a: number): number {
+  let d = a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+console.log('--- a zombie already chasing somebody, shot once');
+console.log(
+  `  prey ${CHASE_GAP}px from the zombie (lunge range ${ZOMBIE_LUNGE_RANGE}), shooter ${SHOT_GAP}px the other way\n`,
+);
+
+for (const old of [true, false]) {
+  setZombieAlwaysTakesTheBait(old);
+  const label = old ? 'OLD (always turns)' : 'NEW (decides once)';
+  const runs: Choice[] = [];
+  let staged = 0;
+  for (let r = 0; r < CHOICE_RUNS; r++) {
+    const c = choiceRun();
+    if (c === null) continue;
+    staged++;
+    if (c.hit) runs.push(c);
+  }
+  const twitchy = runs.filter((c) => c.twitches > 0).length;
+  const took = runs.filter((c) => c.took).length;
+  console.log(`  ${label}`);
+  console.log(`    staged / landed        ${staged}/${CHOICE_RUNS} cities, ${runs.length} rounds landed`);
+  console.log(`    turned and turned back ${twitchy}/${runs.length} runs, median ${med(runs.map((c) => c.twitches))} times`);
+  console.log(`    came for the shooter   ${took}/${runs.length}`);
+  console.log(`    ticks on the prey      ${runs.reduce((a, c) => a + c.onPrey, 0)}`);
+  console.log(`    ticks on the shooter   ${runs.reduce((a, c) => a + c.onShooter, 0)}\n`);
+}
+setZombieAlwaysTakesTheBait(false);

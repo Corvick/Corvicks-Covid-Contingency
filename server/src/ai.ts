@@ -6752,7 +6752,11 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
    * up on — ordinary targeting resumes, so a zombie that went to the spot and
    * found nobody is not locked out of the rest of the city for the remainder.
    */
-  const provoked = !forgetsTheShooter() && state.provokedBy !== null && now < state.provokedUntil;
+  const provoked =
+    !forgetsTheShooter() &&
+    state.provokedBy !== null &&
+    now < state.provokedUntil &&
+    state.provokedTook;
   const committed = provoked && state.lastSeenX !== null;
 
   let best: Entity | null = null;
@@ -6791,7 +6795,14 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
     // yourself at something, and an interception at that range is not the
     // reported flip-flop: it ends in a grab, and the grudge is still standing
     // underneath it when that resolves.
-    if (committed && other.id !== state.provokedBy && dist > ZOMBIE_LUNGE_RANGE) continue;
+    // …and the one body the carve-out does not cover is the one it decided
+    // to leave. A zombie chasing somebody is right on top of them, so without
+    // this the exception hands its prey straight back and the decision above
+    // is undone on the tick after it is made — which is the reported twitch.
+    if (committed && other.id !== state.provokedBy) {
+      if (dist > ZOMBIE_LUNGE_RANGE) continue;
+      if (other.id === state.provokedFrom) continue;
+    }
 
     // Someone already swarmed by a full pack isn't worth joining.
     const session = world.grapples.get(other.id);
