@@ -56,7 +56,7 @@ import {
   POLICE_STATION_RACK_DEPTH,
   POLICE_STATION_RACK_BAY,
   POLICE_STATION_RACK_STANDOFF,
-  POLICE_STATION_COUNTER_JUT,
+  POLICE_STATION_COUNTER_DEPTH,
   POLICE_STATION_FAR_END_CHANCE,
 } from '../../shared/constants.js';
 import { NavGrid } from './navgrid.js';
@@ -751,22 +751,22 @@ function roomedBuildingAt(
  * The plan, at `POLICE_STATION_W_TILES` x `POLICE_STATION_H_TILES`:
  *
  * ```
- * x:  0     5           10                  20
- * y=0 +-----+------------+--+--+--+--+--+----+
- *     |CELL |            |  ARMOURY, racked  |   the back
- *     |     |    back    |  along both walls |
- * y=5 +--#--+   office   +##+--+--+--+--+----+
- *     |                                      |
- *     |         OFFICE, in cubicles          |
- * y=12+-----+          +--------+##+---------+   the way through
- *     |     |==glass==|    LOBBY             |   the teller's counter
- * y=16+--------------##----------------------+   the front door
+ * x:  0      6            12                      24
+ * y=0 +------+-------------+--+--+--+--+--+--+-----+
+ *     |CELL  |             |   ARMOURY, racked     |   the back
+ *     |      |    back     |   along both walls    |
+ * y=6 +--##--+   office    D--+--+--+--+--+--+-----+
+ *     |                                            |
+ *     |           OFFICE, in cubicles              |
+ * y=14+-----[====counter====]------+##+------------+   the way through
+ *     |              LOBBY                         |
+ * y=19+---------------------##---------------------+   the front door
  * ```
  *
  * **Every gap in it is at least `MIN_LIMB` tiles**, which is what stops any of
- * this being a room nothing in the game fits into — the cell is five tiles
+ * this being a room nothing in the game fits into — the cell is six tiles
  * across, the cubicle partitions are two clear of everything, the armoury's
- * aisle is three, and each doorway is a `GAP`-wide opening like every other
+ * aisle is four, and each doorway is a `GAP`-wide opening like every other
  * doorway in the city. See "A building is somewhere you can get into".
  *
  * The office is deliberately **L-shaped**: the strip between the cell and the
@@ -776,13 +776,12 @@ function roomedBuildingAt(
  *
  * Three things in it are not simply rooms with walls round them:
  *
- * - **The counter juts.** The clerk's line steps a tile forward into the lobby
- *   between x=4 and x=9, with **glass across the front of the jut and solid
- *   wall down the two returns** — which is what a bank teller's window looks
- *   like from directly above, and what makes it read as a counter rather than
- *   as a pane somebody happened to leave in a wall. The back of the jut is
- *   open, so the well behind the glass belongs to the office and the clerk
- *   stands in it.
+ * - **The counter is a slab.** The clerk's line is a `WindowPane`
+ *   `POLICE_STATION_COUNTER_DEPTH` deep rather than a wall's thickness — a
+ *   *rectangle* the screen stands on, which is what a bank teller's station
+ *   looks like from directly above. Glass all the way through, because that is
+ *   the only shape that is both see-through and solid; what makes it read as
+ *   furniture is `drawCounter` on the client.
  * - **The armoury is racked.** Stubs of wall jut off the back and the front
  *   wall every `POLICE_STATION_RACK_BAY` tiles and the stock stands in the
  *   mouth of each stall between two of them. `station.racks` is that list of
@@ -826,6 +825,29 @@ function policeStationAt(
     const [p, q] = hspan(a, b);
     pushRun(windows, { horiz: true, a: 0, b: 0, line }, p, q, originX, originY, t);
   };
+  /**
+   * **The clerk's counter: one slab, `depth` px deep, hung off a wall line.**
+   *
+   * A `WindowPane` rather than a `Wall`, and the whole depth of it — that is
+   * the only shape that gives "see, but do not travel through", since
+   * `hasLineOfSight` ignores panes and `hasWallClearPath` treats them as
+   * solid. `pushRun` cannot make it: that helper builds runs a wall thick,
+   * centred on a tile line, which is exactly what this is not.
+   *
+   * It starts flush with the wall line's own outer face so it butts against
+   * the runs either side of it with no seam, and grows `inward` from there.
+   */
+  const counter = (line: number, a: number, b: number, depth: number, inward: number): void => {
+    const [p, q] = hspan(a, b);
+    const near = originY + line * TILE - (t / 2) * inward;
+    windows.push({
+      x: originX + p * TILE - t / 2,
+      y: inward > 0 ? near : near - depth,
+      w: (q - p) * TILE + t,
+      h: depth,
+      counter: true,
+    });
+  };
   /** A doorway in a horizontal line, recorded so everything can reason about it. */
   const hdoor = (line: number, a: number, b: number, interior: boolean, bars = false): void => {
     const [p, q] = hspan(a, b);
@@ -860,10 +882,12 @@ function policeStationAt(
 
   // Where the plan's rooms meet, in tiles. Named rather than repeated, because
   // the racks, the counter and the parking all have to agree with them.
-  const CELL_X = 5; // the cell runs 0..CELL_X
-  const ARM_X = 10; // the armoury runs ARM_X..W
-  const BACK_Y = 5; // the back rooms run 0..BACK_Y
-  const COUNTER_Y = 12; // the clerk's line
+  const CELL_X = 6; // the cell runs 0..CELL_X
+  const ARM_X = 12; // the armoury runs ARM_X..W
+  const BACK_Y = 6; // the back rooms run 0..BACK_Y
+  const COUNTER_Y = 14; // the clerk's line
+  const COUNTER_A = 5; // and the span of the counter slab along it
+  const COUNTER_B = 11;
 
   // --- the shell. The front door is the one opening in it.
   hwall(0, 0, W);
@@ -933,39 +957,36 @@ function policeStationAt(
   vwall(ARM_X + GAP, BACK_Y - POLICE_STATION_RACK_DEPTH, BACK_Y);
 
   /*
-   * --- the front counter, jutting into the lobby like a bank teller's window.
+   * --- the front counter: a slab the screen stands on.
    *
-   * Glass across the **front** of the jut and solid wall down the two returns:
-   * you can see the clerk and there is no way past them, which is the whole of
-   * what a teller's window is. Left flat in the wall it read as a pane
-   * somebody had put in an office partition.
+   * A rectangle rather than a line in the wall, which is what a bank teller's
+   * station is from directly above. Glass the whole way through, because that
+   * is the only shape that is both see-through and solid — see `counter()`
+   * above, and `drawCounter` for what makes it read as furniture.
    *
-   * The back of the jut is deliberately left open, so the well behind the
-   * glass is part of the office rather than a sealed pocket — a room with no
-   * exit is exactly what `rooms.ts` is checked for not producing.
+   * It replaces the wall run over its own span rather than sitting in front of
+   * one, so there is exactly one thing between the lobby and the office here
+   * and no sealed pocket behind it.
    */
-  const JUT = POLICE_STATION_COUNTER_JUT;
-  hwall(COUNTER_Y, 0, 4);
-  vwall(4, COUNTER_Y, COUNTER_Y + JUT);
-  hglass(COUNTER_Y + JUT, 4, 9);
-  vwall(9, COUNTER_Y, COUNTER_Y + JUT);
-  hwall(COUNTER_Y, 9, 13);
-  hdoor(COUNTER_Y, 13, 13 + GAP, true);
-  hwall(COUNTER_Y, 13 + GAP, W);
+  hwall(COUNTER_Y, 0, COUNTER_A);
+  counter(COUNTER_Y, COUNTER_A, COUNTER_B, POLICE_STATION_COUNTER_DEPTH, 1);
+  hwall(COUNTER_Y, COUNTER_B, COUNTER_B + GAP + 3);
+  hdoor(COUNTER_Y, COUNTER_B + GAP + 3, COUNTER_B + GAP * 2 + 3, true);
+  hwall(COUNTER_Y, COUNTER_B + GAP * 2 + 3, W);
 
   /*
    * --- cubicles.
    *
-   * Four partitions, each an L of two tiles by two, and **nothing else** —
+   * Five partitions, each an L of two tiles by two, and **nothing else** —
    * the ask was a cubicle layout that is not crowded, and a wall in this game
    * is a wall: a full grid of them would be a maze rather than an office.
    * They are free-standing, so they close nothing off and the office stays one
    * room; and they are kept two tiles clear of the walls above and below, so
    * every slot between them is a `MIN_LIMB` a body can walk down.
    */
-  for (const cx of [3, 7, 11, 15]) {
-    vwall(cx, 7, 9);
-    hwall(7, cx, cx + 2);
+  for (const cx of [3, 7, 11, 15, 19]) {
+    vwall(cx, 8, 10);
+    hwall(8, cx, cx + 2);
   }
 
   // The footprint is a plain rectangle, one rect per tile row, like every
@@ -1010,6 +1031,9 @@ function policeStationAt(
     building: index,
     parking,
     armoury: room(ARM_X, 0, W, BACK_Y),
+    // The counter slab stands inside the lobby's rect, so a spawn sampled in
+    // it can land on the bench — `findSpawn` rejects blocked spots, which is
+    // what already keeps the clerk off it.
     lobby: room(0, COUNTER_Y, W, H),
     office: room(0, BACK_Y, W, COUNTER_Y),
     cell: room(0, 0, CELL_X, BACK_Y),

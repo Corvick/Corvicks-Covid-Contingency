@@ -168,6 +168,17 @@ export interface Window {
   y: number;
   w: number;
   h: number;
+  /**
+   * The clerk's counter: a slab several times a wall's thickness, drawn as a
+   * bench with a screen standing on it rather than as a pane in a wall.
+   *
+   * **A pane is the only shape that gives "see, but do not travel through"** —
+   * `hasLineOfSight` ignores panes and `hasWallClearPath` treats them as solid
+   * — so the whole depth of the counter is glass and this flag is purely about
+   * how it is drawn. Like `Door.bars` it rides on the map, so it costs the wire
+   * one boolean once in `welcome`.
+   */
+  counter?: boolean;
 }
 
 /** A gap punched in a building's wall — where you can actually get in. */

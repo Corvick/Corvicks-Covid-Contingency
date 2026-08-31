@@ -10,8 +10,8 @@
  * depending on map size (have a couple civilians spawn in here to act as staff
  * too) … the office area have a cubicle like layout but not too crowded"*.
  *
- * And then, once it existed: *"a bit of wall jutting out like its a bank tellers
- * window (so you can see but not travel through this) … make the building a
+ * And then, once it existed: *"a thicker wall like a rectangle that the window
+ * sits on" … "make the building a
  * little larger … the jail cell locked and can only be kicked down by officers
  * or by zombies or the zombie dog … 0-3 civilians in the jail cell each round …
  * white parking space lanes for the cars … the loot on gun racks (two stalls
@@ -76,9 +76,11 @@ import {
   POLICE_STATION_APRON,
   POLICE_STATION_RACK_BAY,
   POLICE_STATION_RACK_DEPTH,
+  POLICE_STATION_COUNTER_DEPTH,
   POLICE_STATION_RADIO_CHANCE,
   CAR_LENGTH,
   CAR_WIDTH,
+  WALL_THICKNESS,
   DOOR_HEALTH,
   DOOR_ZOMBIE_DAMAGE,
   TICK_RATE,
@@ -102,6 +104,25 @@ function med(xs: number[]): number {
   if (xs.length === 0) return 0;
   const s = xs.slice().sort((a, b) => a - b);
   return s[Math.floor(s.length / 2)];
+}
+/**
+ * The standard error of the difference between two sample means.
+ *
+ * **Every gate in this file is measured as a gain against a control run, and a
+ * gain needs a band sized off its own sample.** Written as a fixed threshold
+ * one of them sat on a knife edge — "about 2-3 staff" was checked as
+ * `gain > 1.5` and a true gain of 2.5 reads 1.5 at one and a half standard
+ * errors, which is a coin toss on code that is working. Two other checks here
+ * had already been re-sized for exactly this; this makes it the arithmetic
+ * rather than a number somebody picks.
+ */
+function sem2(a: number[], b: number[]): number {
+  const varOf = (xs: number[]): number => {
+    if (xs.length < 2) return 0;
+    const m = mean(xs);
+    return xs.reduce((s, x) => s + (x - m) * (x - m), 0) / (xs.length - 1);
+  };
+  return Math.sqrt(varOf(a) / Math.max(1, a.length) + varOf(b) / Math.max(1, b.length));
 }
 
 interface Row {
@@ -150,6 +171,8 @@ interface Row {
   counterWalks: number;
   /** The control: can you walk lobby-to-office at all, by the doorway. */
   doorWalks: boolean;
+  /** How thick the counter slab is — a wall's thickness would be the old one. */
+  counterDepth: number;
   /** Armoury stock standing in the mouth of a stall. */
   onRack: number;
   armouryItems: number;
@@ -233,6 +256,7 @@ function inspect(world: World): Row {
     counterSees: 0,
     counterWalks: 0,
     doorWalks: false,
+    counterDepth: 0,
     onRack: 0,
     armouryItems: 0,
     stalls: 0,
@@ -376,19 +400,25 @@ function inspect(world: World): Row {
    * you cannot walk from the lobby into the office at all.
    */
   {
-    const pane = world.map.windows.find(
-      (w) => inRect(b, w.x + w.w / 2, w.y + w.h / 2),
-    );
-    if (pane) {
+    /*
+     * **Found by its own flag, not by being the pane inside the footprint.**
+     * A zombie smashing a house window is a different pane and the station is
+     * a building like any other; `counter` is what says which one this is.
+     */
+    const pane = world.map.windows.find((w) => w.counter);
+    if (pane && inRect(b, pane.x + pane.w / 2, pane.y + pane.h / 2)) {
+      row.counterDepth = Math.min(pane.w, pane.h);
       const R = ENTITY_RADIUS.human + 8;
       const horiz = pane.w > pane.h;
+      // Probed from clear of the *slab*, not of a wall line — it is 24px deep
+      // now, so a body's radius off its centre is still standing on it.
       for (const f of [0.2, 0.5, 0.8]) {
         const px = pane.x + pane.w * (horiz ? f : 0.5);
         const py = pane.y + pane.h * (horiz ? 0.5 : f);
-        const ax = horiz ? px : px - R;
-        const ay = horiz ? py - R : py;
-        const bx = horiz ? px : px + R;
-        const by = horiz ? py + R : py;
+        const ax = horiz ? px : pane.x - R;
+        const ay = horiz ? pane.y - R : py;
+        const bx = horiz ? px : pane.x + pane.w + R;
+        const by = horiz ? pane.y + pane.h + R : py;
         if (hasLineOfSight(world, ax, ay, bx, by)) row.counterSees++;
         if (hasWallClearPath(world, ax, ay, bx, by)) row.counterWalks++;
       }
@@ -714,11 +744,13 @@ check(
  * move is the whole distribution, by about their own number.
  */
 const gain = mean(staff) - mean(bareStaff);
+const staffMid = (POLICE_STATION_STAFF_MIN + POLICE_STATION_STAFF_MAX) / 2;
+const staffBand = 3 * sem2(staff, bareStaff);
 check(
-  gain > POLICE_STATION_STAFF_MIN - 0.5,
+  Math.abs(gain - staffMid) < staffBand,
   `and about ${POLICE_STATION_STAFF_MIN}-${POLICE_STATION_STAFF_MAX} of them are staff, not passers-by`,
-  `${mean(staff).toFixed(1)} vs ${mean(bareStaff).toFixed(1)} with the staff gated off,` +
-    ` so +${gain.toFixed(1)}`,
+  `${mean(staff).toFixed(1)} vs ${mean(bareStaff).toFixed(1)} with the staff gated off, so` +
+    ` +${gain.toFixed(2)} against ${staffMid} expected, band +-${staffBand.toFixed(2)}`,
 );
 check(
   made.every((r) => r.strays === 0),
@@ -755,8 +787,13 @@ check(
 // ---------------------------------------------------------------- the counter
 console.log("\n  the clerk's counter");
 check(
+  made.every((r) => r.counterDepth === POLICE_STATION_COUNTER_DEPTH),
+  'it is a slab, not a line in a wall',
+  `${med(made.map((r) => r.counterDepth))}px deep against a wall's ${WALL_THICKNESS}`,
+);
+check(
   made.every((r) => r.counterSees === 3),
-  'you can see through the glass, right across it',
+  'you can see over it, right across it',
   `${made.reduce((a, r) => a + r.counterSees, 0)}/${made.length * 3} sample lines`,
 );
 check(
@@ -790,37 +827,33 @@ check(
 const inmates = made.map((r) => r.inmates);
 const bareInmates = noCell.filter((r) => r.placed).map((r) => r.inmates);
 /*
- * **A head count of the cell is a superset, so the range is checked on the
- * gain and not on the tally** — the same argument, and the same trap, as the
- * staff row above. The cell is part of a building, the ordinary indoor draw
- * samples the building's rows, and it puts somebody in there on about one city
- * in five all by itself. Measured as a raw count, "0-3 locked in" reads a max
- * of 4 on code that is doing exactly what it says.
- *
- * What is checked instead is the mean the cell code moves the count by, banded
- * at three standard errors of a uniform draw over the range \u2014 plus the two
- * ends, which are what "0-3" is actually promising: an empty cell has to be an
- * ordinary sight, and a full one has to happen.
+ * **The head count is exact, because nothing else can be in there.** The
+ * ordinary indoor draw samples a building's own rows and the station is a
+ * building, so it used to land people in the cell like anywhere else — and
+ * measured with the cell's own spawn gated off it reached **three** on its own,
+ * which made "0-3 locked in" a claim about roughly half of who was in there.
+ * `populate` redraws a spawn that lands in the cell now, so the tally *is* the
+ * roll and the control has to read zero.
  */
 const cellGain = mean(inmates) - mean(bareInmates);
-const cellMid = (POLICE_STATION_CELL_MIN + POLICE_STATION_CELL_MAX) / 2;
-const span = POLICE_STATION_CELL_MAX - POLICE_STATION_CELL_MIN + 1;
-const cellBand = (3 * Math.sqrt((span * span - 1) / 12)) / Math.sqrt(Math.max(1, made.length));
 check(
-  Math.abs(cellGain - cellMid) < cellBand,
+  inmates.every((n) => n >= POLICE_STATION_CELL_MIN && n <= POLICE_STATION_CELL_MAX),
   `${POLICE_STATION_CELL_MIN}-${POLICE_STATION_CELL_MAX} civilians locked in it`,
-  `${mean(inmates).toFixed(2)} in the cell vs ${mean(bareInmates).toFixed(2)} with it gated` +
-    ` off, so +${cellGain.toFixed(2)} against ${cellMid} expected, band +-${cellBand.toFixed(2)}`,
-);
-check(
-  Math.min(...inmates) === POLICE_STATION_CELL_MIN,
-  'an empty cell is an ordinary sight',
   `min ${Math.min(...inmates)} med ${med(inmates)} max ${Math.max(...inmates)}`,
 );
 check(
-  Math.max(...inmates) >= POLICE_STATION_CELL_MAX,
-  'and a full one happens',
-  `${[...new Set(inmates)].sort((a, b) => a - b).join(',')} seen`,
+  bareInmates.every((n) => n === 0),
+  'and nobody else ever wanders into a locked cell — the control',
+  `${bareInmates.filter((n) => n > 0).length}/${bareInmates.length} cities with anyone in it` +
+    ` when nobody was put there, mean ${mean(bareInmates).toFixed(2)}`,
+);
+check(
+  Math.min(...inmates) === POLICE_STATION_CELL_MIN &&
+    Math.max(...inmates) >= POLICE_STATION_CELL_MAX &&
+    new Set(inmates).size >= 3,
+  'an empty cell is an ordinary sight, and a full one happens',
+  `${[...new Set(inmates)].sort((a, b) => a - b).join(',')} seen,` +
+    ` mean ${mean(inmates).toFixed(2)} against ${cellGain.toFixed(2)} of gain`,
 );
 
 // ---------------------------------------------------------------- the armoury

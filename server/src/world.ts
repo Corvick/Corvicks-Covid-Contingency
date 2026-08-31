@@ -1881,10 +1881,34 @@ export function acidCloudAt(world: World, x: number, y: number): AcidCloud | nul
 }
 
 /** Rejection-sample a point that clears existing entities and walls. */
+/** Is this spot inside the station's cell — the one room nobody walks into? */
+export function inTheCell(world: World, x: number, y: number): boolean {
+  const cell = world.map.policeStation?.cell;
+  if (!cell) return false;
+  return x > cell.x && x < cell.x + cell.w && y > cell.y && y < cell.y + cell.h;
+}
+
 export function findSpawn(
   world: World,
   radius: number,
   bounds?: { x: number; y: number; w: number; h: number },
+  /**
+   * **Nobody is placed in the locked cell unless they are being locked in it.**
+   *
+   * `isReachable` waves the cell through — doors are not in the nav grid, so
+   * routes are planned as though every one of them were open and the cell's
+   * floor is ordinary floor as far as that test is concerned. But it is not a
+   * room you can walk into, it is a room somebody put you in, and every path
+   * that places a body goes through here: the indoor draw, the general
+   * population, a social circle, and `spawnPlayer`. Measured with only the
+   * indoor draw excluded, a stray still turned up in there on **5 cities in 30**
+   * — and a player who spawns in it is stuck there for the round with nothing
+   * on screen to say why.
+   *
+   * Opt-in rather than opt-out, in the shape `findSpawnNear`'s `outdoors` flag
+   * already uses: the one caller that means the cell says so.
+   */
+  intoTheCell = false,
 ): { x: number; y: number } {
   for (let attempt = 0; attempt < 60; attempt++) {
     const x = bounds
@@ -1896,6 +1920,7 @@ export function findSpawn(
 
     // Never drop anyone into a room they could never have walked into.
     if (!world.nav.isReachable(x, y)) continue;
+    if (!intoTheCell && inTheCell(world, x, y)) continue;
 
     const probe = { x, y, radius: radius + 6 };
     const walls = world.wallGrid.queryCircle(x, y, radius + 24, new Set<Wall>());
@@ -2705,7 +2730,7 @@ function populate(world: World): void {
       POLICE_STATION_CELL_MIN +
       Math.floor(Math.random() * (POLICE_STATION_CELL_MAX - POLICE_STATION_CELL_MIN + 1));
     for (let i = 0; i < inmates && placed < HUMAN_COUNT; i++) {
-      const spawn = findSpawn(world, ENTITY_RADIUS.human, station.cell);
+      const spawn = findSpawn(world, ENTITY_RADIUS.human, station.cell, true);
       const id = addHuman(placed, spawn.x, spawn.y);
       world.ai.get(id)!.homeBuilding = station.building;
       placed++;
@@ -2727,6 +2752,9 @@ function populate(world: World): void {
    */
   const complexTickets = world.map.cornerBuilding >= 0 ? COMPLEX_CROWD_MUL - 1 : 0;
   const houseCount = world.map.buildings.length + complexTickets;
+  // The station is a building like any other here, so this draw samples the
+  // cell's floor along with the rest of it — `findSpawn` is what refuses,
+  // because every other path that places a body needs the same refusal.
   while (placed < indoorTarget && placed < HUMAN_COUNT) {
     const draw = Math.floor(Math.random() * houseCount);
     const index = draw < world.map.buildings.length ? draw : world.map.cornerBuilding;
@@ -3162,6 +3190,11 @@ export function findSpawnNear(
      * was.
      */
     if (outdoors && !spawnsIgnoreBuildings && buildingIndexAt(world, x, y) >= 0) continue;
+
+    // And never the cell, for the same reason as `findSpawn` — a van that
+    // happens to park against the back of the station could otherwise put a
+    // SWAT operator inside it, and nothing would ever let them out.
+    if (inTheCell(world, x, y)) continue;
 
     const probe = { x, y, radius: radius + 4 };
     let blocked = false;

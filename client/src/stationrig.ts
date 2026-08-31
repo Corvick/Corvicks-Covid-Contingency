@@ -24,16 +24,22 @@
  * Open `/stationrig.html` on the dev server to look at the frame it leaves:
  * the gate in three states over an ordinary door, and a three-bay car park.
  */
-import type { Door, DoorState, PoliceStation } from '../../shared/types.js';
+import type {
+  Door,
+  DoorState,
+  PoliceStation,
+  Window as WindowPane,
+} from '../../shared/types.js';
 import {
   GROUND_COLOR,
   POLICE_STATION_BAY_TILES,
   POLICE_STATION_BAY_DEPTH,
   POLICE_STATION_PARKING,
+  POLICE_STATION_COUNTER_DEPTH,
   TILE,
   WALL_THICKNESS,
 } from '../../shared/constants.js';
-import { drawDoors, drawParkingBays } from './render.js';
+import { drawDoors, drawParkingBays, drawWindows } from './render.js';
 
 const canvas = document.getElementById('rig') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -188,6 +194,64 @@ function run(): void {
       steel,
     ).bands;
 
+    // ----------------------------------------------------------- the counter
+    /*
+     * The bench has to read as furniture rather than as a very thick window,
+     * which is three separate things and each has its own reading:
+     *  - it is **not** the ordinary pane's flat translucent blue,
+     *  - there is a **screen line** up the middle of it that is,
+     *  - and it has a **lit lip** along its public edge, which is what says the
+     *    slab has a top surface rather than being a hole in the floor.
+     * The control is an ordinary pane of the same size in the same rig.
+     */
+    const slab = { x: 420, y: 300, w: 180, h: POLICE_STATION_COUNTER_DEPTH };
+    for (const [name, pane] of [
+      ['counter', { ...slab, counter: true }],
+      ['pane', { ...slab, y: slab.y + 60 }],
+    ] as Array<[string, WindowPane]>) {
+      clear();
+      drawWindows(ctx, [pane], new Set(), WHOLE);
+      const lit = (r: number, g: number, b: number): boolean =>
+        r > ROAD[0] + 30 && g > ROAD[1] + 30 && b > ROAD[2] + 30;
+      // Down the slab, a third of the way along: bench, screen, bench.
+      const down = scan(
+        pane.x + pane.w / 3,
+        pane.y - 2,
+        pane.x + pane.w / 3,
+        pane.y + pane.h + 2,
+        lit,
+      );
+      result[`${name}Bands`] = down.bands;
+      // What the body of it is, away from the screen line and the lip.
+      const body = ctx.getImageData(
+        Math.round(pane.x + pane.w / 3),
+        Math.round(pane.y + 5),
+        1,
+        1,
+      ).data;
+      result[`${name}Body`] = [body[0], body[1], body[2]];
+      // How blue it is. An ordinary pane is flat blue over its whole depth;
+      // a bench is grey, with the blue confined to the screen line.
+      result[`${name}Blue`] = body[2] - body[0];
+      // The lip: the last row before the public edge, and how bright it is
+      // against the body two pixels above it.
+      const lip = ctx.getImageData(
+        Math.round(pane.x + pane.w / 3),
+        Math.round(pane.y + pane.h - 2),
+        1,
+        1,
+      ).data;
+      result[`${name}Lip`] = lip[0] + lip[1] + lip[2] - (body[0] + body[1] + body[2]);
+      // And across the middle of it, where the deal tray and the speak-hole are.
+      result[`${name}Across`] = scan(
+        pane.x - 2,
+        pane.y + pane.h / 2,
+        pane.x + pane.w + 2,
+        pane.y + pane.h / 2,
+        lit,
+      ).bands;
+    }
+
     // -------------------------------------------------------------- the bays
     const bayW = POLICE_STATION_BAY_TILES * TILE;
     const rowY = 420;
@@ -211,7 +275,19 @@ function run(): void {
     // And nothing is painted on the road beside the row.
     result.bayOutside = scan(600 - half - 40, rowY, 600 - half - 12, rowY, white).px;
 
+    /*
+     * `counterAcross` is **2**, not more, and that is the reading rather than a
+     * shortfall: the screen runs the whole length and the deal tray cuts it
+     * once, so a line across the middle crosses screen, tray, screen. An
+     * ordinary pane of the same size answers 1, which is the control.
+     */
     result.pass =
+      result.counterBands === 3 &&
+      result.paneBands === 1 &&
+      (result.counterLip as number) > (result.paneLip as number) &&
+      (result.counterBlue as number) * 2 < (result.paneBlue as number) &&
+      result.counterAcross === 2 &&
+      result.paneAcross === 1 &&
       (result.gateTeeth as number) >= 3 &&
       result.doorTeeth === 0 &&
       (result.wideGateTeeth as number) > (result.gateTeeth as number) &&
@@ -240,6 +316,15 @@ function run(): void {
     WHOLE,
   );
   drawParkingBays(ctx, bayRow(460, 330), WHOLE);
+  drawWindows(
+    ctx,
+    [
+      { x: 380, y: 90, w: 200, h: POLICE_STATION_COUNTER_DEPTH, counter: true },
+      { x: 380, y: 150, w: 200, h: POLICE_STATION_COUNTER_DEPTH },
+    ],
+    new Set(),
+    WHOLE,
+  );
   ctx.font = '12px sans-serif';
   ctx.fillStyle = '#888';
   ctx.textAlign = 'left';
@@ -247,6 +332,8 @@ function run(): void {
     ctx.fillText(t, 250, 94 + i * 80),
   );
   ctx.fillText('car park', 400, 400);
+  ctx.fillText('the counter', 600, 106);
+  ctx.fillText('an ordinary pane, same size', 600, 166);
 
   /*
    * And the same four at 4x, because a gate is 10px thick and judging one at
@@ -260,6 +347,19 @@ function run(): void {
     drawDoors(ctx, [door], new Map([[0, state]]), WHOLE);
     ctx.restore();
   });
+  for (const [i, pane] of (
+    [
+      { x: 0, y: 0, w: 150, h: POLICE_STATION_COUNTER_DEPTH, counter: true },
+      { x: 0, y: 0, w: 150, h: POLICE_STATION_COUNTER_DEPTH },
+    ] as WindowPane[]
+  ).entries()) {
+    ctx.save();
+    ctx.setTransform(3, 0, 0, 3, 320, 430 + i * 90);
+    drawWindows(ctx, [pane], new Set(), WHOLE);
+    ctx.restore();
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillText('3x', 280, 440);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillText('4x', 760, 40);
 

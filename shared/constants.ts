@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.24.0';
+export const GAME_VERSION = '0.24.1';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3441,27 +3441,28 @@ export const CITY_CAR_SPREAD = 0.34;
 /**
  * **The one building in the city with a floor plan.**
  *
- * Twenty tiles by sixteen — 560 x 448 — which is between an ordinary block
+ * Twenty-four tiles by nineteen — 672 x 532 — which is between an ordinary block
  * building and a big one. Every wall inside it is placed by hand rather than
  * partitioned at random, because the rooms have jobs: a lobby you come in to,
  * a teller's counter of glass between that and the office, an office laid out
  * in cubicles, a cell you cannot get out of and a racked armoury at the back.
  *
- * **It grew from 16x13 with the counter, the racks and the cell**, and the
- * three of them are why: a jut into the lobby costs the lobby a tile of its
- * depth, a rack costs the armoury one off each long wall, and a cell with
- * three people in it wants to be a room rather than a cupboard. The floor at
- * `CITY_SCALE_MIN` is 3000x2220, so the box — 560 wide by 448 plus its apron —
- * still has most of the far half of the smallest city to find room in;
- * measured, it places on 30/30 maps at either end of the slider.
+ * **It grew from 16x13 with the counter, the racks and the cell**, and again
+ * with the counter slab: a bench 24px deep comes out of the lobby, a rack
+ * costs the armoury a tile off each long wall, and a cell with three people
+ * locked in it wants to be a room rather than a cupboard. The floor at
+ * `CITY_SCALE_MIN` is 3000x2220, so the box — 672 wide by 532 plus its apron —
+ * still has 372px of vertical range and 2100 of horizontal in the far half of
+ * the *smallest* city; measured, it places on every map at either end of the
+ * slider.
  *
  * The two figures are in *tiles* because every clearance rule in `mapgen` is:
  * nothing the plan leaves may be narrower than `MIN_LIMB`, or it is a room
  * nothing in the game fits into. See "A building is somewhere you can get
  * into".
  */
-export const POLICE_STATION_W_TILES = 20;
-export const POLICE_STATION_H_TILES = 16;
+export const POLICE_STATION_W_TILES = 24;
+export const POLICE_STATION_H_TILES = 19;
 /**
  * How deep the car park in front of it is, how many bays it has, and how wide
  * and how deep one bay is.
@@ -3601,14 +3602,28 @@ export const POLICE_STATION_RACK_DEPTH = 1;
 export const POLICE_STATION_RACK_BAY = 2;
 export const POLICE_STATION_RACK_STANDOFF = 1.3;
 /**
- * How far the clerk's counter juts into the lobby, in tiles.
+ * **The clerk's counter is one thick slab, not a line in a wall.**
  *
- * The glass is on the *front* of that jut and the two returns either side of
- * it are solid wall — a bank teller's window seen from above, which is what
- * was asked for. One tile is enough to read as a counter and shallow enough
- * that the lobby is still a room you walk across rather than round.
+ * Asked for as *"a thicker wall like a rectangle that the window sits on"*,
+ * over a photograph of a bank teller's station: a steel-framed screen standing
+ * on a bench, with a speak-hole through it and a deal tray under it. Seen from
+ * directly above that is a **rectangle** with a screen line running along it,
+ * and this is how deep that rectangle is, in world px.
+ *
+ * **It is pushed as one `WindowPane`, and the whole depth of it is glass.**
+ * That is not a compromise, it is the only shape that gives what was asked
+ * for: `hasLineOfSight` ignores panes entirely and `hasWallClearPath` treats
+ * them as solid, so a pane is *exactly* "see, but do not travel through".
+ * Built as a `Wall` instead — which is what a bench looks like — the lobby
+ * could not see the office at all, and the counter would stop being a window.
+ * What makes it read as furniture rather than as a slab of glass is the
+ * drawing: see `drawCounter`.
+ *
+ * 24px is a shade under a tile. It has to be plainly thicker than
+ * `WALL_THICKNESS` (10) or the whole change is invisible, and it comes out of
+ * the lobby's own depth, which is why the building grew with it.
  */
-export const POLICE_STATION_COUNTER_JUT = 1;
+export const POLICE_STATION_COUNTER_DEPTH = 24;
 /** Where the officer stands, and where the two items land, off the body. */
 export const CITY_CAR_OFFICER_GAP = 46;
 export const CITY_CAR_LOOT_GAP = 40;

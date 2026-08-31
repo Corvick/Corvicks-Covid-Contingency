@@ -2316,38 +2316,41 @@ it so the black cell door is not smooth but has 'teeth' like you see on a ruler
 parking space lanes for the cars. Make the jail cell locked and can only be
 kicked down by officers or by zombies or the zombie dog. for the loot room can
 we put the loot on gun racks (two stalls like a urinal and the loot in
-between)"*.
+between)"*. And then, over a photograph of a real teller's station: *"I meant
+more like a thicker wall like a rectangle that the window sits on, also make the
+building a little larger"*.
 
 **It is the only building in the city with a floor plan.** Everything else
 `mapgen` lays down is a shell with a partition rolled into it; this one has named
 rooms because every one of them is a place something happens, and `PoliceStation`
 on `MapData` hands their *interiors* over rather than leaving anybody to work
-them back out of the walls. 20 tiles by 16 — 560x448, between an ordinary block
+them back out of the walls. 24 tiles by 19 — 672x532, between an ordinary block
 and a big building — laid out on a canonical orientation with the entrance on the
 south face and **optionally mirrored left to right**, which is variety for the
 price of one sign and no rotation arithmetic anywhere.
 
 ```
-x:  0     5           10                  20
-y=0 +-----+------------+--+--+--+--+--+----+
-    |CELL |            |  ARMOURY, racked  |   the back
-    |     |    back    |  along both walls |
-y=5 +--#--+   office   +##+--+--+--+--+----+
-    |                                      |
-    |         OFFICE, in cubicles          |
-y=12+-----+          +--------+##+---------+   the way through
-    |     |==glass==|    LOBBY             |   the teller's counter
-y=16+--------------##----------------------+   the front door
+x:  0      6            12                      24
+y=0 +------+-------------+--+--+--+--+--+--+-----+
+    |CELL  |             |   ARMOURY, racked     |   the back
+    |      |    back     |   along both walls    |
+y=6 +--##--+   office    D--+--+--+--+--+--+-----+
+    |                                            |
+    |           OFFICE, in cubicles              |
+y=14+-----[====counter====]------+##+------------+   the way through
+    |              LOBBY                         |
+y=19+---------------------##---------------------+   the front door
 ```
 
-**It grew from 16x13, and the three things that grew it are the three things
-below**: a counter that juts costs the lobby a tile of its depth, a rack costs
-the armoury a tile off each of its long walls, and a cell with three people
-locked in it wants to be a room rather than a cupboard. The floor at
-`CITY_SCALE_MIN` is 3000x2220, so the box — 560 wide by 448 plus its apron —
-still has most of the far half of the smallest city to find room in: measured,
-it places on **30/30 maps at pop 500 and 20/20 at pop 100**, and `roomfit` still
-reads 0 of 24 cities with any floor a body cannot reach.
+**It grew from 16x13 to 20x16 and then to 24x19, and the four things below are
+what grew it**: a counter slab comes out of the lobby's depth, a rack costs the
+armoury a tile off each of its long walls, a cell with three people locked in it
+wants to be a room rather than a cupboard, and each of those wants the office
+between them to stay an office. The floor at `CITY_SCALE_MIN` is 3000x2220, so
+the box — 672 wide by 532 plus its apron — still has **372px of vertical range
+and 2100 of horizontal** in the far half of the *smallest* city: measured, it
+places on every map at 100, 500 and 1000 civilians, and `roomfit` still reads 0
+of 24 cities with any floor a body cannot reach.
 
 - **Every gap in it is at least `MIN_LIMB` tiles**, which is the rule the whole
   of **A building is somewhere you can get into** rests on. `roomfit` reads 0 of
@@ -2358,41 +2361,52 @@ reads 0 of 24 cities with any floor a body cannot reach.
   the cell and the armoury, so the back of the office opens into the back of the
   building. That is one room to `rooms.ts`, which flood-fills the finished
   geometry and neither knows nor needs to know what any of it is for.
-- **The cubicles are four free-standing L partitions and nothing else.** A wall
+- **The cubicles are five free-standing L partitions and nothing else.** A wall
   in this game is a wall, so a full grid of them is a maze rather than an office
   — "not too crowded" is the ask and it is measured: **96% of the office is
   clear floor**. They are kept two tiles clear of the walls above and below, so
   every slot between them is a `MIN_LIMB` a body can walk down.
 
-#### The counter juts, like a bank teller's window
+#### The counter is a slab the screen stands on
 
-Asked for as *"for the glass can we have a bit of wall jutting out like its a
-bank tellers window (so you can see but not travel through this)"*. The glass
-was already a real `WindowPane` — see-through, solid, breakable, all of it free
-from the pane existing — and flat in the wall it read as a pane somebody had
-left in an office partition rather than as a place you queue at.
+Asked for twice. First as *"a bit of wall jutting out like its a bank tellers
+window (so you can see but not travel through this)"*, which was built as a
+one-tile jut with glass across its front and solid returns at its sides — and
+that was not it. Then, over a photograph of a real teller's station: *"I meant
+more like a thicker wall like a rectangle that the window sits on."*
 
-- **The counter steps `POLICE_STATION_COUNTER_JUT` (1 tile) forward into the
-  lobby, with glass across the front of the jut and solid wall down the two
-  returns.** That is what a teller's window is from directly above: a bench
-  projecting into the public side with a screen on it and the clerk behind. The
-  returns are wall rather than more glass, which is the half that makes "not
-  travel through" survive a smashed pane — break the screen and the jut is
-  still there.
-- **The back of the jut is left open on purpose**, so the well behind the glass
-  belongs to the office and the clerk stands in it. Walled off it would be a
-  room with no exit, which is precisely what `rooms.ts` is checked for never
-  producing.
-- **A tile deep is as far as it can go.** The lobby is four tiles and the jut
-  takes one, leaving three — 74px of clear floor under the counter, which is a
-  corridor rather than a squeeze. Two tiles would leave 46px, the width of a
-  doorway, for a room a crowd files through.
-- Measured over 30 cities, three sample lines across the full width of the
-  glass, a body's radius either side: **90/90 lines see through it and 0/90
-  would let a body past**. The control is the way through beside it, which is
-  open on 30/30 — "you cannot walk from the lobby into the office here" is
-  satisfied just as well by a plan where you cannot walk from the lobby into the
-  office at all.
+**So it is one `WindowPane` `POLICE_STATION_COUNTER_DEPTH` (24px) deep** — a
+rectangle, not a line in a wall, and glass the whole way through.
+
+- **Glass all the way through is the only shape that works**, and this is worth
+  not re-litigating. `hasLineOfSight` ignores panes entirely and
+  `hasWallClearPath` treats them as solid, so a pane is *exactly* "see, but do
+  not travel through" — the property the first ask named. Built as a `Wall`,
+  which is what a bench actually is, the lobby could not see the office at all
+  and the counter would stop being a window. What makes it read as furniture
+  rather than as a slab of glass is entirely the **drawing**.
+- **`pushRun` cannot make it.** That helper builds runs a wall thick, centred on
+  a tile line, which is precisely what this is not — so `counter()` in `mapgen`
+  pushes the rect itself, starting flush with the wall line's outer face so it
+  butts against the runs either side with no seam.
+- **24px is a shade under a tile.** It has to be plainly thicker than
+  `WALL_THICKNESS` (10) or the change is invisible, and it comes out of the
+  lobby's own depth — which is one of the reasons the building grew again.
+- **`Window.counter` is how the client knows**, and like `Door.bars` it rides on
+  the map rather than on any per-tick state: one boolean once, in `welcome`.
+- **`drawCounter` is five things off the photograph**, and two of them do the
+  work. The **lip** along the public edge is what says the slab has a top
+  surface rather than being a hole in the floor; the **screen line** up the
+  middle is what says the thing you cannot walk through is glass. Then the
+  bench itself, the speak-hole through the screen, and the deal tray cut across
+  it — all three straight off the picture, and all three free, because none of
+  them is on the wire.
+- Measured over 30 cities, three sample lines across the full width, a body's
+  radius clear of the *slab* rather than of a wall line: **it is 24px deep
+  against a wall's 10**, every line sees over it and **not one would let a body
+  past**. The control is the way through beside it — "you cannot walk from the
+  lobby into the office here" is satisfied just as well by a plan where you
+  cannot walk from the lobby into the office at all.
 
 #### The half away from the breach, and usually the far end of it
 
@@ -2455,8 +2469,8 @@ items and a stall is a *place*, which is what the room wanted.
 
 - **A stub of wall `POLICE_STATION_RACK_DEPTH` (1 tile) long juts off the back
   and the front wall every `POLICE_STATION_RACK_BAY` (2 tiles), and one item
-  stands in the mouth of each stall between two of them.** Nine of them: five
-  along the back wall and four along the front, which starts past the doorway.
+  stands in the mouth of each stall between two of them.** Eleven of them: six
+  along the back wall and five along the front, which starts past the doorway.
   The armoury's way in moved to the **west** wall's south corner for exactly
   that reason — its south wall is a rack now.
 - **The bay width is load-bearing and cannot come down.** Two tiles leaves 46px
@@ -2473,12 +2487,13 @@ items and a stall is a *place*, which is what the room wanted.
   `inventory.ts` shuffles that list and fills it and never works out where a
   divider is — computed at both ends, the day somebody moves a divider is the
   day the guns start standing inside one.
-- **The shuffled grid survives as the overflow.** Nine stalls against a maximum
-  draw of ten (6 guns, 3 utilities, a radio) is about **one round in fifty**
-  with something left over, and an over-stocked armoury with a crate on the
-  floor is exactly what that looks like. Measured over 30 cities: **176 of 177
-  items racked**, the one exception being the single city that drew more than
-  nine.
+- **The shuffled grid survives as the overflow, and now never fires.** Eleven
+  stalls against a maximum draw of ten (6 guns, 3 utilities, a radio) covers
+  every round the table can produce — it was nine before the building grew, and
+  measured then, one city in thirty put something on the floor. It is **kept
+  anyway**: it costs nothing, it is the same shuffled sample that used to do all
+  of the placing, and it is what an armoury with a crate on the floor would look
+  like if the counts ever moved.
 - **`POLICE_STATION_LOOT_GAP` (30) against `LOOT_MIN_GAP` (44) everywhere else**
   is what that overflow grid uses. `LOOT_MIN_GAP` is a rule about scattering
   loot *through a city*, so that a house holds a rifle rather than a pile — and
@@ -2544,6 +2559,16 @@ ever opens.
 - **The inmates come out of the civilian count**, like the staff, and `MIN` is 0
   on purpose — an empty cell has to be an ordinary sight, or the room stops
   being a cell and becomes a place three people are always kept.
+- **And nobody else is ever put in a locked cell**, which is enforced in
+  `findSpawn` rather than at any one caller. `isReachable` waves the cell
+  through — doors are not in the nav grid, so its floor is ordinary floor as far
+  as that test goes — and every path that places a body comes through here: the
+  indoor draw, the general population, a social circle, and `spawnPlayer`.
+  Measured with only the indoor draw excluded, a stray still turned up in there
+  on **5 cities in 30**; a *player* who spawns in it is stuck for the round with
+  nothing on screen to say why. Opt-in, in the shape `findSpawnNear`'s
+  `outdoors` flag already uses: the one caller that means the cell says so. The
+  tally is now the roll — 0-3, with the control reading **0 in every city**.
 
 **Black with teeth, and the teeth are the bars.** Every other door in the city
 is a brown slab, so the one you cannot open has to be tellable from the ones you
@@ -2580,7 +2605,7 @@ top of a parked car would read as the car being behind it.
 - **The row sits at the far end of the frontage from the front door**, so the
   way out of the building is open tarmac rather than a gap between two parked
   cars, and the drive in off the street has somewhere to be. Measured over 30
-  cities: **the nearest bay edge is 20px clear of the doorway's own span**, and
+  cities: **the nearest bay edge is 76px clear of the doorway's own span**, and
   0 bays fall outside the apron reserved for them.
 
 #### Manned, and staffed
@@ -2627,12 +2652,13 @@ as well by a station with no staff code at all. Forty cities:
 | floor a body cannot reach | **0** |
 | narrowest gap anywhere in it | **46px** |
 | the office, clear floor | **96%** |
-| **see through the counter's glass** | **90/90** sample lines |
-| **walk through the counter** | **0/90** — and the way through beside it open 30/30 |
+| **the counter's depth** | **24px** against a wall's 10 |
+| **see over the counter** | every sample line |
+| **walk through the counter** | **none** — and the way through beside it open 30/30 |
 | barred gates in the city | **1**, shut and locked on 30/30 |
-| civilians locked in the cell | **+1.2 to +1.5** against the cell gated off, 0-3 all seen |
-| armoury stalls, and stock standing in one | **9**, **176/177** racked |
-| a bay painted across the front door | **0** — nearest 20px clear |
+| civilians locked in the cell | **0-3**, all four seen, **0** in the control |
+| armoury stalls, and stock standing in one | **11**, all racked |
+| a bay painted across the front door | **0** — nearest 76px clear |
 
 And the gate is staged, because *who* can open it is the whole of what makes it
 a cell and a generated city will not answer that on its own — nothing walks up
@@ -2669,22 +2695,24 @@ failing, and two of them are the same lesson twice:*
   Counting what is standing in the armoury put "1-3 utilities" at a max of 4 on a
   room that had placed 2. The claim is about what the *armoury* stocked, and the
   pickup ids are what say so.
-- **Two of the checks were tighter than their own sample supports.** A fixed
-  ±0.16 band on a 0.3 coin is 1.7 standard errors at n=24 and failed about one
-  run in ten on working code; the staff control compared *minima*, which is a
-  coin toss because an unlucky control city still draws three ordinary civilians
-  into the station. Both are sized off the sample now — three standard errors for
-  the radio, pooling both runs since the staff gate does not touch loot, and the
-  mean rather than the floor for the staff.
+- **Every check here that is a gain against a control needs a band sized off
+  its own sample, and three of them have now had to learn it.** A fixed ±0.16
+  on a 0.3 coin is 1.7 standard errors at n=24 and failed about one run in ten
+  on working code; the staff control compared *minima*, which is a coin toss
+  because an unlucky control city still draws three ordinary civilians into the
+  station; and rewritten as `gain > 1.5` that same staff row sat exactly on a
+  knife edge, because a true gain of 2.5 reads 1.5 at one and a half standard
+  errors. `sem2` is the arithmetic now rather than a number somebody picks.
 
 **`client/src/stationrig.ts` is the drawing half**, and it measures rather than
-looks: the gate's teeth and the car park's lanes are both claims about *pixels*,
-and `getImageData` needs no compositing, which is what makes them answerable
-from a browser pane where rAF is throttled to nothing. It lives under
-`client/src`, so unlike the harnesses at `server/`'s root it is covered by
-`npx tsc --noEmit`. Open `/stationrig.html` on the dev server to look at the
-frame it leaves — the gate in three states over an ordinary door, at 1:1 and at
-4x, beside a three-bay car park.
+looks: the gate's teeth, the counter's bench and the car park's lanes are all
+claims about *pixels*, and `getImageData` needs no compositing, which is what
+makes them answerable from a browser pane where rAF is throttled to nothing. It
+lives under `client/src`, so unlike the harnesses at `server/`'s root it is
+covered by `npx tsc --noEmit`. Open `/stationrig.html` on the dev server to look
+at the frame it leaves — the gate in three states over an ordinary door, the
+counter over an ordinary pane of the same size, and a three-bay car park, at 1:1
+and magnified.
 
 | | |
 |---|---|
@@ -2693,13 +2721,23 @@ frame it leaves — the gate in three states over an ordinary door, at 1:1 and a
 | **teeth on an ordinary door — the control** | **0** |
 | the gate's slab | **(17,19,24)**, brown +-0 |
 | an ordinary door's slab | (109,74,44), brown **+65** |
+| bands down the counter's depth | **3** — bench, screen, bench |
+| **…down an ordinary pane of the same size** | **1** |
+| how blue the counter's body is | **+18**, against the pane's **+40** |
+| the counter's lit lip, over its own body | **+166**, against the pane's +69 |
+| bands across the counter's middle | **2** — the deal tray cuts the screen |
 | white lines across a three-bay row | **4** — one more than there are bays |
 | the stop line down one bay's middle | **1** |
 | paint on the road beside the row | **0** |
 
 - **A count of *bands*, not of lit pixels**, which is the same trick the
   flamethrower's one-stream check uses: one fat stripe and five thin ones put
-  down the same number of lit pixels and only one of them is teeth.
+  down the same number of lit pixels and only one of them is teeth. It is what
+  the counter is read by too — three bands down its depth is *bench, screen,
+  bench*, and an ordinary pane of the same size answers one.
+- **Two bands across the counter's middle is the reading, not a shortfall.**
+  The screen runs the whole length and the deal tray cuts it once, so a line
+  across crosses screen, tray, screen. The pane answers one.
 - **The slab's own colour is the darkest pixel along that line**, not a sample
   at a chosen spot. A fixed sample is a lottery against the tooth spacing —
   measured a quarter of the way along it landed on a tooth and read the gate's

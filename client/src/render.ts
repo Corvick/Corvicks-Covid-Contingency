@@ -571,6 +571,88 @@ export function drawWalls(ctx: CanvasRenderingContext2D, walls: Wall[], view: Vi
   }
 }
 
+/**
+ * **The clerk's counter, drawn as furniture rather than as a slab of glass.**
+ *
+ * The geometry is a `WindowPane` the whole way through, because that is the
+ * only shape in the game that is see-through *and* solid — but filled with the
+ * ordinary pane's translucent blue it reads as a very thick window rather than
+ * as a bench with a screen on it, which is the whole of what was asked for.
+ *
+ * So it is drawn the way a teller's station looks from directly above: a solid
+ * bench top, a lighter lip along the public edge, the screen standing on it as
+ * a bright line up the middle, a speak-hole through that screen, and the deal
+ * tray cut across it. All five come straight off the reference photograph, and
+ * the two that do most of the work are the **lip** — which is what says the
+ * slab has a top surface rather than being a hole — and the **screen line**,
+ * which is what says the thing you cannot walk through is glass.
+ */
+function drawCounter(ctx: CanvasRenderingContext2D, p: WindowPane): void {
+  const along = p.w >= p.h;
+  const depth = along ? p.h : p.w;
+  const span = along ? p.w : p.h;
+
+  // The bench itself. Darker than a wall, because it is a thing standing in a
+  // room rather than the room's edge.
+  ctx.fillStyle = '#333a45';
+  ctx.fillRect(p.x, p.y, p.w, p.h);
+  ctx.strokeStyle = '#525b6a';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(p.x + 0.5, p.y + 0.5, p.w - 1, p.h - 1);
+
+  // The counter lip, along the public edge. A slab with no lit edge reads as a
+  // gap in the floor from above.
+  ctx.fillStyle = 'rgba(146, 158, 176, 0.55)';
+  if (along) ctx.fillRect(p.x, p.y + p.h - 3, p.w, 3);
+  else ctx.fillRect(p.x + p.w - 3, p.y, 3, p.h);
+
+  // The screen, standing on the bench: a bright line up the middle of it.
+  const mid = along ? p.y + p.h / 2 : p.x + p.w / 2;
+  ctx.fillStyle = 'rgba(147, 197, 253, 0.45)';
+  if (along) ctx.fillRect(p.x + 2, mid - COUNTER_GLASS / 2, p.w - 4, COUNTER_GLASS);
+  else ctx.fillRect(mid - COUNTER_GLASS / 2, p.y + 2, COUNTER_GLASS, p.h - 4);
+  ctx.strokeStyle = 'rgba(198, 222, 255, 0.75)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const off of [-COUNTER_GLASS / 2, COUNTER_GLASS / 2]) {
+    if (along) {
+      ctx.moveTo(p.x + 2, mid + off);
+      ctx.lineTo(p.x + p.w - 2, mid + off);
+    } else {
+      ctx.moveTo(mid + off, p.y + 2);
+      ctx.lineTo(mid + off, p.y + p.h - 2);
+    }
+  }
+  ctx.stroke();
+
+  // The speak-hole through the screen, and the deal tray cut across the bench
+  // beneath it — both at the middle of the run, where the clerk sits.
+  const cx = p.x + p.w / 2;
+  const cy = p.y + p.h / 2;
+  ctx.fillStyle = 'rgba(20, 24, 30, 0.85)';
+  if (along) ctx.fillRect(cx - COUNTER_TRAY / 2, p.y + 2, COUNTER_TRAY, p.h - 4);
+  else ctx.fillRect(p.x + 2, cy - COUNTER_TRAY / 2, p.w - 4, COUNTER_TRAY);
+  ctx.strokeStyle = 'rgba(176, 196, 222, 0.8)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.min(depth, span) * 0.22, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // And the steel posts at each end, which is what frames it.
+  ctx.fillStyle = 'rgba(160, 172, 190, 0.7)';
+  if (along) {
+    ctx.fillRect(p.x, p.y, 3, p.h);
+    ctx.fillRect(p.x + p.w - 3, p.y, 3, p.h);
+  } else {
+    ctx.fillRect(p.x, p.y, p.w, 3);
+    ctx.fillRect(p.x, p.y + p.h - 3, p.w, 3);
+  }
+}
+
+/** How thick the screen line and the deal tray are drawn, in world px. */
+const COUNTER_GLASS = 5;
+const COUNTER_TRAY = 11;
+
 /** Intact panes read as glass; smashed ones leave an empty gap in the wall. */
 export function drawWindows(
   ctx: CanvasRenderingContext2D,
@@ -587,6 +669,10 @@ export function drawWindows(
       p.y > view.y + view.h ||
       p.y + p.h < view.y
     ) {
+      continue;
+    }
+    if (p.counter) {
+      drawCounter(ctx, p);
       continue;
     }
     ctx.fillStyle = 'rgba(147, 197, 253, 0.34)';
