@@ -5609,6 +5609,71 @@ and cost containment. Bots alive is a count out of four rather than a share of a
 diverging population, which is what makes it survive the pairing where the
 rolling metrics in `circles.ts` did not.
 
+#### The radio is not a smoke grenade, and a sling is why it was
+
+Reported as *"bot officers keep trying to use the radio like a weapon when it is
+on cooldown instead of switching to another weapon"*, with a screenshot of a bot
+saying `RADIO_STATIC_LINE` with a zombie walking up to it.
+
+**`GUN_SLOTS` is the constant; `gunSlots(inv)` is what this bag can use, and
+the two differ by one the moment a gunsling is in it.** The numbering is
+contiguous, so a sling shifts every utility along — and two call sites reached
+for the constant:
+
+```
+inv.activeSlot = GUN_SLOTS + 1 + at;                            // popSmoke
+inv.activeSlot = GUN_SLOTS + 1 + inv.utilities.indexOf(...);    // gunnerTick
+```
+
+So with a sling in the bag **every utility does the job of the one before it**.
+A bot values the radio highest and so keeps it in the first utility slot, which
+is exactly what `popSmoke` then picked up and pulled the trigger on: the radio
+answered with static, `fireHeld` returned true, and `popSmoke` took that for a
+grenade thrown — spending the tick, setting `BOT_SMOKE_COOLDOWN_MS`, and
+throwing no smoke. `gunnerTick` one slot along threw the smoke grenade instead
+and took *that* for a pocket gunner going down.
+
+- **`firstUtilitySlot(inv)` is the fix and it is one function**, because the
+  arithmetic is the thing that was wrong rather than either call site. Every
+  other slot in `ai.ts` already went through `utilitySlotOf`, which had it
+  right.
+- **The client learned this exact lesson once already** — see the note under
+  **Items, orders and scenery** about `inventory.gunSlots` against
+  `inventory.guns.length`, where the same mix-up cost the beacon map, the scope
+  reticle and the charge bars on every bag without a sling in it. This is the
+  server's copy of it, and the tell is the same: it is right by luck until
+  somebody picks up the one item that changes the count.
+- **It is invisible without a sling**, which is why it survived. A bot with no
+  sling computes the correct number from the constant, so every headless run of
+  a city that happened not to hand one out reads perfectly.
+
+`server/botfight.ts` carries it. `setBotSlotsIgnoreSling` is the gate, and the
+staging is a bag with a sling, a radio, a smoke grenade and a pocket gunner —
+every one of them there because that is the order a bot collects them in. Eight
+cities each way:
+
+| a sling, and the radio on cooldown | OLD | NEW |
+|---|---|---|
+| squeezed the dead radio | **12 times** | **0** |
+| smoke actually thrown | 8 | 8 |
+| pocket gunners actually deployed | **0** | **8** |
+
+| the same bag, radio ready | OLD | NEW |
+|---|---|---|
+| radio calls spent | 8 — *by `popSmoke`* | 8 — by `radioTick`, as intended |
+| smoke thrown | 8 — *by `gunnerTick`* | 8 |
+| pocket gunners deployed | **0** | **8** |
+
+The two "8"s in the OLD column are the whole fault in one line: the smoke did go
+out and a call did get made, but by the wrong branches, and the thing at the end
+of the chain — the pocket gunner — never happened at all.
+
+*One thing about measuring it was the rig lying rather than the code failing.*
+A smoke grenade is a projectile that becomes a cloud in `updateHeli`, and this
+rig ticks the AI and collision alone — so `world.smokes` stays empty however
+well the throw worked, and the first reading was **0 smoke in both modes**. It
+is counted as it leaves the hand instead.
+
 #### A charge rifle is how a bot sees the infected
 
 `chargeInfectedTick`. It is the one gun in the city that can shoot somebody

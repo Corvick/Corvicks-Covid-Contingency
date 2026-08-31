@@ -37,7 +37,13 @@ import {
   type World,
   type Entity,
 } from './src/world.js';
-import { computeFrozen, updateAi, setLegacyBotCombat, setBotsAtOldPace } from './src/ai.js';
+import {
+  computeFrozen,
+  updateAi,
+  setLegacyBotCombat,
+  setBotsAtOldPace,
+  setBotSlotsIgnoreSling,
+} from './src/ai.js';
 import {
   TICK_RATE,
   PLAYER_SPEED,
@@ -48,6 +54,8 @@ import {
   BOT_DOOR_STANDOFF,
   SHIELD_BASH_RANGE,
   SHIELD_POINTS,
+  RADIO_USES,
+  RADIO_COOLDOWN_MS,
 } from '../shared/constants.js';
 
 const TICK_MS = 1000 / TICK_RATE;
@@ -459,12 +467,102 @@ function roundRun(seed: number): Round {
   return { alive, bots: ids.length, bitten: bitten.size, zombies, survivors };
 }
 
+// -------------------------------------------------- the wrong slot number
+
+interface Kit {
+  /** Times it squeezed a radio that was on cooldown, off the static bubble. */
+  statics: number;
+  /** Smoke grenades that actually went out. */
+  smokes: number;
+  /** Pocket gunners that actually went down. */
+  gunners: number;
+  /** Calls left on the radio — a slot mix-up spends them as something else. */
+  radioLeft: number;
+}
+
+/**
+ * **A bot carrying a gunsling, a radio, a smoke grenade and a pocket gunner**,
+ * with a zombie in front of it and the radio already on cooldown.
+ *
+ * The sling is the whole staging: it is what makes `gunSlots(inv)` differ from
+ * the `GUN_SLOTS` constant, and every one of these items is in the bag because
+ * a bot values the radio highest and so keeps it in the first utility slot —
+ * which is the slot the two broken lines actually selected.
+ *
+ * The radio is put on cooldown deliberately. With it ready the fault is worse
+ * and harder to read: the bot calls in a van *instead of* throwing smoke and
+ * the rig has to infer the mix-up from a missing grenade. On cooldown it says
+ * so out loud.
+ */
+function slotRun(seed: number, radioReady: boolean): Kit | null {
+  const { world, bot } = withSeed(seed, stagedWorld);
+  const inv = world.inventories.get('bot-0');
+  if (!inv) return null;
+  inv.sling = true;
+  inv.utilities.length = 0;
+  inv.utilities.push('radio', 'smokeGrenade', 'pocketGunner');
+  inv.radioUses = RADIO_USES;
+
+  const spot = openSpot(world);
+  if (!spot) return null;
+  bot.x = spot.x;
+  bot.y = spot.y;
+  const state = world.ai.get('bot-0');
+  if (state) {
+    state.lastX = bot.x;
+    state.lastY = bot.y;
+    state.wanderX = bot.x;
+    state.wanderY = bot.y;
+  }
+
+  const z = makeEntity('chaser', 'zombie', bot.x + 260, bot.y);
+  z.radius = ZOMBIE_RADIUS;
+  z.health = 1e9;
+  z.maxHealth = 1e9;
+  world.entities.set('chaser', z);
+  world.ai.delete('chaser');
+
+  let now = Date.now();
+  // On cooldown from the first tick, so every squeeze is a squeeze of a radio
+  // that is not going to answer — which is the reported symptom, said out loud.
+  // The other staging leaves it ready, where the same mix-up spends a call on
+  // what should have been a grenade and says nothing at all.
+  inv.radioReadyAt = radioReady ? 0 : now + RADIO_COOLDOWN_MS;
+
+  const out: Kit = { statics: 0, smokes: 0, gunners: 0, radioLeft: RADIO_USES };
+  const seen = new Set<string>();
+  let saying = false;
+  for (let i = 0; i < TICKS; i++) {
+    z.x = bot.x + 260;
+    z.y = bot.y;
+    now += TICK_MS;
+    tick(world, now, TICK_MS / 1000);
+    const sp = world.speech.get('bot-0');
+    const on = sp !== undefined && sp.until > now && sp.text.startsWith('ssshh');
+    if (on && !saying) out.statics++;
+    saying = on;
+    // **Counted as it leaves the hand, not as it lands.** A smoke grenade is a
+    // projectile that becomes a cloud in `updateHeli`, and this rig ticks the
+    // AI and collision alone — so `world.smokes` stays empty however well the
+    // throw worked, and the first version of this read 0 in both modes. Nothing
+    // deletes from `world.grenades` here either, and the bot has no frags, so
+    // what is in it at the end is exactly what it threw.
+    for (const id of world.grenades.keys()) seen.add(id);
+  }
+  out.smokes = seen.size;
+  out.gunners = world.emplacements.size;
+  out.radioLeft = inv.radioUses;
+  return out;
+}
+
 // ------------------------------------------------------------- driver
 
 const ways: Record<string, Way[]> = { OLD: [], NEW: [] };
 const bashes: Record<string, Bash[]> = { OLD: [], NEW: [] };
 const paces: Record<string, number[]> = { OLD: [], NEW: [] };
 const walks: Record<string, number[]> = { OLD: [], NEW: [] };
+const kits: Record<string, Kit[]> = { OLD: [], NEW: [] };
+const kitsReady: Record<string, Kit[]> = { OLD: [], NEW: [] };
 let skipped = 0;
 
 /** Ticks and size of the paired live rounds at the bottom. */
@@ -489,6 +587,14 @@ for (let run = 0; run < RUNS; run++) {
     if (d !== null) walks[mode].push(d);
     else skipped++;
     setBotsAtOldPace(false);
+    setBotSlotsIgnoreSling(mode === 'OLD');
+    const k = slotRun(7000 + run, false);
+    if (k) kits[mode].push(k);
+    else skipped++;
+    const kr = slotRun(8000 + run, true);
+    if (kr) kitsReady[mode].push(kr);
+    else skipped++;
+    setBotSlotsIgnoreSling(false);
   }
 }
 
@@ -522,6 +628,26 @@ for (const mode of ['OLD', 'NEW'] as const) {
   console.log(
     `  ${mode}  median ${f1(med(walks[mode]))} px/s` +
       `   (a player walks at ${PLAYER_SPEED}, n=${walks[mode].length})`,
+  );
+}
+console.log(
+  `\na bot with a gunsling, a radio on cooldown, a smoke grenade and a gunner  (${RUNS} cities each)`,
+);
+for (const mode of ['OLD', 'NEW'] as const) {
+  const rs = kits[mode];
+  console.log(
+    `  ${mode}  squeezed the dead radio ${rs.reduce((a, r) => a + r.statics, 0)} times` +
+      `   smoke thrown ${rs.reduce((a, r) => a + r.smokes, 0)}` +
+      `   gunners down ${rs.reduce((a, r) => a + r.gunners, 0)}`,
+  );
+}
+console.log(`\n…and the same bag with the radio ready  (${RUNS} cities each)`);
+for (const mode of ['OLD', 'NEW'] as const) {
+  const rs = kitsReady[mode];
+  console.log(
+    `  ${mode}  radio calls spent ${rs.length * RADIO_USES - rs.reduce((a, r) => a + r.radioLeft, 0)}` +
+      `   smoke thrown ${rs.reduce((a, r) => a + r.smokes, 0)}` +
+      `   gunners down ${rs.reduce((a, r) => a + r.gunners, 0)}`,
   );
 }
 if (skipped > 0) console.log(`\n(${skipped} stagings skipped)`);

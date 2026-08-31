@@ -591,6 +591,42 @@ export function setBotsAtOldPace(v: boolean): void {
   botsAtOldPace = v;
 }
 
+/**
+ * True is the two slot numbers that were computed off the `GUN_SLOTS` constant
+ * rather than off `gunSlots(inv)`. `server/botfight.ts` reads it.
+ */
+let botSlotsIgnoreSling = false;
+
+export function setBotSlotsIgnoreSling(v: boolean): void {
+  botSlotsIgnoreSling = v;
+}
+
+/**
+ * **The first utility slot number for *this* bag.**
+ *
+ * `GUN_SLOTS` is the constant; `gunSlots(inv)` is what this bag can actually
+ * use, and the two differ by one the moment a gunsling is in it — the numbering
+ * is contiguous, so a sling shifts every utility along. Two call sites reached
+ * for the constant and so selected **the utility before the one they meant**,
+ * or the sling's own gun slot when they meant the first utility.
+ *
+ * Reported as *"bot officers keep trying to use the radio like a weapon when it
+ * is on cooldown instead of switching to another weapon"* — and that is exactly
+ * what it looks like from outside, because a bot values the radio highest and so
+ * usually carries it in utility slot 0. `popSmoke` reaching for a smoke
+ * grenade one slot along picked the radio up instead, pulled the trigger on it,
+ * got `RADIO_STATIC_LINE` back, and took `fireHeld` returning true for a
+ * grenade thrown — so it spent the tick, set its own cooldown, and threw no
+ * smoke. `gunnerTick` had the same line and so never put a pocket gunner down
+ * either.
+ *
+ * The client learned this exact lesson once already — see "Slot counts are
+ * per-bag, not constants" — and this is the server's copy of it.
+ */
+function firstUtilitySlot(inv: Inventory): number {
+  return (botSlotsIgnoreSling ? GUN_SLOTS : gunSlots(inv)) + 1;
+}
+
 /** What the two speeds were before they were levelled with a player's. */
 const OLD_BOT_WALK = BOT_WALK_SPEED * 0.72;
 const OLD_BOT_SPRINT = BOT_SPRINT_SPEED * 0.85;
@@ -5848,7 +5884,7 @@ function popSmoke(world: World, e: Entity, state: AiState, toThreat: number, now
   // Go through the normal trigger so it burns the grenade and takes the same
   // cooldown a player's would.
   const wasSlot = inv.activeSlot;
-  inv.activeSlot = GUN_SLOTS + 1 + at;
+  inv.activeSlot = firstUtilitySlot(inv) + at;
   const thrown = fireHeld(world, e, inv, angle, now);
   if (!thrown) {
     inv.activeSlot = wasSlot;
@@ -5911,7 +5947,7 @@ function gunnerTick(
   if (Math.abs(angleDelta(e.facing, aim)) > 0.3) return false;
 
   const was = inv.activeSlot;
-  inv.activeSlot = GUN_SLOTS + 1 + inv.utilities.indexOf('pocketGunner');
+  inv.activeSlot = firstUtilitySlot(inv) + inv.utilities.indexOf('pocketGunner');
   const placed = fireHeld(world, e, inv, aim, now);
   if (!placed) {
     inv.activeSlot = was;
