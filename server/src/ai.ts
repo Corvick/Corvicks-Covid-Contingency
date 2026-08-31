@@ -197,6 +197,8 @@ import {
   GROUP_RADIUS,
   GROUP_MIN_PEERS,
   ENTITY_MAX_HEALTH,
+  ZOMBIE_ELITE_HEALTH_MUL,
+  ZOMBIE_OFFICER_HEALTH_MUL,
   NPC_OFFICER_SHOOT_INTERVAL_MS,
   NPC_OFFICER_BLOOM_RAD,
   NPC_OFFICER_RETREAT_DIST,
@@ -7888,7 +7890,37 @@ function markDogBite(world: World, session: GrappleLike, targetId: string): void
   }
 }
 
-function convert(world: World, target: Entity, now: number): void {
+/**
+ * How much health a body comes up with once it turns, given who it used to be.
+ *
+ * Asked of the sets rather than of `target.type`, because by the time this
+ * runs `type` already reads 'zombie' — and it is exactly the sets the ring in
+ * `render.ts` leans on for the same reason: `world.swat`, `world.soldiers`,
+ * `world.riflemen`, `world.cityOfficers` and `world.dispatched` are none of
+ * them ever cleared off a converted id, so asking any of them here is free and
+ * cannot go stale. A fresh outbreak zombie has a brand new id that was never in
+ * any of them, so this can never fire on one by accident.
+ *
+ * SWAT and soldiers first, since a van driver or an ordinary rifleman is also
+ * in `world.dispatched` and must not be scored as an elite for it.
+ */
+function zombieHealthFor(world: World, id: string): number {
+  if (world.swat.has(id) || world.soldiers.has(id)) {
+    return Math.round(ENTITY_MAX_HEALTH.zombie * ZOMBIE_ELITE_HEALTH_MUL);
+  }
+  if (world.cityOfficers.has(id) || world.riflemen.has(id) || world.dispatched.has(id)) {
+    return Math.round(ENTITY_MAX_HEALTH.zombie * ZOMBIE_OFFICER_HEALTH_MUL);
+  }
+  return ENTITY_MAX_HEALTH.zombie;
+}
+
+/**
+ * One human, officer or civilian becoming a zombie. Exported so
+ * `server/eliteundead.ts` can turn a staged body through the real function
+ * rather than reimplementing what it does — the same reasoning `attemptGrab`
+ * is exported for.
+ */
+export function convert(world: World, target: Entity, now: number): void {
   creditConversion(world, target.id);
   /**
    * **The outbreak's own tally, unconditional on who did the biting.**
@@ -7903,8 +7935,9 @@ function convert(world: World, target: Entity, now: number): void {
    */
   world.totalConverted++;
   target.type = 'zombie';
-  target.health = ENTITY_MAX_HEALTH.zombie;
-  target.maxHealth = ENTITY_MAX_HEALTH.zombie;
+  const maxHealth = zombieHealthFor(world, target.id);
+  target.health = maxHealth;
+  target.maxHealth = maxHealth;
   target.speedMul = rollSpeedMul('zombie');
   world.speedBoosts.delete(target.id);
   world.pendingInfections.delete(target.id);

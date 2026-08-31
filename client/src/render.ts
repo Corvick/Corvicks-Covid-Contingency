@@ -1036,16 +1036,20 @@ export function drawEntity(
     // read as something around it. Not gated on `e.npc`: SWAT are always the
     // ones a call sent, and there is nothing else wearing that colour.
     //
-    // It stays on through a turn, unlike the helmet. The reddening tell is
-    // carried by `color` and the ring is carried by who they are — and one of
-    // your own going over is the last body on the map you want to lose track
-    // of.
+    // It stays on through a turn, unlike the helmet — one of your own going
+    // over is the last body on the map you want to lose track of — but the
+    // colour doesn't. `world.swat` is never cleared off a converted id, so
+    // the black gear and this ring outlive the man wearing it; once `e.type`
+    // actually reads `zombie` the ring turns the same red as the rest of the
+    // horde, because a dot that still reads "one of ours" once it is hunting
+    // you is the wrong message. `ENTITY_COLOR.zombie` rather than a colour of
+    // its own, so it is exactly the red everything else on that side is.
     if (e.swat) {
       const w = SIMPLE_RING_PX / scale;
       ctx.beginPath();
       ctx.arc(e.x, e.y, radius + SIMPLE_RING_GAP_PX / scale + w / 2, 0, Math.PI * 2);
       ctx.lineWidth = w;
-      ctx.strokeStyle = '#ffffff';
+      ctx.strokeStyle = e.type === 'zombie' ? ENTITY_COLOR.zombie : '#ffffff';
       ctx.stroke();
     }
     if (isSelf) {

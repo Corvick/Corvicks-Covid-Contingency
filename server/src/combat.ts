@@ -15,6 +15,8 @@ import {
   DOOR_BULLET_DAMAGE,
   SHOT_SLOW_MS,
   SHOT_SLOW_MULTIPLIER,
+  ZOMBIE_ELITE_STAGGER_TIME_MUL,
+  ZOMBIE_ELITE_STAGGER_STRENGTH,
   ENTITY_MAX_HEALTH,
   GRENADE_THROW_RANGE,
   GRENADE_COOLDOWN_MS,
@@ -384,8 +386,21 @@ function hit(
       // them down harder and for longer than a pistol does. This happens
       // whatever it decides below — being shot hurts either way.
       const slowMs = def?.slowMs ?? SHOT_SLOW_MS;
-      state.slowUntil = Math.max(state.slowUntil, now + slowMs);
-      state.slowMul = Math.min(state.slowMul || 1, def?.slowMul ?? SHOT_SLOW_MULTIPLIER);
+      const slowMul = def?.slowMul ?? SHOT_SLOW_MULTIPLIER;
+      /**
+       * **A converted SWAT operator or soldier shrugs a stagger off faster**,
+       * the same trade the dog's own stagger already makes — trained and
+       * armoured is what that means here rather than merely tougher. Checked
+       * off `world.swat`/`world.soldiers`, which are never cleared off a
+       * converted id, so this is exactly the veteran zombie the extra health
+       * in `zombieHealthFor` gave to. Eased toward full speed rather than
+       * scaled, so a `slowMul` of 1 (no slow at all) is left alone.
+       */
+      const elite = victim.type === 'zombie' && (world.swat.has(victim.id) || world.soldiers.has(victim.id));
+      const easedMs = elite ? slowMs * ZOMBIE_ELITE_STAGGER_TIME_MUL : slowMs;
+      const easedMul = elite ? 1 - (1 - slowMul) * ZOMBIE_ELITE_STAGGER_STRENGTH : slowMul;
+      state.slowUntil = Math.max(state.slowUntil, now + easedMs);
+      state.slowMul = Math.min(state.slowMul || 1, easedMul);
 
       /**
        * **Being shot is a commitment.**

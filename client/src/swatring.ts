@@ -2,11 +2,15 @@
  * SWAT-ring rig. A canvas and nothing else — no socket and no port, so it
  * leaves a game on 8080 alone.
  *
- * The claim is "a SWAT dot cannot be told from the road it stands on, and a
- * white ring fixes it", which is a claim about *pixels* and so cannot be
- * settled by looking — especially not from here, where rAF is throttled to
- * nothing while the browser pane is not compositing. `getImageData` needs no
- * compositing at all.
+ * Two claims, both about *pixels* and so neither settled by looking —
+ * especially not from here, where rAF is throttled to nothing while the
+ * browser pane is not compositing. `getImageData` needs no compositing at all.
+ *
+ *  - "A SWAT dot cannot be told from the road it stands on, and a white ring
+ *    fixes it."
+ *  - "A converted SWAT operator is a zombie, not one of yours, and the ring
+ *    has to say so" — `world.swat` is never cleared off a turned id, so only
+ *    `e.type` tells the two apart. See the `swat-turned` kind below.
  *
  * Everything is drawn on `GROUND_COLOR`, the real road, at the real fully
  * zoomed-out camera scale, through the real `drawEntity`. Results land on
@@ -14,6 +18,7 @@
  */
 import type { EntityState } from '../../shared/types.js';
 import {
+  ENTITY_COLOR,
   ENTITY_RADIUS,
   GROUND_COLOR,
   SWAT_COLOR,
@@ -39,6 +44,8 @@ interface Reading {
   seenPx: number;
   /** Of those, the ones that are the white mark. */
   whitePx: number;
+  /** Of those, the ones that are the ring gone zombie-red instead. */
+  redRingPx: number;
   /**
    * Visible pixels *inside the dot* — what the body puts down on its own, and
    * so exactly what this drawing produced before the ring. The ring's own
@@ -109,6 +116,17 @@ function isWhite(r: number, g: number, b: number): boolean {
   return r > 190 && g > 190 && b > 190;
 }
 
+/**
+ * `world.swat` is never cleared off a converted id, so a body that has
+ * actually turned still carries `e.swat` and the black gear — only `e.type`
+ * says it is a zombie now. The ring has to read that rather than "swat", or a
+ * dot that is hunting you goes on reading as one of yours.
+ */
+function isZombieRed(r: number, g: number, b: number): boolean {
+  const [rr, gg, bb] = [1, 3, 5].map((i) => parseInt(ENTITY_COLOR.zombie.slice(i, i + 2), 16));
+  return Math.abs(r - rr) < 20 && Math.abs(g - gg) < 20 && Math.abs(b - bb) < 20;
+}
+
 /** Draw one body at sx,sy screen and read back everything it put down. */
 function read(
   kind: string,
@@ -137,6 +155,7 @@ function read(
   let seenPx = 0;
   let bodyPx = 0;
   let whitePx = 0;
+  let redRingPx = 0;
   let outerPx = 0;
   let ringInnerPx = 999;
   let ringOuterPx = 0;
@@ -154,6 +173,15 @@ function read(
       if (dist < ringInnerPx) ringInnerPx = dist;
       if (dist > ringOuterPx) ringOuterPx = dist;
     }
+    // Only counted outside the dot's own radius: the body itself is drawn in
+    // ENTITY_COLOR.zombie's near-neighbourhood for nothing here, but a
+    // converted body's *fill* is still SWAT_COLOR (black) — see the comment
+    // on `isZombieRed` — so a red pixel this far out can only be the ring.
+    if (dist > dotPx && isZombieRed(d[i], d[i + 1], d[i + 2])) {
+      redRingPx++;
+      if (dist < ringInnerPx) ringInnerPx = dist;
+      if (dist > ringOuterPx) ringOuterPx = dist;
+    }
   }
   const c = ctx.getImageData(sx, sy, 1, 1).data;
   const r1 = (v: number) => Math.round(v * 10) / 10;
@@ -162,6 +190,7 @@ function read(
     bodyVsRoad: offRoad(c[0], c[1], c[2]),
     seenPx,
     whitePx,
+    redRingPx,
     bodyPx,
     outerPx: r1(outerPx),
     ringInnerPx: whitePx === 0 ? 0 : r1(ringInnerPx),
@@ -178,6 +207,9 @@ const KINDS: Array<[string, Partial<EntityState>]> = [
   ['npc officer', { type: 'officer', npc: true }],
   ['civilian', { type: 'human' }],
   ['zombie', { type: 'zombie' }],
+  // A converted SWAT operator: `e.type` is 'zombie' but `e.swat` never gets
+  // cleared, so the ring is the one thing that has to change to say so.
+  ['swat-turned', { type: 'zombie', swat: true }],
 ];
 
 function run(): void {

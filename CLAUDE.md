@@ -3081,6 +3081,69 @@ zombie red, and most of them say so.
   it over, which also means being shot on the way up stacks with it rather than
   arguing with it. Measured: every fresh zombie carries it, none are stunned.
 
+#### Who somebody was is still under the gear
+
+Asked for outright: *"give the swat zombies and soldier zombies more health and
+the grey officer zombies just a little more than a regular zombie. have swat
+and soldier zombies stagger less too."* `convert` set every fresh zombie's
+health from the flat `ENTITY_MAX_HEALTH.zombie` regardless of what walked into
+the bite, so a SWAT operator, a grey officer and an unarmed civilian all came
+up identically fragile the moment they turned.
+
+- **`zombieHealthFor` reads the same sets the ring reads.** `world.swat`,
+  `world.soldiers`, `world.cityOfficers`, `world.riflemen` and `world.dispatched`
+  are none of them ever cleared off a converted id — the exact fact **A ring
+  that used to be one of yours** leans on — so asking any of them at the moment
+  of conversion is free and cannot go stale. SWAT and soldiers are checked
+  first, because a van driver or an ordinary rifleman is also in
+  `world.dispatched` and must not be scored as an elite for it.
+- **Multipliers on the base, not flat numbers.** `ZOMBIE_ELITE_HEALTH_MUL`
+  (1.8) and `ZOMBIE_OFFICER_HEALTH_MUL` (1.15), so raising `ZOMBIE_MAX_HEALTH`
+  later scales every tier with it instead of leaving the gap to drift. **180hp**
+  for a converted SWAT operator or soldier, **115hp** for a converted grey
+  officer, **100hp** for everyone else — a bot, a player, a civilian — none of
+  whom were mentioned.
+- **A fresh outbreak zombie is never in any of these sets**, because only a
+  conversion reuses an existing officer's entity id; a body spawned fresh at
+  the breach or off the dog's roar is a brand new id that was never anybody.
+  So the boost can never land on the wrong body by accident, and nothing had to
+  be told to leave the ordinary horde alone.
+- **The stagger reduction is the dog's own trick, reused.** `hit` already
+  computes `slowMs`/`slowMul` off the weapon before touching the AiState;
+  `ZOMBIE_ELITE_STAGGER_TIME_MUL` (0.55) scales the duration directly and
+  `ZOMBIE_ELITE_STAGGER_STRENGTH` (0.45) eases the multiplier *toward* full
+  speed rather than scaling it — the same two-constant shape as
+  `DOG_STAGGER_TIME_MUL`/`STRENGTH`, and for the same reason: a strength of 1
+  would be unchanged and 0 would be no stagger at all. Checked with
+  `victim.type === 'zombie'` on top of the set membership, so an infected
+  officer who has not turned yet — reachable only by the charge rifle, which is
+  the one gun that can hit somebody still counted as human — never borrows a
+  veteran's stagger before it has earned one.
+- **Only SWAT and soldiers stagger less.** A converted grey officer was asked
+  for more health and nothing about its stagger, so it takes the ordinary
+  `SHOT_SLOW_MS`/`SHOT_SLOW_MULTIPLIER` a ordinary zombie does.
+
+`server/eliteundead.ts` is the harness — headless, no socket, no port. It turns
+a staged body through the real, now-exported `convert`, and fires a real bolt
+action round through the real `fire` for the stagger half.
+
+| | regular | SWAT/soldier | grey officer |
+|---|---|---|---|
+| max health | 100 | **180** | **115** |
+| a bolt-action stagger | 900ms at 35% speed | **495ms at 71% speed** | 900ms at 35% speed |
+
+*Two things about staging it were the rig lying rather than the code failing.*
+**`convert` also sets the ordinary "a fresh zombie comes up slow" stagger**
+(`FRESH_ZOMBIE_SLOW_MS` at `FRESH_ZOMBIE_SLOW_MUL`, 65%) — reading
+`state.slowUntil` right after conversion measures that mechanic instead of
+anything a shot did, and its leftover `slowMul` sitting under the shot's own
+`Math.min` read as the elite reduction failing when it was actually just older
+and, by coincidence, more restrictive. The turn is staged well outside that
+window and the stale value is reset before firing. **And `fire`'s hit-scan
+reads the entity grid, not `world.entities` directly** — the same trap every
+harness in this file's own notes on testing already records — so nothing was
+ever hit until `rebuildEntityGrid` ran.
+
 ### Aiming past your own screen
 
 **The viewport is 1920×1080**, scaled by the page to fit the window keeping
@@ -6233,9 +6296,11 @@ at 95-212/255 of contrast. They were not hard to see; they were not visible.
   ring's *radius* does grow, because it hugs a dot that grows.
 - **The gap is not decoration.** A white stroke laid straight onto near-black
   gear reads as one fatter pale dot rather than as a body with a mark on it.
-- **It stays on through a turn, unlike the helmet.** The reddening tell is
-  carried by `color` and the ring is carried by who they are, and one of your own
-  going over is the last body on the map you want to lose track of.
+- **It stays on through a turn, unlike the helmet — but the colour doesn't.**
+  The reddening tell is carried by `color` and the ring used to be carried by
+  who they were regardless — one of your own going over was the last body on
+  the map you wanted to lose track of. See **A ring that used to be one of
+  yours** below for why that stopped being true of the colour.
 - **Only SWAT.** Every other kind already differs from the road by 95-212 of one
   channel, so a second ringed thing would cost the first one its meaning.
   Soldiers are the nearest call at 95 and are still plainly green.
@@ -6259,6 +6324,41 @@ thing that works. It lives under `client/src`, so unlike the harnesses at
 pixels that are not white" looked like the right before-and-after and is not: it
 counts the ring's own antialiased skirt as body, and read 36 where the body puts
 down 0. What the body puts down has to be counted *inside the dot's own radius*.
+
+#### A ring that used to be one of yours
+
+Reported as *"swat when turned into zombies should have a red circle around
+them not white"*. The white ring was deliberately built to survive a
+conversion — see the bullet above — but survive was all it did: `world.swat` is
+never cleared off a converted id (nothing in the game clears it until the round
+resets), so the black gear and the white ring both outlived the man wearing
+them. A body that is now hunting you read, at the one zoom level this ring
+exists for, as one of your own.
+
+- **One condition on the stroke colour, nothing else.** `e.type === 'zombie'`
+  swaps the stroke to `ENTITY_COLOR.zombie` — the exact red every other zombie
+  on the map already is, not a colour of its own — and leaves it white for as
+  long as the body is still an officer. Nothing about *when* the ring is drawn
+  changes, and nothing about the black fill does either: `base` is still
+  `SWAT_COLOR` regardless of `e.type`, which is its own oddity (a converted
+  SWAT zombie keeps the gear colour forever) and not what was reported here.
+- **`ENTITY_COLOR.zombie` rather than a new constant.** The ring's whole job is
+  to say what this dot currently is, and "currently a zombie" already has a
+  colour every other body on the map uses for it.
+
+`client/swatring.ts` gained a seventh kind, `swat-turned` (`{ type: 'zombie',
+swat: true }` — exactly what a converted operator's wire state looks like), and
+a `redRingPx` reading beside the existing `whitePx` one. Read live off the real
+`drawEntity` at the real fully zoomed-out scale:
+
+| | `swat` | `swat-turned` |
+|---|---|---|
+| ring pixels, white | 64 | **0** |
+| ring pixels, zombie red | 0 | **52** |
+| body centre | `#1c1f26` | `#1c1f26` (unchanged) |
+
+The centre pixel is the control: the fill is untouched, so what changed is
+purely the ring.
 
 ### The dog is baked, not drawn
 

@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.21.0';
+export const GAME_VERSION = '0.22.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -517,6 +517,24 @@ export const ZOMBIE_SPEED = 102;
 export const ZOMBIE_SEARCH_SPEED = 48;
 export const ZOMBIE_SIGHT_RADIUS = 420;
 export const ZOMBIE_MAX_HEALTH = 100;
+/**
+ * **Who somebody was before they turned is not thrown away — it is who is
+ * still under the gear.**
+ *
+ * `convert` sets every fresh zombie's health from `ZOMBIE_MAX_HEALTH`
+ * regardless of what walked into the bite, so a SWAT operator, a grey officer
+ * and an unarmed civilian all came up identically fragile. These are the two
+ * multipliers on top of it: a converted SWAT operator or soldier trained and
+ * armoured is meaningfully tougher, and a converted grey officer is only a
+ * little hardier than the crowd he was protecting — not because he fights
+ * differently once turned (nothing about a zombie's behaviour reads who it
+ * used to be), but because there is more of him to get through.
+ *
+ * Multipliers rather than flat additions, so raising `ZOMBIE_MAX_HEALTH` later
+ * scales every tier with it instead of leaving the gap between them to drift.
+ */
+export const ZOMBIE_ELITE_HEALTH_MUL = 1.8;
+export const ZOMBIE_OFFICER_HEALTH_MUL = 1.15;
 export const ZOMBIE_TURN_RATE = 10;
 /**
  * Noticeably uneven — some shamble, some are quick — but the floor is kept
@@ -2198,6 +2216,25 @@ export const BUILDING_START_SHARE = 0.48;
 /** Being shot staggers a zombie for a moment. */
 export const SHOT_SLOW_MS = 500;
 export const SHOT_SLOW_MULTIPLIER = 0.36;
+
+/**
+ * **A converted SWAT operator or soldier is a veteran zombie, not a fresh one,
+ * and takes a rifle round differently on both counts.**
+ *
+ * Checked at the moment of the hit rather than latched anywhere new:
+ * `world.swat`/`world.soldiers` are never cleared off a converted id — the same
+ * fact the ring in `render.ts` has to work around — so asking either set at the
+ * point of a shot is free and cannot go stale. A fresh outbreak zombie has a
+ * brand new entity id that was never in either set, so this can never fire on
+ * one of those by accident.
+ *
+ * Same shape as `DOG_STAGGER_TIME_MUL`/`STRENGTH`: the duration is scaled
+ * directly and the strength eases the slow *toward* full speed rather than
+ * scaling it, so a strength of 1 is unchanged and 0 would be no stagger at
+ * all.
+ */
+export const ZOMBIE_ELITE_STAGGER_TIME_MUL = 0.55;
+export const ZOMBIE_ELITE_STAGGER_STRENGTH = 0.45;
 
 // -------------------------------------------------------------- special guns
 /**
