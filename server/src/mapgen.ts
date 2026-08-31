@@ -1345,9 +1345,23 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     }
   }
 
+  /**
+   * A block that comes this close to a landmark is left empty.
+   *
+   * **`STREET_MIN` rather than the 40 it used to be**, for the reason written
+   * beside that constant: a building may sit flush against its block's edge, so
+   * a 40px reservation is a 30px alley once both walls are drawn, and 30px is a
+   * gap you can see down and cannot walk down. It never showed at 500 because
+   * there are only a handful of landmark frontages; at 1000 there are twice as
+   * many and it turned up in 3 cities of 8.
+   */
   const hitsLandmark = (x: number, y: number, size: number) =>
     landmarks.some(
-      (b) => x < b.x + b.w + 40 && x + size + 40 > b.x && y < b.y + b.h + 40 && y + size + 40 > b.y,
+      (b) =>
+        x < b.x + b.w + STREET_MIN &&
+        x + size + STREET_MIN > b.x &&
+        y < b.y + b.h + STREET_MIN &&
+        y + size + STREET_MIN > b.y,
     );
 
   // Jog each row and column sideways so streets stagger instead of running

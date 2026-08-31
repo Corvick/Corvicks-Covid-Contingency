@@ -30,7 +30,7 @@ import type {
   SlotWire,
 } from '../../shared/types.js';
 import {
-  CITY_POP_MAX,
+  CITY_POP_BASE,
   LOBBY_CODE_ALPHABET,
   LOBBY_CODE_LENGTH,
   LOBBY_DOG_SLOTS,
@@ -198,10 +198,11 @@ export function createLobby(
     offline,
     notice: '',
     running: false,
-    // A new room is a full city until the host says otherwise. The setting is
-    // for the machine that cannot manage one, and it should be the choice
-    // somebody makes rather than the one they inherit.
-    population: CITY_POP_MAX,
+    // A new room is the standard city until the host says otherwise — the one
+    // the game is tuned in, in the middle of the slider. Both directions are a
+    // choice somebody makes rather than one they inherit: down for the machine
+    // that cannot manage a full round, up for one that wants more of everything.
+    population: CITY_POP_BASE,
   };
   // The host takes the first officer seat rather than standing about in a
   // lobby they own — one fewer click to get to a startable state.

@@ -7,6 +7,7 @@ import type {
   SlotWire,
 } from '../../shared/types.js';
 import {
+  CITY_POP_BASE,
   CITY_POP_MAX,
   CITY_POP_MIN,
   CITY_POP_STEP,
@@ -468,11 +469,16 @@ export function setupMenu(hooks: MenuHooks): Menu {
    */
   let draggingPop = false;
 
+  /**
+   * The slider reads both ways now, so the caption has to as well: 500 is the
+   * city the game is tuned in and the share is measured against that, which
+   * means it goes over 100% as often as under it.
+   */
   const popCaption = (pop: number) => {
     const { width, height } = citySizeFor(pop);
-    if (pop >= CITY_POP_MAX) return `${width}x${height} — the full city`;
+    if (pop === CITY_POP_BASE) return `${width}x${height} — the standard city`;
     const share = Math.round((width * height * 100) / (WORLD_BASE_WIDTH * WORLD_BASE_HEIGHT));
-    return `${width}x${height} city · ${share}% of a full one`;
+    return `${width}x${height} city · ${share}% of a standard one`;
   };
 
   /** Draw the number and the caption for a value, wherever it came from. */

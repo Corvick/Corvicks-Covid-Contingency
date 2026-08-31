@@ -923,17 +923,32 @@ ever left running unattended.
 
 ### The city is not one size
 
-The host's lobby slider: **100 to 500 civilians, and the city shrinks with the
-crowd.** It exists because one of the two machines this is developed on cannot
-run a full round, and it is the only setting in the game.
+The host's lobby slider: **100 to 1000 civilians, and the city grows and shrinks
+with the crowd.** It started as 100-500 because one of the two machines this is
+developed on cannot run a full round; the ceiling went to 1000 so a machine that
+can manage more gets more. It is still the only setting in the game.
+
+**The top of the slider and the yardstick are two different numbers**, and
+splitting them is the whole of what raising the ceiling took. `CITY_POP_BASE`
+(500) is the crowd `WORLD_BASE_WIDTH`/`HEIGHT` describes, so `cityScaleFor` is
+1.0 there by construction and every share cap in `mapgen` is a no-op; the scale
+is `sqrt(pop / CITY_POP_BASE)`, which now runs *above* 1 as well as below it.
+They were the same constant while the slider stopped at 500, and raising
+`CITY_POP_MAX` on its own would have rescaled the **default** round — 500 would
+have become 0.71 of the map it is tuned in.
+
+A fresh lobby still opens at 500. Both directions are a choice somebody makes
+rather than one they inherit.
 
 - **The number is civilians only.** The garrison, the players, their bots and
   the five zombies that walk in from the edge are all on top of it — which is
   what the slider says, and what `HUMAN_COUNT` has always meant.
-- **Area scales with population**, so the streets stay as busy as they are now.
-  A quieter round is meant to be a *smaller city*, not the same city with the
-  people thinned out of it; walking four blocks to find anybody is not the game.
-  That is `sqrt(pop / 500)` on each axis.
+- **Area scales with population**, so the streets stay as busy as they are now
+  in both directions. A quieter round is meant to be a *smaller city*, not the
+  same city with the people thinned out of it — walking four blocks to find
+  anybody is not the game — and a louder one is meant to be a *bigger city*
+  rather than a crowd crammed into the same streets. That is
+  `sqrt(pop / CITY_POP_BASE)` on each axis.
 - **`CITY_SCALE_MIN` (0.6) is where it stops, and the floor is not a round
   number picked by eye.** Blocks, roads and the gaps between buildings keep
   their **absolute** sizes at every setting — that is precisely what keeps a van
@@ -998,16 +1013,26 @@ a game on 8080 alone. Measured over six cities at each of five settings:
 
 | pop | city | buildings | street clearance p5/p50 | narrowest doorway | van parks | crew out | garrison |
 |---|---|---|---|---|---|---|---|
-| 500 | 5000x3700 | 80-81 | 8 / 74 | 56 | 36/36 | 36/36 | 15-17 |
-| 400 | 4472x3309 | 59-60 | 8 / 80 | 56 | 36/36 | 36/36 | 14 |
-| 300 | 3873x2866 | 40-45 | 8 / 80-86 | 56 | 36/36 | 36/36 | 11-12 |
-| 200 | 3162x2340 | 26-27 | 8 / 86 | 56 | 36/36 | 36/36 | 9 |
-| 100 | 3000x2220 | 24-25 | 8 / 86 | 56 | 36/36 | 36/36 | 8 |
+| 1000 | 7071x5233 | 172-177 | 8 / 68 | 56 | 36/36 | 36/36 | 29-31 |
+| 750 | 6124x4532 | 127-128 | 8 / 74 | 56 | 36/36 | 36/36 | 22-23 |
+| 500 | 5000x3700 | 77-80 | 8 / 74 | 56 | 36/36 | 36/36 | 16-18 |
+| 300 | 3873x2866 | 42-45 | 8 / 80-86 | 56 | 36/36 | 36/36 | 12-13 |
+| 100 | 3000x2220 | 24-25 | 8 / 86-90 | 56 | 36/36 | 36/36 | 9-10 |
+
+**A block near a landmark is left empty by `STREET_MIN` now, not by 40px.**
+A building may sit flush against its block’s edge, so a 40px reservation is a
+30px alley once both walls are drawn — a gap you can see down and cannot walk
+down. It never showed at 500 because there are only a handful of landmark
+frontages; at 1000 there are twice as many and `roomfit` found it in **3
+cities of 8**, which the wider reservation takes to 1. Nothing changes at 500,
+which still reads 0 of 20.
 
 **Two of those columns moved with "A building is somewhere you can get into"
-below and one of them did not.** Measured on the same harness against `mapgen`
-before that change: buildings **80 / 64 / 52 / 35 / 26**, doorway **46** at every
-setting, garrison **15 / 14 / 11 / 9 / 8**.
+below and one of them did not.** Measured at the time on the same harness, at
+the 500/400/300/200/100 settings the table then had, against `mapgen` before
+that change: buildings **80 / 64 / 52 / 35 / 26**, doorway **46** at every
+setting, garrison **15 / 14 / 11 / 9 / 8**. The rows are 1000/750/500/300/100
+now, so read the comparison rather than the alignment.
 
 - **Buildings are unchanged at 500 and lose the last row or column below it.**
   `cols`/`rows` are rounded *up* so the street grid runs out to the boundary,
@@ -1028,10 +1053,36 @@ absent players. Ranges are across repeated runs — the map is not seeded, so
 quote a range and never compare two single runs.
 
 **A smaller city is a more open one, never a tighter one** — the median street
-clearance goes *up* as it shrinks, the narrowest doorway is 46px at every
-setting (the dog's collision circle is 38), and the van found a spot its whole
-footprint fits and got its crew out on every one of 180 calls. The park and the
-pond were on the map in 30/30 cities.
+clearance goes *up* as it shrinks and *down* as it grows (68px at 1000 against
+86-90 at 100), the narrowest doorway is 56px at every setting (the dog's
+collision circle is 38), and the van found a spot its whole footprint fits and
+got its crew out on every one of 180 calls. The park and the pond were on the
+map in 30/30 cities.
+
+**What the top of the slider costs**, on the same harness, 300 ticks each
+with a clock that actually advances:
+
+| pop | entities | tick p50/p90 | nav cells | generateMap |
+|---|---|---|---|---|
+| 1000 | 1032 | **9.8-13.7 / 16.3-17.0ms** | 189,244 | 6.8-7.5ms |
+| 500 | 522 | 6.9-7.1 / 9.3-9.6ms | 94,870 | 3.7ms |
+| 100 | 113-114 | 2.4 / 3.2-3.4ms | 34,185 | 1.1ms |
+
+So a 1000-civilian round is **about twice the tick of a 500 one**, which is
+what doubling the entities and the area should cost and is the honest answer
+to "can my machine take it". Even the worse of the two medians leaves most of
+a 33.3ms budget, but it is the *server’s* half only — per-viewer serialisation
+roughly doubles with it, and on the peer-to-peer path the host pays that inside
+a browser tab while also drawing. The machine that cannot manage 500 certainly
+cannot manage 1000; that is the slider working rather than a fault. Quote the
+range and never a single run — the map is not seeded and how far the outbreak
+got moves the median a long way.
+
+**And two things grow with the map on the client that are worth knowing.**
+`stainLayer` is `BLOOD_BAKE_SCALE` (0.5) of the world, so at 7071x5233 it is a
+3536x2617 canvas — about 37MB against 18MB at 500 — and the minimap bake is
+the whole city’s footprints. Neither is per-frame work (both are blits), but
+they are the two allocations that scale with the setting.
 
 **What it buys**, on the same world resized under itself, 300 ticks each with a
 clock that actually advances: entities **521 → 113**, nav cells 94,870 →

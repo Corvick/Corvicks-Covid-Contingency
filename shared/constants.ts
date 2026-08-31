@@ -19,12 +19,14 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.20.0';
+export const GAME_VERSION = '0.21.0';
 
 // ---------------------------------------------------------------- world
 /**
  * The full-size city, and the yardstick everything below is measured against.
- * A round at `CITY_POP_MAX` civilians is played in exactly this.
+ * A round at `CITY_POP_BASE` civilians is played in exactly this — which is
+ * the middle of the slider now rather than the top of it, so a city can be
+ * bigger than the yardstick as well as smaller.
  */
 export const WORLD_BASE_WIDTH = 5000;
 export const WORLD_BASE_HEIGHT = 3700;
@@ -376,7 +378,25 @@ export const HUMAN_RADIUS = 13;
  * garrison, the players, their bots and the five zombies that walk in from the
  * edge are all on top of it.
  */
-export const CITY_POP_MAX = 500;
+/**
+ * **The yardstick, and not the same thing as the top of the slider.**
+ *
+ * `WORLD_BASE_WIDTH`/`HEIGHT` is the city this many civilians live in, so
+ * `cityScaleFor` is 1.0 here by construction and every share cap in `mapgen`
+ * is a no-op. It was `CITY_POP_MAX` while the slider stopped at 500 and the two
+ * were the same number; raising the ceiling to 1000 without splitting them
+ * would have rescaled the *default* round, since the scale is measured
+ * against whatever the top of the slider is.
+ */
+export const CITY_POP_BASE = 500;
+/**
+ * As far up as the slider goes. **A city above `CITY_POP_BASE` is a bigger one
+ * rather than a busier one** — the area grows with the crowd exactly as it
+ * shrinks below it, so the streets stay as full as they are at 500 and what
+ * you get is more city, more people and more garrison. It costs what that
+ * implies: see the table under "The city is not one size" in CLAUDE.md.
+ */
+export const CITY_POP_MAX = 1000;
 export const CITY_POP_MIN = 100;
 /** The slider's granularity. Nobody is choosing between 337 and 338 people. */
 export const CITY_POP_STEP = 25;
@@ -390,7 +410,7 @@ export const CITY_POP_STEP = 25;
  * game, and the point of the setting is to have *less of everything* to
  * simulate and to draw.
  *
- * That is `sqrt(pop / CITY_POP_MAX)` on each axis, and it holds until
+ * That is `sqrt(pop / CITY_POP_BASE)` on each axis, and it holds until
  * `CITY_SCALE_MIN`, where it stops. **The floor is not a round number picked by
  * eye — it is what the city needs to still be one.** Blocks, roads and the gaps
  * between buildings keep their absolute sizes at every setting (that is what
@@ -406,8 +426,14 @@ export const CITY_POP_STEP = 25;
  */
 export const CITY_SCALE_MIN = 0.6;
 
-/** Civilians in the city. A `let`, and written by `setCityPopulation` alone. */
-export let HUMAN_COUNT = CITY_POP_MAX;
+/**
+ * Civilians in the city. A `let`, and written by `setCityPopulation` alone.
+ *
+ * Starts at the yardstick rather than at the top of the slider: a fresh lobby
+ * is the city the game is tuned in, and going bigger is a choice somebody
+ * makes rather than one they inherit.
+ */
+export let HUMAN_COUNT = CITY_POP_BASE;
 
 /** The slider's value, as the server will read it: on a step, and in range. */
 export function clampCityPopulation(pop: number): number {
@@ -417,7 +443,7 @@ export function clampCityPopulation(pop: number): number {
 
 /** Linear scale on each axis for a given crowd. See `CITY_SCALE_MIN`. */
 export function cityScaleFor(pop: number): number {
-  return Math.max(CITY_SCALE_MIN, Math.sqrt(clampCityPopulation(pop) / CITY_POP_MAX));
+  return Math.max(CITY_SCALE_MIN, Math.sqrt(clampCityPopulation(pop) / CITY_POP_BASE));
 }
 
 /** The city that crowd gets, without setting it — for the lobby's readout. */
@@ -3000,7 +3026,7 @@ export const BIG_BUILDING_MAX_TILES = 24;
  *
  * The tile counts above are absolute, and on a full-size city they are already
  * well inside these — a 34-tile complex is 952px against a 3700px side, 26% of
- * it, so at `CITY_POP_MAX` these caps change nothing at all. They exist for the
+ * it, so at `CITY_POP_BASE` and above these caps change nothing at all. They
  * small end of the slider, where the same 952px would be 43% of a 2220px side
  * and the corner complex would stop being a landmark in a city and start being
  * the city. Capped as a *share* rather than a second set of numbers, so there

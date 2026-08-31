@@ -13,7 +13,7 @@
 import {
   CITY_POP_MAX,
   CITY_POP_MIN,
-  CITY_POP_STEP,
+  CITY_POP_BASE,
   VAN_LENGTH,
   VAN_WIDTH,
   BACKUP_LANE_CLEARANCE,
@@ -130,7 +130,10 @@ type Row = {
 
 const rows: Row[] = [];
 
-for (let pop = CITY_POP_MAX; pop >= CITY_POP_MIN; pop -= CITY_POP_STEP * 4) {
+// **An explicit list rather than a sweep**, because the slider reaches 1000
+// now and a step of 100 down from there is ten settings at six cities each.
+// These are the ones worth a row: both ends, the yardstick, and one either side.
+for (const pop of [CITY_POP_MAX, 750, CITY_POP_BASE, 300, CITY_POP_MIN]) {
   setCityPopulation(pop);
   const row: Row = {
     pop: HUMAN_COUNT,
@@ -253,7 +256,7 @@ for (const r of rows) {
 
 // mapgen cost, which is what a smaller city is meant to buy back.
 console.log('');
-for (const pop of [CITY_POP_MAX, 300, CITY_POP_MIN]) {
+for (const pop of [CITY_POP_MAX, CITY_POP_BASE, CITY_POP_MIN]) {
   setCityPopulation(pop);
   const t0 = performance.now();
   for (let i = 0; i < 10; i++) generateMap();
@@ -270,10 +273,10 @@ for (const pop of [CITY_POP_MAX, 300, CITY_POP_MIN]) {
 console.log('\n--- resize a live world, then tick it ---');
 console.log('  pop        city  entities  tick p50/p90  worst-cell  out-of-bounds  navcells');
 
-setCityPopulation(CITY_POP_MAX);
+setCityPopulation(CITY_POP_BASE);
 const live = createWorld();
 
-for (const pop of [CITY_POP_MAX, 300, CITY_POP_MIN]) {
+for (const pop of [CITY_POP_MAX, CITY_POP_BASE, CITY_POP_MIN]) {
   setCityPopulation(pop);
   resetWorld(live);
 
@@ -288,7 +291,7 @@ for (const pop of [CITY_POP_MAX, 300, CITY_POP_MIN]) {
     const t0 = performance.now();
     rebuildNav(live);
     rebuildEntityGrid(live);
-    const frozen = computeFrozen(live, now);
+    const frozen = computeFrozen(live);
     updateAi(live, now, 1 / 30, frozen);
     resolveCollisions(live);
     times.push(performance.now() - t0);
@@ -324,7 +327,7 @@ for (const pop of [CITY_POP_MAX, 300, CITY_POP_MIN]) {
 console.log('\n--- grid dimensions against the map they index ---');
 const ENTITY_CELL = 96;
 const STATIC_CELL = 160;
-for (const pop of [CITY_POP_MAX, CITY_POP_MIN, 300]) {
+for (const pop of [CITY_POP_MAX, CITY_POP_MIN, CITY_POP_BASE]) {
   setCityPopulation(pop);
   resetWorld(live);
   const dims = (g: unknown) => g as unknown as { cols: number; rows: number };
@@ -368,7 +371,7 @@ rebuildEntityGrid(grown);
   for (const bucket of cells.values()) fullest = Math.max(fullest, bucket.length);
   const g = grown.entityGrid as unknown as { cols: number; rows: number };
   console.log(
-    `  100 -> 500: city ${grown.map.width}x${grown.map.height}, entityGrid ${g.cols}x${g.rows},` +
+    `  ${CITY_POP_MIN} -> ${CITY_POP_MAX}: city ${grown.map.width}x${grown.map.height}, entityGrid ${g.cols}x${g.rows},` +
       ` ${grown.entities.size} entities, fullest cell ${fullest}`,
   );
 }
