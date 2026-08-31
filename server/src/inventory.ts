@@ -42,7 +42,8 @@ import {
   PARK_LOOT_GUARANTEED_GUNS,
   PARK_LOOT_GUARANTEED_UTILITIES,
   PARK_LOOT_GUN_SHARE,
-  PARK_LOOT_COVER,
+  PARK_LOOT_CLEARANCE,
+  CITY_CAR_LOOT_GAP,
   PARK_LOOT_PATH_GAP,
   POND_LOOT_GAP,
   POND_LOOT_BAND,
@@ -54,7 +55,7 @@ import type { World } from './world.js';
 import { chargeProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';
-import { callBackup } from './backup.js';
+import { callBackup, placeCityCar, spotBeside } from './backup.js';
 
 export interface Inventory {
   /**
@@ -397,9 +398,11 @@ export function spawnPickups(world: World): void {
 
   // A few things stashed in the park, tucked into the undergrowth rather than
   // left out on the grass — the whole point of putting loot there is that you
-  // have to go into the trees for it, so a candidate spot has to have a bush
-  // close enough to hide it. Kept off the dirt path for the same reason: a rifle
-  // lying on the one clear line through the park is not hidden at all.
+  // sit on open grass with no bush within PARK_LOOT_CLEARANCE of them, so they
+  // can actually be seen from a few paces off — foliage is drawn over the top
+  // of a pickup and a rifle under a canopy is a rifle nobody finds. Still held
+  // off the dirt path, so five of them are not strung out along the one
+  // walkway.
   //
   // The first two entries are a gun and a utility outright. The rest roll on
   // the share, which can easily come up all one kind — and a park with nothing
@@ -420,14 +423,15 @@ export function spawnPickups(world: World): void {
       if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
       if (distToPath(park.path, x, y) < park.pathWidth / 2 + PARK_LOOT_PATH_GAP) continue;
 
-      let hidden = false;
+      // **Clear of every bush, not tucked under one.** See PARK_LOOT_CLEARANCE.
+      let underCover = false;
       for (const bush of world.map.bushes) {
-        if (Math.hypot(bush.x - x, bush.y - y) <= bush.r + PARK_LOOT_COVER) {
-          hidden = true;
+        if (Math.hypot(bush.x - x, bush.y - y) <= bush.r + PARK_LOOT_CLEARANCE) {
+          underCover = true;
           break;
         }
       }
-      if (!hidden) continue;
+      if (underCover) continue;
 
       let crowded = false;
       for (const p of world.pickups.values()) {
@@ -444,6 +448,43 @@ export function spawnPickups(world: World): void {
     }
   }
 
+  /**
+   * **A patrol car parked in the middle of the city, with a gun and a piece of
+   * kit on the tarmac beside it.**
+   *
+   * Here rather than in `resetWorld` for a layering reason worth knowing:
+   * `world.ts` keeps a *type-only* import of `backup.ts` on purpose and so
+   * cannot call `placeCityCar` — and `spawnPickups` clears the pickup table,
+   * so anything laid down before it runs is wiped anyway. This module already
+   * reaches both, and the car is the same kind of thing as the park stash and
+   * the pond pair: a landmark with something worth walking to on it.
+   *
+   * The two items go through `drawItem` like everything else, so
+   * `ITEM_CITY_CAP` still holds over them — a ceiling any one placement could
+   * step round is not a ceiling.
+   */
+  const car = placeCityCar(world, Date.now());
+  if (car) {
+    // Along its flanks, one fore and one aft, on whichever side has kerb to
+    // spare. The offsets clear the body by construction — which matters,
+    // because `park` only sets `navDirty` and the grid it put the car into
+    // is not rebuilt until the next tick, so a nav test cannot see it yet.
+    const G = CITY_CAR_LOOT_GAP;
+    const tables = [GUN_LOOT, UTILITY_LOOT];
+    for (let i = 0; i < tables.length; i++) {
+      const along = i === 0 ? -G : G;
+      const at = spotBeside(world, car.x, car.y, car.facing, [
+        { along, across: G },
+        { along, across: -G },
+        { along: -along, across: G },
+        { along: -along, across: -G },
+        { along: along * 1.8, across: 0 },
+      ]);
+      if (!at) continue;
+      const id = `loot-car-${i}`;
+      world.pickups.set(id, { id, item: drawItem(tables[i]), x: at.x, y: at.y });
+    }
+  }
   // And a pair on the bank of the duck pond: one gun and one utility, both out
   // of the scarcest tier there is. The pond was the one landmark with nothing
   // to do in it — ornamental water, a flock of ducks, and no reason to walk
@@ -497,8 +538,16 @@ export function spawnPickups(world: World): void {
   // building, and counting it would have the every-gun floor satisfied by a
   // heap of test items and never place anything in the city at all.
   const inACity = (p: PickupState) => !p.id.startsWith('loot-test-');
+  // The patrol car's pair is placed by hand too, and for the same reason as the
+  // other two: a takeover *deletes* the id it lands on and re-adds under its
+  // own, so leaving them takeable meant the car's gun could quietly become a
+  // second utility. Measured before this, the pair was one item short of what
+  // the rig looked up in **1 city in 8** — the item was still lying there, but
+  // under another name and no longer a gun.
   const byHand = (p: PickupState) =>
-    p.id.startsWith('loot-oneoff-') || p.id.startsWith('loot-min-');
+    p.id.startsWith('loot-oneoff-') ||
+    p.id.startsWith('loot-min-') ||
+    p.id.startsWith('loot-car-');
   const freeSpots = () =>
     Array.from(world.pickups.values()).filter((p) => inACity(p) && !byHand(p));
 

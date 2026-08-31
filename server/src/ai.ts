@@ -1020,7 +1020,11 @@ function safestHeading(world: World, e: Entity, state: AiState): number {
     if (clearance === Infinity) clearance = 400;
 
     let score = Math.min(clearance, 400);
-    if (world.nav.isBlocked(px, py) || !world.nav.lineClear(e.x, e.y, px, py)) score -= 500;
+    // Sandbags count for anything that cannot eat them — running away is no
+    // reason to run into a wall somebody built. See `softAware`.
+    if (shutTo(world, e, px, py) || !world.nav.lineClear(e.x, e.y, px, py, softAware(e))) {
+      score -= 500;
+    }
     score += Math.cos(angle - state.heading) * 45;
 
     // Steer off the map edge before they end up grinding along it.
@@ -1041,6 +1045,30 @@ function safestHeading(world: World, e: Entity, state: AiState): number {
  * is penalised — the old random turn was as likely to point back into the wall
  * as away from it, which is what left people grinding there for seconds.
  */
+/**
+ * **A sandbag wall is ground for a zombie and an obstacle for everybody else**,
+ * and `headingToward` was the only place that knew it.
+ *
+ * That is enough while a body is walking a route, because the route goes round.
+ * It is not enough the moment something else picks the bearing — a blind
+ * breakout, a squad going round a frontage, a spot chosen to walk to — and all
+ * three of those read `nav.isBlocked`, which is the hard layer alone. Reported
+ * as SWAT having trouble with sandbags, and a sweeping squad is the body that
+ * meets all three: it crosses the whole city, so it is forever picking new
+ * points and forever getting nowhere against something and breaking out of it.
+ *
+ * One test on the type, the same one `headingToward` makes, so a zombie's
+ * behaviour is byte-for-byte what it was.
+ */
+function softAware(e: Entity): boolean {
+  return !sandbagsIgnoredByRoutes && e.type !== 'zombie';
+}
+
+/** `nav.isBlocked`, with the destructible layer counted in for the living. */
+function shutTo(world: World, e: Entity, x: number, y: number): boolean {
+  return softAware(e) ? world.nav.isBlockedOrSoft(x, y) : world.nav.isBlocked(x, y);
+}
+
 function breakoutHeading(world: World, e: Entity, state: AiState): number {
   let bestAngle = state.heading + Math.PI;
   let bestScore = -Infinity;
@@ -1050,7 +1078,8 @@ function breakoutHeading(world: World, e: Entity, state: AiState): number {
     const angle = (i / FLEE_DIRECTIONS) * Math.PI * 2;
     const px = e.x + Math.cos(angle) * FLEE_PROBE_DIST;
     const py = e.y + Math.sin(angle) * FLEE_PROBE_DIST;
-    if (world.nav.isBlocked(px, py) || !world.nav.lineClear(e.x, e.y, px, py)) continue;
+    if (shutTo(world, e, px, py)) continue;
+    if (!world.nav.lineClear(e.x, e.y, px, py, softAware(e))) continue;
 
     let score = Math.cos(angle - away) * 120;
     score -= Math.cos(angle - state.heading) * 90;
@@ -1233,7 +1262,11 @@ function pickWanderTarget(
       const r = home.rects[Math.floor(Math.random() * home.rects.length)];
       const x = r.x + 12 + Math.random() * Math.max(1, r.w - 24);
       const y = r.y + r.h / 2;
-      if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+      // `isReachable` is deliberately still the hard layer — a wall somebody
+    // built across a street is not a statement about which parts of the city
+    // are connected, and it is gone the moment a zombie has finished with it.
+    // Whether *this spot* can be stood on is a different question.
+    if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
       state.wanderX = x;
       state.wanderY = y;
       break;
@@ -1813,7 +1846,10 @@ function escapeDestination(
     const angle = (i / ESCAPE_SAMPLES) * Math.PI * 2;
     const x = clamp(e.x + Math.cos(angle) * ESCAPE_DISTANCE, 70, WORLD_WIDTH - 70);
     const y = clamp(e.y + Math.sin(angle) * ESCAPE_DISTANCE, 70, WORLD_HEIGHT - 70);
-    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+    // `isReachable` stays the hard layer — components are not a statement about
+    // a wall somebody stacked this minute — but a destination *inside* the bags
+    // is one nothing alive can stand on. See `softAware`.
+    if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
 
     // Geodesic danger: how far this spot is from the nearest zombie *through
     // walkable space*, so cover between us and them actually counts.
@@ -4414,7 +4450,8 @@ function squadPost(
   for (let t = 1; t > 0.2; t -= 0.2) {
     const x = lead.x + Math.cos(bearing) * reach * t;
     const y = lead.y + Math.sin(bearing) * reach * t;
-    if (buildingIndexAt(world, x, y) < 0 && !world.nav.isBlocked(x, y)) return { x, y };
+    // A post inside a wall of sandbags is as unstandable as one inside a shop.
+    if (buildingIndexAt(world, x, y) < 0 && !shutTo(world, lead, x, y)) return { x, y };
   }
   return { x: lead.x, y: lead.y };
 }
@@ -4500,7 +4537,7 @@ function squadStep(
     for (let d = 20; d <= 90; d += 20) {
       const px = fromX + Math.cos(h) * d;
       const py = fromY + Math.sin(h) * d;
-      if (buildingIndexAt(world, px, py) >= 0 || world.nav.isBlocked(px, py)) break;
+      if (buildingIndexAt(world, px, py) >= 0 || shutTo(world, e, px, py)) break;
       room = d;
     }
     if (room > bestRoom) {
@@ -4746,6 +4783,23 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     state.buildX = null;
     state.buildY = null;
     state.buildAt = 0;
+    /*
+     * **A wall built is a post to hold, not the end of an errand.**
+     *
+     * Reported as grey officers wandering off the moment the sandbags were
+     * stacked. With the build cleared and nothing else standing, the next tick
+     * fell through to escort/guard/patrol and they strolled away from the thing
+     * they had just put up — which is exactly the wrong body to have anywhere
+     * else. So finishing hands over to the move order's own arrival behaviour:
+     * hold where you are and scan the street, until a spectator says otherwise.
+     *
+     * It also overwrites any stale move order underneath. A build supersedes a
+     * move on the way in — the branch above this one is the whole reason —
+     * and resuming a walk that was given before the wall existed is not
+     * "finished building".
+     */
+    state.commandX = e.x;
+    state.commandY = e.y;
     return;
   }
 

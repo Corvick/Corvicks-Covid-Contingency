@@ -500,6 +500,43 @@ function sandbagSuite(): void {
   check(stacking > 0, 'and says so once he has arrived and is stacking', `${stacking} ticks`);
   check(world.barricades.size === 3, 'three walls actually get built', `${world.barricades.size}/3`);
   check(buildSitesToWire(world).length === 0, 'and the ghosts come off the wire with them');
+  /*
+   * **And then they stand there.**
+   *
+   * Reported as grey officers wandering off the moment the sandbags were
+   * stacked: with the build cleared and nothing else standing, the next tick
+   * fell through to escort/guard/patrol and they strolled away from the thing
+   * they had just put up. Finishing hands over to the move order's own arrival
+   * behaviour instead — hold where you are and scan the street.
+   *
+   * Measured over a good deal longer than the walk took, because "did not move"
+   * is a claim about the rest of the round rather than about the next second.
+   */
+  {
+    const wasAt = ids.map((id) => {
+      const e = world.entities.get(id);
+      return { id, x: e?.x ?? 0, y: e?.y ?? 0 };
+    });
+    for (let i = 0; i < 600; i++) {
+      tick(world, now, TICK_MS / 1000);
+      now += TICK_MS;
+    }
+    const drift = wasAt.map((w) => {
+      const e = world.entities.get(w.id);
+      return e ? Math.hypot(e.x - w.x, e.y - w.y) : 0;
+    });
+    const worst = Math.max(...drift);
+    check(
+      worst < 30,
+      'and then holds the spot rather than wandering off it',
+      `worst drift ${worst.toFixed(1)}px over 20s`,
+    );
+    check(
+      ids.every((id) => world.ai.get(id)?.commandX !== null),
+      'because finishing leaves him under a stand-here order',
+    );
+  }
+
   check(
     ids.every((id) => world.ai.get(id)?.hasSandbag === false),
     'every builder spent his one sandbag',

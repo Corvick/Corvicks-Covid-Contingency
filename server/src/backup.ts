@@ -18,6 +18,8 @@ import {
   RADIO_BACKUP_COUNT,
   RADIO_CALL_LINE,
   RADIO_CAR_BACKUP_COUNT,
+  CITY_CAR_SPREAD,
+  CITY_CAR_OFFICER_GAP,
   RADIO_REPLY_DELAY_MS,
   RADIO_REPLY_LINE,
   RADIO_SPEECH_MS,
@@ -610,6 +612,134 @@ function park(world: World, vehicle: BackupVehicle, now: number): void {
   world.navDirty = true;
 }
 
+/**
+ * A clear spot beside a parked body, tried in the order offered.
+ *
+ * Deliberately **not** `findSpawnNear`, which scatters at 40px plus a random
+ * reach from its origin — it is a spawn spread, not a nudge, and using it put
+ * the officer a median of **116px** from the car he was supposed to be
+ * standing beside. Offsets are in the body's own frame: `along` down its
+ * length, `across` out of its flank.
+ */
+export function spotBeside(
+  world: World,
+  x: number,
+  y: number,
+  facing: number,
+  offers: ReadonlyArray<{ along: number; across: number }>,
+): { x: number; y: number } | null {
+  const cos = Math.cos(facing);
+  const sin = Math.sin(facing);
+  for (const o of offers) {
+    const px = x + cos * o.along - sin * o.across;
+    const py = y + sin * o.along + cos * o.across;
+    if (px < 40 || py < 40 || px > WORLD_WIDTH - 40 || py > WORLD_HEIGHT - 40) continue;
+    if (buildingIndexAt(world, px, py) >= 0) continue;
+    if (world.nav.isBlocked(px, py)) continue;
+    return { x: px, y: py };
+  }
+
+  // **And a ring when none of the offers works**, which is a car parked with a
+  // kerb or a frontage down both flanks. Without it the second item simply was
+  // not placed — measured, 1 city in 16 came out with one thing on the tarmac
+  // instead of two, which reads as the placement being unreliable rather than
+  // as the spot being awkward.
+  for (let r = 56; r <= 140; r += 28) {
+    for (let i = 0; i < 12; i++) {
+      const t = (i / 12) * Math.PI * 2;
+      const px = x + Math.cos(t) * r;
+      const py = y + Math.sin(t) * r;
+      if (px < 40 || py < 40 || px > WORLD_WIDTH - 40 || py > WORLD_HEIGHT - 40) continue;
+      if (buildingIndexAt(world, px, py) >= 0) continue;
+      if (world.nav.isBlocked(px, py)) continue;
+      return { x: px, y: py };
+    }
+  }
+  return null;
+}
+/**
+ * **A patrol car the city started with**, parked somewhere near the middle with
+ * a grey officer beside it. See `CITY_CAR_SPREAD`.
+ *
+ * Built as an already-`parked` vehicle rather than driven in: there is no
+ * arrival to watch, and `dropped` is set to the car's full crew so
+ * `updateBackup` never tries to unload one. Everything else about it is an
+ * ordinary parked car — the lightbar goes on flashing, which is most of what
+ * makes it findable from a street away, and `park` puts its body into
+ * `world.navBlockers` so routes go round it like any other.
+ *
+ * Returns where it ended up so the caller can lay the two items beside it, or
+ * null if nowhere near the middle had room — a city with a very large building
+ * across the centre, which is not worth forcing.
+ */
+export function placeCityCar(
+  world: World,
+  now: number,
+): { x: number; y: number; facing: number } | null {
+  for (let attempt = 0; attempt < 240; attempt++) {
+    // Toward the middle, but not on the same pixel every round.
+    const x = WORLD_WIDTH * (0.5 + (Math.random() - 0.5) * CITY_CAR_SPREAD);
+    const y = WORLD_HEIGHT * (0.5 + (Math.random() - 0.5) * CITY_CAR_SPREAD);
+    // Streets are axis-aligned, so a car lies along one rather than at some
+    // angle across it.
+    const facing = Math.floor(Math.random() * 4) * (Math.PI / 2);
+    if (!bodyFits(world, x, y, facing)) continue;
+    if (!world.nav.isReachable(x, y)) continue;
+
+    const id = 'city-car';
+    const vehicle: BackupVehicle = {
+      id,
+      kind: 'car',
+      x,
+      y,
+      targetX: x,
+      targetY: y,
+      facing,
+      heading: facing,
+      phase: 'parked',
+      skidX: null,
+      skidY: null,
+      driftDir: 1,
+      drift: 0,
+      callerId: '',
+      // Its crew got out long before the round started, so there is nobody
+      // left in it to unload.
+      dropped: crewSize('car'),
+      nextDropAt: 0,
+      rearOpen: 0,
+      cabOpen: 0,
+      leaderId: null,
+    };
+    world.vehicles.set(id, vehicle);
+    park(world, vehicle, now);
+
+    // One grey officer standing by it, off to the side rather than in the road,
+    // and posted there — the same `guardX`/`guardY` the van's driver uses, so he
+    // is a sentry and a landmark at once instead of wandering off.
+    const G = CITY_CAR_OFFICER_GAP;
+    const stand =
+      spotBeside(world, x, y, facing, [
+        { along: 0, across: G },
+        { along: 0, across: -G },
+        { along: G, across: G },
+        { along: -G, across: G },
+        { along: G, across: -G },
+        { along: -G, across: -G },
+        { along: G * 1.6, across: 0 },
+        { along: -G * 1.6, across: 0 },
+      ]) ?? { x, y };
+    const guard = 'city-car-officer';
+    world.entities.set(guard, makeEntity(guard, 'officer', stand.x, stand.y));
+    const state = newAiState(now, stand.x, stand.y);
+    state.guardX = x;
+    state.guardY = y;
+    world.ai.set(guard, state);
+    world.cityOfficers.add(guard);
+
+    return { x, y, facing };
+  }
+  return null;
+}
 export function updateBackup(world: World, now: number, dt: number): void {
   // The radio answers a beat after the call, from the caller's own hip.
   for (let i = world.radioReplies.length - 1; i >= 0; i--) {

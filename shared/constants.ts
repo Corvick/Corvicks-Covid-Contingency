@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.19.1';
+export const GAME_VERSION = '0.20.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -140,10 +140,16 @@ export const PARK_PATH_WIDTH = 52;
 /** Undergrowth is kept this much clear of the path's edge on top of that. */
 export const PARK_PATH_CLEARANCE = 12;
 /**
- * Things stashed in the park. Not a lot — it is a cache, not a shop — and
- * every one has to be within `PARK_LOOT_COVER` of a bush, so you go into the
- * trees for it rather than spotting it from the road. Kept well off the dirt
- * path, since something lying on the one clear line through is not hidden.
+ * Things stashed in the park. Not a lot — it is a cache, not a shop.
+ *
+ * **On open grass, clear of every bush.** It used to be the opposite: each one
+ * had to be *within* `PARK_LOOT_COVER` of foliage, on the reasoning that you
+ * should go into the trees for it rather than spot it from the road. In
+ * practice a pickup tucked under a canopy is a pickup nobody can see at all —
+ * a bush is drawn over the top of it and hides a body standing in it, never
+ * mind a rifle lying under it — so the park read as empty and the cache went
+ * unfound. Asked for as "the loot in the park needs to spawn in a visible area
+ * (not in or touching a tree)".
  */
 export const PARK_LOOT_COUNT = 5;
 /**
@@ -155,8 +161,21 @@ export const PARK_LOOT_COUNT = 5;
 export const PARK_LOOT_GUARANTEED_GUNS = 1;
 export const PARK_LOOT_GUARANTEED_UTILITIES = 1;
 export const PARK_LOOT_GUN_SHARE = 0.45;
-export const PARK_LOOT_COVER = 26;
-export const PARK_LOOT_PATH_GAP = 70;
+/**
+ * How far the *edge* of a bush has to be from a park pickup.
+ *
+ * Measured off `bush.r`, so it is a gap between the foliage and the item
+ * rather than between two centres — "not touching" is a statement about the
+ * drawn circle. Generous enough that the item is not half under an overhang on
+ * the frame it is drawn.
+ */
+export const PARK_LOOT_CLEARANCE = 30;
+/**
+ * And off the dirt path, which is now about spreading them over the grass
+ * rather than about hiding them: five items strung out along the one walkway
+ * is a park you never leave the path in.
+ */
+export const PARK_LOOT_PATH_GAP = 40;
 /**
  * A pair of good things dropped on the bank of the duck pond — one gun and one
  * utility, both out of the scarcest tier there is (`rarestOf`).
@@ -3337,6 +3356,26 @@ export const RADIO_STATIC_LINE = 'ssshhhkk—';
 /** Four out of the van; two out of the car. */
 export const RADIO_BACKUP_COUNT = 4;
 export const RADIO_CAR_BACKUP_COUNT = 2;
+
+/**
+ * A patrol car already parked in the middle of the city when the round starts,
+ * with a grey officer standing by it and a gun and a piece of kit on the
+ * tarmac beside it.
+ *
+ * It is a landmark stash rather than a vehicle that arrived: the city's own
+ * loot is scattered a house at a time, the park's is under the trees and the
+ * pond's is on the bank, and none of those is somewhere you can *see* from a
+ * street away and decide to walk to. A cop car with its lightbar going is.
+ *
+ * `CITY_CAR_SPREAD` is how far off dead centre it may land, as a share of
+ * the map — 0 would put it on the same pixel every round and 1 would put it
+ * anywhere at all. Deliberately a *fraction of the map* rather than a pixel
+ * figure, so a small city keeps it proportionally as central.
+ */
+export const CITY_CAR_SPREAD = 0.34;
+/** Where the officer stands, and where the two items land, off the body. */
+export const CITY_CAR_OFFICER_GAP = 46;
+export const CITY_CAR_LOOT_GAP = 40;
 /** How far a grey officer will hear the radio and come in, while it is out. */
 export const RADIO_CALL_RANGE = 1500;
 export const RADIO_CALL_SCAN_MS = 700;

@@ -271,6 +271,32 @@ radius with its closest pair going 17.8 → 36.0**. Bearings from the group's
 centre are held to 2.0°, the centroid lands 0.0px off the click, no pair is under
 36px anywhere, and nothing is squeezed below the packing bound.
 
+#### A wall built is a post to hold
+
+Reported as *"in the rts mode when a grey officer is finished building a
+sandbag they should not move (they are wandering after right now)"*, and the
+code said exactly that: the build branch cleared `buildX` and returned, and
+the next tick fell through to escort/guard/patrol. So the officer strolled
+away from the thing he had just put up — which is the last body you want
+anywhere else.
+
+- **Finishing hands over to the move order’s own arrival behaviour.**
+  `commandX`/`commandY` are set to where he is standing, and the branch
+  immediately below already knows what to do with an officer who has arrived:
+  hold, and scan the street. No new state and no new branch.
+- **It overwrites any stale move order underneath**, deliberately. A build
+  supersedes a move on the way in — that is what the branch order is for —
+  and resuming a walk given before the wall existed is not "finished
+  building".
+- **`R` still hands him back to his own AI** and a fresh order still replaces
+  it, so it is a post rather than a lock.
+- Giving up on a spot (`BARRICADE_GIVE_UP_MS`) is untouched: that is not
+  finishing, and a man who could not reach the place has no reason to stand
+  where he gave up.
+
+Measured in `rtscheck.ts`, over 20s after the last wall goes up — because
+"did not move" is a claim about the rest of the round rather than the next
+second: **worst drift 0.0px**, and all three end under a stand-here order.
 #### And a command card to build with
 
 Selecting grey officers raises an SC2-shaped card bottom-right —
@@ -2593,17 +2619,61 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
 - **The every-gun floor still ignores it**, via `inACity` excluding any
   `loot-test-` id — the heap can now appear mid-round, and counting it would
   have the guarantee satisfied by test items while the buildings went without.
-- **Some loot is hidden in the park.** `PARK_LOOT_COUNT` (5) items rolled on
-  `PARK_LOOT_GUN_SHARE`, plus `PARK_LOOT_GUARANTEED_GUNS` and
+- **Some loot is out on the grass in the park.** `PARK_LOOT_COUNT` (5) items
+  rolled on `PARK_LOOT_GUN_SHARE`, plus `PARK_LOOT_GUARANTEED_GUNS` and
   `PARK_LOOT_GUARANTEED_UTILITIES` (one each) that are not left to the roll —
-  five coin flips come up all one kind often enough, and a park with nothing in
-  it worth carrying a gun for is a park nobody walks into twice. Every one has
-  to be within `PARK_LOOT_COVER` of a bush — the point of putting loot in the
-  park is that you go into the trees for it rather than spotting it from the
-  road. Kept `PARK_LOOT_PATH_GAP` clear of the dirt path for the same reason:
-  something lying on the one clear line through is not hidden at all.
-  Measured over six cities: 7.0 per park, at least one gun and one utility in
-  every one, 0 near the path, 0 out in the open.
+  five coin flips come up all one kind often enough, and a park with nothing
+  in it worth carrying a gun for is a park nobody walks into twice.
+  - **Every one is `PARK_LOOT_CLEARANCE` clear of the nearest bush, and it used
+    to be the exact opposite.** The old rule was that each had to be *within*
+    `PARK_LOOT_COVER` of foliage, so you went into the trees for it rather
+    than spotting it from the road. In practice a pickup under a canopy is a
+    pickup nobody can see at all — the bush is drawn over the top of it, and a
+    bush hides a whole body — so the park read as empty and the cache went
+    unfound. Reported as *"the loot in the park needs to spawn in a visible
+    area (not in or touching a tree)"*. Measured off `bush.r` rather than
+    between centres, because "not touching" is a statement about the drawn
+    circle.
+  - **`PARK_LOOT_PATH_GAP` came down 70 → 40 with it**, and its reason
+    changed: it was there to keep things off the one clear line through, and
+    it is there now only so five items are not strung out along the walkway.
+  - Measured over 24 cities: **6 per park, 0 touching a bush, closest 30.1px
+    clear**, at least one gun and one utility in every one.
+- **A patrol car parked in the middle of the city**, with a grey officer
+  stood beside it and a gun and a utility on the tarmac. Asked for as "one
+  cop car in the middle of the city (location somewhat random each time but
+  still towards the center)".
+  - **It is a landmark stash, not a vehicle that arrived.** The city’s own
+    loot is scattered a house at a time, the park’s is on the grass and the
+    pond’s is on the bank, and none of those is somewhere you can *see* from
+    a street away and decide to walk to. A cop car with its lightbar going is.
+  - **Built as an already-`parked` vehicle** with `dropped` at the car’s full
+    crew, so `updateBackup` never tries to unload one. Everything else about
+    it is an ordinary parked car, including `park` putting its body into
+    `world.navBlockers` so routes go round it.
+  - **`CITY_CAR_SPREAD` is a share of the map, not a pixel figure**, so a
+    small city keeps it proportionally as central. Measured over 24 cities it
+    lands 10-33% of the half-map off centre, never with its body in a
+    building, and lying along a street rather than at an angle across one.
+  - **`spotBeside` rather than `findSpawnNear` for the officer and the two
+    items.** That function scatters at 40px plus a random reach from its
+    origin — it is a spawn spread, not a nudge — and using it put the officer
+    a median of **116px** from the car he was supposed to be standing beside.
+    It is 46px now.
+  - **It is placed from `spawnPickups`**, which looks like the wrong module
+    and is the right one: `world.ts` keeps a *type-only* import of
+    `backup.ts` on purpose and so cannot call `placeCityCar`, and
+    `spawnPickups` clears the pickup table so anything laid down before it
+    runs is wiped anyway. The two items go through `drawItem` like everything
+    else, so `ITEM_CITY_CAP` still holds over them.
+  - The officer is posted with `guardX`/`guardY`, the same as the van’s
+    driver: a sentry and a landmark at once rather than one more wanderer.
+  - **Its pair is off limits to the takeover machinery**, like the one-offs and
+    the every-gun floor. A takeover *deletes* the id it lands on and re-adds
+    under its own, so leaving them takeable meant the car’s gun could quietly
+    become a second utility — measured, that happened in 1 city in 8.
+  - `server/citystash.ts` is the harness — headless, no socket, no port.
+
 - **A pair of rare things on the bank of the duck pond.** One gun and one
   utility, both out of `rarestOf` — the scarcest tier that still appears in the
   loot table, derived rather than hand-listed so a new rare is covered the day
@@ -2749,6 +2819,35 @@ has no business trying.
   iterator whether or not there is anything in it, and two of those five hundred
   times a tick is not nothing.
 
+**Routing round them was only ever half of it, and SWAT is the body that
+found the other half.** `headingToward` has known about the bags since the
+rule went in — but the moment something *other than a route* picks the
+bearing, the hard layer was all anybody asked about. Three did:
+
+- **`breakoutHeading`**, which is where a body goes when `unstickTick` has
+  decided it is getting nowhere. It fanned out on `nav.isBlocked` and
+  `lineClear` with no soft layer, so the answer to being stuck against a wall
+  of sandbags could be a committed blind walk into the same wall.
+- **the frontage scan in `squadStep`**, which commits a squad to going *along*
+  something for `SQUAD_AVOID_MS` — down a line it had not checked for bags.
+- **`sweepTarget` and `squadPost`**, which choose somewhere to be. A sweep
+  point or a station inside the bags is a spot nothing alive can stand on, so
+  the officer walks at it until the clock runs out.
+
+`safestHeading` and `escapeDestination` went with them, on the same argument:
+running away is no reason to run into a wall somebody built.
+
+**A sweeping squad is the body that meets all five**, which is why this came
+in as "SWAT are having trouble navigating sandbags" rather than as anything
+about civilians. It crosses the whole city, so it is forever picking new
+points, forever getting nowhere against something, and forever breaking out
+of that on a blind heading.
+
+`softAware(e)` and `shutTo(world, e, x, y)` are the two helpers, and they
+make the same test `headingToward` already made — one look at the type — so a
+zombie’s behaviour is byte-for-byte what it was. `isReachable` is deliberately
+left on the hard layer everywhere: components are not a statement about a
+wall somebody stacked this minute.
 `server/sandbagnav.ts` is the harness — headless, no socket, no port.
 `setSandbagsIgnoredByRoutes` is the gate and it is **kept**: the control is the
 whole value of the run, and here doubly so, since half of what has to be shown
@@ -2757,10 +2856,22 @@ lane with room round it, both behaviours on the same city:
 
 | 340px lane, wall across the middle | OLD | NEW |
 |---|---|---|
-| commanded officer got to the far end | **0/10** | **10/10**, median 10.7s |
-| …ticks spent pressed on the wall | 488 | **49** |
-| civilian got to the far end | **0/10** | **10/10**, median 7.4s |
-| …ticks spent bumping into it | 510 | **36** |
+| commanded officer got to the far end | **0/12** | **12/12**, median 9.0s |
+| …ticks spent pressed on the wall | 493 | **48** |
+| civilian got to the far end | **0/12** | **12/12**, median 6.8s |
+| …ticks spent bumping into it | 512 | **37** |
+| a sweeping SWAT officer, ticks pressed on it | 21-33 | **17-18** |
+
+**For SWAT the arrivals are the control and the pressing is the signal**,
+which is the other way round from the two rows above. A squad routes through
+`headingToward`, so it mostly got round a lone wall before this too — what
+moved is the blind fallbacks underneath, and what those cost is time spent
+leaning on the thing rather than never arriving. The rig asserts "no worse on
+arrivals" for that reason: asserting a *gain* reads as flaky because there is
+barely one to have (10/12 → 10/12 on one run, 8/10 → 9/10 on the next). A
+`WALL_RUN` knob stages a whole run of walls across the lane for the harder
+case; at that length the 20s run stops being long enough to arrive in and the
+reading becomes the clock.
 
 and the horde: a zombie's straight line is still clear through the bags
 **10/10** while the route for anything alive goes round **10/10**, and a zombie
