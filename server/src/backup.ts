@@ -95,6 +95,16 @@ export interface BackupVehicle {
   cabOpen: number;
   /** The one who leads the squad away, once they are all out. */
   leaderId: string | null;
+  /**
+   * Parked with the lightbar off.
+   *
+   * A car that came in on a call keeps flashing afterwards — that is most of
+   * what makes an arrival readable from a street away a minute later. One that
+   * has been sitting in the station car park since before anybody was infected
+   * never had a call to answer, and a yard of cars all flashing at nothing
+   * reads as three separate incidents rather than as a car park.
+   */
+  silent: boolean;
 }
 
 let counter = 0;
@@ -438,6 +448,7 @@ export function callBackup(
     rearOpen: 0,
     cabOpen: 0,
     leaderId: null,
+    silent: false,
   });
 
   world.speech.set(caller.id, { text: RADIO_CALL_LINE, until: now + RADIO_SPEECH_MS });
@@ -709,6 +720,7 @@ export function placeCityCar(
       rearOpen: 0,
       cabOpen: 0,
       leaderId: null,
+      silent: false,
     };
     world.vehicles.set(id, vehicle);
     park(world, vehicle, now);
@@ -740,6 +752,70 @@ export function placeCityCar(
   }
   return null;
 }
+/**
+ * **The station car park: nought to three cars, sirens off.**
+ *
+ * The bays are laid out by `mapgen` and reserved as part of the landmark box,
+ * so a bay is somewhere a car can stand by construction and this does not have
+ * to go looking. What is rolled here is only *how many* of them are occupied,
+ * and which — shuffled rather than filled left to right, or the third bay would
+ * be the empty one every single round and the yard would read as a pattern.
+ *
+ * They are built already `parked`, with `dropped` at the full crew, exactly as
+ * the city car is: `updateBackup` only ever unloads a vehicle that still has
+ * somebody in it, so a car that arrived before the round did needs no case of
+ * its own anywhere. Nobody gets out of these — the officers who man the station
+ * are inside it, which is what a station car park looks like.
+ *
+ * They are `silent`, which is the one thing that distinguishes them on screen
+ * from a car that has just skidded to a halt in front of you.
+ */
+export function placePoliceCars(world: World, now: number): number {
+  const station = world.map.policeStation;
+  if (!station) return 0;
+
+  const bays = station.parking.map((_, i) => i);
+  for (let i = bays.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [bays[i], bays[j]] = [bays[j], bays[i]];
+  }
+  const filled = Math.floor(Math.random() * (station.parking.length + 1));
+
+  let made = 0;
+  for (let n = 0; n < filled; n++) {
+    const bay = station.parking[bays[n]];
+    const id = `police-car-${bays[n]}`;
+    const vehicle: BackupVehicle = {
+      id,
+      kind: 'car',
+      x: bay.x,
+      y: bay.y,
+      targetX: bay.x,
+      targetY: bay.y,
+      facing: bay.facing,
+      heading: bay.facing,
+      phase: 'parked',
+      skidX: null,
+      skidY: null,
+      driftDir: 1,
+      drift: 0,
+      callerId: '',
+      dropped: crewSize('car'),
+      nextDropAt: 0,
+      rearOpen: 0,
+      cabOpen: 0,
+      leaderId: null,
+      silent: true,
+    };
+    world.vehicles.set(id, vehicle);
+    // Into `world.navBlockers` like any other parked body, so the crowd walks
+    // round the yard rather than into it. See "The radio".
+    park(world, vehicle, now);
+    made++;
+  }
+  return made;
+}
+
 export function updateBackup(world: World, now: number, dt: number): void {
   // The radio answers a beat after the call, from the caller's own hip.
   for (let i = world.radioReplies.length - 1; i >= 0; i--) {
@@ -891,6 +967,7 @@ export function vehiclesToWire(world: World): BackupVehicleState[] {
       // the marks lie along — *not* the body angle, which has swung off it.
       state.skidAngle = Math.round(v.heading * 100) / 100;
     }
+    if (v.silent) state.silent = true;
     if (v.phase === 'braking') state.braking = true;
     if (v.rearOpen > 0) state.rearOpen = Math.round(v.rearOpen * 100) / 100;
     if (v.cabOpen > 0) state.cabOpen = Math.round(v.cabOpen * 100) / 100;

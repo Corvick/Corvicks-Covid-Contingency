@@ -27,6 +27,12 @@ import {
   TURNING_TELL_MS,
   HUMAN_COUNT,
   cityAreaScale,
+  POLICE_STATION_OFFICERS,
+  POLICE_STATION_OFFICERS_MIN,
+  POLICE_STATION_OFFICERS_MAX,
+  POLICE_STATION_GUARD_RADIUS,
+  POLICE_STATION_STAFF_MIN,
+  POLICE_STATION_STAFF_MAX,
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
   BOT_OFFICER_COUNT,
@@ -1914,6 +1920,20 @@ export function findSpawn(
   };
 }
 
+/**
+ * Harness gate: leave the police station empty of people.
+ *
+ * The control for "a couple of civilians spawn in here as staff". Ordinary
+ * indoor spawns land in the station like any other building — it is a building
+ * — so a count of who is standing in it is a *superset* and says nothing on its
+ * own. What the difference between the two says something about is the two or
+ * three who were put there on purpose. See `server/policestation.ts`.
+ */
+let stationStaffOff = false;
+export function setStationHasNoStaff(v: boolean): void {
+  stationStaffOff = v;
+}
+
 export function createWorld(): World {
   const map = generateMap();
   const nav = new NavGrid(map);
@@ -2627,6 +2647,28 @@ function populate(world: World): void {
   // A share of the rest start indoors — and most of them live there, rather
   // than immediately strolling out of the front door.
   const indoorTarget = placed + Math.floor(HUMAN_COUNT * BUILDING_START_SHARE);
+  /*
+   * **The station has staff**, and they come out of the civilian count rather
+   * than on top of it: the slider promises a number of civilians and a desk
+   * clerk is one. They are spawned before the general indoor draw so they get
+   * their spots, and given `homeBuilding`, which is the existing trait for
+   * somebody who lives somewhere and will not idly wander out of it.
+   */
+  const station = world.map.policeStation;
+  if (station && !stationStaffOff) {
+    const staff =
+      POLICE_STATION_STAFF_MIN +
+      Math.floor(Math.random() * (POLICE_STATION_STAFF_MAX - POLICE_STATION_STAFF_MIN + 1));
+    // The lobby for the clerk, the office for the rest.
+    for (let i = 0; i < staff && placed < HUMAN_COUNT; i++) {
+      const room = i === 0 ? station.lobby : station.office;
+      const spawn = findSpawn(world, ENTITY_RADIUS.human, room);
+      const id = addHuman(placed, spawn.x, spawn.y);
+      world.ai.get(id)!.homeBuilding = station.building;
+      placed++;
+    }
+  }
+
   /**
    * The corner complex is busier than an ordinary block.
    *
@@ -2732,6 +2774,51 @@ function populate(world: World): void {
     world.cityOfficers.add(id);
   }
 
+  /*
+   * **And the station is manned.**
+   *
+   * These are ordinary grey officers — `world.cityOfficers`, the same set the
+   * spread garrison above goes into, so everything from `officerGrade` to the
+   * anti-dog rule treats them identically. What is different is that they are
+   * *posted*: `guardX`/`guardY` at the middle of the building, which is the
+   * same machinery the van's driver and the city car's officer already use.
+   *
+   * Posting them is the whole point of the word "manned". Left to patrol they
+   * would file out of the front door within a minute and the station would be
+   * a building full of guns and nobody, which is the opposite of somewhere to
+   * fall back to. The guard branch sits *below* the fight, so a posted officer
+   * still shoots what comes to it and still gives ground; it just comes back.
+   *
+   * Scaled by area like the garrison and then clamped, because 1-6 is what was
+   * asked for and a 1000-civilian round would otherwise put eight in it.
+   */
+  if (station) {
+    const manned = Math.max(
+      POLICE_STATION_OFFICERS_MIN,
+      Math.min(
+        POLICE_STATION_OFFICERS_MAX,
+        Math.round(POLICE_STATION_OFFICERS * cityAreaScale()),
+      ),
+    );
+    const b = world.map.buildings[station.building];
+    const midX = b.x + b.w / 2;
+    const midY = b.y + b.h / 2;
+    for (let i = 0; i < manned; i++) {
+      // Spread over the three rooms worth standing in rather than stacked in
+      // one: the lobby, the office, and the armoury they are guarding.
+      const room = i % 3 === 0 ? station.lobby : i % 3 === 1 ? station.office : station.armoury;
+      const spawn = findSpawn(world, ENTITY_RADIUS.officer, room);
+      const id = `station-officer-${i}`;
+      world.entities.set(id, makeEntity(id, `officer`, spawn.x, spawn.y));
+      const state = newAiState(now, spawn.x, spawn.y);
+      state.guardX = midX;
+      state.guardY = midY;
+      state.guardRadius = POLICE_STATION_GUARD_RADIUS;
+      world.ai.set(id, state);
+      world.cityOfficers.add(id);
+    }
+  }
+
   // Bot officers stand in for the players who aren't here. They get the same
   // starting kit a player does — a pistol and nothing else — and go looking
   // for the rest of it.
@@ -2780,16 +2867,24 @@ function populate(world: World): void {
     console.log(`[server] TESTING: ${chosen} starts with the survivor beacon`);
   }
 
-  // The outbreak walks in from one randomly chosen edge, spread along it.
-  const side = Math.floor(Math.random() * 4); // 0 N, 1 E, 2 S, 3 W
-  // Recorded because backup is not allowed to arrive on it — see `outbreakSide`.
+  /*
+   * The outbreak walks in from one edge, spread along it — and **which edge
+   * is the map's decision, not this one's**.
+   *
+   * It used to be rolled right here, which was fine while nothing else cared.
+   * The police station has to stand in the half away from the breach, and it
+   * is laid out inside `generateMap`, long before this runs. So the roll moved
+   * there and this reads it back. Everything downstream — `world.outbreakSide`,
+   * which is what keeps backup from arriving through the horde — is unchanged.
+   */
+  const side = world.map.outbreakSide;
   world.outbreakSide = side;
   const inset = BOUNDARY_THICKNESS + ENTITY_RADIUS.zombie + 24;
   let originX = 0;
   let originY = 0;
 
   // One breach point rather than a picket line across the whole edge.
-  const breach = 0.15 + Math.random() * 0.7;
+  const breach = world.map.outbreakAlong;
   for (let i = 0; i < INITIAL_ZOMBIES; i++) {
     const along = breach;
     const jitter = (i - (INITIAL_ZOMBIES - 1) / 2) * (INITIAL_ZOMBIE_SPREAD / INITIAL_ZOMBIES)

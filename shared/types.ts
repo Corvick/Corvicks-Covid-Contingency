@@ -264,6 +264,13 @@ export interface BackupVehicleState {
   /** How far the back doors and the cab door have swung, 0-1. */
   rearOpen?: number;
   cabOpen?: number;
+  /**
+   * Parked with the lightbar dark. A car that drove in on a call goes on
+   * flashing afterwards — that is most of what makes it findable from a
+   * street away — but one that has been sitting in the station car park
+   * since before the round started never had a call to answer.
+   */
+  silent?: boolean;
 }
 
 /** What pressing or holding E would do to the door you're stood at. */
@@ -394,6 +401,29 @@ export interface Park extends Wall {
   pathWidth: number;
 }
 
+/**
+ * The city police station: one per map, and the only building with a floor
+ * plan rather than a random partition.
+ *
+ * The rects are the *interior* of each room, inset off the walls, because
+ * every one of them is a place something gets put — loot in the armoury,
+ * staff in the lobby, the garrison in the office. Handed over rather than
+ * worked out again from the walls: the plan is laid out in tiles in one
+ * function and a second derivation of it would drift the first time a room
+ * moved.
+ */
+export interface PoliceStation {
+  /** Index into `buildings`. */
+  building: number;
+  /** Where a car may stand, and which way it is nosed in. 0-3 get filled. */
+  parking: Array<{ x: number; y: number; facing: number }>;
+  /** Interiors, for whoever fills them. */
+  armoury: Wall;
+  lobby: Wall;
+  office: Wall;
+  cell: Wall;
+}
+
 export interface MapData {
   seed: number;
   width: number;
@@ -414,6 +444,29 @@ export interface MapData {
    * day something else is pushed first.
    */
   cornerBuilding: number;
+  /**
+   * The police station, or null on a map with nowhere to put one.
+   *
+   * Nullable rather than assumed, because its placement has a hard
+   * constraint no other landmark has — the half of the map away from the
+   * breach — and a small city whose corner complex happens to sit in that
+   * half can genuinely run out of room. Everything that reads it has to
+   * cope with a round that has none.
+   */
+  policeStation: PoliceStation | null;
+  /**
+   * Which edge the outbreak walks in from (0 N, 1 E, 2 S, 3 W), and where
+   * along it, 0-1.
+   *
+   * **Rolled by `generateMap` rather than by `populate`, and that is what
+   * makes the police station possible.** The station has to stand in the
+   * half of the map away from the breach, which is a question the map has
+   * to be able to answer while it is being laid out — and `populate` runs
+   * afterwards. So the map decides, and `populate` reads it back and puts
+   * the zombies where it says.
+   */
+  outbreakSide: number;
+  outbreakAlong: number;
   doors: Door[];
   pond: Pond;
   park: Park;

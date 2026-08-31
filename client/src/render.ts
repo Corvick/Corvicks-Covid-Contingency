@@ -4652,12 +4652,24 @@ function drawPatrolCar(
     }
   }
 
+  /*
+   * **A car sitting in the station yard has its lightbar off.**
+   *
+   * The alternating halves have no "both dark" state between them — one of
+   * the two is always the bright one — so silence is its own branch rather
+   * than a beat that never comes. A yard of cars all flashing at nothing
+   * reads as three separate incidents rather than as a car park, and the
+   * flash is what makes a car that *did* answer a call findable a minute
+   * later from a street away.
+   */
   const beat = Math.sin(now * 0.012) > 0;
   ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
   ctx.fillRect(-7, -W + 1, 13, CAR_WIDTH - 2);
-  ctx.fillStyle = beat ? '#ef4444' : 'rgba(120, 30, 30, 0.65)';
+  const dimRed = 'rgba(120, 30, 30, 0.65)';
+  const dimBlue = 'rgba(30, 60, 140, 0.65)';
+  ctx.fillStyle = car.silent || !beat ? dimRed : '#ef4444';
   ctx.fillRect(-6, -W + 2, 11, W - 2);
-  ctx.fillStyle = beat ? 'rgba(30, 60, 140, 0.65)' : '#3b82f6';
+  ctx.fillStyle = car.silent || beat ? dimBlue : '#3b82f6';
   ctx.fillRect(-6, 1, 11, W - 3);
   ctx.restore();
 }

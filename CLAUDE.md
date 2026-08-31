@@ -64,9 +64,12 @@ Server modules and what each owns:
 - `ai.ts` — all NPC behaviour (humans, zombies, NPC officers)
 - `mapgen.ts` — procedural city; returns walls, windows, bushes, buildings, doors.
   Also guarantees every indoor space can be reached from the street. Ground is
-  claimed in order — park, corner complex, big buildings, edge buildings, then
-  ordinary blocks yield to all of it — so anything that must get its spot goes
-  early. `MapData.cornerBuilding` names the complex outright rather than
+  claimed in order — corner complex, police station, park, big buildings, edge
+  buildings, then ordinary blocks yield to all of it — so anything that must
+  get its spot goes early. The complex is first because it claims its corner
+  outright; the station is second because it is the only one with a *hard*
+  constraint on where it may be (the half away from the breach), which is also
+  why `outbreakSide` is rolled here rather than in `populate`. `MapData.cornerBuilding` names the complex outright rather than
   leaving anybody to assume it is `buildings[0]`. Nothing it lays down is
   narrower than a body can walk down — see **A building is somewhere you can get
   into**
@@ -98,6 +101,8 @@ Server modules and what each owns:
 - `inventory.ts` — loot spawning, slots, pickup/drop
 - `heli.ts` — thrown/launched charges, smoke → helicopter → soldiers, blasts
 - `backup.ts` — the radio's answer: a van or a car in off the map, and its crew
+- `backup.ts` also parks the station's yard (`placePoliceCars`) and the city
+  car, neither of which ever drove anywhere
 - `mines.ts` — zap mines on the ground, and who they have dropped
 - `ducks.ts` — the flock on the pond
 - `spatial.ts` / `geometry.ts` — uniform grid broadphase, math primitives
@@ -1013,11 +1018,19 @@ a game on 8080 alone. Measured over six cities at each of five settings:
 
 | pop | city | buildings | street clearance p5/p50 | narrowest doorway | van parks | crew out | garrison |
 |---|---|---|---|---|---|---|---|
-| 1000 | 7071x5233 | 172-177 | 8 / 68 | 56 | 36/36 | 36/36 | 29-31 |
-| 750 | 6124x4532 | 127-128 | 8 / 74 | 56 | 36/36 | 36/36 | 22-23 |
-| 500 | 5000x3700 | 77-80 | 8 / 74 | 56 | 36/36 | 36/36 | 16-18 |
-| 300 | 3873x2866 | 42-45 | 8 / 80-86 | 56 | 36/36 | 36/36 | 12-13 |
-| 100 | 3000x2220 | 24-25 | 8 / 86-90 | 56 | 36/36 | 36/36 | 9-10 |
+| 1000 | 7071x5233 | 160 | 8 / 74 | 56 | 36/36 | 36/36 | 36 |
+| 750 | 6124x4532 | 119 | 8 / 80 | 56 | 36/36 | 36/36 | 27 |
+| 500 | 5000x3700 | 72 | 8 / 80 | 56 | 36/36 | 36/36 | 21 |
+| 300 | 3873x2866 | 38 | 8 / 90 | 56 | 36/36 | 36/36 | 14 |
+| 100 | 3000x2220 | 20 | 8 / 90 | 56 | 36/36 | 36/36 | 11 |
+
+**Both the building and garrison columns moved with the police station**, and
+the previous figures are worth keeping for scale: buildings were **172-177 /
+127-128 / 77-80 / 42-45 / 24-25** and the garrison **29-31 / 22-23 / 16-18 /
+12-13 / 9-10**. The station reserves its footprint plus a car park as one
+landmark box, so the block grid loses a few frontages to it; and it is manned,
+so 1 to 6 more grey officers stand in the count. The street clearance went the
+other way for the same reason — fewer ordinary blocks is more road.
 
 **A block near a landmark is left empty by `STREET_MIN` now, not by 40px.**
 A building may sit flush against its block’s edge, so a 40px reservation is a
@@ -2276,6 +2289,209 @@ that matters for anything solid: that function has exactly one caller — the
 straight-line shortcut in `headingToward` — and what it asks is whether you can
 **walk** there. A parked vehicle is now in both it and the grid, and being in
 only one of the two is the same as being in neither. See **The radio**.
+
+### The police station
+
+Asked for outright: *"lets get a police station that spawns somewhat randomly (it
+will always be on the opposite half of the map away from the initial zombie dog
+and zombies, and more often than not the opposite end of that half) … 3 parking
+spots that will be randomly filled 0-3 with cop cars with their sirens off … a
+lobby and a glass window that is like the clerks desk … a simple jail cell in the
+back and a room 2-6 spawns for guns and 1-3 spawns for utility (and with a 30%
+chance to spawn a radio that is excluded from the map limits) … manned by 1-6
+grey officers depending on map size (have a couple civilians spawn in here to act
+as staff too) … the office area have a cubicle like layout but not too crowded"*.
+
+**It is the only building in the city with a floor plan.** Everything else
+`mapgen` lays down is a shell with a partition rolled into it; this one has named
+rooms because every one of them is a place something happens, and `PoliceStation`
+on `MapData` hands their *interiors* over rather than leaving anybody to work
+them back out of the walls. 16 tiles by 13 — 448x364, between an ordinary block
+and a big building — laid out on a canonical orientation with the entrance on the
+south face and **optionally mirrored left to right**, which is variety for the
+price of one sign and no rotation arithmetic anywhere.
+
+```
+x:  0    4          11        16
+y=0 +----+-----------+---------+
+    |CELL|           | ARMOURY |   the back
+y=4 +-##-+           +---##----+
+    |                          |
+    |   OFFICE, in cubicles    |
+y=10+---[GLASS]----##----------+   the clerk's window, and the way through
+    |         LOBBY            |
+y=13+---------##---------------+   the front door
+```
+
+- **Every gap in it is at least `MIN_LIMB` tiles**, which is the rule the whole
+  of **A building is somewhere you can get into** rests on. `roomfit` reads 0 of
+  24 cities with any floor a body cannot reach, and the narrowest clear run
+  anywhere inside is **46px** — a two-tile doorway, the same figure the rest of
+  the city's doorways measure.
+- **The office is deliberately L-shaped**: nothing walls off the strip between
+  the cell and the armoury, so the back of the office opens into the back of the
+  building. That is one room to `rooms.ts`, which flood-fills the finished
+  geometry and neither knows nor needs to know what any of it is for.
+- **The cubicles are three free-standing L partitions and nothing else.** A wall
+  in this game is a wall, so a full grid of them is a maze rather than an office
+  — "not too crowded" is the ask and it is measured: **95% of the office is
+  clear floor**. They are kept two tiles clear of the walls above and below, so
+  every slot between them is a `MIN_LIMB` a body can walk down.
+- **The clerk's desk is real glass**, not a drawn line: a `WindowPane`, so you
+  can see the office from the lobby, nothing walks through it, and a zombie can
+  break it — all of which comes free from the pane already existing.
+
+#### The half away from the breach, and usually the far end of it
+
+**`generateMap` rolls the outbreak now, and `populate` reads it back.**
+`outbreakSide` and `outbreakAlong` moved onto `MapData` for one reason: the
+station has to stand in the half of the map away from where the outbreak walks
+in, and that is a question the map has to answer *while it is being laid out*,
+where `populate` runs afterwards. Nothing about the outbreak itself changed —
+`world.outbreakSide` is still what stops backup arriving through the horde, and
+`breachSpawnPoint` still puts the dog and the first five zombies in.
+
+- **It goes second**, after the corner complex and before everything that merely
+  samples for a spot. The complex claims its corner outright and cannot be asked
+  to move, so the station cannot go first; but it is the only landmark with a
+  *hard* constraint on where it may be, so it must go before the park, the big
+  buildings and the ordinary blocks.
+- **The constraint is on the whole footprint, not on its centre**, and the
+  difference is a real leak rather than pedantry. Written the obvious way —
+  sample a fraction of the map, constrain the centre — a station drawn at
+  exactly the halfway fraction sits with its centre *on* the midline and half of
+  itself in the wrong half. Measured, that is about **one city in forty**, and
+  "always" was the word in the request. The origin range is narrowed instead.
+- **`POLICE_STATION_FAR_END_CHANCE` (0.7) is the bias on the free axis**, and it
+  is deliberately not 1.0: a station that is in the same corner every time you
+  know where the breach is, is a station you never have to look for.
+- **The apron is reserved with the building**, as one landmark box, so the
+  street grid keeps off the car park and a bay is somewhere a car can stand by
+  construction rather than by luck.
+- **Bushes are cleared off the apron by hand.** A bush is not in the nav grid, so
+  nothing else would have turned one away — and a shrub drawn over a parked
+  patrol car is a *picture* problem rather than a walking one, which is exactly
+  the kind that never gets noticed until it is on screen.
+
+#### The yard
+
+`placePoliceCars`, in `backup.ts`. Nought to three, shuffled rather than filled
+left to right — or the third bay would be the empty one every single round and
+the yard would read as a pattern.
+
+- **They are the existing parked-vehicle record with nobody in it**, built
+  already `parked` with `dropped` at the full crew, exactly as the city car is.
+  `updateBackup` only ever unloads a vehicle that still has somebody aboard, so a
+  car that arrived before the round did needs no case of its own anywhere. They
+  go into `world.navBlockers` through the same `park()` as any other, so the
+  crowd walks round the yard rather than into it.
+- **`silent` is the one new thing on the wire**, and it is one boolean. A car that
+  came in on a call keeps flashing afterwards — that is most of what makes an
+  arrival readable from a street away a minute later — and one that has been
+  sitting in the station yard since before anybody was infected never had a call
+  to answer. **It needed its own branch in the drawing**, not a beat that never
+  comes: the two halves of a lightbar alternate, so one of them is always the
+  bright one and there is no "both dark" state between them.
+
+#### The armoury is a rack, not a scatter
+
+- **`POLICE_STATION_LOOT_GAP` (30) against `LOOT_MIN_GAP` (44) everywhere else.**
+  That figure is a rule about scattering loot *through a city*, so that a house
+  holds a rifle rather than a pile — and an armoury is the one room in the game
+  where it is exactly wrong.
+- **And it is laid out on a shuffled grid rather than sampled for.** Ten items in
+  five tiles by four is a density rejection sampling simply cannot find:
+  measured with the ordinary gap and the ordinary placer, a room asked for up to
+  six guns and three utilities came away with a **median of three and none**,
+  and the radio landed on **5% of maps against the 30% it rolls**. A grid cannot
+  fail that way, and it is also what a rack against a wall looks like from above.
+  After: **2-6 guns and 1-3 utilities on every map**, radio at 30%.
+- **The radio is outside `ITEM_CITY_CAP` in both directions**, which is the one
+  exception in the game and is what was asked for. It is not refused when the
+  city already holds its two, and it does not count toward them — so a round can
+  finish with three. The cap exists because three vans out of the *ordinary*
+  building roll was the ordinary case and nobody chose it; finding one in an
+  armoury on the far side of the map is a thing you went and did. Measured: the
+  rest of the city still reads at most 2, with the armoury's on top of that in
+  11 cities of 40.
+- **`STATION_RADIO_ID` is named rather than inlined** because `cityCount` and
+  `byHand` both have to agree on it, and a typo in either would silently put it
+  back under the ceiling.
+- **The armoury's stock is off limits to the takeover machinery**, like the city
+  car's pair and the one-offs: a takeover *deletes* the id it lands on and re-adds
+  under its own.
+
+#### Manned, and staffed
+
+- **The officers are ordinary grey officers** — `world.cityOfficers`, the same
+  set the spread garrison goes into, so `officerGrade` and the anti-dog rule
+  treat them identically. What is different is that they are **posted**:
+  `guardX`/`guardY` at the middle of the building, the same machinery the van's
+  driver and the city car's officer already use. Left to patrol they would file
+  out of the front door inside a minute and the station would be a building full
+  of guns and nobody. The guard branch sits *below* the fight, so a posted
+  officer still shoots what comes to it and still gives ground; it just comes
+  back. Measured over 60s of a real round: **4 of 4 still at their post, worst
+  drift 70px against a 250px radius.**
+- **Scaled by area and then clamped**, like the garrison — `1` officer at a
+  100-civilian city, `4` at 500, `6` at 1000. 1-6 is the whole of what was asked
+  for and `cityAreaScale()` alone would put eight in a full one.
+- **The staff come out of the civilian count, not on top of it.** The slider
+  promises a number of civilians and a desk clerk is one. Spawned before the
+  general indoor draw so they get their spots, one in the lobby and the rest in
+  the office, with `homeBuilding` set — the existing trait for somebody who lives
+  somewhere and will not idly wander out of it.
+
+`server/policestation.ts` is the harness — headless, no socket, no port.
+**`setStationHasNoStaff` is the gate and it is kept**, because the station is a
+building and the ordinary indoor draw lands people in it whether or not anybody
+was put there on purpose: a bare count of who is standing in it is satisfied just
+as well by a station with no staff code at all. Forty cities:
+
+| | |
+|---|---|
+| a station on every map | 40/40 |
+| **its whole footprint in the half away from the breach** | **40/40** |
+| and the far end of that half | 70-95%, expected 85% |
+| nearest initial zombie | **34-75% of the map diagonal**, median 56% |
+| cars in the yard | 0-3, all four counts seen, **every one silent** |
+| …parked in geometry | **0** |
+| armoury | **2-6 guns, 1-3 utilities**, 0 astray |
+| a radio | **30%** of maps, never two |
+| the rest of the city's radios | still capped at 2 |
+| manned | **1 / 4 / 6** officers at pop 100 / 500 / 1000 |
+| civilians in it | 6.2 against **3.6 with the staff gated off** |
+| rooms, none sealed | 4, **0** without an exit |
+| floor a body cannot reach | **0** |
+| narrowest gap anywhere in it | **46px** |
+| the office, clear floor | **95%** |
+
+*Four things about measuring this were the rig lying rather than the code
+failing, and two of them are the same lesson twice:*
+
+- **`world.nav` carries `NAV_INFLATE` (10px a side), so it is the wrong
+  instrument for a question about geometry.** A 10px cubicle partition reads as
+  30 and a 56px doorway reads as 36 — measured that way the office came back
+  **76% clear** and the narrowest gap in the building **14px**, neither of which
+  is a fact about anything that was built. The inflation is there so a *route*
+  keeps its distance from a wall; what a body fits down is the wall itself.
+- **The station is a building, so the ordinary building roll drops loot in it.**
+  Counting what is standing in the armoury put "1-3 utilities" at a max of 4 on a
+  room that had placed 2. The claim is about what the *armoury* stocked, and the
+  pickup ids are what say so.
+- **Two of the checks were tighter than their own sample supports.** A fixed
+  ±0.16 band on a 0.3 coin is 1.7 standard errors at n=24 and failed about one
+  run in ten on working code; the staff control compared *minima*, which is a
+  coin toss because an unlucky control city still draws three ordinary civilians
+  into the station. Both are sized off the sample now — three standard errors for
+  the radio, pooling both runs since the staff gate does not touch loot, and the
+  mean rather than the floor for the staff.
+
+**What is not measured is what it looks like.** rAF is throttled to nothing while
+the browser pane is not compositing, so the drawing is the same standard as
+`DOG_CAMERA_ZOOM` and the resolution row: the station is walls, windows and doors
+that the client already draws, and the one new drawing decision — a dark lightbar
+on a silent car — is three lines that typecheck. Somebody has to look at it.
 
 ### The park
 

@@ -44,6 +44,12 @@ import {
   PARK_LOOT_GUN_SHARE,
   PARK_LOOT_CLEARANCE,
   CITY_CAR_LOOT_GAP,
+  POLICE_STATION_GUNS_MIN,
+  POLICE_STATION_GUNS_MAX,
+  POLICE_STATION_UTILITIES_MIN,
+  POLICE_STATION_UTILITIES_MAX,
+  POLICE_STATION_RADIO_CHANCE,
+  POLICE_STATION_LOOT_GAP,
   PARK_LOOT_PATH_GAP,
   POND_LOOT_GAP,
   POND_LOOT_BAND,
@@ -52,10 +58,18 @@ import {
   TEST_BEACON_ON_A_BOT,
 } from '../../shared/constants.js';
 import type { World } from './world.js';
+
+/**
+ * The armoury radio's pickup id, which is the whole of how it sits outside
+ * `ITEM_CITY_CAP` — `cityCount` skips it and `drawItem` never sees it. Named
+ * rather than inlined because two places have to agree on it and a typo in
+ * either would silently put the radio back under the ceiling.
+ */
+const STATION_RADIO_ID = 'loot-armoury-radio';
 import { chargeProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';
-import { callBackup, placeCityCar, spotBeside } from './backup.js';
+import { callBackup, placeCityCar, placePoliceCars, spotBeside } from './backup.js';
 
 export interface Inventory {
   /**
@@ -297,7 +311,13 @@ export function spawnPickups(world: World): void {
   const cityCount = (item: ItemId): number => {
     let seen = 0;
     for (const p of world.pickups.values()) {
-      if (p.item === item && !p.id.startsWith('loot-test-')) seen++;
+      if (p.id.startsWith('loot-test-')) continue;
+      // **The armoury radio does not count toward the ceiling.** It is placed
+      // outside `drawItem` so the cap cannot refuse it; counting it here would
+      // let it push an ordinary house's radio off the map instead, which is the
+      // cap doing the opposite of its job — see `POLICE_STATION_RADIO_CHANCE`.
+      if (p.id === STATION_RADIO_ID) continue;
+      if (p.item === item) seen++;
     }
     return seen;
   };
@@ -485,6 +505,89 @@ export function spawnPickups(world: World): void {
       world.pickups.set(id, { id, item: drawItem(tables[i]), x: at.x, y: at.y });
     }
   }
+  /**
+   * **The station armoury, and the yard in front of it.**
+   *
+   * The one room in the city stocked as a *room* rather than as a building:
+   * `placeIn` samples a building's footprint rows, which for the station would
+   * scatter the guns through the lobby and the cell as readily as the armoury,
+   * and the whole point of a police station is that the guns are in the place
+   * with a door on it. `mapgen` hands over the interior rects for exactly this.
+   *
+   * Guns and utilities both draw through `drawItem`, so `ITEM_CITY_CAP` holds
+   * over them like everywhere else. **The radio is the one exception in the
+   * game**, and it is deliberate: the cap exists because three vans out of the
+   * ordinary building roll was the *ordinary* case and nobody chose it, where
+   * finding one in an armoury on the far side of the map is a thing you went
+   * and did. It is placed directly, so the cap cannot refuse it, and it is
+   * excluded from `cityCount`, so it cannot cost a house one either.
+   */
+  const station = world.map.policeStation;
+  if (station) {
+    placePoliceCars(world, Date.now());
+
+    /*
+     * **The armoury is laid out on a rack, not sampled for.**
+     *
+     * Everywhere else in the city a pickup is dropped by rejection sampling,
+     * which is right when a house holds one item and there is a whole floor to
+     * put it on. This room is asked for up to ten in five tiles by four, and a
+     * rejection sample at that density simply fails — measured, it came away
+     * with three guns, no utilities and the radio on 5% of maps against 30%.
+     *
+     * A shuffled grid cannot fail that way, and it is also what a rack of
+     * rifles against a wall actually looks like from above.
+     */
+    const slots: Array<{ x: number; y: number }> = [];
+    {
+      const G = POLICE_STATION_LOOT_GAP;
+      const room = station.armoury;
+      const cols = Math.max(1, Math.floor((room.w - 24) / G) + 1);
+      const rows = Math.max(1, Math.floor((room.h - 24) / G) + 1);
+      const spanX = cols > 1 ? (room.w - 24) / (cols - 1) : 0;
+      const spanY = rows > 1 ? (room.h - 24) / (rows - 1) : 0;
+      for (let c = 0; c < cols; c++) {
+        for (let r = 0; r < rows; r++) {
+          const x = room.x + 12 + c * spanX;
+          const y = room.y + 12 + r * spanY;
+          // A slot inside geometry is skipped rather than nudged: the grid is
+          // built off the room the walls actually left, so this is a belt and
+          // braces against a plan change rather than an expected case.
+          if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+          slots.push({ x, y });
+        }
+      }
+      for (let i = slots.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [slots[i], slots[j]] = [slots[j], slots[i]];
+      }
+    }
+    let next = 0;
+    const rack = (item: ItemId, id: string): void => {
+      const at = slots[next++];
+      if (!at) return;
+      world.pickups.set(id, { id, item, x: at.x, y: at.y });
+    };
+    const guns =
+      POLICE_STATION_GUNS_MIN +
+      Math.floor(Math.random() * (POLICE_STATION_GUNS_MAX - POLICE_STATION_GUNS_MIN + 1));
+    const utils =
+      POLICE_STATION_UTILITIES_MIN +
+      Math.floor(
+        Math.random() * (POLICE_STATION_UTILITIES_MAX - POLICE_STATION_UTILITIES_MIN + 1),
+      );
+    let slot = 0;
+    for (let i = 0; i < guns; i++) {
+      rack(drawItem(GUN_LOOT), `loot-armoury-${slot++}`);
+    }
+    for (let i = 0; i < utils; i++) {
+      rack(drawItem(UTILITY_LOOT), `loot-armoury-${slot++}`);
+    }
+    if (Math.random() < POLICE_STATION_RADIO_CHANCE) {
+      rack('radio', STATION_RADIO_ID);
+    }
+  }
+
   // And a pair on the bank of the duck pond: one gun and one utility, both out
   // of the scarcest tier there is. The pond was the one landmark with nothing
   // to do in it — ornamental water, a flock of ducks, and no reason to walk
@@ -547,7 +650,9 @@ export function spawnPickups(world: World): void {
   const byHand = (p: PickupState) =>
     p.id.startsWith('loot-oneoff-') ||
     p.id.startsWith('loot-min-') ||
-    p.id.startsWith('loot-car-');
+    p.id.startsWith('loot-car-') ||
+    p.id.startsWith('loot-armoury-') ||
+    p.id === STATION_RADIO_ID;
   const freeSpots = () =>
     Array.from(world.pickups.values()).filter((p) => inACity(p) && !byHand(p));
 

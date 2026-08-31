@@ -4,6 +4,7 @@ import type {
   Door,
   MapData,
   Park,
+  PoliceStation,
   Pond,
   Wall,
   Window as WindowPane,
@@ -46,6 +47,11 @@ import {
   BIG_BUILDING_MAX_SHARE,
   cityAreaScale,
   cityLinearScale,
+  POLICE_STATION_W_TILES,
+  POLICE_STATION_H_TILES,
+  POLICE_STATION_APRON,
+  POLICE_STATION_PARKING,
+  POLICE_STATION_FAR_END_CHANCE,
 } from '../../shared/constants.js';
 import { NavGrid } from './navgrid.js';
 
@@ -727,6 +733,180 @@ function roomedBuildingAt(
   };
 }
 
+/**
+ * **The police station, and the only building in the city drawn to a plan.**
+ *
+ * Everything else here is a shell with a random partition in it; this one has
+ * named rooms because each of them is a place something happens. Laid out in
+ * tiles on a canonical orientation — the entrance always on the south face —
+ * and optionally mirrored left-to-right, which is variety for the price of one
+ * sign and no rotation arithmetic at all.
+ *
+ * The plan, at `POLICE_STATION_W_TILES` x `POLICE_STATION_H_TILES`:
+ *
+ * ```
+ * x:  0    4          11        16
+ * y=0 +----+-----------+---------+
+ *     |CELL|           | ARMOURY |   the back
+ * y=4 +-##-+           +---##----+
+ *     |                          |
+ *     |   OFFICE, in cubicles    |
+ * y=10+---[GLASS]----##----------+   the clerk's window, and the way through
+ *     |         LOBBY            |
+ * y=13+---------##---------------+   the front door
+ * ```
+ *
+ * **Every gap in it is at least `MIN_LIMB` tiles**, which is what stops any of
+ * this being a room nothing in the game fits into — the cell is four tiles
+ * across, the cubicle partitions are two clear of everything, and each doorway
+ * is a `GAP`-wide opening like every other doorway in the city. See "A
+ * building is somewhere you can get into".
+ *
+ * The office is deliberately **L-shaped**: the strip between the cell and the
+ * armoury has no wall across it, so the back of the office opens into the back
+ * of the building. That is one room to `rooms.ts`, which flood-fills the
+ * finished geometry and neither knows nor needs to know what any of it is for.
+ */
+function policeStationAt(
+  walls: Wall[],
+  windows: WindowPane[],
+  buildings: Building[],
+  doors: Door[],
+  rand: Rng,
+  originX: number,
+  originY: number,
+  mirror: boolean,
+): { building: Building; station: PoliceStation } {
+  const t = WALL_THICKNESS;
+  const W = POLICE_STATION_W_TILES;
+  const H = POLICE_STATION_H_TILES;
+  const index = buildings.length;
+  const doorIds: number[] = [];
+
+  // Mirroring is a reflection of the x axis and nothing else. Both helpers go
+  // through it so no run can be flipped by hand and forgotten.
+  const mx = (v: number): number => (mirror ? W - v : v);
+  const hspan = (a: number, b: number): [number, number] =>
+    mirror ? [W - b, W - a] : [a, b];
+
+  /** A run of solid wall along a horizontal tile line. */
+  const hwall = (line: number, a: number, b: number): void => {
+    const [p, q] = hspan(a, b);
+    pushRun(walls, { horiz: true, a: 0, b: 0, line }, p, q, originX, originY, t);
+  };
+  /** A run of solid wall along a vertical tile line. */
+  const vwall = (line: number, a: number, b: number): void => {
+    pushRun(walls, { horiz: false, a: 0, b: 0, line: mx(line) }, a, b, originX, originY, t);
+  };
+  /** Glass, which is see-through and every bit as solid as wall. */
+  const hglass = (line: number, a: number, b: number): void => {
+    const [p, q] = hspan(a, b);
+    pushRun(windows, { horiz: true, a: 0, b: 0, line }, p, q, originX, originY, t);
+  };
+  /** A doorway in a horizontal line, recorded so everything can reason about it. */
+  const hdoor = (line: number, a: number, b: number, interior: boolean): void => {
+    const [p, q] = hspan(a, b);
+    doorIds.push(doors.length);
+    doors.push(
+      gapToDoor({ horiz: true, a: p, b: q, line }, originX, originY, index, interior),
+    );
+  };
+  /** An interior rect in world units, inset off its own walls. */
+  const room = (x0: number, y0: number, x1: number, y1: number): Wall => {
+    const [p, q] = hspan(x0, x1);
+    return {
+      x: originX + p * TILE + t,
+      y: originY + y0 * TILE + t,
+      w: (q - p) * TILE - t * 2,
+      h: (y1 - y0) * TILE - t * 2,
+    };
+  };
+
+  // --- the shell. The front door is the one opening in it.
+  hwall(0, 0, W);
+  vwall(0, 0, H);
+  vwall(W, 0, H);
+  hwall(H, 0, 7);
+  hwall(H, 9, W);
+  hdoor(H, 7, 9, false);
+
+  // --- the cell, back left: its own wall and its own door.
+  vwall(4, 0, 4);
+  hwall(4, 0, 1);
+  hwall(4, 3, 4);
+  hdoor(4, 1, 3, true);
+
+  // --- the armoury, back right.
+  vwall(11, 0, 4);
+  hwall(4, 11, 12);
+  hwall(4, 14, W);
+  hdoor(4, 12, 14, true);
+
+  // --- the front counter. Glass where the clerk sits, and a way through
+  // beside it. The glass is a real pane: you can see the lobby from the
+  // office and shoot through neither until somebody breaks it.
+  hwall(10, 0, 3);
+  hglass(10, 3, 7);
+  hwall(10, 7, 10);
+  hwall(10, 12, W);
+  hdoor(10, 10, 12, true);
+
+  /*
+   * --- cubicles.
+   *
+   * Three partitions, each an L of two tiles by two, and **nothing else** —
+   * the ask was a cubicle layout that is not crowded, and a wall in this game
+   * is a wall: a full grid of them would be a maze rather than an office.
+   * They are free-standing, so they close nothing off and the office stays one
+   * room; and they are kept two tiles clear of the walls above and below, so
+   * every slot between them is a `MIN_LIMB` a body can walk down.
+   */
+  for (const cx of [4, 8, 12]) {
+    vwall(cx, 6, 8);
+    hwall(6, cx, cx + 2);
+  }
+
+  // The footprint is a plain rectangle, one rect per tile row, like every
+  // other rectangular building here.
+  const rects: Wall[] = [];
+  for (let y = 0; y < H; y++) {
+    rects.push({ x: originX, y: originY + y * TILE, w: W * TILE, h: TILE });
+  }
+
+  const building: Building = {
+    x: originX,
+    y: originY,
+    w: W * TILE,
+    h: H * TILE,
+    rects,
+    doors: doorIds,
+  };
+
+  // The bays, out on the apron in front. Nosed in at the building, which is
+  // what a car park looks like from above and also keeps the whole body inside
+  // the reserved ground rather than sticking out into the road.
+  const parking: Array<{ x: number; y: number; facing: number }> = [];
+  for (let i = 0; i < POLICE_STATION_PARKING; i++) {
+    const bay = mx(1.8 + i * 2.1);
+    parking.push({
+      x: originX + bay * TILE,
+      y: originY + H * TILE + POLICE_STATION_APRON / 2,
+      facing: -Math.PI / 2,
+    });
+  }
+
+  const station: PoliceStation = {
+    building: index,
+    parking,
+    armoury: room(11, 0, W, 4),
+    lobby: room(0, 10, W, H),
+    office: room(0, 4, W, 10),
+    cell: room(0, 0, 4, 4),
+  };
+  void rand;
+  return { building, station };
+}
+
 /** An oversized landmark building carved into connected rooms. */
 function bigBuildingAt(
   walls: Wall[],
@@ -1183,6 +1363,99 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
   buildings.push(corner.building);
   landmarks.push(corner.box);
 
+  /*
+   * **Where the outbreak comes in, decided here rather than in `populate`.**
+   *
+   * It is one side and one position along it, and it used to be rolled at
+   * spawn time — which is after the map exists. The police station has to
+   * stand in the half away from it, so the map has to know; so the map picks,
+   * and `populate` reads it back off `MapData` and puts the zombies where it
+   * says. Nothing about the outbreak itself changes.
+   */
+  const outbreakSide = Math.floor(rand() * 4); // 0 N, 1 E, 2 S, 3 W
+  const outbreakAlong = 0.15 + rand() * 0.7;
+
+  /*
+   * **The police station goes second**, after the corner complex and before
+   * everything that merely samples for a spot.
+   *
+   * It is the only landmark with a *hard* constraint on where it may be —
+   * the half of the map away from the breach — so it needs its pick early;
+   * but the complex claims a corner outright and cannot be asked to move, so
+   * it cannot go first. Second is exactly right, and if the complex happens
+   * to be sitting in the half the station wants, the station still has the
+   * rest of that half to find room in.
+   */
+  const stationW = POLICE_STATION_W_TILES * TILE;
+  const stationH = POLICE_STATION_H_TILES * TILE + POLICE_STATION_APRON;
+  let policeStation: PoliceStation | null = null;
+  {
+    /*
+     * The origin range, **narrowed so the whole building is in the far half**
+     * rather than merely its centre.
+     *
+     * Written the obvious way — sample a fraction of the map and constrain the
+     * centre — a station drawn at exactly the halfway fraction sits with its
+     * centre *on* the midline and half of it in the wrong half. Measured, that
+     * is about one city in forty, and "always" was the word in the request.
+     */
+    let loX = MAP_MARGIN + STREET_MIN;
+    let loY = loX;
+    let hiX = WORLD_WIDTH - loX - stationW;
+    let hiY = WORLD_HEIGHT - loY - stationH;
+    const midX = WORLD_WIDTH / 2;
+    const midY = WORLD_HEIGHT / 2;
+    if (outbreakSide === 0) loY = Math.max(loY, midY); // in at the north, build south
+    else if (outbreakSide === 2) hiY = Math.min(hiY, midY - stationH);
+    else if (outbreakSide === 1) hiX = Math.min(hiX, midX - stationW); // in at the east
+    else loX = Math.max(loX, midX);
+
+    // Which end of the *free* axis is away from the breach. The half is a rule;
+    // this is only a bias inside it, so the station is not in the same corner
+    // every time you happen to know where the outbreak came in.
+    const farHigh = outbreakAlong < 0.5;
+    const freeIsX = outbreakSide === 0 || outbreakSide === 2;
+
+    if (hiX >= loX && hiY >= loY) {
+      for (let attempt = 0; attempt < 260; attempt++) {
+        const bias = (f: number): number =>
+          rand() < POLICE_STATION_FAR_END_CHANCE
+            ? farHigh
+              ? 0.5 + f * 0.5
+              : f * 0.5
+            : f;
+        const fx = freeIsX ? bias(rand()) : rand();
+        const fy = freeIsX ? rand() : bias(rand());
+        const ox = Math.round(loX + fx * (hiX - loX));
+        const oy = Math.round(loY + fy * (hiY - loY));
+
+        const box = { x: ox, y: oy, w: stationW, h: stationH };
+        const clashes = landmarks.some(
+          (b) =>
+            box.x < b.x + b.w + STREET_MIN &&
+            box.x + box.w + STREET_MIN > b.x &&
+            box.y < b.y + b.h + STREET_MIN &&
+            box.y + box.h + STREET_MIN > b.y,
+        );
+        if (clashes) continue;
+
+        landmarks.push(box);
+        const built = policeStationAt(
+          walls,
+          windows,
+          buildings,
+          doors,
+          rand,
+          ox,
+          oy,
+          rand() < 0.5,
+        );
+        buildings.push(built.building);
+        policeStation = built.station;
+        break;
+      }
+    }
+  }
   // The park goes anywhere on the map rather than hugging the middle. It still
   // gets its pick before the pond and the big buildings, so it is never
   // squeezed out — it just has to keep off what has already been claimed.
@@ -1398,6 +1671,30 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     park,
   );
 
+  // **Nothing grows on the car park.** A bush is not in the nav grid, so
+  // nothing else would have turned one away from the apron — and a shrub drawn
+  // over a parked patrol car is a picture problem rather than a walking one,
+  // which is exactly the kind that never gets noticed until it is on screen.
+  if (policeStation) {
+    const bay = {
+      x: policeStation.lobby.x - TILE,
+      y: policeStation.lobby.y + policeStation.lobby.h,
+      w: policeStation.lobby.w + TILE * 2,
+      h: POLICE_STATION_APRON + TILE,
+    };
+    for (let i = bushes.length - 1; i >= 0; i--) {
+      const bush = bushes[i];
+      if (
+        bush.x + bush.r > bay.x &&
+        bush.x - bush.r < bay.x + bay.w &&
+        bush.y + bush.r > bay.y &&
+        bush.y - bush.r < bay.y + bay.h
+      ) {
+        bushes.splice(i, 1);
+      }
+    }
+  }
+
   // Hard playable boundary, thicker than the interior walls. Pushed last so
   // the repair pass below can tell it apart from everything it may cut.
   const b = BOUNDARY_THICKNESS;
@@ -1415,6 +1712,9 @@ export function generateMap(seed = Math.floor(Math.random() * 1e9)): MapData {
     windows,
     buildings,
     cornerBuilding,
+    policeStation,
+    outbreakSide,
+    outbreakAlong,
     doors,
     pond,
     park,

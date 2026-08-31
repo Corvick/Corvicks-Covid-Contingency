@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.22.0';
+export const GAME_VERSION = '0.23.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3436,6 +3436,91 @@ export const RADIO_CAR_BACKUP_COUNT = 2;
  * figure, so a small city keeps it proportionally as central.
  */
 export const CITY_CAR_SPREAD = 0.34;
+
+// ------------------------------------------------------------ police station
+/**
+ * **The one building in the city with a floor plan.**
+ *
+ * Sixteen tiles by thirteen — 448 x 364 — which is between an ordinary block
+ * building and a big one. Every wall inside it is placed by hand rather than
+ * partitioned at random, because the rooms have jobs: a lobby you come in to,
+ * a clerk's window of glass between that and the office, an office laid out
+ * in cubicles, a cell and an armoury at the back.
+ *
+ * The two figures are in *tiles* because every clearance rule in `mapgen` is:
+ * nothing the plan leaves may be narrower than `MIN_LIMB`, or it is a room
+ * nothing in the game fits into. See "A building is somewhere you can get
+ * into".
+ */
+export const POLICE_STATION_W_TILES = 16;
+export const POLICE_STATION_H_TILES = 13;
+/**
+ * How deep the car park in front of it is, and how many bays it has.
+ *
+ * Reserved as part of the landmark box rather than left to chance, so the
+ * street grid keeps off it and a bay is always somewhere a car can actually
+ * stand. How many of the bays are *filled* is rolled at spawn, 0 to all three.
+ */
+export const POLICE_STATION_APRON = 110;
+export const POLICE_STATION_PARKING = 3;
+/**
+ * **Always the half of the map away from the breach, and usually the far end
+ * of that half.**
+ *
+ * The half is a rule and this is the bias inside it: with this chance the
+ * free axis is drawn from the half furthest from where the outbreak came
+ * through, and otherwise from anywhere in the strip. Not 1.0, because a
+ * station that is in the same corner every time you know the breach is a
+ * station you never have to look for.
+ */
+export const POLICE_STATION_FAR_END_CHANCE = 0.7;
+/**
+ * How many grey officers man it, before the map size is taken into account,
+ * and the range that scaling is clamped to.
+ *
+ * Scaled by `cityAreaScale()` for the same reason the garrison is — a bigger
+ * city is a bigger force — and clamped, because "1-6" is the whole of what
+ * was asked for and a 1000-civilian round would otherwise put eight in it.
+ */
+export const POLICE_STATION_OFFICERS = 4;
+export const POLICE_STATION_OFFICERS_MIN = 1;
+export const POLICE_STATION_OFFICERS_MAX = 6;
+/** How far off their post they may drift before walking back to it. */
+export const POLICE_STATION_GUARD_RADIUS = 250;
+/** Civilians working there — a desk clerk and a colleague or two. */
+export const POLICE_STATION_STAFF_MIN = 2;
+export const POLICE_STATION_STAFF_MAX = 3;
+/** What is in the armoury. The radio is on top of these and rolls its own. */
+export const POLICE_STATION_GUNS_MIN = 2;
+export const POLICE_STATION_GUNS_MAX = 6;
+export const POLICE_STATION_UTILITIES_MIN = 1;
+export const POLICE_STATION_UTILITIES_MAX = 3;
+/**
+ * And a radio in the armoury, **outside `ITEM_CITY_CAP` in both directions**.
+ *
+ * It is not refused when the city already holds its two, and it does not
+ * count toward them — so a round can finish with three. That is the point:
+ * the cap exists because three vans out of the ordinary loot roll was the
+ * ordinary case and nobody chose it, where walking into the armoury and
+ * finding one is a thing you went and did.
+ */
+export const POLICE_STATION_RADIO_CHANCE = 0.3;
+/**
+ * How far apart the armoury lays its stock out, against `LOOT_MIN_GAP` (44)
+ * everywhere else.
+ *
+ * **That figure is a rule about scattering loot through a city**, so that a
+ * house holds a rifle rather than a pile — and an armoury is the one room in
+ * the game where it is exactly wrong. Ten items at 44px apart do not fit in
+ * a five-by-four room at any density a rejection sample could find: measured
+ * with the ordinary gap, a room asked for up to six guns and three utilities
+ * came away with a median of three and none, and the radio landed on 5% of
+ * maps against the 30% it rolls.
+ *
+ * Still comfortably over a body radius, so every item is separately walked up
+ * to and picked up rather than being one heap you hoover with one keypress.
+ */
+export const POLICE_STATION_LOOT_GAP = 30;
 /** Where the officer stands, and where the two items land, off the body. */
 export const CITY_CAR_OFFICER_GAP = 46;
 export const CITY_CAR_LOOT_GAP = 40;
