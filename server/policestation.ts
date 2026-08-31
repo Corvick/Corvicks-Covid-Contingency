@@ -173,6 +173,9 @@ interface Row {
   doorWalks: boolean;
   /** How thick the counter slab is — a wall's thickness would be the old one. */
   counterDepth: number;
+  /** Wall runs found flanking it, and how far off their centre line it sits. */
+  counterFlanks: number;
+  counterOffset: number;
   /** Armoury stock standing in the mouth of a stall. */
   onRack: number;
   armouryItems: number;
@@ -257,6 +260,8 @@ function inspect(world: World): Row {
     counterWalks: 0,
     doorWalks: false,
     counterDepth: 0,
+    counterFlanks: 0,
+    counterOffset: 0,
     onRack: 0,
     armouryItems: 0,
     stalls: 0,
@@ -408,6 +413,32 @@ function inspect(world: World): Row {
     const pane = world.map.windows.find((w) => w.counter);
     if (pane && inRect(b, pane.x + pane.w / 2, pane.y + pane.h / 2)) {
       row.counterDepth = Math.min(pane.w, pane.h);
+      /*
+       * **Even with the wall, not pushed forward of it**, which is the one
+       * thing that was reported about it. Built flush with the wall's
+       * office-side face the slab grew entirely into the lobby, and on screen
+       * it read as a bench shoved up against the wall rather than as part of
+       * it. What is measured is the gap between the slab's own centre line and
+       * the centre line of the wall runs flanking it — 0 is even.
+       *
+       * The runs are found by their *ends*, and the tolerance is a wall's
+       * thickness rather than a pixel: the slab overlaps them by `t/2` on
+       * purpose, so it butts against them with no seam, and a probe looking
+       * for runs that stop exactly at its edge finds none at all.
+       */
+      const mid = pane.y + pane.h / 2;
+      const flanks = world.map.walls.filter(
+        (s) =>
+          s.h <= WALL_THICKNESS + 1 &&
+          Math.abs(s.y + s.h / 2 - mid) < 1 &&
+          (Math.abs(s.x + s.w - pane.x) <= WALL_THICKNESS + 1 ||
+            Math.abs(s.x - (pane.x + pane.w)) <= WALL_THICKNESS + 1),
+      );
+      row.counterFlanks = flanks.length;
+      row.counterOffset = Math.max(
+        0,
+        ...flanks.map((s) => Math.abs(s.y + s.h / 2 - mid)),
+      );
       const R = ENTITY_RADIUS.human + 8;
       const horiz = pane.w > pane.h;
       // Probed from clear of the *slab*, not of a wall line — it is 24px deep
@@ -790,6 +821,13 @@ check(
   made.every((r) => r.counterDepth === POLICE_STATION_COUNTER_DEPTH),
   'it is a slab, not a line in a wall',
   `${med(made.map((r) => r.counterDepth))}px deep against a wall's ${WALL_THICKNESS}`,
+);
+check(
+  made.every((r) => r.counterFlanks === 2 && r.counterOffset === 0),
+  'and it is even with the wall rather than pushed forward of it',
+  `${made.filter((r) => r.counterFlanks === 2).length}/${made.length} found both flanking runs,` +
+    ` worst centre offset ${Math.max(...made.map((r) => r.counterOffset)).toFixed(2)}px,` +
+    ` standing ${(POLICE_STATION_COUNTER_DEPTH - WALL_THICKNESS) / 2}px proud each side`,
 );
 check(
   made.every((r) => r.counterSees === 3),

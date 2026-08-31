@@ -2343,7 +2343,7 @@ y=19+---------------------##---------------------+   the front door
 ```
 
 **It grew from 16x13 to 20x16 and then to 24x19, and the four things below are
-what grew it**: a counter slab comes out of the lobby's depth, a rack costs the
+what grew it**: a counter slab comes out of the rooms either side of it, a rack costs the
 armoury a tile off each of its long walls, a cell with three people locked in it
 wants to be a room rather than a cupboard, and each of those wants the office
 between them to stay an office. The floor at `CITY_SCALE_MIN` is 3000x2220, so
@@ -2391,7 +2391,18 @@ rectangle, not a line in a wall, and glass the whole way through.
   butts against the runs either side with no seam.
 - **24px is a shade under a tile.** It has to be plainly thicker than
   `WALL_THICKNESS` (10) or the change is invisible, and it comes out of the
-  lobby's own depth — which is one of the reasons the building grew again.
+  rooms either side of it — which is one of the reasons the building grew again.
+- **It is centred on the wall line, not hung off one face**, and that is the one
+  thing about it that was reported: *"the window should be even with the wall
+  and not pushed forward"*. Built flush with the wall's office-side face it grew
+  entirely into the lobby, and on screen it read as a bench shoved up against
+  the wall rather than as part of it. Sharing the wall's own centre line it
+  stands **7px proud into each room**, which is what a counter is — a thicker
+  piece of the wall with a screen in it. Measured against the runs flanking it:
+  **centre offset 0.00px** on every city.
+- **So the lit lip runs along both long edges**, not one. There is no public
+  side to single one out any more, and a slab with no lit edge reads as a gap in
+  the floor from above rather than as something standing in the room.
 - **`Window.counter` is how the client knows**, and like `Door.bars` it rides on
   the map rather than on any per-tick state: one boolean once, in `welcome`.
 - **`drawCounter` is five things off the photograph**, and two of them do the
@@ -2653,6 +2664,7 @@ as well by a station with no staff code at all. Forty cities:
 | narrowest gap anywhere in it | **46px** |
 | the office, clear floor | **96%** |
 | **the counter's depth** | **24px** against a wall's 10 |
+| **even with the wall** | centre offset **0.00px** from the runs flanking it |
 | **see over the counter** | every sample line |
 | **walk through the counter** | **none** — and the way through beside it open 30/30 |
 | barred gates in the city | **1**, shut and locked on 30/30 |

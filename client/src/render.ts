@@ -600,11 +600,20 @@ function drawCounter(ctx: CanvasRenderingContext2D, p: WindowPane): void {
   ctx.lineWidth = 1;
   ctx.strokeRect(p.x + 0.5, p.y + 0.5, p.w - 1, p.h - 1);
 
-  // The counter lip, along the public edge. A slab with no lit edge reads as a
-  // gap in the floor from above.
+  /*
+   * The counter lip, along **both** long edges. A slab with no lit edge reads
+   * as a gap in the floor from above rather than as something standing in the
+   * room — and the slab is centred on the wall line, so it faces the office
+   * and the lobby equally and there is no "public" side to single out.
+   */
   ctx.fillStyle = 'rgba(146, 158, 176, 0.55)';
-  if (along) ctx.fillRect(p.x, p.y + p.h - 3, p.w, 3);
-  else ctx.fillRect(p.x + p.w - 3, p.y, 3, p.h);
+  if (along) {
+    ctx.fillRect(p.x, p.y, p.w, 3);
+    ctx.fillRect(p.x, p.y + p.h - 3, p.w, 3);
+  } else {
+    ctx.fillRect(p.x, p.y, 3, p.h);
+    ctx.fillRect(p.x + p.w - 3, p.y, 3, p.h);
+  }
 
   // The screen, standing on the bench: a bright line up the middle of it.
   const mid = along ? p.y + p.h / 2 : p.x + p.w / 2;

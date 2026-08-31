@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.24.1';
+export const GAME_VERSION = '0.24.2';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3621,7 +3621,14 @@ export const POLICE_STATION_RACK_STANDOFF = 1.3;
  *
  * 24px is a shade under a tile. It has to be plainly thicker than
  * `WALL_THICKNESS` (10) or the whole change is invisible, and it comes out of
- * the lobby's own depth, which is why the building grew with it.
+ * the rooms either side of it, which is why the building grew with it.
+ *
+ * **Centred on the wall line, not hung off one face**, and that is the one
+ * thing about it that was reported. Built flush with the wall's office-side
+ * face it grew entirely into the lobby and read on screen as a bench shoved up
+ * against the wall rather than as part of it; sharing the wall's own centre
+ * line, it stands 7px proud into each room and reads as what a counter is — a
+ * thicker piece of the wall with a screen in it.
  */
 export const POLICE_STATION_COUNTER_DEPTH = 24;
 /** Where the officer stands, and where the two items land, off the body. */

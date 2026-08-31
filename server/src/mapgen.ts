@@ -826,23 +826,26 @@ function policeStationAt(
     pushRun(windows, { horiz: true, a: 0, b: 0, line }, p, q, originX, originY, t);
   };
   /**
-   * **The clerk's counter: one slab, `depth` px deep, hung off a wall line.**
+   * **The clerk's counter: one slab, `depth` px deep, centred on a wall line.**
    *
    * A `WindowPane` rather than a `Wall`, and the whole depth of it — that is
    * the only shape that gives "see, but do not travel through", since
    * `hasLineOfSight` ignores panes and `hasWallClearPath` treats them as
    * solid. `pushRun` cannot make it: that helper builds runs a wall thick,
-   * centred on a tile line, which is exactly what this is not.
+   * which is exactly what this is not.
    *
-   * It starts flush with the wall line's own outer face so it butts against
-   * the runs either side of it with no seam, and grows `inward` from there.
+   * **Centred, not hung off one face**, and that is the one thing about it
+   * that was reported: built flush with the wall's office-side face it grew
+   * entirely into the lobby, and on screen the counter was plainly shoved
+   * forward of the wall it sits in rather than being part of it. Sharing the
+   * wall's own centre line is what makes it read as thicker wall — which is
+   * what a counter is — instead of as a bench pushed up against one.
    */
-  const counter = (line: number, a: number, b: number, depth: number, inward: number): void => {
+  const counter = (line: number, a: number, b: number, depth: number): void => {
     const [p, q] = hspan(a, b);
-    const near = originY + line * TILE - (t / 2) * inward;
     windows.push({
       x: originX + p * TILE - t / 2,
-      y: inward > 0 ? near : near - depth,
+      y: originY + line * TILE - depth / 2,
       w: (q - p) * TILE + t,
       h: depth,
       counter: true,
@@ -965,11 +968,12 @@ function policeStationAt(
    * above, and `drawCounter` for what makes it read as furniture.
    *
    * It replaces the wall run over its own span rather than sitting in front of
-   * one, so there is exactly one thing between the lobby and the office here
-   * and no sealed pocket behind it.
+   * one, and shares that run's centre line, so it is **even with the wall**
+   * rather than pushed forward of it — there is exactly one thing between the
+   * lobby and the office here, and no sealed pocket behind it.
    */
   hwall(COUNTER_Y, 0, COUNTER_A);
-  counter(COUNTER_Y, COUNTER_A, COUNTER_B, POLICE_STATION_COUNTER_DEPTH, 1);
+  counter(COUNTER_Y, COUNTER_A, COUNTER_B, POLICE_STATION_COUNTER_DEPTH);
   hwall(COUNTER_Y, COUNTER_B, COUNTER_B + GAP + 3);
   hdoor(COUNTER_Y, COUNTER_B + GAP + 3, COUNTER_B + GAP * 2 + 3, true);
   hwall(COUNTER_Y, COUNTER_B + GAP * 2 + 3, W);

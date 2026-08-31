@@ -39,7 +39,7 @@ import {
   TILE,
   WALL_THICKNESS,
 } from '../../shared/constants.js';
-import { drawDoors, drawParkingBays, drawWindows } from './render.js';
+import { drawDoors, drawParkingBays, drawWalls, drawWindows } from './render.js';
 
 const canvas = document.getElementById('rig') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -347,19 +347,34 @@ function run(): void {
     drawDoors(ctx, [door], new Map([[0, state]]), WHOLE);
     ctx.restore();
   });
+  /*
+   * The counter **in a wall**, at 3x, over an ordinary pane in the same wall.
+   * The claim that was reported is about how it sits against the runs either
+   * side of it, so a slab drawn on bare road cannot answer it.
+   */
   for (const [i, pane] of (
     [
       { x: 0, y: 0, w: 150, h: POLICE_STATION_COUNTER_DEPTH, counter: true },
-      { x: 0, y: 0, w: 150, h: POLICE_STATION_COUNTER_DEPTH },
+      { x: 0, y: 0, w: 150, h: WALL_THICKNESS },
     ] as WindowPane[]
   ).entries()) {
     ctx.save();
-    ctx.setTransform(3, 0, 0, 3, 320, 430 + i * 90);
+    ctx.setTransform(3, 0, 0, 3, 320, 440 + i * 100);
+    const mid = pane.y + pane.h / 2;
+    drawWalls(
+      ctx,
+      [
+        { x: pane.x - 90, y: mid - WALL_THICKNESS / 2, w: 90, h: WALL_THICKNESS },
+        { x: pane.x + pane.w, y: mid - WALL_THICKNESS / 2, w: 90, h: WALL_THICKNESS },
+      ],
+      WHOLE,
+    );
     drawWindows(ctx, [pane], new Set(), WHOLE);
     ctx.restore();
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillText('3x', 280, 440);
+  ctx.fillText('3x, in a wall', 60, 446);
+  ctx.fillText('an ordinary pane in the same wall', 60, 546);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillText('4x', 760, 40);
 
