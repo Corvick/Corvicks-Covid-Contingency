@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.23.0';
+export const GAME_VERSION = '0.24.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3441,28 +3441,49 @@ export const CITY_CAR_SPREAD = 0.34;
 /**
  * **The one building in the city with a floor plan.**
  *
- * Sixteen tiles by thirteen — 448 x 364 — which is between an ordinary block
+ * Twenty tiles by sixteen — 560 x 448 — which is between an ordinary block
  * building and a big one. Every wall inside it is placed by hand rather than
  * partitioned at random, because the rooms have jobs: a lobby you come in to,
- * a clerk's window of glass between that and the office, an office laid out
- * in cubicles, a cell and an armoury at the back.
+ * a teller's counter of glass between that and the office, an office laid out
+ * in cubicles, a cell you cannot get out of and a racked armoury at the back.
+ *
+ * **It grew from 16x13 with the counter, the racks and the cell**, and the
+ * three of them are why: a jut into the lobby costs the lobby a tile of its
+ * depth, a rack costs the armoury one off each long wall, and a cell with
+ * three people in it wants to be a room rather than a cupboard. The floor at
+ * `CITY_SCALE_MIN` is 3000x2220, so the box — 560 wide by 448 plus its apron —
+ * still has most of the far half of the smallest city to find room in;
+ * measured, it places on 30/30 maps at either end of the slider.
  *
  * The two figures are in *tiles* because every clearance rule in `mapgen` is:
  * nothing the plan leaves may be narrower than `MIN_LIMB`, or it is a room
  * nothing in the game fits into. See "A building is somewhere you can get
  * into".
  */
-export const POLICE_STATION_W_TILES = 16;
-export const POLICE_STATION_H_TILES = 13;
+export const POLICE_STATION_W_TILES = 20;
+export const POLICE_STATION_H_TILES = 16;
 /**
- * How deep the car park in front of it is, and how many bays it has.
+ * How deep the car park in front of it is, how many bays it has, and how wide
+ * and how deep one bay is.
  *
  * Reserved as part of the landmark box rather than left to chance, so the
  * street grid keeps off it and a bay is always somewhere a car can actually
  * stand. How many of the bays are *filled* is rolled at spawn, 0 to all three.
+ *
+ * **A bay is a size and not merely a spacing, because it is painted on the
+ * road.** `drawParkingBays` walks the same `parking` list the cars stand in
+ * and lays `POLICE_STATION_PARKING + 1` dividers `POLICE_STATION_BAY_TILES`
+ * apart, so the lines and the cars cannot disagree about where a bay is --
+ * the same reason the park's lamp posts come off the path polyline rather
+ * than off a second list of positions.
+ *
+ * The row sits at the far end of the frontage from the front door, so nobody
+ * leaving the building walks out between two parked cars.
  */
 export const POLICE_STATION_APRON = 110;
 export const POLICE_STATION_PARKING = 3;
+export const POLICE_STATION_BAY_TILES = 2.6;
+export const POLICE_STATION_BAY_DEPTH = 92;
 /**
  * **Always the half of the map away from the breach, and usually the far end
  * of that half.**
@@ -3490,6 +3511,35 @@ export const POLICE_STATION_GUARD_RADIUS = 250;
 /** Civilians working there — a desk clerk and a colleague or two. */
 export const POLICE_STATION_STAFF_MIN = 2;
 export const POLICE_STATION_STAFF_MAX = 3;
+/**
+ * **And nought to three of them locked in the cell.**
+ *
+ * Out of the civilian count like the staff are, and for the same reason: the
+ * slider promises a number of civilians and somebody in the drunk tank is one
+ * of them. `MIN` is 0 on purpose — an empty cell has to be an ordinary sight,
+ * or the room stops being a cell and becomes a place three people are kept.
+ *
+ * They cannot get out. The cell door is `bars`: nothing in the game unlocks
+ * one, so they are there until an officer takes it off its hinges or something
+ * chews through it. See `POLICE_STATION_CELL_LOCKED` below.
+ */
+export const POLICE_STATION_CELL_MIN = 0;
+export const POLICE_STATION_CELL_MAX = 3;
+/**
+ * **The cell door is locked from the moment the map exists, and there is no
+ * key anywhere in the round.**
+ *
+ * `DoorRuntime.barred` is the flag and it is deliberately not `playerLocked`,
+ * which is a different rule wearing similar clothes: that one means "a
+ * teammate threw this bolt, do not undo their work", so an officer meeting one
+ * reroutes. A cell door is the opposite — an officer meeting one takes it off
+ * its hinges, because that is the only way it ever opens. Civilians and the
+ * crowd can do nothing with it at all, which is what makes it a cell.
+ *
+ * Zombies and the dog need no rule: a barred door is a shut door, and they
+ * have been tearing at those since long before this existed.
+ */
+export const POLICE_STATION_CELL_LOCKED = true;
 /** What is in the armoury. The radio is on top of these and rolls its own. */
 export const POLICE_STATION_GUNS_MIN = 2;
 export const POLICE_STATION_GUNS_MAX = 6;
@@ -3506,21 +3556,59 @@ export const POLICE_STATION_UTILITIES_MAX = 3;
  */
 export const POLICE_STATION_RADIO_CHANCE = 0.3;
 /**
- * How far apart the armoury lays its stock out, against `LOOT_MIN_GAP` (44)
- * everywhere else.
+ * How far apart the armoury lays its **overflow** out, against `LOOT_MIN_GAP`
+ * (44) everywhere else.
  *
- * **That figure is a rule about scattering loot through a city**, so that a
+ * The stock stands on the racks now — see `POLICE_STATION_RACK_BAY` — and this
+ * is the shuffled floor grid that catches whatever a draw of more than nine
+ * has left over, which is about one round in fifty.
+ *
+ * **`LOOT_MIN_GAP` is a rule about scattering loot through a city**, so that a
  * house holds a rifle rather than a pile — and an armoury is the one room in
- * the game where it is exactly wrong. Ten items at 44px apart do not fit in
- * a five-by-four room at any density a rejection sample could find: measured
- * with the ordinary gap, a room asked for up to six guns and three utilities
- * came away with a median of three and none, and the radio landed on 5% of
- * maps against the 30% it rolls.
+ * the game where it is exactly wrong. Ten items at 44px apart do not fit in a
+ * room this size at any density a rejection sample could find: measured with
+ * the ordinary gap and before the racks existed, a room asked for up to six
+ * guns and three utilities came away with a median of three and none, and the
+ * radio landed on 5% of maps against the 30% it rolls.
  *
  * Still comfortably over a body radius, so every item is separately walked up
  * to and picked up rather than being one heap you hoover with one keypress.
  */
 export const POLICE_STATION_LOOT_GAP = 30;
+/**
+ * **The armoury's gun racks: dividers off the wall, one item between each
+ * pair.**
+ *
+ * Asked for as *"two stalls like a urinal and the loot in between"*, and it is
+ * exactly that — a stub of wall `POLICE_STATION_RACK_DEPTH` tiles long jutting
+ * off the back wall every `POLICE_STATION_RACK_BAY` tiles, with a pickup
+ * standing in the mouth of each stall.
+ *
+ * **The bay width is the load-bearing figure and it is not a matter of taste.**
+ * A stall two tiles across leaves 46px between the dividers — the same width
+ * as the narrowest doorway in the city — which is 26px once `NAV_INFLATE` has
+ * had its 10px a side, and an item at the middle of that has 13px of clear
+ * ground round it. Narrower and the slot fails `nav.isBlocked` and the item is
+ * silently dropped rather than placed, which reads as an armoury that rolled
+ * nothing.
+ *
+ * `POLICE_STATION_RACK_STANDOFF` is how far out from the wall the item stands,
+ * in tiles: **past the end of the divider**, not level with it. Inside the
+ * stall it is within the divider's own inflation skirt and the same silent
+ * refusal applies.
+ */
+export const POLICE_STATION_RACK_DEPTH = 1;
+export const POLICE_STATION_RACK_BAY = 2;
+export const POLICE_STATION_RACK_STANDOFF = 1.3;
+/**
+ * How far the clerk's counter juts into the lobby, in tiles.
+ *
+ * The glass is on the *front* of that jut and the two returns either side of
+ * it are solid wall — a bank teller's window seen from above, which is what
+ * was asked for. One tile is enough to read as a counter and shallow enough
+ * that the lobby is still a room you walk across rather than round.
+ */
+export const POLICE_STATION_COUNTER_JUT = 1;
 /** Where the officer stands, and where the two items land, off the body. */
 export const CITY_CAR_OFFICER_GAP = 46;
 export const CITY_CAR_LOOT_GAP = 40;

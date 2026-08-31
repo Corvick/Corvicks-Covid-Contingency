@@ -527,21 +527,39 @@ export function spawnPickups(world: World): void {
     placePoliceCars(world, Date.now());
 
     /*
-     * **The armoury is laid out on a rack, not sampled for.**
+     * **The armoury is laid out on its racks, not sampled for.**
      *
      * Everywhere else in the city a pickup is dropped by rejection sampling,
      * which is right when a house holds one item and there is a whole floor to
-     * put it on. This room is asked for up to ten in five tiles by four, and a
-     * rejection sample at that density simply fails — measured, it came away
-     * with three guns, no utilities and the radio on 5% of maps against 30%.
+     * put it on. This room is asked for up to ten in a room the size of a
+     * corridor, and a rejection sample at that density simply fails — measured
+     * before any of this, it came away with three guns, no utilities and the
+     * radio on 5% of maps against 30%.
      *
-     * A shuffled grid cannot fail that way, and it is also what a rack of
-     * rifles against a wall actually looks like from above.
+     * `station.racks` is the mouth of each stall between two of the dividers
+     * `mapgen` jutted off the armoury walls — so a gun stands where a gun
+     * would stand, and this file never works out where a divider is. Shuffled,
+     * because taken in order the same stall would hold the radio every round.
+     *
+     * **Then the floor, when there are more items than stalls.** Nine racks
+     * against a maximum draw of ten (6 guns, 3 utilities, a radio) leaves
+     * about one round in fifty with something over, and an over-stocked
+     * armoury with a crate on the floor is exactly what that looks like. The
+     * grid below is the same shuffled sample that used to do all of it.
      */
     const slots: Array<{ x: number; y: number }> = [];
+    for (const spot of station.racks) {
+      if (world.nav.isBlocked(spot.x, spot.y) || !world.nav.isReachable(spot.x, spot.y)) continue;
+      slots.push(spot);
+    }
+    for (let i = slots.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [slots[i], slots[j]] = [slots[j], slots[i]];
+    }
     {
       const G = POLICE_STATION_LOOT_GAP;
       const room = station.armoury;
+      const floor: Array<{ x: number; y: number }> = [];
       const cols = Math.max(1, Math.floor((room.w - 24) / G) + 1);
       const rows = Math.max(1, Math.floor((room.h - 24) / G) + 1);
       const spanX = cols > 1 ? (room.w - 24) / (cols - 1) : 0;
@@ -554,13 +572,16 @@ export function spawnPickups(world: World): void {
           // built off the room the walls actually left, so this is a belt and
           // braces against a plan change rather than an expected case.
           if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
-          slots.push({ x, y });
+          // Not on top of a rack: that item is already there.
+          if (slots.some((s) => Math.hypot(s.x - x, s.y - y) < G)) continue;
+          floor.push({ x, y });
         }
       }
-      for (let i = slots.length - 1; i > 0; i--) {
+      for (let i = floor.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
-        [slots[i], slots[j]] = [slots[j], slots[i]];
+        [floor[i], floor[j]] = [floor[j], floor[i]];
       }
+      slots.push(...floor);
     }
     let next = 0;
     const rack = (item: ItemId, id: string): void => {

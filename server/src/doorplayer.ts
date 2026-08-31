@@ -67,6 +67,20 @@ function optionsFor(
 
   if (door.open) return { tap: 'close', hold: null, label: 'Press E to close' };
 
+  /*
+   * **A cell gate is the boot from either side, and there is no other option
+   * on it.**
+   *
+   * Nothing in the round unlocks one, so offering "hold E to unlock" from the
+   * inside would be a prompt for an action that cannot happen — and the inside
+   * of this one is where the prisoners are. The label says gate rather than
+   * door, because being told the usual thing and getting a different one is
+   * how a player learns to distrust the prompt.
+   */
+  if (door.barred) {
+    return { tap: null, hold: 'kick', label: 'Hold E to break the gate' };
+  }
+
   if (door.locked) {
     return inside
       ? { tap: null, hold: 'unlock', label: 'Hold E to unlock' }

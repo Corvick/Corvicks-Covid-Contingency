@@ -2272,6 +2272,12 @@ A door an officer bolted (`playerLocked`) is one no civilian will unlock or
 open. Civilians can draw the bolt on each other's locks from the inside, taking
 `DOOR_NPC_UNLOCK_MS`, which is what keeps a locked city from seizing up.
 
+**A cell gate (`barred`) is neither.** Nothing in the game unlocks one — there
+is no key in the round — so an officer meeting it takes it off its hinges and a
+civilian can do nothing with it at all. It is the third state of a shut door and
+the only one that is a property of the *map* rather than of the round: see
+**The cell is a cell**.
+
 Player actions all run on one key: the press arms the *hold* action and a
 release inside `TAP_MAX_MS` performs the tap instead. Completing an action
 latches the key (`doorSpent`) until it is physically released — otherwise still
@@ -2302,26 +2308,46 @@ chance to spawn a radio that is excluded from the map limits) … manned by 1-6
 grey officers depending on map size (have a couple civilians spawn in here to act
 as staff too) … the office area have a cubicle like layout but not too crowded"*.
 
+And then, once it existed: *"for the glass can we have a bit of wall jutting out
+like its a bank tellers window (so you can see but not travel through this). Can
+we make the building a little larger. and make the jail cell door black and have
+it so the black cell door is not smooth but has 'teeth' like you see on a ruler
+… and put a 0-3 civilians in the jail cell each round. Can we also put white
+parking space lanes for the cars. Make the jail cell locked and can only be
+kicked down by officers or by zombies or the zombie dog. for the loot room can
+we put the loot on gun racks (two stalls like a urinal and the loot in
+between)"*.
+
 **It is the only building in the city with a floor plan.** Everything else
 `mapgen` lays down is a shell with a partition rolled into it; this one has named
 rooms because every one of them is a place something happens, and `PoliceStation`
 on `MapData` hands their *interiors* over rather than leaving anybody to work
-them back out of the walls. 16 tiles by 13 — 448x364, between an ordinary block
+them back out of the walls. 20 tiles by 16 — 560x448, between an ordinary block
 and a big building — laid out on a canonical orientation with the entrance on the
 south face and **optionally mirrored left to right**, which is variety for the
 price of one sign and no rotation arithmetic anywhere.
 
 ```
-x:  0    4          11        16
-y=0 +----+-----------+---------+
-    |CELL|           | ARMOURY |   the back
-y=4 +-##-+           +---##----+
-    |                          |
-    |   OFFICE, in cubicles    |
-y=10+---[GLASS]----##----------+   the clerk's window, and the way through
-    |         LOBBY            |
-y=13+---------##---------------+   the front door
+x:  0     5           10                  20
+y=0 +-----+------------+--+--+--+--+--+----+
+    |CELL |            |  ARMOURY, racked  |   the back
+    |     |    back    |  along both walls |
+y=5 +--#--+   office   +##+--+--+--+--+----+
+    |                                      |
+    |         OFFICE, in cubicles          |
+y=12+-----+          +--------+##+---------+   the way through
+    |     |==glass==|    LOBBY             |   the teller's counter
+y=16+--------------##----------------------+   the front door
 ```
+
+**It grew from 16x13, and the three things that grew it are the three things
+below**: a counter that juts costs the lobby a tile of its depth, a rack costs
+the armoury a tile off each of its long walls, and a cell with three people
+locked in it wants to be a room rather than a cupboard. The floor at
+`CITY_SCALE_MIN` is 3000x2220, so the box — 560 wide by 448 plus its apron —
+still has most of the far half of the smallest city to find room in: measured,
+it places on **30/30 maps at pop 500 and 20/20 at pop 100**, and `roomfit` still
+reads 0 of 24 cities with any floor a body cannot reach.
 
 - **Every gap in it is at least `MIN_LIMB` tiles**, which is the rule the whole
   of **A building is somewhere you can get into** rests on. `roomfit` reads 0 of
@@ -2332,14 +2358,41 @@ y=13+---------##---------------+   the front door
   the cell and the armoury, so the back of the office opens into the back of the
   building. That is one room to `rooms.ts`, which flood-fills the finished
   geometry and neither knows nor needs to know what any of it is for.
-- **The cubicles are three free-standing L partitions and nothing else.** A wall
+- **The cubicles are four free-standing L partitions and nothing else.** A wall
   in this game is a wall, so a full grid of them is a maze rather than an office
-  — "not too crowded" is the ask and it is measured: **95% of the office is
+  — "not too crowded" is the ask and it is measured: **96% of the office is
   clear floor**. They are kept two tiles clear of the walls above and below, so
   every slot between them is a `MIN_LIMB` a body can walk down.
-- **The clerk's desk is real glass**, not a drawn line: a `WindowPane`, so you
-  can see the office from the lobby, nothing walks through it, and a zombie can
-  break it — all of which comes free from the pane already existing.
+
+#### The counter juts, like a bank teller's window
+
+Asked for as *"for the glass can we have a bit of wall jutting out like its a
+bank tellers window (so you can see but not travel through this)"*. The glass
+was already a real `WindowPane` — see-through, solid, breakable, all of it free
+from the pane existing — and flat in the wall it read as a pane somebody had
+left in an office partition rather than as a place you queue at.
+
+- **The counter steps `POLICE_STATION_COUNTER_JUT` (1 tile) forward into the
+  lobby, with glass across the front of the jut and solid wall down the two
+  returns.** That is what a teller's window is from directly above: a bench
+  projecting into the public side with a screen on it and the clerk behind. The
+  returns are wall rather than more glass, which is the half that makes "not
+  travel through" survive a smashed pane — break the screen and the jut is
+  still there.
+- **The back of the jut is left open on purpose**, so the well behind the glass
+  belongs to the office and the clerk stands in it. Walled off it would be a
+  room with no exit, which is precisely what `rooms.ts` is checked for never
+  producing.
+- **A tile deep is as far as it can go.** The lobby is four tiles and the jut
+  takes one, leaving three — 74px of clear floor under the counter, which is a
+  corridor rather than a squeeze. Two tiles would leave 46px, the width of a
+  doorway, for a room a crowd files through.
+- Measured over 30 cities, three sample lines across the full width of the
+  glass, a body's radius either side: **90/90 lines see through it and 0/90
+  would let a body past**. The control is the way through beside it, which is
+  open on 30/30 — "you cannot walk from the lobby into the office here" is
+  satisfied just as well by a plan where you cannot walk from the lobby into the
+  office at all.
 
 #### The half away from the breach, and usually the far end of it
 
@@ -2393,19 +2446,47 @@ the yard would read as a pattern.
   comes: the two halves of a lightbar alternate, so one of them is always the
   bright one and there is no "both dark" state between them.
 
-#### The armoury is a rack, not a scatter
+#### The armoury is a rack of stalls, not a scatter
 
-- **`POLICE_STATION_LOOT_GAP` (30) against `LOOT_MIN_GAP` (44) everywhere else.**
-  That figure is a rule about scattering loot *through a city*, so that a house
-  holds a rifle rather than a pile — and an armoury is the one room in the game
-  where it is exactly wrong.
-- **And it is laid out on a shuffled grid rather than sampled for.** Ten items in
-  five tiles by four is a density rejection sampling simply cannot find:
-  measured with the ordinary gap and the ordinary placer, a room asked for up to
-  six guns and three utilities came away with a **median of three and none**,
-  and the radio landed on **5% of maps against the 30% it rolls**. A grid cannot
-  fail that way, and it is also what a rack against a wall looks like from above.
-  After: **2-6 guns and 1-3 utilities on every map**, radio at 30%.
+Asked for as *"for the loot room can we put the loot on gun racks (two stalls
+like a urinal and the loot in between). or if it would look better put them on
+shelves"* — and it is the stalls, because a shelf against a wall is a line of
+items and a stall is a *place*, which is what the room wanted.
+
+- **A stub of wall `POLICE_STATION_RACK_DEPTH` (1 tile) long juts off the back
+  and the front wall every `POLICE_STATION_RACK_BAY` (2 tiles), and one item
+  stands in the mouth of each stall between two of them.** Nine of them: five
+  along the back wall and four along the front, which starts past the doorway.
+  The armoury's way in moved to the **west** wall's south corner for exactly
+  that reason — its south wall is a rack now.
+- **The bay width is load-bearing and cannot come down.** Two tiles leaves 46px
+  between dividers — the narrowest doorway in the city — which is 26px once
+  `NAV_INFLATE` has had its 10px a side, and an item in the middle of that has
+  13px of clear ground round it. Narrower and the slot fails `nav.isBlocked`,
+  the item is **silently dropped rather than placed**, and an armoury that
+  rolled six guns comes away with four.
+- **The item stands a shade *past* the divider's tip** (`RACK_STANDOFF`, 1.3
+  tiles), not level with it. Inside the stall it is within the divider's own
+  inflation skirt and the same silent refusal applies. It still reads as being
+  between the two, because it is.
+- **`mapgen` works the spots out and hands them over as `station.racks`.**
+  `inventory.ts` shuffles that list and fills it and never works out where a
+  divider is — computed at both ends, the day somebody moves a divider is the
+  day the guns start standing inside one.
+- **The shuffled grid survives as the overflow.** Nine stalls against a maximum
+  draw of ten (6 guns, 3 utilities, a radio) is about **one round in fifty**
+  with something left over, and an over-stocked armoury with a crate on the
+  floor is exactly what that looks like. Measured over 30 cities: **176 of 177
+  items racked**, the one exception being the single city that drew more than
+  nine.
+- **`POLICE_STATION_LOOT_GAP` (30) against `LOOT_MIN_GAP` (44) everywhere else**
+  is what that overflow grid uses. `LOOT_MIN_GAP` is a rule about scattering
+  loot *through a city*, so that a house holds a rifle rather than a pile — and
+  an armoury is the one room in the game where it is exactly wrong. Measured
+  with the ordinary gap and the ordinary placer, before any of this, a room
+  asked for up to six guns and three utilities came away with a **median of
+  three and none**, and the radio landed on **5% of maps against the 30% it
+  rolls**. After: **2-6 guns and 1-3 utilities on every map**, radio at 30%.
 - **The radio is outside `ITEM_CITY_CAP` in both directions**, which is the one
   exception in the game and is what was asked for. It is not refused when the
   city already holds its two, and it does not count toward them — so a round can
@@ -2420,6 +2501,87 @@ the yard would read as a pattern.
 - **The armoury's stock is off limits to the takeover machinery**, like the city
   car's pair and the one-offs: a takeover *deletes* the id it lands on and re-adds
   under its own.
+
+#### The cell is a cell
+
+Asked for as *"make the jail cell door black and have it so the black cell door
+is not smooth but has 'teeth' like you see on a ruler to show that its a jail
+cell door … put a 0-3 civilians in the jail cell each round … make the jail cell
+locked and can only be kicked down by officers or by zombies or the zombie
+dog"*.
+
+**`Door.bars` on the map is the whole of it, and it is deliberately not
+`playerLocked`.** That flag is a different rule wearing similar clothes: it
+means *a teammate threw this bolt, do not undo their work*, so an officer
+meeting one reroutes and leaves it standing. A cell gate is the opposite — an
+officer meeting it takes it **off its hinges**, because that is the only way it
+ever opens.
+
+- **It rides on the map rather than on `DoorState`.** It is a property of the
+  door that was hung there and never changes, so it costs the wire one boolean
+  once in `welcome` rather than a field on every door near every viewer thirty
+  times a second.
+- **Its state is not rolled.** `INTERIOR_DOOR_SHARE` deciding a cell had no gate
+  this round, or `DOOR_START_OPEN_CHANCE` leaving it standing open, is a cell
+  that is not a cell — so `initDoors` gives it its own early return: always
+  hung, always shut, always locked.
+- **Nothing unlocks it, and that is enforced at `unlockDoor`** rather than only
+  at the four callers. Every one of them already declines to ask — the player's
+  prompt offers a kick from either side, an officer kicks, a civilian cannot
+  work it at all — so the guard cannot fire today. It is there because "the cell
+  cannot be unlocked" is a rule about the door rather than about who is stood at
+  it, and a rule enforced only by its callers is one that lapses the first time
+  somebody adds a fifth.
+- **A civilian falls through to the existing "found it bolted" path**, which
+  needed no new line: a `begsAtDoors` prisoner hammers on it, and everybody else
+  gives the way up. **`answerDoorPlea` skips a barred door**, so nobody walks
+  over to answer — the plea is the shouting, and shouting is the whole of what a
+  prisoner can do about an outbreak.
+- **Zombies and the dog need no rule at all.** A barred door is a shut door and
+  they have been tearing at those since long before this existed. Measured: **89
+  bites at `DOOR_ZOMBIE_DAMAGE` against `DOOR_HEALTH`**, which is what a cell
+  gate costs a pack.
+- **The inmates come out of the civilian count**, like the staff, and `MIN` is 0
+  on purpose — an empty cell has to be an ordinary sight, or the room stops
+  being a cell and becomes a place three people are always kept.
+
+**Black with teeth, and the teeth are the bars.** Every other door in the city
+is a brown slab, so the one you cannot open has to be tellable from the ones you
+can before you have walked up to it and read the prompt: black does that at a
+glance, and the teeth say *what* it is. They are the bars themselves seen from
+directly above — evenly spaced steel graduations across the slab — which is the
+one pattern that cannot be mistaken for the panelling line an ordinary door
+carries. Drawn off the slab's own span at a fixed `GATE_TOOTH_GAP` rather than
+at a fixed count, so a wider gate grows *more* bars rather than fatter ones. A
+broken one leaves bent steel stubs rather than the wooden splinters an ordinary
+door leaves, which was a one-line branch and would otherwise read as the wrong
+door having broken.
+
+**How it is measured is `client/src/stationrig.ts`** — see below.
+
+#### White bays on the car park
+
+Asked for as *"can we also put white parking space lanes for the cars"*.
+`drawParkingBays`, on the ground with the blood and the tyre marks, under the
+walls and everything standing on them: paint is on the road, and a line over the
+top of a parked car would read as the car being behind it.
+
+- **The dividers are laid off the same `parking` list the cars stand in**, which
+  is the design rather than a saving — the same reason the park's lamp posts
+  come off the path polyline. It is what makes it impossible for the lines and
+  the bays to disagree.
+- **The row is walked once, not per bay.** Two bays share a divider, so a
+  per-bay pair paints every interior line twice — invisible at full opacity and
+  a bright seam at anything less, and worn paint has to be translucent. So it is
+  `POLICE_STATION_PARKING + 1` dividers a bay-width apart, plus one stop line
+  across the head where the cars nose in.
+- **A bay is drawn whether or not it has a car in it.** Nought to three are
+  filled; an empty bay with no lines on it is not an empty bay, it is tarmac.
+- **The row sits at the far end of the frontage from the front door**, so the
+  way out of the building is open tarmac rather than a gap between two parked
+  cars, and the drive in off the street has somewhere to be. Measured over 30
+  cities: **the nearest bay edge is 20px clear of the doorway's own span**, and
+  0 bays fall outside the apron reserved for them.
 
 #### Manned, and staffed
 
@@ -2464,7 +2626,35 @@ as well by a station with no staff code at all. Forty cities:
 | rooms, none sealed | 4, **0** without an exit |
 | floor a body cannot reach | **0** |
 | narrowest gap anywhere in it | **46px** |
-| the office, clear floor | **95%** |
+| the office, clear floor | **96%** |
+| **see through the counter's glass** | **90/90** sample lines |
+| **walk through the counter** | **0/90** — and the way through beside it open 30/30 |
+| barred gates in the city | **1**, shut and locked on 30/30 |
+| civilians locked in the cell | **+1.2 to +1.5** against the cell gated off, 0-3 all seen |
+| armoury stalls, and stock standing in one | **9**, **176/177** racked |
+| a bay painted across the front door | **0** — nearest 20px clear |
+
+And the gate is staged, because *who* can open it is the whole of what makes it
+a cell and a generated city will not answer that on its own — nothing walks up
+to the back of a police station in the first tick of a round. Six rigs each,
+pinned nose to the slab:
+
+| | |
+|---|---|
+| an officer takes the gate off its hinges | **6/6**, median 4200ms |
+| …and never unlocks it | **0** came unlocked on their hinges |
+| **the same officer at an ordinary bolted door** | **drew the bolt 4/4, kicked 0** |
+| a civilian on the same pixel | **0** broke it, **0** unlocked it |
+| the horde chewing through | 89 bites at `DOOR_ZOMBIE_DAMAGE` |
+
+**That third row is the discriminating control and it is the point of the
+staging.** "The officer did not unlock the gate" is satisfied just as well by an
+officer that cannot work a lock at all, which is not the behaviour — see the
+note beside `openDoorAhead`. It also has to be *staged*: `initDoors` starts every
+door in the city unlocked and a lock only ever appears because a civilian threw
+one, so a rig with nothing alive but its subject never meets a locked door at
+all. That is the trap `complexcheck.ts` already records, and it is why the
+control had to be bolted by hand.
 
 *Four things about measuring this were the rig lying rather than the code
 failing, and two of them are the same lesson twice:*
@@ -2487,11 +2677,47 @@ failing, and two of them are the same lesson twice:*
   the radio, pooling both runs since the staff gate does not touch loot, and the
   mean rather than the floor for the staff.
 
-**What is not measured is what it looks like.** rAF is throttled to nothing while
-the browser pane is not compositing, so the drawing is the same standard as
-`DOG_CAMERA_ZOOM` and the resolution row: the station is walls, windows and doors
-that the client already draws, and the one new drawing decision — a dark lightbar
-on a silent car — is three lines that typecheck. Somebody has to look at it.
+**`client/src/stationrig.ts` is the drawing half**, and it measures rather than
+looks: the gate's teeth and the car park's lanes are both claims about *pixels*,
+and `getImageData` needs no compositing, which is what makes them answerable
+from a browser pane where rAF is throttled to nothing. It lives under
+`client/src`, so unlike the harnesses at `server/`'s root it is covered by
+`npx tsc --noEmit`. Open `/stationrig.html` on the dev server to look at the
+frame it leaves — the gate in three states over an ordinary door, at 1:1 and at
+4x, beside a three-bay car park.
+
+| | |
+|---|---|
+| teeth across a 56px gate | **7** |
+| …across a 112px one | **15** — a wider gate grows more bars, not fatter ones |
+| **teeth on an ordinary door — the control** | **0** |
+| the gate's slab | **(17,19,24)**, brown +-0 |
+| an ordinary door's slab | (109,74,44), brown **+65** |
+| white lines across a three-bay row | **4** — one more than there are bays |
+| the stop line down one bay's middle | **1** |
+| paint on the road beside the row | **0** |
+
+- **A count of *bands*, not of lit pixels**, which is the same trick the
+  flamethrower's one-stream check uses: one fat stripe and five thin ones put
+  down the same number of lit pixels and only one of them is teeth.
+- **The slab's own colour is the darkest pixel along that line**, not a sample
+  at a chosen spot. A fixed sample is a lottery against the tooth spacing —
+  measured a quarter of the way along it landed on a tooth and read the gate's
+  body as (121,129,143), and on the centre line of an ordinary door it landed on
+  the **brass bolt** and read (224,180,92). Neither is the slab.
+- *And one figure was the rig lying before it was ever the code.*
+  `getImageData` snaps a fractional origin to the pixel grid but the arithmetic
+  around it does not, so a fractional readback origin leaves the index into the
+  byte array fractional and **every sample reads `undefined`** — which is not a
+  colour, so the scan reports an empty line. The car park's four dividers came
+  back as **0 bands** while the gate's teeth, whose coordinates happened to land
+  on integers, read correctly. Floor the origin.
+
+**What is still not measured is the whole thing in a real round**, and that is
+the same standard as `DOG_CAMERA_ZOOM` and the resolution row: the rest of the
+station is walls, windows and doors the client already draws. Looked at over a
+live spectator socket the plan reads and the bays are painted under it, but
+somebody has to play in it.
 
 ### The park
 

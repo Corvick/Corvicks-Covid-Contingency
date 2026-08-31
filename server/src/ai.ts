@@ -2993,6 +2993,34 @@ function openDoorAhead(
     // reroute like everyone else rather than undoing a teammate's work.
     if (door.playerLocked) return false;
 
+    /*
+     * **A cell gate is the one lock an officer takes the boot to.**
+     *
+     * The rule below — an officer works a lock rather than wrecking the house
+     * he is there to clear — is right for a bolted front door and exactly
+     * wrong here: there is no key to this one anywhere in the round, so
+     * working it would be an officer standing at a handle that will never
+     * turn. This is the barricade case `DOOR_KICK_MS` was kept for.
+     *
+     * Everybody else can do nothing with it at all. A civilian falls through
+     * to the refusal below, which is the existing "found it bolted" path — so
+     * somebody locked in begs at it or gives the way up, and neither needed a
+     * line of its own.
+     */
+    if (door.barred) {
+      if (e.type !== 'officer') {
+        if (!state.refusedDoors.includes(ahead)) state.refusedDoors.push(ahead);
+        if (state.refusedDoors.length > 6) state.refusedDoors.shift();
+        handleLockedDoor(world, e, state, ahead, now);
+        return state.begDoor === ahead;
+      }
+      // The same trap the kick has everywhere else: a held key would start it
+      // again on the tick it was dropped.
+      if (pressed) return false;
+      beginDoorWork(world, e, state, ahead, 'kick', now);
+      return true;
+    }
+
     // **An officer works the lock from whichever side it is on.** A civilian
     // can only draw a bolt back from the side it is on, which is what makes
     // finding a bolted front door a real refusal for the crowd; an officer has
@@ -3237,6 +3265,11 @@ function answerPleaTick(world: World, e: Entity, state: AiState, now: number, dt
       if (now >= until) continue;
       const door = world.doors[index];
       if (!door || !door.locked || door.open) continue;
+      // Somebody hammering on a cell gate is hammering on a cell gate. The
+      // plea still goes up — that is the shouting, and it is the only thing a
+      // prisoner can do — but nobody civilian is coming to let them out, and
+      // walking over to try would be a spell spent at a lock with no key.
+      if (door.barred) continue;
       const spec = world.map.doors[index];
       if (spec.building !== building && !spec.interior) continue;
       if (Math.hypot(spec.x - e.x, spec.y - e.y) > DOOR_PLEA_HEARING) continue;
@@ -3249,7 +3282,7 @@ function answerPleaTick(world: World, e: Entity, state: AiState, now: number, dt
   const index = state.answeringDoor;
   const door = world.doors[index];
   const spec = world.map.doors[index];
-  if (!door || door.open || door.broken || !door.locked || door.playerLocked) {
+  if (!door || door.open || door.broken || !door.locked || door.playerLocked || door.barred) {
     state.answeringDoor = -1;
     return false;
   }

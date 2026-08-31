@@ -6,6 +6,7 @@ import {
   DOOR_START_OPEN_CHANCE,
   DOOR_USE_RANGE,
   INTERIOR_DOOR_SHARE,
+  POLICE_STATION_CELL_LOCKED,
   WALL_THICKNESS,
   ZOMBIE_SIGHT_RADIUS,
 } from '../../shared/constants.js';
@@ -26,6 +27,23 @@ export interface DoorRuntime {
   locked: boolean;
   /** Bolted by a player: civilians will not unlock or open it. */
   playerLocked: boolean;
+  /**
+   * A cell gate. Locked from the moment the map exists and **nothing in the
+   * game can unlock one** — there is no key in the round.
+   *
+   * Deliberately not `playerLocked`, which is a different rule wearing similar
+   * clothes. That one means "a teammate threw this bolt, do not undo their
+   * work", so an officer meeting one reroutes and leaves it standing. This one
+   * is the opposite: an officer meeting it takes it **off its hinges**, which
+   * is the only way it ever opens, and the crowd can do nothing with it at
+   * all. Zombies and the dog need no rule of their own — a barred door is a
+   * shut door, and they have been tearing at those all along.
+   *
+   * Copied off the map's `Door.bars` at `initDoors` rather than read through
+   * to it on every query, so the hot paths ask the runtime record they already
+   * hold rather than indexing a second array.
+   */
+  barred: boolean;
   broken: boolean;
   health: number;
   /** Cached slab rectangle, so collision isn't rebuilding it per query. */
@@ -55,11 +73,30 @@ export function doorRect(door: Door): Wall {
 /** Hang doors in every way in, and in a share of the openings between rooms. */
 export function initDoors(world: World): void {
   world.doors = world.map.doors.map((door) => {
+    // A cell gate is always hung and always shut behind its own lock. It is the
+    // one door in the city whose state is not rolled: `INTERIOR_DOOR_SHARE`
+    // deciding a cell had no gate this round, or `DOOR_START_OPEN_CHANCE`
+    // leaving it standing open, is a cell that is not a cell.
+    if (door.bars) {
+      return {
+        open: false,
+        locked: POLICE_STATION_CELL_LOCKED,
+        playerLocked: false,
+        barred: true,
+        broken: false,
+        health: DOOR_HEALTH,
+        rect: doorRect(door),
+        busyBy: null,
+        busyUntil: 0,
+        insideSign: 0,
+      };
+    }
     if (door.interior && Math.random() >= INTERIOR_DOOR_SHARE) return null;
     return {
       open: Math.random() < DOOR_START_OPEN_CHANCE,
       locked: false,
       playerLocked: false,
+      barred: false,
       broken: false,
       health: DOOR_HEALTH,
       rect: doorRect(door),
@@ -294,6 +331,17 @@ export function lockDoor(world: World, index: number): void {
 export function unlockDoor(world: World, index: number): void {
   const door = world.doors[index];
   if (!door) return;
+  /*
+   * **A cell gate refuses here, at the one place a lock is ever undone.**
+   *
+   * Every caller already declines to ask — the player's prompt offers a kick
+   * instead, an officer kicks, a civilian cannot work it at all — so this
+   * cannot fire today. It is here because "the cell cannot be unlocked" is a
+   * rule about the door rather than about who is stood at it, and a rule
+   * enforced only by its callers is one that lapses the first time somebody
+   * adds a fifth of them.
+   */
+  if (door.barred) return;
   door.locked = false;
 }
 

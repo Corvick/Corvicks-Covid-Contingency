@@ -27,6 +27,7 @@ import type {
   MineState,
   BackupVehicleState,
   CorpseState,
+  PoliceStation,
   ShotKind,
   Wall,
   Window as WindowPane,
@@ -142,6 +143,9 @@ import {
   DOG_RESPAWN_FADE_MS,
   VIGNETTE_ALPHA,
   VIGNETTE_INNER,
+  TILE,
+  POLICE_STATION_BAY_TILES,
+  POLICE_STATION_BAY_DEPTH,
 } from '../../shared/constants.js';
 import type { DogHud } from '../../shared/types.js';
 import { dogSprites, drawSprite } from './dogsprite.js';
@@ -310,6 +314,75 @@ export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
   // grime is *on the road* rather than a screen overlay that slides under it.
   ctx.fillStyle = pattern;
   ctx.fillRect(0, 0, map.width, map.height);
+}
+
+/**
+ * **The bays painted on the station's car park.**
+ *
+ * On the ground with the blood and the tyre marks, under the walls and
+ * everybody standing on them: paint is on the road, and a line drawn over the
+ * top of a parked car would read as the car being behind it.
+ *
+ * **The dividers are laid off the same `parking` list the cars stand in**, and
+ * that is the whole design rather than a saving. Two bays share one line, so a
+ * per-bay pair would paint every interior divider twice — which is invisible
+ * at full opacity and a bright seam at anything less, and worn paint has to be
+ * translucent. So the row is walked once: `n + 1` dividers a bay-width apart
+ * from the first bay's outer edge, and one stop line across the head where the
+ * cars nose in. Deriving it from the cars is also what makes it impossible for
+ * the lines and the bays to disagree, the same reason the park's lamp posts
+ * come off the path polyline.
+ *
+ * A bay is drawn whether or not it has a car in it — nought to three of them
+ * are filled, and an empty bay with no lines on it is not an empty bay, it is
+ * tarmac.
+ */
+export function drawParkingBays(
+  ctx: CanvasRenderingContext2D,
+  station: PoliceStation | null,
+  view: Viewport,
+): void {
+  if (!station || station.parking.length === 0) return;
+
+  const first = station.parking[0];
+  const last = station.parking[station.parking.length - 1];
+  const midX = (first.x + last.x) / 2;
+  const midY = (first.y + last.y) / 2;
+  const bayW = POLICE_STATION_BAY_TILES * TILE;
+  const half = (station.parking.length * bayW) / 2;
+  if (!visible(view, midX, midY, half + POLICE_STATION_BAY_DEPTH)) return;
+
+  // Along the bay is where a car is nosed; across it is the row.
+  const cos = Math.cos(first.facing);
+  const sin = Math.sin(first.facing);
+  const depth = POLICE_STATION_BAY_DEPTH;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(226, 230, 238, 0.42)';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'butt';
+  ctx.beginPath();
+  for (let i = 0; i <= station.parking.length; i++) {
+    const across = -half + i * bayW;
+    // The head of the bay is the end the cars point at; the tail is the aisle.
+    const hx = midX + cos * (depth / 2) - sin * across;
+    const hy = midY + sin * (depth / 2) + cos * across;
+    const tx = midX - cos * (depth / 2) - sin * across;
+    const ty = midY - sin * (depth / 2) + cos * across;
+    ctx.moveTo(hx, hy);
+    ctx.lineTo(tx, ty);
+  }
+  ctx.stroke();
+
+  // And the stop line the noses come up to, which is what stops the dividers
+  // reading as three unrelated stripes on a road.
+  ctx.strokeStyle = 'rgba(226, 230, 238, 0.3)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(midX + cos * (depth / 2) - sin * -half, midY + sin * (depth / 2) + cos * -half);
+  ctx.lineTo(midX + cos * (depth / 2) - sin * half, midY + sin * (depth / 2) + cos * half);
+  ctx.stroke();
+  ctx.restore();
 }
 
 /**
@@ -690,6 +763,17 @@ export function doorSlab(door: Door): Wall {
  * An open one swings back against the jamb; a shut one fills the opening, with
  * a bolt shown when it's locked and splintering as it takes damage.
  */
+/**
+ * The cell gate's teeth: how far apart the bars are and how thick, in world
+ * px.
+ *
+ * A gap rather than a count, so a wider gate grows more bars rather than
+ * fatter ones — the spacing is what says "bars", and a slab with three fat
+ * stripes on it at one width and three thin ones at another says nothing.
+ */
+const GATE_TOOTH_GAP = 7;
+const GATE_TOOTH_W = 2;
+
 export function drawDoors(
   ctx: CanvasRenderingContext2D,
   doors: Door[],
@@ -705,8 +789,10 @@ export function drawDoors(
     const t = WALL_THICKNESS;
 
     if (state.broken) {
-      // Wreckage: a couple of splinters left hanging in the frame.
-      ctx.strokeStyle = 'rgba(120, 84, 52, 0.75)';
+      // Wreckage: a couple of splinters left hanging in the frame — or, for a
+      // cell gate, the stubs of bent steel it leaves instead. A brown splinter
+      // hanging out of a black gate reads as the wrong door having broken.
+      ctx.strokeStyle = door.bars ? 'rgba(96, 104, 118, 0.8)' : 'rgba(120, 84, 52, 0.75)';
       ctx.lineWidth = 3;
       for (const side of [-1, 1]) {
         ctx.beginPath();
@@ -741,6 +827,62 @@ export function drawDoors(
 
     const slab = doorSlab(door);
     const hp = state.hp ?? 1;
+
+    /*
+     * **A cell gate is black and toothed, and neither is decoration.**
+     *
+     * Every other door in the city is a brown slab, so the one you cannot open
+     * has to be tellable from the ones you can before you have walked up to it
+     * and read the prompt. Black does that at a glance; the teeth say *what*
+     * it is. They are the bars themselves seen from directly above — evenly
+     * spaced steel graduations across the slab, the way the marks on a ruler
+     * read — which is the one pattern that cannot be mistaken for panelling.
+     *
+     * Drawn off the slab's own span rather than at a fixed count, so a wider
+     * gate grows more bars rather than fatter ones.
+     */
+    if (door.bars) {
+      ctx.fillStyle = '#111318';
+      ctx.fillRect(slab.x, slab.y, slab.w, slab.h);
+      ctx.strokeStyle = '#2b303a';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(slab.x + 0.5, slab.y + 0.5, slab.w - 1, slab.h - 1);
+
+      const teeth = Math.max(3, Math.round(span / GATE_TOOTH_GAP));
+      ctx.strokeStyle = hp < 1 ? 'rgba(120, 128, 142, 0.75)' : '#79818f';
+      ctx.lineWidth = GATE_TOOTH_W;
+      ctx.lineCap = 'butt';
+      ctx.beginPath();
+      for (let i = 1; i < teeth; i++) {
+        const along = (-0.5 + i / teeth) * span;
+        if (door.horiz) {
+          ctx.moveTo(door.x + along, slab.y + 1.5);
+          ctx.lineTo(door.x + along, slab.y + slab.h - 1.5);
+        } else {
+          ctx.moveTo(slab.x + 1.5, door.y + along);
+          ctx.lineTo(slab.x + slab.w - 1.5, door.y + along);
+        }
+      }
+      ctx.stroke();
+
+      if (hp < 1) {
+        // Bars bend before they give. One end of the gate goes dark as it does.
+        ctx.strokeStyle = `rgba(8, 9, 12, ${0.3 + (1 - hp) * 0.5})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        const bite = (1 - hp) * span * 0.4;
+        if (door.horiz) {
+          ctx.moveTo(door.x - span / 2, door.y);
+          ctx.lineTo(door.x - span / 2 + bite, door.y);
+        } else {
+          ctx.moveTo(door.x, door.y - span / 2);
+          ctx.lineTo(door.x, door.y - span / 2 + bite);
+        }
+        ctx.stroke();
+      }
+      continue;
+    }
+
     ctx.fillStyle = state.locked ? '#6d4a2c' : '#8a6039';
     ctx.fillRect(slab.x, slab.y, slab.w, slab.h);
     ctx.strokeStyle = '#4a3120';

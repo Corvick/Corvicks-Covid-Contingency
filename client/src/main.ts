@@ -81,6 +81,7 @@ import {
   ENTITY_DETAIL_SCALE,
   drawGrenades,
   drawGround,
+  drawParkingBays,
   drawHandLinks,
   drawHelicopters,
   drawInteractPrompt,
@@ -2316,6 +2317,8 @@ function render() {
     // Under everything else: it is ground, and the bushes stand on it.
     drawPark(ctx, map.park, view);
     drawPond(ctx, map.pond, view);
+    // Paint on the road, so it goes under the cars standing on it.
+    drawParkingBays(ctx, map.policeStation, view);
     // On the road, under the walls and everyone standing on it. `drawBlood`
     // also blits the shared permanent-stain layer, so it comes before anything
     // that reads from it.

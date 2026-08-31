@@ -10,6 +10,15 @@
  * depending on map size (have a couple civilians spawn in here to act as staff
  * too) … the office area have a cubicle like layout but not too crowded"*.
  *
+ * And then, once it existed: *"a bit of wall jutting out like its a bank tellers
+ * window (so you can see but not travel through this) … make the building a
+ * little larger … the jail cell locked and can only be kicked down by officers
+ * or by zombies or the zombie dog … 0-3 civilians in the jail cell each round …
+ * white parking space lanes for the cars … the loot on gun racks (two stalls
+ * like a urinal and the loot in between)"*. The teeth on the gate and the paint
+ * on the road are claims about pixels, so they are measured in
+ * `client/src/stationrig.ts` rather than here.
+ *
  * No socket, no port, so it leaves a game on 8080 alone.
  *   npx tsx policestation.ts
  *   CITIES=40 npx tsx policestation.ts
@@ -25,7 +34,19 @@
  * list of tile lines and the claim is about a body being able to get about, so
  * what is measured is the geometry that actually got pushed.
  */
-import { createWorld, buildingIndexAt, setStationHasNoStaff, type World } from './src/world.js';
+import {
+  createWorld,
+  resetWorld,
+  rebuildEntityGrid,
+  rebuildNav,
+  buildingIndexAt,
+  hasLineOfSight,
+  hasWallClearPath,
+  setStationHasNoStaff,
+  setStationCellEmpty,
+  type World,
+} from './src/world.js';
+import { computeFrozen, updateAi } from './src/ai.js';
 
 /** Kept in step with `inventory.ts`; the ids are what the armoury is counted by. */
 const ARMOURY_PREFIX = 'loot-armoury-';
@@ -48,11 +69,23 @@ import {
   POLICE_STATION_OFFICERS_MAX,
   POLICE_STATION_STAFF_MIN,
   POLICE_STATION_STAFF_MAX,
+  POLICE_STATION_CELL_MIN,
+  POLICE_STATION_CELL_MAX,
+  POLICE_STATION_BAY_TILES,
+  POLICE_STATION_BAY_DEPTH,
+  POLICE_STATION_APRON,
+  POLICE_STATION_RACK_BAY,
+  POLICE_STATION_RACK_DEPTH,
   POLICE_STATION_RADIO_CHANCE,
   CAR_LENGTH,
   CAR_WIDTH,
+  DOOR_HEALTH,
+  DOOR_ZOMBIE_DAMAGE,
+  TICK_RATE,
+  PATH_NODE_BUDGET_PER_TICK,
   setCityPopulation,
 } from '../shared/constants.js';
+import { damageDoor } from './src/doors.js';
 
 const CITIES = Number(process.env.CITIES ?? 40);
 setCityPopulation(Number(process.env.POP ?? 500));
@@ -105,6 +138,28 @@ interface Row {
   /** How much clear floor the office has, as a share of its own area. */
   officeOpen: number;
   narrowest: number;
+  /** Civilians standing inside the cell when the round starts. */
+  inmates: number;
+  /** Barred cell gates in the whole city — there is exactly one. */
+  gates: number;
+  /** True when that gate is shut and locked, which is its only resting state. */
+  gateHeld: boolean;
+  /** Sample points across the clerk's glass you can see through. */
+  counterSees: number;
+  /** ...and the ones you could *walk* through, which must be none. */
+  counterWalks: number;
+  /** The control: can you walk lobby-to-office at all, by the doorway. */
+  doorWalks: boolean;
+  /** Armoury stock standing in the mouth of a stall. */
+  onRack: number;
+  armouryItems: number;
+  /** Stalls the plan left, and how many of them are between two dividers. */
+  stalls: number;
+  stallsFramed: number;
+  /** Closest a parking bay's edge comes to the front door's own span, in px. */
+  bayDoorGap: number;
+  /** Bays whose painted footprint leaves the reserved apron. */
+  baysOutside: number;
 }
 
 /**
@@ -113,6 +168,17 @@ interface Row {
  * the shape of thing that gets this wrong — three partitions two tiles apart is
  * a maze if the gaps are a tile — so it is measured rather than eyeballed.
  */
+/** Is this exact point inside a wall or a pane? Geometry, not the nav grid. */
+function solidAtPoint(world: World, x: number, y: number): boolean {
+  for (const w of world.map.walls) {
+    if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return true;
+  }
+  for (const w of world.map.windows) {
+    if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return true;
+  }
+  return false;
+}
+
 function deadFloor(world: World, b: { x: number; y: number; w: number; h: number }): number {
   const R = ENTITY_RADIUS.human;
   const STEP = 4;
@@ -161,6 +227,18 @@ function inspect(world: World): Row {
     dead: 0,
     officeOpen: 0,
     narrowest: Infinity,
+    inmates: 0,
+    gates: 0,
+    gateHeld: false,
+    counterSees: 0,
+    counterWalks: 0,
+    doorWalks: false,
+    onRack: 0,
+    armouryItems: 0,
+    stalls: 0,
+    stallsFramed: 0,
+    bayDoorGap: Infinity,
+    baysOutside: 0,
   };
   const st = world.map.policeStation;
   if (!st) return row;
@@ -256,10 +334,150 @@ function inspect(world: World): Row {
   }
 
   // --- who is in it
+  const inRect = (r: { x: number; y: number; w: number; h: number }, x: number, y: number) =>
+    x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h;
   for (const [id, e] of world.entities) {
     if (buildingIndexAt(world, e.x, e.y) !== st.building) continue;
     if (id.startsWith('station-officer-')) row.officers++;
-    else if (e.type === 'human') row.staff++;
+    else if (e.type === 'human') {
+      // The cell is part of the office in `staff` terms only if nobody is
+      // locked in it, so the two are counted apart rather than one of them
+      // being a subset of the other.
+      if (inRect(st.cell, e.x, e.y)) row.inmates++;
+      else row.staff++;
+    }
+  }
+
+  /*
+   * --- the cell gate.
+   *
+   * Exactly one in the city, always shut and always locked. `world.doors` is
+   * the runtime record and `map.doors` is the plan; both have to agree, or the
+   * flag is on a door nobody hung.
+   */
+  for (let i = 0; i < world.map.doors.length; i++) {
+    if (!world.map.doors[i].bars) continue;
+    row.gates++;
+    const d = world.doors[i];
+    if (d && !d.open && !d.broken && d.locked && d.barred) row.gateHeld = true;
+  }
+
+  /*
+   * --- the clerk's counter: **see, but do not travel**.
+   *
+   * Sampled across the width of the glass rather than at its middle, because
+   * the claim is about the whole frontage — a jut with solid returns and a
+   * pane between them can be right at the centre and open at an edge. The
+   * probe stands a body's radius either side of the pane, so it is the walk a
+   * body would actually make.
+   *
+   * `doorWalks` is the control and it is load-bearing: "you cannot walk from
+   * the lobby into the office here" is satisfied just as well by a plan where
+   * you cannot walk from the lobby into the office at all.
+   */
+  {
+    const pane = world.map.windows.find(
+      (w) => inRect(b, w.x + w.w / 2, w.y + w.h / 2),
+    );
+    if (pane) {
+      const R = ENTITY_RADIUS.human + 8;
+      const horiz = pane.w > pane.h;
+      for (const f of [0.2, 0.5, 0.8]) {
+        const px = pane.x + pane.w * (horiz ? f : 0.5);
+        const py = pane.y + pane.h * (horiz ? 0.5 : f);
+        const ax = horiz ? px : px - R;
+        const ay = horiz ? py - R : py;
+        const bx = horiz ? px : px + R;
+        const by = horiz ? py + R : py;
+        if (hasLineOfSight(world, ax, ay, bx, by)) row.counterSees++;
+        if (hasWallClearPath(world, ax, ay, bx, by)) row.counterWalks++;
+      }
+    }
+    /*
+     * Lobby to office by the doorway, which is the way through beside it.
+     *
+     * **The door in it is opened first, and that is not cheating.** Doors are
+     * in `hasWallClearPath` — that is what stops a route being drawn through a
+     * shut one — so `INTERIOR_DOOR_SHARE` hanging a door there and
+     * `DOOR_START_OPEN_CHANCE` leaving it shut refuses the control on about a
+     * quarter of cities, which says nothing about the plan. The claim is about
+     * the *opening* the walls left beside the glass.
+     */
+    const doorIndex = world.map.doors.findIndex(
+      (d) => d.building === st.building && d.interior && !d.bars && d.horiz &&
+        Math.abs(d.y - (st.lobby.y - TILE / 2)) < TILE,
+    );
+    if (doorIndex >= 0) {
+      const doorSpec = world.map.doors[doorIndex];
+      const hung = world.doors[doorIndex];
+      if (hung) hung.open = true;
+      row.doorWalks = hasWallClearPath(
+        world,
+        doorSpec.x,
+        doorSpec.y + TILE,
+        doorSpec.x,
+        doorSpec.y - TILE,
+      );
+    }
+  }
+
+  /*
+   * --- the racks, and whether the stock is actually standing in one.
+   *
+   * `stallsFramed` is the check that a slot is *between* two things rather
+   * than merely inside the room: a spot with nothing either side of it is a
+   * gun on the floor whatever the code that put it there was called. Measured
+   * off the finished walls, sideways from the slot, at half a bay's reach.
+   */
+  row.stalls = st.racks.length;
+  for (const slot of st.racks) {
+    const reach = (POLICE_STATION_RACK_BAY * TILE) / 2 + 2;
+    // Which way the wall is, so the probe walks *into* the stall rather than
+    // out of it. The slot stands a shade past the dividers' tips — that is
+    // what keeps it out of their inflation skirt — so a sideways probe at the
+    // slot's own depth finds nothing and would report every stall unframed.
+    const toWall =
+      Math.abs(slot.y - st.armoury.y) < Math.abs(slot.y - (st.armoury.y + st.armoury.h)) ? -1 : 1;
+    for (let k = 1; k <= 4; k++) {
+      const y = slot.y + toWall * (k / 5) * POLICE_STATION_RACK_DEPTH * TILE;
+      if (solidAtPoint(world, slot.x - reach, y) && solidAtPoint(world, slot.x + reach, y)) {
+        row.stallsFramed++;
+        break;
+      }
+    }
+  }
+  for (const p of world.pickups.values()) {
+    if (p.id !== STATION_RADIO_ID && !p.id.startsWith(ARMOURY_PREFIX)) continue;
+    row.armouryItems++;
+    if (st.racks.some((s) => Math.hypot(s.x - p.x, s.y - p.y) < 1)) row.onRack++;
+  }
+
+  /*
+   * --- the bays, against the front door and against the ground reserved for
+   * them. Both are claims about where the paint goes, and the paint is laid
+   * off this same list on the client.
+   */
+  {
+    const front = world.map.doors.find((d) => d.building === st.building && !d.interior);
+    const bayW = POLICE_STATION_BAY_TILES * TILE;
+    for (const bay of st.parking) {
+      if (front) {
+        // Both spans are along x; the bays sit clear of the doorway's own.
+        const gap = Math.abs(bay.x - front.x) - bayW / 2 - front.halfSpan;
+        if (gap < row.bayDoorGap) row.bayDoorGap = gap;
+      }
+      const nose = bay.y - POLICE_STATION_BAY_DEPTH / 2;
+      const tail = bay.y + POLICE_STATION_BAY_DEPTH / 2;
+      const apronTop = b.y + b.h;
+      if (
+        nose < apronTop - 1 ||
+        tail > apronTop + POLICE_STATION_APRON + 1 ||
+        bay.x - bayW / 2 < b.x - 1 ||
+        bay.x + bayW / 2 > b.x + b.w + 1
+      ) {
+        row.baysOutside++;
+      }
+    }
   }
 
   // --- the rooms, off the finished walls
@@ -344,6 +562,17 @@ setStationHasNoStaff(true);
 const bare: Row[] = [];
 for (let i = 0; i < CITIES; i++) bare.push(inspect(createWorld()));
 setStationHasNoStaff(false);
+
+/*
+ * **And the control for the cell**, which is the same argument again: the cell
+ * is part of a building, the ordinary indoor draw samples the building's rows,
+ * and it lands people in there whether or not anybody locked them in. A count
+ * of who is standing in the cell is a superset; the difference is the inmates.
+ */
+setStationCellEmpty(true);
+const noCell: Row[] = [];
+for (let i = 0; i < CITIES; i++) noCell.push(inspect(createWorld()));
+setStationCellEmpty(false);
 
 const made = rows.filter((r) => r.placed);
 console.log(`  placed in ${made.length}/${CITIES} cities`);
@@ -522,6 +751,320 @@ check(
   'the cubicles are a layout, not a maze',
   `${(med(made.map((r) => r.officeOpen)) * 100).toFixed(0)}% of the office is clear floor`,
 );
+
+// ---------------------------------------------------------------- the counter
+console.log("\n  the clerk's counter");
+check(
+  made.every((r) => r.counterSees === 3),
+  'you can see through the glass, right across it',
+  `${made.reduce((a, r) => a + r.counterSees, 0)}/${made.length * 3} sample lines`,
+);
+check(
+  made.every((r) => r.counterWalks === 0),
+  'and you cannot walk through any of it',
+  `${made.reduce((a, r) => a + r.counterWalks, 0)}/${made.length * 3} would let a body past`,
+);
+/*
+ * **The control, and it is the whole value of the row above.** "You cannot walk
+ * from the lobby into the office at the counter" is satisfied just as well by a
+ * plan where you cannot walk from the lobby into the office at all.
+ */
+check(
+  made.every((r) => r.doorWalks),
+  'and the way through beside it is open — the control',
+  `${made.filter((r) => r.doorWalks).length}/${made.length}`,
+);
+
+// ------------------------------------------------------------------- the cell
+console.log('\n  the cell');
+check(
+  made.every((r) => r.gates === 1),
+  'exactly one barred gate in the city',
+  `${made.reduce((a, r) => a + r.gates, 0)} across ${made.length} cities`,
+);
+check(
+  made.every((r) => r.gateHeld),
+  'shut and locked before anybody has touched it',
+  `${made.filter((r) => r.gateHeld).length}/${made.length}`,
+);
+const inmates = made.map((r) => r.inmates);
+const bareInmates = noCell.filter((r) => r.placed).map((r) => r.inmates);
+/*
+ * **A head count of the cell is a superset, so the range is checked on the
+ * gain and not on the tally** — the same argument, and the same trap, as the
+ * staff row above. The cell is part of a building, the ordinary indoor draw
+ * samples the building's rows, and it puts somebody in there on about one city
+ * in five all by itself. Measured as a raw count, "0-3 locked in" reads a max
+ * of 4 on code that is doing exactly what it says.
+ *
+ * What is checked instead is the mean the cell code moves the count by, banded
+ * at three standard errors of a uniform draw over the range \u2014 plus the two
+ * ends, which are what "0-3" is actually promising: an empty cell has to be an
+ * ordinary sight, and a full one has to happen.
+ */
+const cellGain = mean(inmates) - mean(bareInmates);
+const cellMid = (POLICE_STATION_CELL_MIN + POLICE_STATION_CELL_MAX) / 2;
+const span = POLICE_STATION_CELL_MAX - POLICE_STATION_CELL_MIN + 1;
+const cellBand = (3 * Math.sqrt((span * span - 1) / 12)) / Math.sqrt(Math.max(1, made.length));
+check(
+  Math.abs(cellGain - cellMid) < cellBand,
+  `${POLICE_STATION_CELL_MIN}-${POLICE_STATION_CELL_MAX} civilians locked in it`,
+  `${mean(inmates).toFixed(2)} in the cell vs ${mean(bareInmates).toFixed(2)} with it gated` +
+    ` off, so +${cellGain.toFixed(2)} against ${cellMid} expected, band +-${cellBand.toFixed(2)}`,
+);
+check(
+  Math.min(...inmates) === POLICE_STATION_CELL_MIN,
+  'an empty cell is an ordinary sight',
+  `min ${Math.min(...inmates)} med ${med(inmates)} max ${Math.max(...inmates)}`,
+);
+check(
+  Math.max(...inmates) >= POLICE_STATION_CELL_MAX,
+  'and a full one happens',
+  `${[...new Set(inmates)].sort((a, b) => a - b).join(',')} seen`,
+);
+
+// ---------------------------------------------------------------- the armoury
+console.log('\n  the armoury');
+check(
+  made.every((r) => r.stalls > 0 && r.stallsFramed === r.stalls),
+  'every stall is between two dividers',
+  `${made.reduce((a, r) => a + r.stallsFramed, 0)}/${made.reduce((a, r) => a + r.stalls, 0)}`,
+);
+const racked = made.reduce((a, r) => a + r.onRack, 0);
+const stocked = made.reduce((a, r) => a + r.armouryItems, 0);
+const overflowed = made.filter((r) => r.armouryItems > r.stalls).length;
+check(
+  made.every((r) => r.onRack >= Math.min(r.armouryItems, r.stalls)),
+  'and the stock stands on them rather than on the floor',
+  `${racked}/${stocked} racked; ${overflowed}/${made.length} cities drew more than ${med(
+    made.map((r) => r.stalls),
+  )} stalls`,
+);
+
+// --------------------------------------------------------------- the car park
+console.log('\n  the car park');
+check(
+  made.every((r) => r.bayDoorGap > 0),
+  'no bay is painted across the front door',
+  `closest ${Math.min(...made.map((r) => r.bayDoorGap)).toFixed(0)}px clear of it`,
+);
+check(
+  made.every((r) => r.baysOutside === 0),
+  'and every bay is inside the ground reserved for it',
+  `${made.reduce((a, r) => a + r.baysOutside, 0)} outside`,
+);
+
+/*
+ * ---------------------------------------------------------------- the gate,
+ * **staged, because who can open it is the whole of what makes it a cell** and
+ * a generated city will not answer that on its own: nothing walks up to the
+ * back of a police station in the first tick of a round.
+ *
+ * Four claims and each has its control, because "the gate did not open" is
+ * satisfied just as well by a rig in which nothing opens anything:
+ *
+ *  - nothing unlocks it, ever          — control: an ordinary locked door in
+ *                                        the same building, which the same
+ *                                        officer draws the bolt on
+ *  - an officer takes it off its hinges — control: a civilian staged on the
+ *                                        same pixel, who cannot
+ *  - a zombie or the dog chews through  — both go through `damageDoor`, which
+ *                                        is what is measured
+ */
+console.log('\n  who can open the gate');
+{
+  const R = ENTITY_RADIUS.officer;
+  const RIGS = 6;
+  const TICKS = 420;
+  const TICK_MS = 1000 / TICK_RATE;
+
+  interface DoorRun {
+    /** The rig actually got somebody standing nose-to-slab at the door. */
+    staged: boolean;
+    broke: boolean;
+    /** Came unlocked with the slab still on its hinges. Breaking one clears
+     *  the lock too, so the two have to be told apart. */
+    unlocked: boolean;
+    ms: number;
+  }
+
+  /**
+   * Stand `subject` at `pick`'s slab, nose to it, and let the tick loop run.
+   *
+   * **Pinned, and that is not optional.** `doorInTheWay` probes along
+   * `state.heading` for the step the body is about to take, so a subject left
+   * to walk drifts off the one thing being measured within a second — the same
+   * pinning `provoke.ts` and `targetchurn.ts` each need, and for the same
+   * reason.
+   */
+  function driveAtDoor(subject: 'bot' | 'human', pick: 'gate' | 'ordinary'): DoorRun {
+    const run: DoorRun = { staged: false, broke: false, unlocked: false, ms: 0 };
+    const world = createWorld();
+    world.botOfficerCount = 1;
+    resetWorld(world);
+    const st = world.map.policeStation;
+    if (!st) return run;
+
+    const gate = world.map.doors.findIndex((d) => d.bars);
+    if (gate < 0) return run;
+
+    /*
+     * The ordinary door is **bolted by hand**, because `initDoors` starts
+     * every door in the city unlocked and a lock only ever appears when
+     * somebody throws one. A rig with nothing alive but its subject therefore
+     * never meets a locked door at all — the trap `complexcheck.ts` already
+     * records, and the reason the control could not otherwise exist.
+     */
+    let index = gate;
+    if (pick === 'ordinary') {
+      index = world.map.doors.findIndex(
+        (d, i) => i !== gate && d.building === st.building && d.interior && world.doors[i] !== null,
+      );
+      if (index < 0) return run;
+      const d = world.doors[index]!;
+      d.open = false;
+      d.locked = true;
+      d.broken = false;
+      d.health = DOOR_HEALTH;
+    }
+    const spec = world.map.doors[index];
+
+    // Everything else out of the way, so nothing is a threat, an escort, or a
+    // reason to be somewhere else.
+    const keep =
+      subject === 'bot' ? 'bot-0' : [...world.entities.keys()].find((k) => k.startsWith('human-'));
+    if (!keep || !world.entities.has(keep)) return run;
+    for (const id of [...world.entities.keys()]) {
+      if (id === keep) continue;
+      world.entities.delete(id);
+      world.ai.delete(id);
+    }
+    world.cityOfficers.clear();
+    const e = world.entities.get(keep)!;
+    const state = world.ai.get(keep)!;
+    if (subject === 'human') world.bots.delete(keep);
+
+    /*
+     * Which side to stand on is **found, not assumed.** The gate's office side
+     * is the far one from the cell, but the ordinary door is wherever the plan
+     * put it and either face of it may be a wall corner. A rig staged on a
+     * fixed side reports the city.
+     */
+    let stand: { x: number; y: number } | null = null;
+    let heading = 0;
+    for (const side of [1, -1]) {
+      const x = spec.horiz ? spec.x : spec.x + side * (R + 8);
+      const y = spec.horiz ? spec.y + side * (R + 8) : spec.y;
+      if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+      stand = { x, y };
+      heading = spec.horiz
+        ? side > 0
+          ? -Math.PI / 2
+          : Math.PI / 2
+        : side > 0
+          ? Math.PI
+          : 0;
+      break;
+    }
+    if (!stand) return run;
+    run.staged = true;
+
+    let now = 10_000;
+    const dt = TICK_MS / 1000;
+    for (let t = 0; t < TICKS; t++) {
+      e.x = stand.x;
+      e.y = stand.y;
+      state.heading = heading;
+      e.facing = heading;
+
+      world.pathBudget = PATH_NODE_BUDGET_PER_TICK;
+      if (world.navDirty) rebuildNav(world);
+      rebuildEntityGrid(world);
+      updateAi(world, now, dt, computeFrozen(world));
+
+      const d = world.doors[index]!;
+      // **While it is still on its hinges.** `damageDoor` clears the lock as
+      // it breaks one, so a flag that did not say "unbroken" would read every
+      // successful kick as an unlock.
+      if (!d.broken && !d.locked) run.unlocked = true;
+      if (d.broken && !run.broke) {
+        run.broke = true;
+        run.ms = now - 10_000;
+      }
+      now += TICK_MS;
+    }
+    return run;
+  }
+
+  const up = (rs: DoorRun[]) => rs.filter((r) => r.staged);
+  const gateBots: DoorRun[] = [];
+  const gateCivs: DoorRun[] = [];
+  const plainBots: DoorRun[] = [];
+  for (let i = 0; i < RIGS; i++) {
+    gateBots.push(driveAtDoor('bot', 'gate'));
+    gateCivs.push(driveAtDoor('human', 'gate'));
+    plainBots.push(driveAtDoor('bot', 'ordinary'));
+  }
+
+  check(
+    up(gateBots).length === RIGS && up(gateCivs).length === RIGS,
+    'the rig stood somebody at the gate',
+    `${up(gateBots).length}/${RIGS} officers, ${up(gateCivs).length}/${RIGS} civilians`,
+  );
+  check(
+    up(gateBots).every((r) => r.broke),
+    'an officer takes the gate off its hinges',
+    `${up(gateBots).filter((r) => r.broke).length}/${up(gateBots).length}, median ${med(
+      up(gateBots).filter((r) => r.broke).map((r) => r.ms),
+    ).toFixed(0)}ms`,
+  );
+  check(
+    up(gateBots).every((r) => !r.unlocked),
+    'and never unlocks it, because there is no key',
+    `${up(gateBots).filter((r) => r.unlocked).length} came unlocked on their hinges`,
+  );
+  /*
+   * **The discriminating control.** "The officer did not unlock it" is
+   * satisfied just as well by an officer that cannot work a lock at all, which
+   * is not the behaviour — see the note beside `openDoorAhead`. So the same
+   * officer is stood at an ordinary bolted door in the same building, where it
+   * has to draw the bolt rather than kick.
+   */
+  check(
+    up(plainBots).length > 0 && up(plainBots).every((r) => r.unlocked && !r.broke),
+    'while still drawing the bolt on an ordinary locked door — the control',
+    `${up(plainBots).filter((r) => r.unlocked).length}/${up(plainBots).length} unlocked,` +
+      ` ${up(plainBots).filter((r) => r.broke).length} kicked in`,
+  );
+  check(
+    up(gateCivs).every((r) => !r.broke && !r.unlocked),
+    'and a civilian on the same pixel can do neither',
+    `${up(gateCivs).filter((r) => r.broke).length} broke,` +
+      ` ${up(gateCivs).filter((r) => r.unlocked).length} unlocked`,
+  );
+
+  /*
+   * And the horde, which needs no rule of its own: a barred door is a shut
+   * door, so a zombie's claws and the dog's jaws reach it through `damageDoor`
+   * exactly as they reach any other. What is checked is that `barred` shields
+   * nothing — measured in `DOOR_ZOMBIE_DAMAGE` bites, so the figure is the
+   * number of them a cell gate actually costs.
+   */
+  const chew = createWorld();
+  const gateIndex = chew.map.doors.findIndex((d) => d.bars);
+  let bites = 0;
+  if (gateIndex >= 0) {
+    while (!chew.doors[gateIndex]!.broken && bites < 1000) {
+      damageDoor(chew, gateIndex, DOOR_ZOMBIE_DAMAGE);
+      bites++;
+    }
+  }
+  check(
+    gateIndex >= 0 && chew.doors[gateIndex]!.broken,
+    'and the horde chews through it like any other shut door',
+    `${bites} bites at ${DOOR_ZOMBIE_DAMAGE} against ${DOOR_HEALTH} health`,
+  );
+}
 
 console.log(
   `\n  footprint ${POLICE_STATION_W_TILES * TILE}x${POLICE_STATION_H_TILES * TILE}` +

@@ -182,6 +182,16 @@ export interface Door {
   horiz: boolean;
   /** Between two rooms rather than to the street. */
   interior: boolean;
+  /**
+   * A barred cell gate rather than a door: black, toothed, and permanently
+   * locked.
+   *
+   * It rides on the *map* rather than on `DoorState`, because it is a property
+   * of the door that was hung there and never changes — so it costs the wire
+   * one boolean once, in `welcome`, rather than a field on every door near
+   * every viewer thirty times a second.
+   */
+  bars?: boolean;
 }
 
 /**
@@ -422,6 +432,16 @@ export interface PoliceStation {
   lobby: Wall;
   office: Wall;
   cell: Wall;
+  /**
+   * Where the armoury's stock stands: one spot in the mouth of each stall
+   * between two rack dividers.
+   *
+   * **Worked out by `mapgen` and handed over, rather than derived again by
+   * whoever fills them.** The dividers are walls this file pushed and the
+   * slots have to sit exactly between them — computed twice, the day somebody
+   * moves a divider is the day the guns start standing inside one.
+   */
+  racks: Array<{ x: number; y: number }>;
 }
 
 export interface MapData {

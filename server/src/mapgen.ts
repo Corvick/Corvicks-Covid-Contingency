@@ -51,6 +51,12 @@ import {
   POLICE_STATION_H_TILES,
   POLICE_STATION_APRON,
   POLICE_STATION_PARKING,
+  POLICE_STATION_BAY_TILES,
+  POLICE_STATION_BAY_DEPTH,
+  POLICE_STATION_RACK_DEPTH,
+  POLICE_STATION_RACK_BAY,
+  POLICE_STATION_RACK_STANDOFF,
+  POLICE_STATION_COUNTER_JUT,
   POLICE_STATION_FAR_END_CHANCE,
 } from '../../shared/constants.js';
 import { NavGrid } from './navgrid.js';
@@ -745,27 +751,44 @@ function roomedBuildingAt(
  * The plan, at `POLICE_STATION_W_TILES` x `POLICE_STATION_H_TILES`:
  *
  * ```
- * x:  0    4          11        16
- * y=0 +----+-----------+---------+
- *     |CELL|           | ARMOURY |   the back
- * y=4 +-##-+           +---##----+
- *     |                          |
- *     |   OFFICE, in cubicles    |
- * y=10+---[GLASS]----##----------+   the clerk's window, and the way through
- *     |         LOBBY            |
- * y=13+---------##---------------+   the front door
+ * x:  0     5           10                  20
+ * y=0 +-----+------------+--+--+--+--+--+----+
+ *     |CELL |            |  ARMOURY, racked  |   the back
+ *     |     |    back    |  along both walls |
+ * y=5 +--#--+   office   +##+--+--+--+--+----+
+ *     |                                      |
+ *     |         OFFICE, in cubicles          |
+ * y=12+-----+          +--------+##+---------+   the way through
+ *     |     |==glass==|    LOBBY             |   the teller's counter
+ * y=16+--------------##----------------------+   the front door
  * ```
  *
  * **Every gap in it is at least `MIN_LIMB` tiles**, which is what stops any of
- * this being a room nothing in the game fits into — the cell is four tiles
- * across, the cubicle partitions are two clear of everything, and each doorway
- * is a `GAP`-wide opening like every other doorway in the city. See "A
- * building is somewhere you can get into".
+ * this being a room nothing in the game fits into — the cell is five tiles
+ * across, the cubicle partitions are two clear of everything, the armoury's
+ * aisle is three, and each doorway is a `GAP`-wide opening like every other
+ * doorway in the city. See "A building is somewhere you can get into".
  *
  * The office is deliberately **L-shaped**: the strip between the cell and the
  * armoury has no wall across it, so the back of the office opens into the back
  * of the building. That is one room to `rooms.ts`, which flood-fills the
  * finished geometry and neither knows nor needs to know what any of it is for.
+ *
+ * Three things in it are not simply rooms with walls round them:
+ *
+ * - **The counter juts.** The clerk's line steps a tile forward into the lobby
+ *   between x=4 and x=9, with **glass across the front of the jut and solid
+ *   wall down the two returns** — which is what a bank teller's window looks
+ *   like from directly above, and what makes it read as a counter rather than
+ *   as a pane somebody happened to leave in a wall. The back of the jut is
+ *   open, so the well behind the glass belongs to the office and the clerk
+ *   stands in it.
+ * - **The armoury is racked.** Stubs of wall jut off the back and the front
+ *   wall every `POLICE_STATION_RACK_BAY` tiles and the stock stands in the
+ *   mouth of each stall between two of them. `station.racks` is that list of
+ *   spots; `inventory.ts` fills it and never works out where a divider is.
+ * - **The cell gate is `bars`.** Locked from the moment the map exists, with
+ *   no key anywhere in the round — see `POLICE_STATION_CELL_LOCKED`.
  */
 function policeStationAt(
   walls: Wall[],
@@ -804,11 +827,24 @@ function policeStationAt(
     pushRun(windows, { horiz: true, a: 0, b: 0, line }, p, q, originX, originY, t);
   };
   /** A doorway in a horizontal line, recorded so everything can reason about it. */
-  const hdoor = (line: number, a: number, b: number, interior: boolean): void => {
+  const hdoor = (line: number, a: number, b: number, interior: boolean, bars = false): void => {
     const [p, q] = hspan(a, b);
     doorIds.push(doors.length);
+    const door = gapToDoor({ horiz: true, a: p, b: q, line }, originX, originY, index, interior);
+    if (bars) door.bars = true;
+    doors.push(door);
+  };
+  /**
+   * The same in a vertical line.
+   *
+   * New with this plan rather than an oversight before it: the armoury's way
+   * in used to be in its south wall, and that wall is now a rack. `gapToDoor`
+   * has always known how to make one — only the caller was missing.
+   */
+  const vdoor = (line: number, a: number, b: number, interior: boolean): void => {
+    doorIds.push(doors.length);
     doors.push(
-      gapToDoor({ horiz: true, a: p, b: q, line }, originX, originY, index, interior),
+      gapToDoor({ horiz: false, a, b, line: mx(line) }, originX, originY, index, interior),
     );
   };
   /** An interior rect in world units, inset off its own walls. */
@@ -822,48 +858,114 @@ function policeStationAt(
     };
   };
 
+  // Where the plan's rooms meet, in tiles. Named rather than repeated, because
+  // the racks, the counter and the parking all have to agree with them.
+  const CELL_X = 5; // the cell runs 0..CELL_X
+  const ARM_X = 10; // the armoury runs ARM_X..W
+  const BACK_Y = 5; // the back rooms run 0..BACK_Y
+  const COUNTER_Y = 12; // the clerk's line
+
   // --- the shell. The front door is the one opening in it.
   hwall(0, 0, W);
   vwall(0, 0, H);
   vwall(W, 0, H);
-  hwall(H, 0, 7);
-  hwall(H, 9, W);
-  hdoor(H, 7, 9, false);
+  hwall(H, 0, W / 2 - 1);
+  hwall(H, W / 2 + 1, W);
+  hdoor(H, W / 2 - 1, W / 2 + 1, false);
 
-  // --- the cell, back left: its own wall and its own door.
-  vwall(4, 0, 4);
-  hwall(4, 0, 1);
-  hwall(4, 3, 4);
-  hdoor(4, 1, 3, true);
+  /*
+   * --- the cell, back left, and its gate.
+   *
+   * `bars` is the whole of what makes it a cell rather than a back room with a
+   * door on it: `initDoors` starts it shut and locked, nothing in the game can
+   * unlock one, and an officer meeting it takes it off its hinges. Centred in
+   * the cell's own wall, so it reads from the lobby end of the office.
+   */
+  vwall(CELL_X, 0, BACK_Y);
+  hwall(BACK_Y, 0, CELL_X / 2 - 1);
+  hwall(BACK_Y, CELL_X / 2 + 1, CELL_X);
+  hdoor(BACK_Y, CELL_X / 2 - 1, CELL_X / 2 + 1, true, true);
 
-  // --- the armoury, back right.
-  vwall(11, 0, 4);
-  hwall(4, 11, 12);
-  hwall(4, 14, W);
-  hdoor(4, 12, 14, true);
+  /*
+   * --- the armoury, back right, and the racks down both its long walls.
+   *
+   * Its way in is in the **west** wall's south end — the corner nearest the
+   * office — rather than in the south wall, which is now a rack. `RACK_BAY`
+   * tiles apart is 46px between dividers, the same as a doorway; see
+   * `POLICE_STATION_RACK_DEPTH` for why that figure cannot come down.
+   */
+  vwall(ARM_X, 0, BACK_Y - GAP);
+  vdoor(ARM_X, BACK_Y - GAP, BACK_Y, true);
+  hwall(BACK_Y, ARM_X, W);
 
-  // --- the front counter. Glass where the clerk sits, and a way through
-  // beside it. The glass is a real pane: you can see the lobby from the
-  // office and shoot through neither until somebody breaks it.
-  hwall(10, 0, 3);
-  hglass(10, 3, 7);
-  hwall(10, 7, 10);
-  hwall(10, 12, W);
-  hdoor(10, 10, 12, true);
+  /**
+   * A row of stalls along one of the armoury's long walls, and the spot in the
+   * mouth of each. Both rows run to the east shell wall, so `W` is the far end
+   * of either and only where they *start* differs.
+   */
+  const racks: Array<{ x: number; y: number }> = [];
+  const rackRow = (from: number, wallLine: number, inward: number): void => {
+    const bays = Math.floor((W - from) / POLICE_STATION_RACK_BAY);
+    for (let k = 0; k < bays; k++) {
+      // Dividers between bays only: the ends of the row are already walls.
+      if (k > 0) {
+        const at = from + k * POLICE_STATION_RACK_BAY;
+        const near = wallLine;
+        const far = wallLine + inward * POLICE_STATION_RACK_DEPTH;
+        vwall(at, Math.min(near, far), Math.max(near, far));
+      }
+      racks.push({
+        x: originX + mx(from + (k + 0.5) * POLICE_STATION_RACK_BAY) * TILE,
+        y: originY + (wallLine + inward * POLICE_STATION_RACK_STANDOFF) * TILE,
+      });
+    }
+  };
+  /*
+   * The back wall takes the whole width. The front one starts a doorway in,
+   * because its west end *is* the way in — a stall there would be bounded by
+   * an opening rather than by a divider, which is a gun standing in the
+   * threshold. Nine stalls, and every one of them framed on both sides.
+   */
+  rackRow(ARM_X, 0, 1);
+  rackRow(ARM_X + GAP, BACK_Y, -1);
+  // The west divider of that first front stall, which the row cannot supply
+  // itself: it only ever lays the ones *between* its bays.
+  vwall(ARM_X + GAP, BACK_Y - POLICE_STATION_RACK_DEPTH, BACK_Y);
+
+  /*
+   * --- the front counter, jutting into the lobby like a bank teller's window.
+   *
+   * Glass across the **front** of the jut and solid wall down the two returns:
+   * you can see the clerk and there is no way past them, which is the whole of
+   * what a teller's window is. Left flat in the wall it read as a pane
+   * somebody had put in an office partition.
+   *
+   * The back of the jut is deliberately left open, so the well behind the
+   * glass is part of the office rather than a sealed pocket — a room with no
+   * exit is exactly what `rooms.ts` is checked for not producing.
+   */
+  const JUT = POLICE_STATION_COUNTER_JUT;
+  hwall(COUNTER_Y, 0, 4);
+  vwall(4, COUNTER_Y, COUNTER_Y + JUT);
+  hglass(COUNTER_Y + JUT, 4, 9);
+  vwall(9, COUNTER_Y, COUNTER_Y + JUT);
+  hwall(COUNTER_Y, 9, 13);
+  hdoor(COUNTER_Y, 13, 13 + GAP, true);
+  hwall(COUNTER_Y, 13 + GAP, W);
 
   /*
    * --- cubicles.
    *
-   * Three partitions, each an L of two tiles by two, and **nothing else** —
+   * Four partitions, each an L of two tiles by two, and **nothing else** —
    * the ask was a cubicle layout that is not crowded, and a wall in this game
    * is a wall: a full grid of them would be a maze rather than an office.
    * They are free-standing, so they close nothing off and the office stays one
    * room; and they are kept two tiles clear of the walls above and below, so
    * every slot between them is a `MIN_LIMB` a body can walk down.
    */
-  for (const cx of [4, 8, 12]) {
-    vwall(cx, 6, 8);
-    hwall(6, cx, cx + 2);
+  for (const cx of [3, 7, 11, 15]) {
+    vwall(cx, 7, 9);
+    hwall(7, cx, cx + 2);
   }
 
   // The footprint is a plain rectangle, one rect per tile row, like every
@@ -882,15 +984,24 @@ function policeStationAt(
     doors: doorIds,
   };
 
-  // The bays, out on the apron in front. Nosed in at the building, which is
-  // what a car park looks like from above and also keeps the whole body inside
-  // the reserved ground rather than sticking out into the road.
+  /*
+   * The bays, out on the apron in front. Nosed in at the building, which is
+   * what a car park looks like from above and also keeps the whole body inside
+   * the reserved ground rather than sticking out into the road.
+   *
+   * **They sit at the far end of the frontage from the front door**, so the way
+   * out of the building is open tarmac rather than a gap between two parked
+   * cars — and so the drive in off the street has somewhere to be. The row is
+   * laid backwards from that end for the same reason `drawParkingBays` lays its
+   * dividers off the same list: one arithmetic, one answer.
+   */
   const parking: Array<{ x: number; y: number; facing: number }> = [];
+  const lastBay = W - 0.5 - POLICE_STATION_BAY_TILES / 2;
   for (let i = 0; i < POLICE_STATION_PARKING; i++) {
-    const bay = mx(1.8 + i * 2.1);
+    const bay = mx(lastBay - (POLICE_STATION_PARKING - 1 - i) * POLICE_STATION_BAY_TILES);
     parking.push({
       x: originX + bay * TILE,
-      y: originY + H * TILE + POLICE_STATION_APRON / 2,
+      y: originY + H * TILE + POLICE_STATION_BAY_DEPTH / 2,
       facing: -Math.PI / 2,
     });
   }
@@ -898,10 +1009,11 @@ function policeStationAt(
   const station: PoliceStation = {
     building: index,
     parking,
-    armoury: room(11, 0, W, 4),
-    lobby: room(0, 10, W, H),
-    office: room(0, 4, W, 10),
-    cell: room(0, 0, 4, 4),
+    armoury: room(ARM_X, 0, W, BACK_Y),
+    lobby: room(0, COUNTER_Y, W, H),
+    office: room(0, BACK_Y, W, COUNTER_Y),
+    cell: room(0, 0, CELL_X, BACK_Y),
+    racks,
   };
   void rand;
   return { building, station };

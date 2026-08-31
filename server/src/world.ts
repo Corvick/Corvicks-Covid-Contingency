@@ -33,6 +33,8 @@ import {
   POLICE_STATION_GUARD_RADIUS,
   POLICE_STATION_STAFF_MIN,
   POLICE_STATION_STAFF_MAX,
+  POLICE_STATION_CELL_MIN,
+  POLICE_STATION_CELL_MAX,
   NPC_OFFICER_MIN,
   NPC_OFFICER_MAX,
   BOT_OFFICER_COUNT,
@@ -1929,6 +1931,21 @@ export function findSpawn(
  * own. What the difference between the two says something about is the two or
  * three who were put there on purpose. See `server/policestation.ts`.
  */
+/**
+ * Harness gate: leave the cell empty.
+ *
+ * The control for "nought to three civilians in the jail cell", and it is the
+ * whole value of that row for exactly the same reason the staff one is: the
+ * cell is part of a building, the ordinary indoor draw samples the building's
+ * footprint rows, and it lands people in there whether or not anybody put them
+ * there on purpose. A count of who is standing in the cell is a superset. What
+ * the difference says something about is the ones who were locked in.
+ */
+let stationCellOff = false;
+export function setStationCellEmpty(v: boolean): void {
+  stationCellOff = v;
+}
+
 let stationStaffOff = false;
 export function setStationHasNoStaff(v: boolean): void {
   stationStaffOff = v;
@@ -2663,6 +2680,32 @@ function populate(world: World): void {
     for (let i = 0; i < staff && placed < HUMAN_COUNT; i++) {
       const room = i === 0 ? station.lobby : station.office;
       const spawn = findSpawn(world, ENTITY_RADIUS.human, room);
+      const id = addHuman(placed, spawn.x, spawn.y);
+      world.ai.get(id)!.homeBuilding = station.building;
+      placed++;
+    }
+  }
+
+  /*
+   * **And nought to three locked in the cell.**
+   *
+   * Out of the civilian count like the staff, and for the same reason. `MIN`
+   * is 0 deliberately — an empty cell has to be an ordinary sight, or the room
+   * stops being a cell and becomes a place three people are always kept.
+   *
+   * They are given `homeBuilding` like the staff, which is honest rather than
+   * load-bearing: what actually keeps them in is the gate. It is `bars`, so
+   * nothing in the game unlocks one and they have no way out until an officer
+   * takes it off its hinges or something chews through it. A `begsAtDoors` one
+   * will hammer on it, which is the whole of what a prisoner can do about the
+   * outbreak, and nobody is coming — `answerDoorPlea` skips a barred door.
+   */
+  if (station && !stationCellOff) {
+    const inmates =
+      POLICE_STATION_CELL_MIN +
+      Math.floor(Math.random() * (POLICE_STATION_CELL_MAX - POLICE_STATION_CELL_MIN + 1));
+    for (let i = 0; i < inmates && placed < HUMAN_COUNT; i++) {
+      const spawn = findSpawn(world, ENTITY_RADIUS.human, station.cell);
       const id = addHuman(placed, spawn.x, spawn.y);
       world.ai.get(id)!.homeBuilding = station.building;
       placed++;
