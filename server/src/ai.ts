@@ -680,6 +680,21 @@ export function setSandbagsIgnoredByRoutes(v: boolean): void {
   sandbagsIgnoredByRoutes = v;
 }
 
+/**
+ * True is a bot that picks somewhere to walk to without asking whether it can
+ * get there — which is what it did, and what left one shuffling at a wall of
+ * sandbags for the rest of the round. `server/sealedloot.ts` reads it.
+ *
+ * Kept rather than deleted with the measurement: "it walked away and did
+ * something else" is satisfied just as well by a bot that stopped looting, so
+ * the control is the whole value of the run.
+ */
+let botsIgnoreSealedGoals = false;
+
+export function setBotsIgnoreSealedGoals(v: boolean): void {
+  botsIgnoreSealedGoals = v;
+}
+
 function getAi(world: World, e: Entity, now: number): AiState {
   let state = world.ai.get(e.id);
   if (!state) {
@@ -1086,6 +1101,36 @@ function softAware(e: Entity): boolean {
 /** `nav.isBlocked`, with the destructible layer counted in for the living. */
 function shutTo(world: World, e: Entity, x: number, y: number): boolean {
   return softAware(e) ? world.nav.isBlockedOrSoft(x, y) : world.nav.isBlocked(x, y);
+}
+
+/**
+ * **Is there any way at all from here to there, sandbags and all?**
+ *
+ * `shutTo` and the two above it are about the *step* — they keep a body off a
+ * wall it cannot pass and route it round the end of one. None of them can say
+ * that there is no end to go round, and that is a different failure with a
+ * different answer: not a detour, but giving the errand up.
+ *
+ * Reported as bot officers walking up to a deployed pocket gunner, stopping,
+ * backing off and walking straight at it again for the rest of the round —
+ * with the note that they were trying to get into a house and did not realise
+ * it was not possible. Every part of that is what the code did. The bags seal
+ * the doorway in the destructible layer, so the search for a route in cannot
+ * finish and `findPath` hands back its best partial, which ends against them;
+ * collision pushes the body out; `unstickTick` sees no progress and commits
+ * `UNSTICK_COMMIT_MS` of a breakout heading scored *against* the one that just
+ * failed, which is the step backwards; the commit expires, the errand is still
+ * set, and round it goes. Nothing in that loop is wrong on its own and nothing
+ * in it can conclude anything, because `unstickTick` clears the route and
+ * never the goal.
+ *
+ * So the goal has to be refused where it is *chosen*, and `canWalkBetween` is
+ * the exact question — see the note there on why a capped A* cannot answer it.
+ * True for a zombie, which walks at the bags on purpose and takes them apart.
+ */
+function canWalkTo(world: World, e: Entity, x: number, y: number): boolean {
+  if (botsIgnoreSealedGoals || !softAware(e)) return true;
+  return world.nav.canWalkBetween(e.x, e.y, x, y);
 }
 
 function breakoutHeading(
@@ -5512,6 +5557,14 @@ function lootWanted(
     const dist = Math.hypot(p.x - e.x, p.y - e.y);
     if (dist > range) continue;
     if (!world.nav.isReachable(p.x, p.y)) continue;
+    // And there has to be a way *in*. `isReachable` is the map's own question
+    // and stays the hard layer, so a rifle in a house whose one doorway a
+    // player has just put a pocket gunner across still passes it — and a bot
+    // that set out for that rifle could never arrive and could never work out
+    // why. See `canWalkTo`. No snub goes with it: this is read live off the
+    // nav grid, so the moment the bags come down the rifle is worth having
+    // again, which a timer would have to sit out.
+    if (!canWalkTo(world, e, p.x, p.y)) continue;
     // Nothing lying in the dog's acid is worth walking into it for. A cloud
     // lasts `ACID_CLOUD_MS` and the rifle will still be there afterwards; going
     // in after it means standing blind in the open in the one place the dog has
@@ -5966,7 +6019,13 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
     const reach = BOT_PATROL_MIN + Math.random() * (BOT_PATROL_MAX - BOT_PATROL_MIN);
     const x = clamp(e.x + Math.cos(angle) * reach, 70, WORLD_WIDTH - 70);
     const y = clamp(e.y + Math.sin(angle) * reach, 70, WORLD_HEIGHT - 70);
-    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+    // `shutTo` rather than `isBlocked`, and `canWalkTo` under it: a spot inside
+    // the bags is a spot nothing alive can stand on, and one walled off behind
+    // them is one it can walk at forever. The same pair `sweepTarget` and
+    // `squadPost` were given, and for the same reason — a bot picking a place
+    // to be is a picker like any other.
+    if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
+    if (!canWalkTo(world, e, x, y)) continue;
     // Indoors is where the loot is, not where the work is.
     if (buildingIndexAt(world, x, y) >= 0) continue;
     // And never *into* the dog's acid. `acidBoltTick` is what gets a bot out of
@@ -6007,7 +6066,9 @@ function botPatrolTarget(world: World, e: Entity, state: AiState, now: number): 
       const reach = Math.min(fix.dist, BOT_PATROL_MAX);
       const x = clamp(e.x + Math.cos(fix.bearing) * reach, 70, WORLD_WIDTH - 70);
       const y = clamp(e.y + Math.sin(fix.bearing) * reach, 70, WORLD_HEIGHT - 70);
-      if (!world.nav.isBlocked(x, y) && world.nav.isReachable(x, y)) best = { x, y };
+      if (!shutTo(world, e, x, y) && world.nav.isReachable(x, y) && canWalkTo(world, e, x, y)) {
+        best = { x, y };
+      }
     }
   }
 

@@ -140,10 +140,19 @@ export class NavGrid {
     // "unreachable" — `isReachable` is what decides where a body may be spawned
     // and where an order may be sent, and a barricade is not a decision about
     // either. It is also gone the moment a zombie has finished with it.
-    this.labelComponents();
+    this.mainComponent = this.labelComponents(this.component, false);
+    // Whether the *other* labelling is worth having at all. See `softLabels`.
+    this.hasSoft = softBlockers.length > 0;
   }
 
   private component: Int32Array;
+  /** Is there anything destructible on this grid at all? */
+  private hasSoft = false;
+  /**
+   * The same regions with the destructible layer counted in — see
+   * `canWalkBetween`. Null until somebody asks.
+   */
+  private softComponent: Int32Array | null = null;
   private mainComponent = -1;
 
   /**
@@ -151,15 +160,16 @@ export class NavGrid {
    * Anything walled off from it — a room whose doorway got covered by a
    * partition, say — is somewhere nobody should ever be spawned.
    */
-  private labelComponents(): void {
-    const { cols, rows, blocked, component } = this;
+  private labelComponents(component: Int32Array, countSoft: boolean): number {
+    const { cols, rows, blocked, soft } = this;
     const stack: number[] = [];
     let label = 0;
     let bestLabel = -1;
     let bestSize = 0;
 
     for (let start = 0; start < component.length; start++) {
-      if (blocked[start] === 1 || component[start] !== -1) continue;
+      if (blocked[start] === 1 || (countSoft && soft[start] === 1)) continue;
+      if (component[start] !== -1) continue;
 
       let size = 0;
       stack.length = 0;
@@ -177,7 +187,8 @@ export class NavGrid {
           const nr = r + (i === 2 ? 1 : i === 3 ? -1 : 0);
           if (nc < 0 || nr < 0 || nc >= cols || nr >= rows) continue;
           const next = nr * cols + nc;
-          if (blocked[next] === 1 || component[next] !== -1) continue;
+          if (blocked[next] === 1 || (countSoft && soft[next] === 1)) continue;
+          if (component[next] !== -1) continue;
           component[next] = label;
           stack.push(next);
         }
@@ -189,12 +200,67 @@ export class NavGrid {
       }
       label++;
     }
-    this.mainComponent = bestLabel;
+    return bestLabel;
   }
 
   /** True when this point is part of the map's main walkable region. */
   isReachable(x: number, y: number): boolean {
     return this.component[this.cellAt(x, y)] === this.mainComponent;
+  }
+
+  /**
+   * Can anything alive walk from one of these points to the other, sandbags
+   * and all?
+   *
+   * **`isReachable` is the map's own question and has to stay the hard layer**
+   * — a wall somebody stacked this minute is not a decision about where a body
+   * may be spawned or where an order may be sent, and it is gone the moment a
+   * zombie has finished with it. This is the *other* question, and until now
+   * nothing in the game could answer it. `findPath` cannot: it searches
+   * outward from the body, and a body in the street is standing in the largest
+   * component on the map, so it gives up at `PATH_MAX_NODES` long before it
+   * has exhausted the street. "I could not get there" and "there is no way
+   * there" are the same answer to it — which is exactly why a bot walked at a
+   * rifle behind a bagged doorway for the rest of the round. Two labellings
+   * tell the two apart in one lookup.
+   *
+   * **True when there is no destructible layer at all.** A city with no
+   * sandbags in it is not what this is about, and whether the *map* joins two
+   * points up is `isReachable`'s business and is asked separately — so the
+   * ordinary round pays one null check and its behaviour is untouched.
+   */
+  canWalkBetween(x1: number, y1: number, x2: number, y2: number): boolean {
+    if (!this.hasSoft) return true;
+    const comp = this.softLabels();
+    // Either end may sit inside the bags' own skirt — a body pressed against
+    // them, most obviously — and a soft cell carries no label at all. The same
+    // spiral `findPath` puts its start and goal through, for the same reason.
+    const a = this.nearestOpen(this.cellAt(x1, y1), true);
+    const b = this.nearestOpen(this.cellAt(x2, y2), true);
+    if (a < 0 || b < 0) return false;
+    return comp[a] === comp[b];
+  }
+
+  /**
+   * The destructible layer's own regions, filled on first use and kept.
+   *
+   * **Lazily, because a rebuild is not a question.** The grid is thrown away
+   * and built again whenever anything solid changes — a pane going in, a van
+   * parking, a wall going up or coming down — and in a round with a sandbag
+   * wall standing and glass breaking that is up to one a tick. Measured on a
+   * 5000x3700 city, `rebuildNav` goes **4.3ms to 6.4ms** with this filled
+   * eagerly, and it is only ever read on a bot's loot scan or when one picks
+   * somewhere to patrol, which is a few times a second between all of them.
+   * Safe to keep once made: nothing mutates a grid after it is built.
+   */
+  private softLabels(): Int32Array {
+    let comp = this.softComponent;
+    if (!comp) {
+      comp = new Int32Array(this.cols * this.rows).fill(-1);
+      this.labelComponents(comp, true);
+      this.softComponent = comp;
+    }
+    return comp;
   }
 
   /** Open water is no more walkable than a wall, and the same to a route. */

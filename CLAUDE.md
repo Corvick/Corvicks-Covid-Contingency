@@ -75,7 +75,10 @@ Server modules and what each owns:
   into**
 - `navgrid.ts` — 14px A\* grid, connected components (`isReachable`), string
   pulling. A search that cannot reach the goal hands back its best partial route
-  rather than nothing — see **Going round in circles**
+  rather than nothing — see **Going round in circles**. It labels components
+  *twice*: off the hard layer, which is `isReachable`, and off the destructible
+  one, which is `canWalkBetween` — see **And a wall with no way round it is an
+  errand to give up**
 - `rooms.ts` — which room every indoor spot is in, the way out of each, and who
   is in it. Static for the round; occupancy is recounted once a tick
 - `rumour.ts` — where zombies have been *seen*, decaying. What the crowd knows,
@@ -3440,6 +3443,147 @@ failing, and the third is the one worth remembering:*
   runs, with the traits standing in for the city. It read 900 against 816 on code
   that is identical for a zombie. The decision is checked exactly instead, on the
   two inputs that make it, and the behaviour is pinned.
+
+#### And a wall with no way round it is an errand to give up
+
+Reported as *"bot officers are getting stuck on the deployed pocket machine
+gunner utility. They will walk up to it, get stuck, move backwards and then walk
+directly forward again and will loop this behavior indefinitely"* — and, a
+moment later, the half that names the cause: *"they are trying to get in the
+house but don't realise it is not possible."*
+
+**Routing round the bags was never the fault, and everything above still holds.**
+What had no answer anywhere in the game is a goal with no way round *at all* — a
+rifle in a room whose one doorway a player has just put a pocket gunner across.
+Every step of the loop is a piece of the game working correctly:
+
+- `findPath` cannot reach it, so it hands back **its best partial**, which is
+  exactly right (see **Going round in circles**) and which ends against the bags.
+- The bot walks to the end of the partial, and collision pushes it back out.
+- `unstickTick` measures no progress and commits `UNSTICK_COMMIT_MS` of a
+  breakout heading — scored *against* the one that just failed, which is the
+  step backwards in the report, arriving as a feature rather than a bug.
+- The commit expires. **`unstickTick` clears the route and never the goal**, so
+  the errand is still set, and round it goes.
+
+Nothing in that cycle can conclude anything, because nothing in it is asking the
+question. So the goal has to be refused where it is *chosen*.
+
+**`NavGrid.canWalkBetween` is that question, and it needed a second component
+labelling because a capped A\* cannot answer it.** The search runs outward from
+the *body*, and a body in the street is standing in the largest component on the
+map — so it gives up at `PATH_MAX_NODES` long before it has exhausted the
+street, and "I could not get there" and "there is no way there" are the same
+answer to it. Two labellings tell them apart in one array lookup.
+
+- **`isReachable` stays the hard layer**, deliberately and unchanged. A wall
+  somebody stacked this minute is not a decision about where a body may be
+  spawned or where an order may be sent, and it is gone the moment a zombie has
+  finished with it. This is the *other* question and it gets its own array; the
+  two are asked side by side in `lootWanted`.
+- **`canWalkBetween` answers true when there is no destructible layer at all**,
+  so a city with no sandbags in it pays one boolean check and behaves
+  byte-for-byte as it did.
+- **The labelling is lazy**, and that is not a micro-optimisation. The grid is
+  thrown away and rebuilt whenever anything solid changes — a pane going, a van
+  parking, a wall going up — which in a busy round with a wall standing is up to
+  one a tick, while the answer is only ever read on a bot's loot scan
+  (`BOT_LOOT_SCAN_MS`, 900) or when one re-picks a patrol. Measured on a
+  5000x3700 city: `rebuildNav` is **4.3ms with nothing destructible, 4.5ms with
+  a wall up and nobody asking, and 6.6ms if every rebuild is followed by a
+  query** — so the eager version would have been a flat +2.1ms on every rebuild
+  for an answer almost nobody was going to read. A query on a labelled grid is
+  **0.11us**, so a loot scan over a hundred pickups costs 11us.
+- **`canWalkTo` in `ai.ts` is the caller-side helper**, beside `softAware` and
+  `shutTo` and making the same one test on the type: a zombie walks at the bags
+  on purpose and takes them apart, so it is waved through and its behaviour is
+  unchanged.
+- **Asked in the two places a bot picks somewhere to walk to** — `lootWanted`,
+  which is the reported case, and `botPatrolTarget` including its tracker
+  fallback. `botPatrolTarget` also had `nav.isBlocked` where every other picker
+  in the file already asks `shutTo`, so a patrol sample could land *inside* the
+  bags; that is the same pair `sweepTarget` and `squadPost` were given.
+- **No snub goes with it**, unlike `BOT_LOOT_SNUB_MS`. The refusal is read live
+  off the nav grid, so the moment a zombie has the bags down the rifle is worth
+  having again — where a timer would have to sit that out.
+- **Civilians and grey officers are deliberately not covered.** Only the two bot
+  pickers were touched. A civilian settling into a bagged room has the same
+  shape of problem and nobody has reported it; the helper is there when it is
+  wanted.
+
+**The gunner's own body plays no part in this, which was asked outright.**
+Entities are in no nav layer at all — only the map's walls and glass, the pond,
+`navBlockers` and the destructible layer — and collision shoves bodies apart, so
+one man is something you walk round rather than a seal. He is worth *measuring*
+rather than waving through on that general rule, because he is the one body in
+the game that cannot be shoved aside for long: `updateEmplacements` pins him
+back onto his mount every tick. Measured with the bags torn down off him and the
+man left standing in the doorway: **sealed it 0/10, and the bot walked in and
+took the rifle 10/10.** It is always the bags.
+
+`server/sealedloot.ts` is the harness — headless, no socket, no port.
+`setBotsIgnoreSealedGoals` is the gate and it is **kept**: "it walked away and
+did something else" is satisfied just as well by a bot that has stopped looting
+altogether. Paired, both modes on the same city from the same start, with the
+same rifle behind the same doorway and nothing else alive:
+
+| a rifle behind a doorway a gunner is across, 10 cities, 20s | OLD | NEW |
+|---|---|---|
+| ticks spent walking at a rifle it cannot reach | **3821** | **0** |
+| ticks pressed on the bags on that errand | 607 | **0** |
+| reversals at the wall — the reported loop, counted | 93 | **0** |
+| came away with it, **all of them by squeezing** | 4/10 | 1/10 |
+| **the control: the same rifle, nothing across the doorway** | **10/10** | **10/10** |
+| the gunner alone, bags torn off: sealed it | — | **0/10** |
+
+**The honest cost is that last-but-one row, and it is worth stating plainly.**
+The old behaviour did sometimes come away with the rifle — and every single one
+of those was a **squeeze**: the bot finished standing somewhere the router says
+is cut off from where it started, having ground its way through a gap
+`NAV_INFLATE` closes and no route would ever be drawn down. So what is given up
+is a body blundering through a wall it should not fit past after several seconds
+of the reported loop. A full-budget A\* agreed with `canWalkBetween` on every
+city, which is what says the seal is real rather than an artefact of the check.
+
+*Four things about measuring this were the rig lying rather than the code
+failing, and the first two are the useful ones:*
+
+- **"Got inside the building" is not "reached the rifle".** A landmark footprint
+  runs to thirty-odd rects with ways in that are not doors at all —
+  `repairEnclosures` cuts openings and hangs nothing in them — so a bot can be
+  inside the *footprint* while the rifle's room stays sealed. It read **7/8 got
+  in** on a scene that was correctly walled off. The claim is about the rifle,
+  so the reading is whether it was picked up.
+- **`PICKUP_REACH` is 46, so sealing the rifle's own pixel seals nothing.** The
+  first staging asked only whether the bait cell was cut off; bags landing
+  across a strip beside it satisfied that and left a bot walking in and picking
+  the thing up from the doorway of the room, **5 of 8, at 44px, about two
+  seconds in** — a run reporting its own staging. The precondition is the whole
+  disc within arm's length, sampled at two radii.
+- **`deployEmplacement` puts the gunner through `findSpawnNear`, which is a
+  spawn *spread* and not a nudge** — 40px plus up to 70 more on a random bearing
+  — so the bags land anywhere in a ring round the spot they were asked for.
+  Measured over eight cities staged at a doorway: **41 to 106px off**, with the
+  wall out in the street on seven of them. That is the same trap `placeCityCar`
+  already records for standing an officer beside a car, and it is *live game
+  behaviour*, not only a rig problem: a player deploying a pocket gunner does
+  not get one where they were pointing. Not changed here — it is a feel
+  question rather than the reported fault — but it is why the rig deploys, asks
+  whether the way in is actually shut, and takes the wall away and goes again if
+  it is not.
+- **The wall metrics have to be scoped to the errand.** Counted over the whole
+  run they also count a bot brushing the bags on an ordinary patrol, which is
+  not what was reported and moves a long way run to run — the same code read
+  "pressed 134" one way and "235" the other. The loop is a body at a wall
+  *because it is trying to get past it*, so that is what is counted.
+
+**And two rows of `sandbagnav.ts` fail about half the time either way, which is
+the noise that file already documents rather than anything here.** SWAT reach
+`sweepTarget` and `squadPost`, never `botPatrolTarget` or `lootWanted` — the
+only two functions this touched — so nothing in a squad can have changed.
+Measured twice on identical code: `4/6 -> 5/6` and `27 -> 26` on one run,
+`5/6 -> 4/6` and `26 -> 27` on the next. The officer and civilian rows are
+untouched at **0/6 -> 6/6**.
 
 ### The pocket gunner
 
