@@ -1243,6 +1243,79 @@ are rare enough that twelve cities showed **0/240** for the breach where forty
 showed 13/800; quote the wider run, and do not conclude from a short one that
 the walk never fails.
 
+### And nothing on ours starts on top of it
+
+Asked for outright: *"can we not allow the blue bot officers to spawn in the
+same area as the zombies initial spawn. If you were to divide the map into 6
+equal squares have that be the measurement for how far the no-no blue officers
+spawn is (I know that the zombie spawn is random and won't fit neatly into the
+division I just described but use that square as a measurement). So take the
+square of measurement and place it over the initial zombie spawn and don't
+allow bot officers to spawn in that area."*
+
+- **The six is a measurement, not a grid the breach has to sit inside**, which
+  is what the request says and is the whole of why `outbreakKeepOut` returns a
+  box *centred on `world.outbreakOrigin`* rather than a cell index. Where the
+  outbreak actually landed is where the box goes.
+- **Three across by two down** (`OUTBREAK_KEEP_OUT_COLS`/`ROWS`). The map's
+  aspect is fixed at 5000x3700 whatever the slider does, so 3x2 gives cells of
+  **1667x1850** — very nearly square — where 2x3 gives 2500x1233 and is not a
+  square by any reading.
+- **The half-extents are computed at the call, never written down.**
+  `WORLD_WIDTH` and `WORLD_HEIGHT` are `let` and move with the population
+  slider — see **The city is not one size** — so a module-level half-extent
+  would freeze the launch size in and then quietly disagree with the map for the
+  rest of the round, exactly as `TRACKER_RANGE` had to become a function.
+  Measured: **1000x1110 at pop 100, 1667x1850 at 500, 2357x2617 at 1000**, a
+  sixth of each.
+- **About half the box hangs off the map, and that is deliberate.** The breach
+  is on an edge, so the ground actually withheld is **11.4% of the walkable
+  city** rather than a sixth. Shoving the box inland to keep its whole area
+  would stop it being centred on the thing it is about.
+- **It is a flag on `findSpawn`, asked inside the sampling loop** beside
+  `isReachable` and `inTheCell`, rather than a retry around the whole call —
+  that is where every other reason to reject a spot already lives, and the
+  last-resort return at the bottom of that function would otherwise hand back
+  an unchecked point precisely when the map is crowded. That fallback draws
+  twenty more times against the box before giving up, because a round that will
+  not start is worse than a bot in a bad street.
+- **`populate` places the outbreak before the bot officers now, and the order is
+  load-bearing.** The box is centred on `world.outbreakOrigin`, whose default is
+  the **middle of the map** — so the other way round it would withhold the
+  centre of the city and leave the breach wide open, and nothing would error.
+  The block was moved rather than its arithmetic duplicated. What the move costs
+  is that everybody placed after it clears the initial five by the 6px
+  `findSpawn` already keeps from any body, which is if anything the better
+  answer.
+- **Bot officers only.** Civilians, the garrison and the station's staff are
+  untouched — a garrison spread evenly across the city is *supposed* to have
+  somebody near the breach, and that is the point of it. Players are untouched
+  too; `PLAYER_ONE_SPAWN_AT_CENTER` is a separate testing flag.
+- **Why it is worth having at all** is the round rather than the geometry. A bot
+  dropped a few hundred pixels from the breach is in a fight before it has taken
+  a step, with no loot and no ground — and four officers are most of what holds
+  an outbreak down, see **Fighting is how a bot survives**.
+
+`server/botspawn.ts` is the harness — headless, no socket, no port.
+`setBotsIgnoreOutbreakKeepOut` is the gate and it is **kept**, because the new
+figure is a zero and a zero is exactly what a rig that sampled nothing also
+reports. Forty cities, four bots each:
+
+| | OLD | NEW |
+|---|---|---|
+| bot spawns inside the box | **15/160 (9.4%)** | **0/160** |
+| nearest bot to the breach | 305.6px | **851.3px** |
+| median gap from the breach | 2402.9px | 2541.6px |
+| **civilians inside it — the control** | 9.3% | **9.3%** |
+| map cells the bots still land in | 6/6 | **6/6** |
+
+**Three controls, and each answers a different way of being wrong.** The OLD
+column says the box is somewhere bots would otherwise go — 9.4% against the
+11.4% of walkable ground it covers, which is the uniform draw doing what it
+should. The **civilians** say the keep-out has not quietly been applied to the
+whole city. And the **cells** say the survivors were not all shoved into one
+corner.
+
 ### Civilian traits
 
 Each civilian rolls a fixed personality in `newAiState`, and most odd-looking

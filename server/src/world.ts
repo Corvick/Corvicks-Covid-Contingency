@@ -99,6 +99,8 @@ import {
   RALLY_CHATTER_MIN_MS,
   RALLY_CHATTER_MAX_MS,
   INITIAL_ZOMBIE_SPREAD,
+  OUTBREAK_KEEP_OUT_COLS,
+  OUTBREAK_KEEP_OUT_ROWS,
   ZOMBIE_POST_GRAPPLE_SLOW,
 } from '../../shared/constants.js';
 import { SpatialGrid } from './spatial.js';
@@ -1896,6 +1898,40 @@ export function inTheCell(world: World, x: number, y: number): boolean {
   return x > cell.x && x < cell.x + cell.w && y > cell.y && y < cell.y + cell.h;
 }
 
+/**
+ * **A sixth of the map laid over the breach: the ground bot officers do not
+ * start on.**
+ *
+ * Asked for outright, and the reason is the round rather than the geometry. A
+ * bot dropped a few hundred pixels from where the outbreak walks in is in a
+ * fight before it has taken a step — no loot, no ground, and four officers are
+ * most of what holds an outbreak down (see **Fighting is how a bot survives**).
+ * It is also simply not a place a player would choose to be standing when the
+ * round starts.
+ *
+ * The half-extents come off `OUTBREAK_KEEP_OUT_COLS`/`ROWS` and are computed
+ * here rather than written down, because `WORLD_WIDTH` and `WORLD_HEIGHT` move
+ * with the population slider — so this is a sixth of *this* city, not of the
+ * one the process launched with.
+ *
+ * **Centred on `world.outbreakOrigin`, so it means nothing until that is
+ * set.** Its default is the middle of the map, which as a keep-out is the
+ * worst possible answer; `populate` places the outbreak before the bots for
+ * exactly that reason and nothing else calls this.
+ */
+export function outbreakKeepOut(world: World): { x: number; y: number; w: number; h: number } {
+  const w = WORLD_WIDTH / OUTBREAK_KEEP_OUT_COLS;
+  const h = WORLD_HEIGHT / OUTBREAK_KEEP_OUT_ROWS;
+  const o = world.outbreakOrigin;
+  return { x: o.x - w / 2, y: o.y - h / 2, w, h };
+}
+
+/** The same question of one point. */
+export function inOutbreakKeepOut(world: World, x: number, y: number): boolean {
+  const box = outbreakKeepOut(world);
+  return x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
+}
+
 export function findSpawn(
   world: World,
   radius: number,
@@ -1917,7 +1953,19 @@ export function findSpawn(
    * already uses: the one caller that means the cell says so.
    */
   intoTheCell = false,
+  /**
+   * Keep clear of where the outbreak walked in — see `outbreakKeepOut`. Opt-in
+   * like `intoTheCell` above, and asked *inside* the sampling loop rather than
+   * by retrying the whole call, because that is where every other reason to
+   * reject a spot already lives and because the last-resort return below would
+   * otherwise hand back an unchecked point.
+   */
+  awayFromOutbreak = false,
 ): { x: number; y: number } {
+  const keepOut = awayFromOutbreak && !botsIgnoreOutbreakKeepOut ? outbreakKeepOut(world) : null;
+  const outsideKeepOut = (x: number, y: number): boolean =>
+    !keepOut || x < keepOut.x || x > keepOut.x + keepOut.w || y < keepOut.y || y > keepOut.y + keepOut.h;
+
   for (let attempt = 0; attempt < 60; attempt++) {
     const x = bounds
       ? bounds.x + radius + Math.random() * Math.max(1, bounds.w - radius * 2)
@@ -1929,6 +1977,7 @@ export function findSpawn(
     // Never drop anyone into a room they could never have walked into.
     if (!world.nav.isReachable(x, y)) continue;
     if (!intoTheCell && inTheCell(world, x, y)) continue;
+    if (!outsideKeepOut(x, y)) continue;
 
     const probe = { x, y, radius: radius + 6 };
     const walls = world.wallGrid.queryCircle(x, y, radius + 24, new Set<Wall>());
@@ -1948,6 +1997,19 @@ export function findSpawn(
       }
     }
     if (!blocked) return { x, y };
+  }
+  /*
+   * Sixty tries found nowhere that cleared everything. The fallback is a raw
+   * draw, and it has to keep the one rule the caller actually asked for or the
+   * feature has a hole in it that fires precisely when the map is crowded.
+   * Five-sixths of the city is outside the box, so this lands first go almost
+   * always; twenty is generous and the last resort is still a spawn, because a
+   * round that will not start is worse than a bot in a bad street.
+   */
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const x = radius + Math.random() * (WORLD_WIDTH - radius * 2);
+    const y = radius + Math.random() * (WORLD_HEIGHT - radius * 2);
+    if (outsideKeepOut(x, y)) return { x, y };
   }
   return {
     x: radius + Math.random() * (WORLD_WIDTH - radius * 2),
@@ -1977,6 +2039,19 @@ export function findSpawn(
 let stationCellOff = false;
 export function setStationCellEmpty(v: boolean): void {
   stationCellOff = v;
+}
+
+/**
+ * True is the spawn as it was: a bot officer dropped anywhere on the map, the
+ * ground the outbreak walks in on included.
+ *
+ * Kept rather than deleted with the measurement, like `setSpawnsIgnoreBuildings`
+ * and for the same reason — the new figure is a zero, and a zero is also what a
+ * rig that sampled nothing reports. `server/botspawn.ts` reads it.
+ */
+let botsIgnoreOutbreakKeepOut = false;
+export function setBotsIgnoreOutbreakKeepOut(v: boolean): void {
+  botsIgnoreOutbreakKeepOut = v;
 }
 
 let stationStaffOff = false;
@@ -2898,54 +2973,6 @@ function populate(world: World): void {
     }
   }
 
-  // Bot officers stand in for the players who aren't here. They get the same
-  // starting kit a player does — a pistol and nothing else — and go looking
-  // for the rest of it.
-  for (let i = 0; i < world.botOfficerCount; i++) {
-    const spawn = findSpawn(world, ENTITY_RADIUS.officer);
-    const id = `bot-${i}`;
-    world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
-    const state = newAiState(now, spawn.x, spawn.y);
-    // An officer clearing a building does not stop to tidy up after itself.
-    // The door traits are a civilian's business — shutting one behind you,
-    // bolting it, running back across a room to see to it — and every one of
-    // them is a bot standing still in a doorway instead of fighting. Cleared
-    // as data rather than branched on in `doorTick`, so nothing downstream has
-    // to know bots are different. Opening a door it needs through is untouched.
-    state.closesDoors = false;
-    state.locksDoors = false;
-    state.slamsDoors = false;
-    state.barricades = false;
-    // And an officer does not hole up in a back room seeing to its doors.
-    state.guardsDoors = false;
-    state.hidesDeeper = false;
-    world.ai.set(id, state);
-    world.inventories.set(id, newInventory());
-    world.stamina.set(id, STAMINA_MAX);
-    // A bot stands in a player's slot, so it starts with what a player's slot
-    // starts with. It had neither before, which meant every order that costs a
-    // charge was refused before it was considered — `beaconShoutTick` could
-    // never have fired once however good its judgement was.
-    world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
-    world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
-    world.bots.add(id);
-    // One random thing in the bag, the same as a player gets. It has to come
-    // after `world.bots.add` only in the sense that it must come after the
-    // inventory exists; the draw itself knows nothing about bots.
-    giveStartingItem(world, id, spawn.x, spawn.y);
-  }
-
-  // TESTING: one bot starts with the beacon so the whole sequence — pick a
-  // spot, helicopter, soldier, mast, shout — can be watched every round rather
-  // than only when a bot happens to walk to the duck pond. `spawnPickups`
-  // reads the same condition and leaves the bank one out, so this *moves* the
-  // city's beacon rather than adding a second.
-  if (TEST_BEACON_ON_A_BOT && world.bots.size > 0) {
-    const chosen = [...world.bots][Math.floor(Math.random() * world.bots.size)];
-    world.inventories.get(chosen)?.utilities.push('survivorBeacon');
-    console.log(`[server] TESTING: ${chosen} starts with the survivor beacon`);
-  }
-
   /*
    * The outbreak walks in from one edge, spread along it — and **which edge
    * is the map's decision, not this one's**.
@@ -2955,6 +2982,16 @@ function populate(world: World): void {
    * is laid out inside `generateMap`, long before this runs. So the roll moved
    * there and this reads it back. Everything downstream — `world.outbreakSide`,
    * which is what keeps backup from arriving through the horde — is unchanged.
+   *
+   * **And it goes down before the bot officers do, which is why it sits here
+   * rather than at the end of this function.** They are kept off the ground it
+   * walked in on — see `inOutbreakKeepOut` — and that box is centred on
+   * `world.outbreakOrigin`, which is set at the bottom of this block and whose
+   * default is the *middle of the map*. The other way round it would withhold
+   * the centre of the city and leave the breach wide open, which is exactly
+   * backwards and would not error. What the move costs is that everybody
+   * placed after it clears the initial five by the 6px `findSpawn` already
+   * keeps from any body, which is if anything the better answer.
    */
   const side = world.map.outbreakSide;
   world.outbreakSide = side;
@@ -3007,6 +3044,57 @@ function populate(world: World): void {
     }
   }
   world.outbreakOrigin = { x: originX, y: originY };
+
+  // Bot officers stand in for the players who aren't here. They get the same
+  // starting kit a player does — a pistol and nothing else — and go looking
+  // for the rest of it.
+  for (let i = 0; i < world.botOfficerCount; i++) {
+    // Not on top of the outbreak. See `outbreakKeepOut`; the block above is
+    // what makes `world.outbreakOrigin` mean anything by the time we get here.
+    const spawn = findSpawn(world, ENTITY_RADIUS.officer, undefined, false, true);
+    const id = `bot-${i}`;
+    world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
+    const state = newAiState(now, spawn.x, spawn.y);
+    // An officer clearing a building does not stop to tidy up after itself.
+    // The door traits are a civilian's business — shutting one behind you,
+    // bolting it, running back across a room to see to it — and every one of
+    // them is a bot standing still in a doorway instead of fighting. Cleared
+    // as data rather than branched on in `doorTick`, so nothing downstream has
+    // to know bots are different. Opening a door it needs through is untouched.
+    state.closesDoors = false;
+    state.locksDoors = false;
+    state.slamsDoors = false;
+    state.barricades = false;
+    // And an officer does not hole up in a back room seeing to its doors.
+    state.guardsDoors = false;
+    state.hidesDeeper = false;
+    world.ai.set(id, state);
+    world.inventories.set(id, newInventory());
+    world.stamina.set(id, STAMINA_MAX);
+    // A bot stands in a player's slot, so it starts with what a player's slot
+    // starts with. It had neither before, which meant every order that costs a
+    // charge was refused before it was considered — `beaconShoutTick` could
+    // never have fired once however good its judgement was.
+    world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
+    world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
+    world.bots.add(id);
+    // One random thing in the bag, the same as a player gets. It has to come
+    // after `world.bots.add` only in the sense that it must come after the
+    // inventory exists; the draw itself knows nothing about bots.
+    giveStartingItem(world, id, spawn.x, spawn.y);
+  }
+
+  // TESTING: one bot starts with the beacon so the whole sequence — pick a
+  // spot, helicopter, soldier, mast, shout — can be watched every round rather
+  // than only when a bot happens to walk to the duck pond. `spawnPickups`
+  // reads the same condition and leaves the bank one out, so this *moves* the
+  // city's beacon rather than adding a second.
+  if (TEST_BEACON_ON_A_BOT && world.bots.size > 0) {
+    const chosen = [...world.bots][Math.floor(Math.random() * world.bots.size)];
+    world.inventories.get(chosen)?.utilities.push('survivorBeacon');
+    console.log(`[server] TESTING: ${chosen} starts with the survivor beacon`);
+  }
+
 }
 
 /**

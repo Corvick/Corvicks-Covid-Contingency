@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.24.4';
+export const GAME_VERSION = '0.24.5';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2001,6 +2001,37 @@ export const GRAPPLE_PILE_TURN_MS = 1000;
 /** The outbreak arrives as a tight group along one randomly chosen map edge. */
 export const INITIAL_ZOMBIES = 5;
 export const INITIAL_ZOMBIE_SPREAD = 110;
+
+/**
+ * **The ground a bot officer is not spawned on: the map cut into six, with one
+ * of those laid over the breach.**
+ *
+ * Asked for in exactly those words — *"if you were to divide the map into 6
+ * equal squares have that be the measurement for how far the no-no blue
+ * officers spawn is"* — and the six is a *measurement* rather than a grid the
+ * breach has to sit neatly inside. The box is centred on where the outbreak
+ * actually walked in, wherever that fell.
+ *
+ * **Three across by two down**, because the map's aspect is fixed at
+ * 5000x3700 whatever the population slider does: 3x2 gives cells of 1667x1850,
+ * which are very nearly square, where 2x3 gives 2500x1233 and is not a square
+ * by any reading. So the half-extents are `WORLD_WIDTH / 6` and
+ * `WORLD_HEIGHT / 4`.
+ *
+ * **Derived at the call, never as a constant.** `WORLD_WIDTH` and
+ * `WORLD_HEIGHT` are `let` and move with the population slider — see **The
+ * city is not one size** — so a module-level half-extent would freeze the
+ * launch size in and then quietly disagree with the map for the rest of the
+ * round, the way `TRACKER_RANGE` had to become a function.
+ *
+ * Note the breach is on an *edge*, so about half the box hangs off the map and
+ * the ground actually withheld is nearer a twelfth of the city than a sixth.
+ * That is what "place the square over the spawn" means and it is deliberate; a
+ * box shoved inland to keep its whole area would no longer be centred on the
+ * thing it is about.
+ */
+export const OUTBREAK_KEEP_OUT_COLS = 3;
+export const OUTBREAK_KEEP_OUT_ROWS = 2;
 export const MATERIALIZE_MS = 1400;
 /**
  * A clean getaway with no infection at all — **and it is rolled when the grip
