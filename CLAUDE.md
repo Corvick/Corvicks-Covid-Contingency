@@ -3372,7 +3372,7 @@ bearing, the hard layer was all anybody asked about. Three did:
   `lineClear` with no soft layer, so the answer to being stuck against a wall
   of sandbags could be a committed blind walk into the same wall.
 - **the frontage scan in `squadStep`**, which commits a squad to going *along*
-  something for `SQUAD_AVOID_MS` — down a line it had not checked for bags.
+  something for `BUILDING_AVOID_MS` — down a line it had not checked for bags.
 - **`sweepTarget` and `squadPost`**, which choose somewhere to be. A sweep
   point or a station inside the bags is a spot nothing alive can stand on, so
   the officer walks at it until the clock runs out.
@@ -6326,6 +6326,133 @@ and cost containment. Bots alive is a count out of four rather than a share of a
 diverging population, which is what makes it survive the pairing where the
 rolling metrics in `circles.ts` did not.
 
+#### A bot runs down the street, not into a house
+
+Reported as *"bot officers should not be trying to go into buildings when being
+chased by a large horde, they already dont path very well in buildings and its
+getting them killed in the later stages of the game"*, with two screenshots of a
+blue officer in a front room with the horde in it.
+
+**Nothing anywhere refused it, and that is four absences rather than one wrong
+line.** A fleeing bot picked its destination off a ring that only asked whether
+a spot was walkable, took a route the nav grid was happy to draw through
+somebody's hallway, broke out of being stuck on a bearing that knew about walls
+and not about houses, and gave ground through whatever was behind it. A
+building buys a fleeing bot nothing either — `barricades` and `locksDoors` are
+cleared at spawn, so it cannot shut the door it came through — so every one of
+those is a walk into a room with one way out and a horde in the doorway.
+
+- **`escapeDestination` takes an `outdoors` flag**, and it is off by default so
+  the crowd is byte-for-byte what it was: a civilian running into a house is
+  most of what a civilian *does*, and `shelterSeeker`, `barricades` and
+  `hidesDeeper` are all built on it.
+  - **Two passes, and the second is what stops the rule becoming a trap** — the
+    same shape and the same argument as `exitPointFor`'s. A bot deep inside a
+    landmark can have every point on a 420px ring indoors with it, and
+    answering "nowhere" there drops the caller onto `safestHeading`, which is
+    the blind bearing this branch exists to replace. By then it is walking
+    *out* of a building, which was never the complaint.
+- **`botFleeStep` is the veto, and it is on the step rather than the
+  destination.** A spot picked out in the street is no guarantee the route to it
+  stays there: routes are planned across the nav grid, doors are not in it, and
+  the shortest line from one pavement to another very often runs in one front
+  door and out of another. The only place that knows where the body actually
+  ended up is the step — which is `squadStep`'s argument, learned first for a
+  squad refusing to clear houses, and `alongFrontage` is now one definition with
+  those two callers.
+- **Gated on having been outside**, which is what makes it "do not go in" rather
+  than "do not move". A bot already indoors when the pack arrives walks
+  normally, and what it walks toward is now the way out.
+- **`giveGroundHeading` costs a probe that points into a building**, and this is
+  the branch that was doing most of the damage. Kiting runs from `BOT_BOLT_DIST`
+  out to `backAt` — exactly the band a horde occupies while it is walking in —
+  and it probed for walls and nothing else, so an officer backing down a
+  pavement with a doorway behind it reversed through the doorway and finished
+  the fight in a front room without ever deciding to go in. That branch moves
+  the body by hand rather than through `step`, so it carries the veto itself.
+- **`breakoutHeading` costs one too**, and `unstickTick` checks its own step.
+  "I am getting nowhere" was otherwise answered with a committed blind walk
+  through a front door.
+- **A cost, not a refusal** (`BOT_INDOOR_FLIGHT_COST`), for both headings. Every
+  one of them has to answer *something* — a bot boxed against a frontage with
+  the pack behind it still has to move — and a rule that can return "nowhere" is
+  a rule that leaves it standing there until it is eaten. It is well above the
+  400px clearance those scores cap at, so it only ever loses to a direction that
+  is worse for a reason.
+- **There is deliberately no threshold on the size of the pack.** The report
+  says a large horde because that is when it kills them, but "they already dont
+  path very well in buildings" is as true of one zombie as of ten, and a
+  threshold is one more line for a wavering count to sit on — the cure for which
+  this file has already written down four times.
+- **Looting and the corner-complex raid are untouched.** Neither is flight, and
+  `BOT_LOOT_MIN_CLEARANCE` already keeps an errand away from a crowd. Measured
+  as a control: a rifle on a front-room floor in a quiet city is fetched **36/36
+  either way**. Quote a range and re-run rather than trusting these figures
+  across a change to `mapgen`: they moved a long way when the police station
+  grew a counter, the seed being a seed of the *generator* rather than of the
+  city it produces.
+- **`SQUAD_AVOID_MS` became `BUILDING_AVOID_MS` and `state.squadAvoid*` became
+  `state.avoid*`**, since a squad and a fleeing bot now share the commitment.
+  Same move as `BOT_DODGE_*` losing its prefix when civilians started running
+  `dodgeThreats`.
+
+`server/botindoors.ts` is the harness — headless, no socket, no port.
+`setBotFleesIndoors` is the gate and it is **kept**: all four are absences, and
+an absence has nothing to read wrong. Three stagings, the bot outdoors with its
+back to a frontage and nine zombies in front of it, 36 cities each:
+
+| walked into the building while being chased | OLD | NEW |
+|---|---|---|
+| bolting, a pinned wall at 95px | 31/36 | **0/36** |
+| kiting, a pinned wall at 230px | 36/36 | **0/36** |
+| **a horde that follows, from 230px** | **35/36** | **0/36** |
+
+And on the chasing band, which is the one that models the report: **turned 25/36
+→ 9/36**, ticks with hands on it **1117 → 488**, broke contact 23/36 → 30/36,
+ground covered 1042 → 2086px. So it is not standing still instead — it is
+walking along the frontage and out.
+
+**Motionless spells are read at p90 with the worst printed beside them**, which
+is this file's own rule for a jitter figure (see the HUD's ping readout). The
+chasing band is **0.2/0.5s → 0.3/2.1s**: one city in thirty-six where a bot is
+boxed against a frontage loses a couple of seconds, and a bar on the maximum
+would make the check a lottery on which city the seed drew. The pinned bolt
+band goes the other way and by a mile — **9.9/10.5s → 0.0/2.5s** — because the
+old behaviour's escape was to stand in a building.
+
+*Five things about measuring this were the rig lying rather than the code
+failing, and the last two are new traps worth keeping:*
+
+- **Seeding the city is not seeding the run.** With `Math.random` live for the
+  ticks after staging, the two modes walk different random streams and the file
+  disagreed with itself between invocations by more than the effect: the same
+  code read 0/12 entries and a 4.8s stall on one run and 2/12 and 0.7s on the
+  next. The whole run is inside `withSeed` now.
+- **`botGiving` and `botClosing` are latches maintained only while a zombie is
+  in view**, so a bot that broke contact carries whichever was last set for the
+  rest of the round. Read as "is it fleeing", that scored patrol entries with the
+  nearest zombie **596, 651 and 715px away** as running into a building. The
+  reading needs `state.threatPoints.length > 0` on top — line-of-sight filtered,
+  where distance is not.
+- **`resolveCollisions` can post a bot through a doorway with every branch in
+  `updateBotOfficer` having refused to walk there**, and a position sampled once
+  a tick cannot tell that from a decision. The rig splits the tick and reads the
+  position after `updateAi` and before the collision pass.
+- **A turned bot is still `world.entities.get('bot-0')`.** The id is reused, so a
+  rig holding the entity reference goes on measuring a zombie as a bot:
+  `updateBotOfficer` is never called for it again, `state.bolting` and
+  `state.threatPoints` are stale latches from its last seconds as an officer,
+  and it walks into buildings after prey like anything else. **Every** residual
+  entry this rig reported was that, and the tell was that a probe inside
+  `updateBotOfficer` never fired on the tick it happened.
+- **A pinned pack cannot follow anybody through a door and cannot be shot
+  down**, so in the two pinned bands the building is a real escape rather than
+  the trap the report describes — the control stalls **0.0s** there because it
+  is indoors within a second, and it is *turned less often* in the pinned bolt
+  band (1/36 against 6/36). Neither is a result. Those bands carry the one
+  claim they can support, which is that the bot did not walk inside; the chasing
+  band carries the rest.
+
 #### The radio is not a smoke grenade, and a sling is why it was
 
 Reported as *"bot officers keep trying to use the radio like a weapon when it is
@@ -7835,7 +7962,7 @@ worst single stall **63.5s → 6.2s**.
   than the stall it fixed: crew spent **16%** of the round indoors. Reverted
   and the commitment dropped, the veto below picks a line along the frontage
   instead — **9.81% → 1.04%**.
-- **A refusal commits to going round** for `SQUAD_AVOID_MS` rather than turning
+- **A refusal commits to going round** for `BUILDING_AVOID_MS` rather than turning
   on the spot, or they re-aim through the same gap on the next tick and stand
   in it. That is the whole difference between "went round the building" and
   "stuck facing the door".

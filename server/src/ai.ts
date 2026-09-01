@@ -131,7 +131,8 @@ import {
   SQUAD_PATROL_SPEED_MUL,
   SQUAD_BEARING_RATE,
   SQUAD_CLOSE_TO,
-  SQUAD_AVOID_MS,
+  BUILDING_AVOID_MS,
+  BOT_INDOOR_FLIGHT_COST,
   SQUAD_SLACK,
   SQUAD_SWEEP_SAMPLES,
   SQUAD_SWEEP_MIN,
@@ -604,6 +605,22 @@ export function setBotSlotsIgnoreSling(v: boolean): void {
 }
 
 /**
+ * True is a bot officer running away as it used to: an escape destination that
+ * could be a back bedroom, a route to an outdoor one that cut straight through
+ * somebody's front room, a breakout bearing that knew about walls and not about
+ * buildings, and ground given up through a doorway. `server/botindoors.ts`
+ * reads it, and it is kept — see "A bot runs down the street, not into a
+ * house". Every one of the four is an *absence*, and an absence has nothing to
+ * read wrong: "it stayed out of the building" means nothing without "and it
+ * used to go in".
+ */
+let botFleesIndoors = false;
+
+export function setBotFleesIndoors(v: boolean): void {
+  botFleesIndoors = v;
+}
+
+/**
  * **The first utility slot number for *this* bag.**
  *
  * `GUN_SLOTS` is the constant; `gunSlots(inv)` is what this bag can actually
@@ -1071,10 +1088,25 @@ function shutTo(world: World, e: Entity, x: number, y: number): boolean {
   return softAware(e) ? world.nav.isBlockedOrSoft(x, y) : world.nav.isBlocked(x, y);
 }
 
-function breakoutHeading(world: World, e: Entity, state: AiState): number {
+function breakoutHeading(
+  world: World,
+  e: Entity,
+  state: AiState,
+  /**
+   * Keep the breakout out of buildings. `unstickTick` fires when a body is
+   * getting nowhere, and the bearing it commits to knows about walls and not
+   * about *houses* — so for a bot running from a pack, "I am stuck" could be
+   * answered with a blind committed walk through somebody's front door.
+   * `squadStep` has the same trap and answers it by putting the body back
+   * afterwards; scoring it here is the same fix one step earlier, and it
+   * cannot loop, since it is a cost rather than a refusal.
+   */
+  avoidBuildings = false,
+): number {
   let bestAngle = state.heading + Math.PI;
   let bestScore = -Infinity;
   const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
+  const outside = avoidBuildings && buildingIndexAt(world, e.x, e.y) < 0;
 
   for (let i = 0; i < FLEE_DIRECTIONS; i++) {
     const angle = (i / FLEE_DIRECTIONS) * Math.PI * 2;
@@ -1086,6 +1118,12 @@ function breakoutHeading(world: World, e: Entity, state: AiState): number {
     let score = Math.cos(angle - away) * 120;
     score -= Math.cos(angle - state.heading) * 90;
     score += world.danger.opennessAt(px, py) * 60;
+    // Asked last, and only of a bearing that is still winning. `buildingIndexAt`
+    // is a linear scan of every building in the city and the cost can only ever
+    // lower a score, so anything already losing needs no test at all — which
+    // takes sixteen scans a call down to the handful that set a new best.
+    if (score <= bestScore) continue;
+    if (outside && buildingIndexAt(world, px, py) >= 0) score -= BOT_INDOOR_FLIGHT_COST;
 
     const edgeGap = Math.min(px, py, WORLD_WIDTH - px, WORLD_HEIGHT - py);
     if (edgeGap < BOUNDARY_AVOID_DIST) score -= (BOUNDARY_AVOID_DIST - edgeGap) * 2;
@@ -1110,12 +1148,14 @@ function unstickTick(
   now: number,
   dt: number,
   speed: number,
+  /** Passed through to `breakoutHeading` — see the note there. */
+  avoidBuildings = false,
 ): boolean {
   if (now >= state.lastUnstickCheck) {
     state.lastUnstickCheck = now + UNSTICK_CHECK_MS;
     const progress = Math.hypot(e.x - state.unstickX, e.y - state.unstickY);
     if (progress < UNSTICK_MIN_PROGRESS && now >= state.unstickUntil) {
-      state.unstickHeading = breakoutHeading(world, e, state);
+      state.unstickHeading = breakoutHeading(world, e, state, avoidBuildings);
       state.unstickUntil = now + UNSTICK_COMMIT_MS;
       // Whatever they were making for, they couldn't get to it from here.
       state.path = null;
@@ -1128,7 +1168,23 @@ function unstickTick(
   }
 
   if (now < state.unstickUntil) {
+    const wasOutside = avoidBuildings && buildingIndexAt(world, e.x, e.y) < 0;
+    const fromX = e.x;
+    const fromY = e.y;
     step(world, e, state, state.unstickHeading, speed, HUMAN_TURN_RATE, dt, now);
+    // A committed blind bearing is the one way left into a building for a body
+    // that must not enter one: scoring it in `breakoutHeading` makes it a last
+    // resort rather than an impossibility, and with every direction penalised
+    // it will still pick one. So the step is checked as well, the way
+    // `squadStep` checks its own — put back, commitment dropped, and the
+    // caller's own branch (which is `botFleeStep`, and which will commit to
+    // the frontage instead) gets the tick.
+    if (wasOutside && buildingIndexAt(world, e.x, e.y) >= 0) {
+      e.x = fromX;
+      e.y = fromY;
+      state.unstickUntil = 0;
+      return false;
+    }
     return true;
   }
   return false;
@@ -1834,6 +1890,16 @@ function escapeDestination(
   e: Entity,
   state: AiState,
   now: number,
+  /**
+   * Refuse a spot inside a building, so running away is running down a street.
+   *
+   * Off by default, which is what leaves the crowd byte-for-byte as it was: a
+   * civilian running into a house is most of what a civilian does, and
+   * `shelterSeeker`, `barricades` and `hidesDeeper` are all built on it. It is
+   * a bot officer that has no business in one — see "A bot runs down the
+   * street, not into a house".
+   */
+  outdoors = false,
 ): { x: number; y: number } | null {
   if (state.escapeX !== null && state.escapeY !== null && now < state.escapeUntil) {
     // Drop it early if we've arrived, or if it stopped being safe.
@@ -1841,6 +1907,37 @@ function escapeDestination(
     if (!reached) return { x: state.escapeX, y: state.escapeY };
   }
 
+  /**
+   * Two passes, and the second is what stops the rule becoming a trap — the
+   * same shape, and the same argument, as `exitPointFor`'s.
+   *
+   * A bot deep inside a landmark can have every point on a 420px ring indoors
+   * with it, and answering "nowhere" there drops the caller onto
+   * `safestHeading`, which is the blind bearing this branch exists to replace.
+   * So the preference is dropped rather than the destination: somewhere inside
+   * beats nowhere at all, and by then it is walking *out* of a building rather
+   * than into one, which was never the complaint.
+   */
+  for (const allowIndoors of outdoors ? [false, true] : [true]) {
+    const pick = escapeSample(world, e, state, now, allowIndoors);
+    if (pick) {
+      state.escapeX = pick.x;
+      state.escapeY = pick.y;
+      state.escapeUntil = now + ESCAPE_COMMIT_MS;
+      return pick;
+    }
+  }
+  return null;
+}
+
+/** One ring of candidates, scored. See `escapeDestination`. */
+function escapeSample(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+  allowIndoors: boolean,
+): { x: number; y: number } | null {
   let best: { x: number; y: number } | null = null;
   let bestScore = -Infinity;
 
@@ -1852,6 +1949,7 @@ function escapeDestination(
     // a wall somebody stacked this minute — but a destination *inside* the bags
     // is one nothing alive can stand on. See `softAware`.
     if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
+    if (!allowIndoors && buildingIndexAt(world, x, y) >= 0) continue;
 
     // Geodesic danger: how far this spot is from the nearest zombie *through
     // walkable space*, so cover between us and them actually counts.
@@ -1883,10 +1981,6 @@ function escapeDestination(
     }
   }
 
-  if (!best) return null;
-  state.escapeX = best.x;
-  state.escapeY = best.y;
-  state.escapeUntil = now + ESCAPE_COMMIT_MS;
   return best;
 }
 
@@ -4551,19 +4645,43 @@ function squadStep(
 
   // Already committed to going round something: hold that line rather than
   // re-deciding, or they turn on the spot and aim back into the same doorway.
-  const aim = now < state.squadAvoidUntil ? state.squadAvoidHeading : desired;
+  const aim = now < state.avoidUntil ? state.avoidHeading : desired;
 
   const fromX = e.x;
   const fromY = e.y;
   step(world, e, state, aim, speed, HUMAN_TURN_RATE, dt, now);
   if (!wasOutside || buildingIndexAt(world, e.x, e.y) < 0) return;
 
-  // Refused. Put them back and commit to walking *along* the frontage instead:
-  // whichever way round leaves them outdoors and on walkable ground, held for
-  // SQUAD_AVOID_MS so they actually clear the building rather than turning,
-  // re-aiming through the same gap, and standing in it.
+  // Refused. Put them back and commit to walking *along* the frontage instead.
   e.x = fromX;
   e.y = fromY;
+  const best = alongFrontage(world, e, state, aim, fromX, fromY, now);
+  // The leader also stops aiming at whatever was on the other side of it.
+  if (state.sweeps) sweepTarget(world, e, state, now);
+  state.heading = best;
+  e.facing = best;
+}
+
+/**
+ * Commit to walking *along* a building rather than into it: whichever way
+ * round leaves the body outdoors and on walkable ground, held for
+ * `BUILDING_AVOID_MS` so it actually clears the frontage rather than turning,
+ * re-aiming through the same gap, and standing in it.
+ *
+ * One definition with two callers — a squad refused a step into a front room,
+ * and a bot officer refused one while running from a pack. The question is
+ * identical and so is the answer; written twice they would drift into a squad
+ * that goes round a shop and a bot that leans on it.
+ */
+function alongFrontage(
+  world: World,
+  e: Entity,
+  state: AiState,
+  aim: number,
+  fromX: number,
+  fromY: number,
+  now: number,
+): number {
   let best = aim + Math.PI;
   let bestRoom = -1;
   for (const turn of [Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75, Math.PI]) {
@@ -4580,14 +4698,11 @@ function squadStep(
       best = h;
     }
   }
-  state.squadAvoidHeading = best;
-  state.squadAvoidUntil = now + SQUAD_AVOID_MS;
+  state.avoidHeading = best;
+  state.avoidUntil = now + BUILDING_AVOID_MS;
   state.path = null;
   state.nextPathAt = 0;
-  // The leader also stops aiming at whatever was on the other side of it.
-  if (state.sweeps) sweepTarget(world, e, state, now);
-  state.heading = best;
-  e.facing = best;
+  return best;
 }
 
 /**
@@ -6325,6 +6440,18 @@ function skirtThreatOld(world: World, e: Entity, state: AiState, desired: number
 function giveGroundHeading(world: World, e: Entity, state: AiState, away: number): number {
   let bestAngle = away;
   let bestScore = -Infinity;
+  /**
+   * Backing off is not a reason to back into a house.
+   *
+   * This is the branch a bot spends most of a fight in — kiting runs from
+   * `BOT_BOLT_DIST` out to `backAt`, which is exactly where a pack is while it
+   * is walking in — and it probed for walls and nothing else, so an officer
+   * giving ground down a pavement with a doorway behind it reversed straight
+   * through the doorway and finished the fight in a front room. That is most
+   * of how a bot ends up indoors with the dead, and it never had to decide to
+   * go in.
+   */
+  const outside = !botFleesIndoors && buildingIndexAt(world, e.x, e.y) < 0;
 
   for (let i = 0; i < FLEE_DIRECTIONS; i++) {
     const angle = (i / FLEE_DIRECTIONS) * Math.PI * 2;
@@ -6341,6 +6468,9 @@ function giveGroundHeading(world: World, e: Entity, state: AiState, away: number
 
     let score = Math.min(clearance, 400);
     score += Math.cos(angle - away) * BOT_GIVE_GROUND_BIAS;
+    // See `breakoutHeading`: a losing bearing is never worth a building scan.
+    if (score <= bestScore) continue;
+    if (outside && buildingIndexAt(world, px, py) >= 0) score -= BOT_INDOOR_FLIGHT_COST;
 
     const edgeGap = Math.min(px, py, WORLD_WIDTH - px, WORLD_HEIGHT - py);
     if (edgeGap < BOUNDARY_AVOID_DIST) score -= (BOUNDARY_AVOID_DIST - edgeGap) * 2.4;
@@ -6352,6 +6482,69 @@ function giveGroundHeading(world: World, e: Entity, state: AiState, away: number
   }
   // Every direction blocked: back straight off and let collision sort it out.
   return bestScore === -Infinity ? away : bestAngle;
+}
+
+/**
+ * A bot officer's flight step, which refuses to take it into a building.
+ *
+ * Reported as *"bot officers should not be trying to go into buildings when
+ * being chased by a large horde, they already dont path very well in buildings
+ * and its getting them killed"*, and the destination is only half of it: a
+ * spot picked out in the street is no guarantee the *route* to it stays there.
+ * Routes are planned across the nav grid, doors are not in it, and the
+ * shortest line from one pavement to another very often runs in one front door
+ * and out of another. So the veto is on the *step*, which is the only place
+ * that knows where the body actually ended up — the same argument, and the
+ * same shape, as `squadStep`, which learned it first.
+ *
+ * **Gated on having been outside**, which is what makes it "do not go in"
+ * rather than "do not move". A bot already indoors when the pack arrives is
+ * free to walk — and its escape destination is outdoors now, so what it walks
+ * toward is the way out.
+ *
+ * There is deliberately **no threshold on the size of the pack.** The report
+ * says a large horde because that is when it kills them, but "they already
+ * dont path very well in buildings" is true of one zombie as much as ten, a
+ * bot has `barricades` and `locksDoors` cleared at spawn so a building buys a
+ * fleeing one nothing at all, and a threshold is one more line for a wavering
+ * count to sit on — this file has written down the cure for that four times
+ * already. Looting and the corner-complex raid are untouched: those are not
+ * flight, and `BOT_LOOT_MIN_CLEARANCE` already keeps an errand away from a
+ * crowd.
+ */
+function botFleeStep(
+  world: World,
+  e: Entity,
+  state: AiState,
+  desired: number,
+  speed: number,
+  dt: number,
+  now: number,
+  keepFacing: boolean,
+): void {
+  if (botFleesIndoors) {
+    step(world, e, state, desired, speed, HUMAN_TURN_RATE, dt, now, keepFacing);
+    return;
+  }
+
+  const wasOutside = buildingIndexAt(world, e.x, e.y) < 0;
+  // Already committed to going round something: hold that line rather than
+  // re-deciding, or it turns on the spot and aims back into the same doorway.
+  const aim = now < state.avoidUntil ? state.avoidHeading : desired;
+
+  const fromX = e.x;
+  const fromY = e.y;
+  step(world, e, state, aim, speed, HUMAN_TURN_RATE, dt, now, keepFacing);
+  if (!wasOutside || buildingIndexAt(world, e.x, e.y) < 0) return;
+
+  // Refused. Put it back and commit to running *along* the frontage instead.
+  e.x = fromX;
+  e.y = fromY;
+  const best = alongFrontage(world, e, state, aim, fromX, fromY, now);
+  state.heading = best;
+  // The caller owns the facing when it is keeping the gun on something —
+  // `botGunUpWhileMoving` runs a line or two below this and would be undone.
+  if (!keepFacing) e.facing = best;
 }
 
 /**
@@ -6757,17 +6950,17 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const speed =
         botStaminaTick(state, true, dt, inv) * (boosted ? ESCAPE_SPEED_MULTIPLIER : 1);
 
-      const to = escapeDestination(world, e, state, now);
+      // Out in the street, not into the nearest house — see `botFleeStep`.
+      const to = escapeDestination(world, e, state, now, !botFleesIndoors);
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
-      step(
+      botFleeStep(
         world,
         e,
         state,
         dodgeThreats(world, e, state, desired),
         speed,
-        HUMAN_TURN_RATE,
         dt,
         now,
         !botDropsTheGun,
@@ -6867,21 +7060,24 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const speed = botStaminaTick(state, sprinting, dt, inv);
       // Goal-directed, like every other flight in this game. A raw bearing
       // away from the threat parks them on the first wall behind them.
-      if (unstickTick(world, e, state, now, dt, speed)) return;
-      const to = escapeDestination(world, e, state, now);
+      // The breakout bearing knows about walls; here it has to know about
+      // houses too, or "I am getting nowhere" is answered with a committed
+      // blind walk through a front door. See `breakoutHeading`.
+      if (unstickTick(world, e, state, now, dt, speed, !botFleesIndoors)) return;
+      // And the destination is somewhere in the street — see `botFleeStep`.
+      const to = escapeDestination(world, e, state, now, !botFleesIndoors);
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
       // Whatever is stood in the first hundred pixels of that line is gone
       // round rather than run at — the destination was scored on the danger
       // field, which is far too coarse to have noticed it.
-      step(
+      botFleeStep(
         world,
         e,
         state,
         dodgeThreats(world, e, state, desired),
         speed,
-        HUMAN_TURN_RATE,
         dt,
         now,
         !botDropsTheGun,
@@ -7014,6 +7210,23 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const speed = speedAt(world, e.x, e.y, legacyBotCombat ? pace * 0.75 : pace, e.type);
       const stepX = Math.cos(bearing) * speed * dt;
       const stepY = Math.sin(bearing) * speed * dt;
+      /*
+       * **Backing off does not back through a front door**, and the cost in
+       * `giveGroundHeading` is not enough on its own to promise that: it is a
+       * score rather than a refusal — deliberately, so a bot boxed against a
+       * frontage still answers *something* — and with every bearing penalised
+       * the winner can still be one that ends up inside. This branch also
+       * moves the body by hand rather than through `step`, so it is the one
+       * flight path `botFleeStep` cannot cover.
+       *
+       * Refused, it goes *along* the frontage instead, which is the same
+       * answer and the same commitment `botFleeStep` and `squadStep` reach
+       * for. Only ever refused for a bot that is currently outdoors, so one
+       * already caught in a house still moves normally.
+       */
+      const guard = !botFleesIndoors && buildingIndexAt(world, e.x, e.y) < 0;
+      const fromX = e.x;
+      const fromY = e.y;
       // Slide along whichever axis is open rather than stopping dead.
       if (!world.nav.isBlocked(e.x + stepX, e.y + stepY)) {
         e.x += stepX;
@@ -7022,6 +7235,18 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
         e.x += stepX;
       } else if (!world.nav.isBlocked(e.x, e.y + stepY)) {
         e.y += stepY;
+      }
+      if (guard && buildingIndexAt(world, e.x, e.y) >= 0) {
+        e.x = fromX;
+        e.y = fromY;
+        const round = alongFrontage(world, e, state, bearing, fromX, fromY, now);
+        const rx = Math.cos(round) * speed * dt;
+        const ry = Math.sin(round) * speed * dt;
+        if (!world.nav.isBlocked(e.x + rx, e.y + ry) && buildingIndexAt(world, e.x + rx, e.y + ry) < 0) {
+          e.x += rx;
+          e.y += ry;
+        }
+        if (!botForgetsItsFootsteps) state.heading = round;
       }
     }
     return;

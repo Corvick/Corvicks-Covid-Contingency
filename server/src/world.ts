@@ -453,9 +453,17 @@ export interface AiState {
   squadBearing: number;
   /** Latched station-keeping, so a follower doesn't stutter on the threshold. */
   squadClosing: boolean;
-  /** Committed to going round something, rather than re-aiming into it. */
-  squadAvoidUntil: number;
-  squadAvoidHeading: number;
+  /**
+   * Committed to going round a building, rather than re-aiming into it.
+   *
+   * Two callers with the same problem: a sweeping squad refused a step into a
+   * front room, and a bot officer refused one while running from a pack. Both
+   * are "walk along the frontage until you are past it", so they share the one
+   * commitment rather than keeping two that would drift — which is also why
+   * these lost their `squad` prefix.
+   */
+  avoidUntil: number;
+  avoidHeading: number;
   /**
    * A post to stay near — the van's driver minding the van, or the soldier
    * who put the beacon up holding it. How much ground goes with the post,
@@ -1404,8 +1412,8 @@ export function newAiState(now: number, x: number, y: number): AiState {
     sweeps: false,
     squadBearing: 0,
     squadClosing: false,
-    squadAvoidUntil: 0,
-    squadAvoidHeading: 0,
+    avoidUntil: 0,
+    avoidHeading: 0,
     guardX: null,
     guardY: null,
     guardRadius: VAN_GUARD_RADIUS,

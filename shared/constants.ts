@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.24.2';
+export const GAME_VERSION = '0.24.3';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3819,12 +3819,31 @@ export const SQUAD_BEARING_RATE = 1.1;
  */
 export const SQUAD_CLOSE_TO = 0.4;
 /**
- * How long a squad member commits to going *round* something after being
- * refused a step into it. Without it they turn on the spot, re-aim through the
- * same doorway on the next tick and stand there — which is exactly what "stuck
+ * How long a body commits to going *round* a building after being refused a
+ * step into it. Without it they turn on the spot, re-aim through the same
+ * doorway on the next tick and stand there — which is exactly what "stuck
  * facing the door" looks like.
+ *
+ * **It lost its `SQUAD_` prefix when a fleeing bot officer started using it.**
+ * A squad sweeping the city and an officer running from a pack are refused the
+ * same step for the same reason and go round it the same way, so there is one
+ * commitment rather than two that would drift — the same move that took the
+ * `BOT_` off `BOT_DODGE_*` once civilians ran `dodgeThreats` too.
  */
-export const SQUAD_AVOID_MS = 900;
+export const BUILDING_AVOID_MS = 900;
+
+/**
+ * What a candidate heading costs a *fleeing bot* for pointing into a building
+ * it is not already in. See "A bot runs down the street, not into a house".
+ *
+ * A cost rather than a refusal, deliberately. Every one of the three headings
+ * this is applied to has to answer *something* — a bot boxed against a
+ * frontage with the pack behind it still has to move, and a rule that can
+ * return "nowhere" is a rule that leaves it standing there. It is well above
+ * the 400px clearance those scores cap at, so it only ever loses to a
+ * direction that is worse for a reason.
+ */
+export const BOT_INDOOR_FLIGHT_COST = 600;
 
 /**
  * The dirt path's texture, and the lamps at either end of it.
