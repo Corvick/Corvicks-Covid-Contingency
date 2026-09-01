@@ -681,18 +681,22 @@ export function setSandbagsIgnoredByRoutes(v: boolean): void {
 }
 
 /**
- * True is a bot that picks somewhere to walk to without asking whether it can
- * get there — which is what it did, and what left one shuffling at a wall of
- * sandbags for the rest of the round. `server/sealedloot.ts` reads it.
+ * True is a body that picks somewhere to walk to without asking whether it can
+ * get there — which is what they all did, and what left a bot officer
+ * shuffling at a wall of sandbags for the rest of the round.
+ *
+ * Every picker in this file now asks, not only the bot's two: a civilian's
+ * wander ring and its refuge, a squad's sweep and its posts, and the escape
+ * scoring under all of them. `server/sealedloot.ts` reads it.
  *
  * Kept rather than deleted with the measurement: "it walked away and did
- * something else" is satisfied just as well by a bot that stopped looting, so
- * the control is the whole value of the run.
+ * something else" is satisfied just as well by a body that stopped going
+ * anywhere at all, so the control is the whole value of the run.
  */
-let botsIgnoreSealedGoals = false;
+let ignoreSealedGoals = false;
 
-export function setBotsIgnoreSealedGoals(v: boolean): void {
-  botsIgnoreSealedGoals = v;
+export function setIgnoreSealedGoals(v: boolean): void {
+  ignoreSealedGoals = v;
 }
 
 function getAi(world: World, e: Entity, now: number): AiState {
@@ -1129,7 +1133,7 @@ function shutTo(world: World, e: Entity, x: number, y: number): boolean {
  * True for a zombie, which walks at the bags on purpose and takes them apart.
  */
 function canWalkTo(world: World, e: Entity, x: number, y: number): boolean {
-  if (botsIgnoreSealedGoals || !softAware(e)) return true;
+  if (ignoreSealedGoals || !softAware(e)) return true;
   return world.nav.canWalkBetween(e.x, e.y, x, y);
 }
 
@@ -1366,10 +1370,12 @@ function pickWanderTarget(
       const x = r.x + 12 + Math.random() * Math.max(1, r.w - 24);
       const y = r.y + r.h / 2;
       // `isReachable` is deliberately still the hard layer — a wall somebody
-    // built across a street is not a statement about which parts of the city
-    // are connected, and it is gone the moment a zombie has finished with it.
-    // Whether *this spot* can be stood on is a different question.
-    if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
+      // built across a street is not a statement about which parts of the city
+      // are connected, and it is gone the moment a zombie has finished with it.
+      // Whether *this spot* can be stood on is a different question, and
+      // whether there is any way to it is a third — see `canWalkTo`.
+      if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
+      if (!canWalkTo(world, e, x, y)) continue;
       state.wanderX = x;
       state.wanderY = y;
       break;
@@ -1396,7 +1402,12 @@ function pickWanderTarget(
     const dist = 80 + Math.random() * radius;
     const x = clamp(e.x + Math.cos(angle) * dist, 60, WORLD_WIDTH - 60);
     const y = clamp(e.y + Math.sin(angle) * dist, 60, WORLD_HEIGHT - 60);
-    if (world.nav.isBlocked(x, y)) continue;
+    // `shutTo` rather than `isBlocked`, and `canWalkTo` under it: a spot inside
+    // a wall of sandbags is one nothing alive can stand on, and one walled off
+    // behind them is one it will stroll at until something eats it. This is
+    // the longest-lived goal a civilian has, so it is the one that shows.
+    if (shutTo(world, e, x, y)) continue;
+    if (!canWalkTo(world, e, x, y)) continue;
 
     const score = -world.rumour.heatAt(x, y, now) * RUMOUR_WANDER_WEIGHT + Math.random() * 60;
     if (score > bestScore) {
@@ -1818,9 +1829,23 @@ function chooseSettleGoal(
       return peer ? { x: peer.x, y: peer.y } : null;
     }
     case 'building': {
-      // Stick with a refuge once chosen, or this turns into a random walk.
+      /*
+       * Stick with a refuge once chosen, or this turns into a random walk —
+       * **unless somebody has since walled the way in.**
+       *
+       * The latch is what makes this the longest-lived goal in the civilian
+       * AI, which is exactly why it is also the one that would hold a body
+       * against a wall of sandbags for the rest of the round. Nothing else
+       * looks at the refuge again once it is set, so this is the only place
+       * that can notice, and dropping it here sends them through the choice
+       * below like anyone who never had one.
+       */
       if (state.refugeX !== null && state.refugeY !== null) {
-        return { x: state.refugeX, y: state.refugeY };
+        if (canWalkTo(world, e, state.refugeX, state.refugeY)) {
+          return { x: state.refugeX, y: state.refugeY };
+        }
+        state.refugeX = null;
+        state.refugeY = null;
       }
       const candidates = world.map.buildings
         .map((b, i) => ({ i, d: Math.hypot(b.x + b.w / 2 - e.x, b.y + b.h / 2 - e.y) }))
@@ -1842,6 +1867,11 @@ function chooseSettleGoal(
         const index = candidates[(start + k) % candidates.length].i;
         const goal = interiorPointOf(world, index, state.threatX, state.threatY);
         if (!goal) continue;
+        // A house with no way into it is not a refuge. Nobody knows a door is
+        // locked until they try it — that is the rule and it stays — but a
+        // wall of sandbags across the front of one is a thing you can see from
+        // the street.
+        if (!canWalkTo(world, e, goal.x, goal.y)) continue;
         if (world.rumour.heatAt(goal.x, goal.y, now) > RUMOUR_REFUGE_LIMIT) {
           fallback ??= goal; // nowhere is quiet; better than standing in the road
           continue;
@@ -1994,6 +2024,10 @@ function escapeSample(
     // a wall somebody stacked this minute — but a destination *inside* the bags
     // is one nothing alive can stand on. See `softAware`.
     if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
+    // And somewhere there is a way to. Running away is scored along the route
+    // as well as at the far end for exactly this reason; a wall with no end to
+    // go round is that argument taken one step further.
+    if (!canWalkTo(world, e, x, y)) continue;
     if (!allowIndoors && buildingIndexAt(world, x, y) >= 0) continue;
 
     // Geodesic danger: how far this spot is from the nearest zombie *through
@@ -4625,7 +4659,13 @@ function squadPost(
     const x = lead.x + Math.cos(bearing) * reach * t;
     const y = lead.y + Math.sin(bearing) * reach * t;
     // A post inside a wall of sandbags is as unstandable as one inside a shop.
-    if (buildingIndexAt(world, x, y) < 0 && !shutTo(world, lead, x, y)) return { x, y };
+    if (
+      buildingIndexAt(world, x, y) < 0 &&
+      !shutTo(world, lead, x, y) &&
+      canWalkTo(world, lead, x, y)
+    ) {
+      return { x, y };
+    }
   }
   return { x: lead.x, y: lead.y };
 }
@@ -4769,7 +4809,11 @@ function sweepTarget(world: World, e: Entity, state: AiState, now: number): void
     const reach = SQUAD_SWEEP_MIN + Math.random() * (SQUAD_SWEEP_MAX - SQUAD_SWEEP_MIN);
     const x = clamp(e.x + Math.cos(angle) * reach, 70, WORLD_WIDTH - 70);
     const y = clamp(e.y + Math.sin(angle) * reach, 70, WORLD_HEIGHT - 70);
-    if (world.nav.isBlocked(x, y) || !world.nav.isReachable(x, y)) continue;
+    // `shutTo` and `canWalkTo`, the pair every picker here now asks. A sweeping
+    // squad crosses the whole city, so it is forever choosing new points and is
+    // the body most likely to choose one behind a wall somebody built.
+    if (shutTo(world, e, x, y) || !world.nav.isReachable(x, y)) continue;
+    if (!canWalkTo(world, e, x, y)) continue;
     // Streets, not front rooms. A squad sweeping a city walks the roads.
     if (buildingIndexAt(world, x, y) >= 0) continue;
 

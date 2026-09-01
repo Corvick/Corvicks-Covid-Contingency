@@ -7,6 +7,13 @@ client/dist/
 server/dist/
 *.tsbuildinfo
 
+# Vite writes one of these beside its config every time the dev server reloads
+# it, and cleans it up a moment later — so a `git add -A` while the server is
+# running picks up a file that no longer exists by the time anyone looks. It is
+# how one nearly went out in a commit.
+client/vite.config.ts.timestamp-*
+client/vite.config.js.timestamp-*
+
 # Logs and editor noise
 *.log
 npm-debug.log*

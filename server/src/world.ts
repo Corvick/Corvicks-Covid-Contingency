@@ -99,6 +99,7 @@ import {
   RALLY_CHATTER_MIN_MS,
   RALLY_CHATTER_MAX_MS,
   INITIAL_ZOMBIE_SPREAD,
+  NAV_CELL,
   OUTBREAK_KEEP_OUT_COLS,
   OUTBREAK_KEEP_OUT_ROWS,
   ZOMBIE_POST_GRAPPLE_SLOW,
@@ -1596,8 +1597,40 @@ function softNavBoxes(world: World): OrientedBox[] {
   for (const wall of world.barricades.values()) out.push(wall.box);
   for (const gun of world.emplacements.values()) {
     if (gun.bags) out.push(gun.bags);
+    out.push(gunnerBox(gun));
   }
   return out;
+}
+
+/**
+ * **The gunner's own body, which is scenery rather than a person.**
+ *
+ * Every other body in the game gets shoved aside, which is why bodies are in no
+ * nav layer at all — a route drawn through somebody is a route that works,
+ * because they move. This one does not: `updateEmplacements` writes it back
+ * onto its mount every tick, so a shove is undone before anybody can use it.
+ * And `resolveCollisions` keeps officers `OFFICER_SPACING_PAD` further apart
+ * than their circles demand, so what another officer meets is not a 24px body
+ * but a **36px plug**. Measured on a 56px doorway with a gunner 26px outside
+ * it, bags already torn down: the bot never got past in 20s over 5 cities, and
+ * finished 30-37px off him, still wanting what was behind him.
+ *
+ * That is the report this whole file is about wearing a different hat — a body
+ * pressing at something its router does not know about, forever — so it gets
+ * the answer the bags already have: the **destructible layer**. Anything alive
+ * goes round; a zombie walks at him, which is right, because it can eat him and
+ * that is how the emplacement is taken apart. He leaves the layer when the
+ * emplacement is dismounted, at which point he stops being pinned and goes back
+ * to being an ordinary grey officer.
+ *
+ * **It only started to matter when the gun began landing where it was aimed.**
+ * `deployEmplacement` used to scatter it 40-110px off on a random bearing, so a
+ * gunner in a doorway was a coincidence; now it is what a player siting one
+ * there gets, every time.
+ */
+function gunnerBox(gun: Emplacement): OrientedBox {
+  const r = ENTITY_RADIUS.officer;
+  return { x: gun.x, y: gun.y, hw: r, hh: r, angle: 0 };
 }
 
 export function rebuildNav(world: World): void {
@@ -1777,6 +1810,10 @@ export function hasWallClearPath(
   if (avoidSoft && world.emplacements.size > 0) {
     for (const gun of world.emplacements.values()) {
       if (gun.bags && segmentHitsBox(x1, y1, x2, y2, gun.bags)) return false;
+      // The crew too — see `gunnerBox`. In the grid and not in here is a wall
+      // every route is planned around and nobody ever asks for a route past,
+      // which is the lesson the parked vehicle and the bags have each paid for.
+      if (segmentHitsBox(x1, y1, x2, y2, gunnerBox(gun))) return false;
     }
   }
 
@@ -3260,6 +3297,78 @@ export function playerOneStart(world: World): { x: number; y: number } {
 }
 
 /** A clear spot within `range` of a point — used to place player one. */
+/**
+ * **Geometry and bodies: what a spawn will actually accept.**
+ *
+ * Pulled out of `findSpawnNear` when `findSpawnAt` needed the same answer, and
+ * it is deliberately *only* those two things — no nav grid, so a room's own
+ * floor passes, which is right for a SWAT team getting out of a van against a
+ * frontage and for a pocket gunner going down in a hallway. Never the cell, for
+ * the reason `findSpawn` gives: a van parked against the back of the station
+ * could otherwise put an operator inside it and nothing would let them out.
+ */
+function spawnSpotFits(world: World, x: number, y: number, radius: number): boolean {
+  if (inTheCell(world, x, y)) return false;
+  for (const wall of world.wallGrid.queryCircle(x, y, radius + 20, new Set<Wall>())) {
+    if (resolveCircleRect({ x, y, radius: radius + 4 }, wall)) return false;
+  }
+  for (const other of world.entities.values()) {
+    if (Math.hypot(other.x - x, other.y - y) < other.radius + radius + 4) return false;
+  }
+  return true;
+}
+
+/**
+ * **The spot you asked for, or the nearest one to it that a body fits on.**
+ *
+ * `findSpawnNear` is the other thing entirely and the names now say so: it is a
+ * *spread*, `40 + random() * range` on a random bearing, which never returns
+ * the point it was given and is exactly right for scattering a crew out of a
+ * van. Handed to a caller that meant "here", it is a lottery — measured on
+ * `deployEmplacement`, which works out a spot 46px in front of the officer and
+ * then threw it away: the gun came down **41 to 106px** from it, on a bearing
+ * with nothing to do with where anybody was pointing. Same trap `placeCityCar`
+ * records for standing an officer beside a car, which is why `spotBeside`
+ * exists — but that one refuses anywhere indoors, and a pocket gunner in a
+ * hallway is a thing people do.
+ *
+ * Rings outward at a nav cell at a time, and each ring is turned a little
+ * against the last so a nudge is not always due east. No `Math.random`: the
+ * same deploy twice puts the gun in the same place.
+ *
+ * **Null when nothing within `reach` fits**, which is a real answer rather than
+ * a formality — `deployEmplacement` is documented to refuse and leave the item
+ * unspent, and with `findSpawnNear` under it that could never happen: its own
+ * last resort is `findSpawn`, which would have put the gun anywhere in the
+ * city.
+ */
+export function findSpawnAt(
+  world: World,
+  x: number,
+  y: number,
+  radius: number,
+  reach: number,
+): { x: number; y: number } | null {
+  const at = (px: number, py: number) => ({
+    x: clamp(px, radius, WORLD_WIDTH - radius),
+    y: clamp(py, radius, WORLD_HEIGHT - radius),
+  });
+  const first = at(x, y);
+  if (spawnSpotFits(world, first.x, first.y, radius)) return first;
+
+  const step = NAV_CELL;
+  for (let ring = 1; ring * step <= reach; ring++) {
+    const r = ring * step;
+    const n = Math.max(8, Math.round((2 * Math.PI * r) / step));
+    for (let i = 0; i < n; i++) {
+      const t = ((i + ring * 0.5) / n) * Math.PI * 2;
+      const p = at(x + Math.cos(t) * r, y + Math.sin(t) * r);
+      if (spawnSpotFits(world, p.x, p.y, radius)) return p;
+    }
+  }
+  return null;
+}
+
 export function findSpawnNear(
   world: World,
   originX: number,
@@ -3287,29 +3396,8 @@ export function findSpawnNear(
      */
     if (outdoors && !spawnsIgnoreBuildings && buildingIndexAt(world, x, y) >= 0) continue;
 
-    // And never the cell, for the same reason as `findSpawn` — a van that
-    // happens to park against the back of the station could otherwise put a
-    // SWAT operator inside it, and nothing would ever let them out.
-    if (inTheCell(world, x, y)) continue;
-
-    const probe = { x, y, radius: radius + 4 };
-    let blocked = false;
-    const walls = world.wallGrid.queryCircle(x, y, radius + 20, new Set<Wall>());
-    for (const wall of walls) {
-      if (resolveCircleRect({ ...probe }, wall)) {
-        blocked = true;
-        break;
-      }
-    }
-    if (blocked) continue;
-
-    for (const other of world.entities.values()) {
-      if (Math.hypot(other.x - x, other.y - y) < other.radius + radius + 4) {
-        blocked = true;
-        break;
-      }
-    }
-    if (!blocked) return { x, y };
+    if (!spawnSpotFits(world, x, y, radius)) continue;
+    return { x, y };
   }
   // Forty tries found nowhere. For a caller that insisted on the street, the
   // origin it was given is a far better last resort than a spot anywhere in the

@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.24.5';
+export const GAME_VERSION = '0.24.6';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2030,6 +2030,16 @@ export const INITIAL_ZOMBIE_SPREAD = 110;
  * box shoved inland to keep its whole area would no longer be centred on the
  * thing it is about.
  */
+/**
+ * How far a pocket gunner may be shifted off the spot the officer asked for.
+ *
+ * It went in as the `range` of a `findSpawnNear`, which is a *spread* — the gun
+ * landed 40 to 110px away on a random bearing and never on the spot at all. It
+ * is a nudge now (`findSpawnAt`): the asked-for spot when it fits, and the
+ * nearest one that does when it doesn't.
+ */
+export const EMPLACEMENT_NUDGE = 70;
+
 export const OUTBREAK_KEEP_OUT_COLS = 3;
 export const OUTBREAK_KEEP_OUT_ROWS = 2;
 export const MATERIALIZE_MS = 1400;

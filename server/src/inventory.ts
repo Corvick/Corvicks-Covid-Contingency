@@ -62,10 +62,16 @@ import type { World } from './world.js';
 /**
  * The armoury radio's pickup id, which is the whole of how it sits outside
  * `ITEM_CITY_CAP` — `cityCount` skips it and `drawItem` never sees it. Named
- * rather than inlined because two places have to agree on it and a typo in
- * either would silently put the radio back under the ceiling.
+ * rather than inlined because the places that have to agree on it are now
+ * three, and a typo in any of them would silently put the radio back under the
+ * ceiling — or, in the harness's case, report a ceiling broken that never was.
+ *
+ * Exported for `server/startkit.ts`, which counts what is on the floor and had
+ * no way to tell this one apart. It read **11-13 cities of 40 over the cap**,
+ * which is `POLICE_STATION_RADIO_CHANCE` (0.3) of forty and was the armoury
+ * doing exactly what it is documented to do.
  */
-const STATION_RADIO_ID = 'loot-armoury-radio';
+export const STATION_RADIO_ID = 'loot-armoury-radio';
 import { chargeProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';

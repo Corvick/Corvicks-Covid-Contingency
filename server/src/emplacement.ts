@@ -10,6 +10,7 @@ import {
   EMPLACEMENT_DAMAGE_MAX,
   EMPLACEMENT_DAMAGE_MIN,
   EMPLACEMENT_GUN_HEALTH,
+  EMPLACEMENT_NUDGE,
   EMPLACEMENT_RANGE,
   EMPLACEMENT_SLOW_MS,
   EMPLACEMENT_SLOW_MUL,
@@ -26,6 +27,7 @@ import {
 import { angleDelta, closestOnBox, resolveCircleBox, turnToward, type OrientedBox } from './geometry.js';
 import { fire } from './combat.js';
 import {
+  findSpawnAt,
   findSpawnNear,
   hasLineOfSight,
   makeEntity,
@@ -89,6 +91,21 @@ export interface Barricade {
 let counter = 0;
 let barricadeCounter = 0;
 
+/**
+ * True is the placement as it was: the spot 46px in front of the officer worked
+ * out and then thrown away, with `findSpawnNear` scattering the gun 40 to 110px
+ * off it on a random bearing.
+ *
+ * Kept rather than deleted with the measurement, like `setSpawnsIgnoreBuildings`
+ * and for the same reason — "it landed where it was asked for" means nothing
+ * without "and it did not before". `server/sandbagnav.ts` reads it.
+ */
+let emplacementScatters = false;
+
+export function setEmplacementScatters(v: boolean): void {
+  emplacementScatters = v;
+}
+
 /** Where the bags sit for a gun at (x, y) pointing along `angle`. */
 function bagsFor(x: number, y: number, angle: number): OrientedBox {
   return {
@@ -109,7 +126,16 @@ export function deployEmplacement(world: World, owner: Entity, now: number): boo
   const angle = owner.facing;
   const wantX = owner.x + Math.cos(angle) * 46;
   const wantY = owner.y + Math.sin(angle) * 46;
-  const spot = findSpawnNear(world, wantX, wantY, ENTITY_RADIUS.officer, 70);
+  // **`findSpawnAt`, not `findSpawnNear`** — see the note on the two there.
+  // The second is a spread and never returns the spot it is handed, so the gun
+  // used to come down 41-106px from where the officer was pointing, on a
+  // bearing that had nothing to do with them. This one takes that spot when it
+  // fits and the nearest one that does when it doesn't, and answers null rather
+  // than putting the gun somewhere else entirely — which is what makes the
+  // refusal above a real one and the item genuinely unspent.
+  const spot = emplacementScatters
+    ? findSpawnNear(world, wantX, wantY, ENTITY_RADIUS.officer, EMPLACEMENT_NUDGE)
+    : findSpawnAt(world, wantX, wantY, ENTITY_RADIUS.officer, EMPLACEMENT_NUDGE);
   if (!spot) return false;
 
   const id = `gunner-${counter++}`;

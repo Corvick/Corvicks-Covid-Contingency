@@ -2599,7 +2599,13 @@ items and a stall is a *place*, which is what the room wanted.
   11 cities of 40.
 - **`STATION_RADIO_ID` is named rather than inlined** because `cityCount` and
   `byHand` both have to agree on it, and a typo in either would silently put it
-  back under the ceiling.
+  back under the ceiling. **It is exported now, for a third reader that had no
+  way to tell it apart**: `startkit.ts` counts what is on the floor and read
+  **11-13 cities of 40 "over the cap"**, which is `POLICE_STATION_RADIO_CHANCE`
+  (0.3) of forty and was the armoury doing exactly what this bullet says it
+  does. The rig was crying wolf, not the code regressing — it reads **0** now.
+  A harness that cannot see an exception is a harness that reports it as a
+  fault.
 - **The armoury's stock is off limits to the takeover machinery**, like the city
   car's pair and the one-offs: a takeover *deletes* the id it lands on and re-adds
   under its own.
@@ -3579,35 +3585,59 @@ answer to it. Two labellings tell them apart in one array lookup.
 - **No snub goes with it**, unlike `BOT_LOOT_SNUB_MS`. The refusal is read live
   off the nav grid, so the moment a zombie has the bags down the rifle is worth
   having again — where a timer would have to sit that out.
-- **Civilians and grey officers are deliberately not covered.** Only the two bot
-  pickers were touched. A civilian settling into a bagged room has the same
-  shape of problem and nobody has reported it; the helper is there when it is
-  wanted.
+- **Every picker in the file asks it now, not only the bot's two.** It went in
+  covering `lootWanted` and `botPatrolTarget` because that is what was reported,
+  and was extended when the obvious question came back — *"civilians and grey
+  officers aren't covered"*. The rule is the easy one to remember: **anywhere
+  `shutTo` is asked, `canWalkTo` is asked under it.** That is a civilian's
+  wander ring and its home rooms, `escapeSample` under every flight in the game,
+  a squad's `sweepTarget` and `squadPost`, and the bot's two. `sweepTarget` and
+  the wander ring were also still on `nav.isBlocked` rather than `shutTo`, so a
+  sample could land *inside* the bags.
+- **And the refuge latch, which is the longest-lived goal a civilian has.**
+  `chooseSettleGoal` picks a building to run to and then sticks with it — "or
+  this turns into a random walk" — so nothing looks at it again once it is set,
+  and a wall going up afterwards would hold a body against it for the rest of
+  the round. It is dropped when it stops being walkable, which is the only place
+  that can notice. Candidates are filtered on the way in too: *nobody knows a
+  door is locked until they try it* and that rule stays, but a wall of sandbags
+  across the front of a house is a thing you can see from the street.
 
-**The gunner's own body plays no part in this, which was asked outright.**
-Entities are in no nav layer at all — only the map's walls and glass, the pond,
-`navBlockers` and the destructible layer — and collision shoves bodies apart, so
-one man is something you walk round rather than a seal. He is worth *measuring*
-rather than waving through on that general rule, because he is the one body in
-the game that cannot be shoved aside for long: `updateEmplacements` pins him
-back onto his mount every tick. Measured with the bags torn down off him and the
-man left standing in the doorway: **sealed it 0/10, and the bot walked in and
-took the rifle 10/10.** It is always the bags.
+**Was the gunner's own body ever part of it?** Asked outright, and the answer
+changed halfway through — see **The gun goes where you point it**. It used to be
+no, measured: entities are in no nav layer, collision shoves bodies apart, and a
+bot walked round him and took the rifle **10/10**. That was true of a gunner who
+had landed 40-110px off the spot he was asked for. Now the gun lands *where it
+is aimed*, a player siting one in a doorway gets one in the doorway, and a
+pinned body plus `OFFICER_SPACING_PAD` is a **36px plug** in a 56px gap — bot
+past it **0/5**, finishing 30-37px off him and still wanting what was behind
+him. So he is in the destructible layer with his own bags now, and the rows
+below say so.
 
 `server/sealedloot.ts` is the harness — headless, no socket, no port.
-`setBotsIgnoreSealedGoals` is the gate and it is **kept**: "it walked away and
-did something else" is satisfied just as well by a bot that has stopped looting
-altogether. Paired, both modes on the same city from the same start, with the
-same rifle behind the same doorway and nothing else alive:
+`setIgnoreSealedGoals` is the gate and it is **kept**: "it walked away and did
+something else" is satisfied just as well by a body that has stopped going
+anywhere at all. Paired, both modes on the same city from the same start:
 
-| a rifle behind a doorway a gunner is across, 10 cities, 20s | OLD | NEW |
+| a rifle behind a doorway a gunner is across, 8-10 cities, 20s | OLD | NEW |
 |---|---|---|
-| ticks spent walking at a rifle it cannot reach | **3821** | **0** |
-| ticks pressed on the bags on that errand | 607 | **0** |
-| reversals at the wall — the reported loop, counted | 93 | **0** |
+| ticks spent walking at a rifle it cannot reach | **4800** | **0** |
+| ticks pressed on the bags on that errand | 1023 | **0** |
+| reversals at the wall — the reported loop, counted | 152 | **0** |
 | came away with it, **all of them by squeezing** | 4/10 | 1/10 |
 | **the control: the same rifle, nothing across the doorway** | **10/10** | **10/10** |
-| the gunner alone, bags torn off: sealed it | — | **0/10** |
+| **a civilian outside it: ticks making for somewhere it cannot reach** | **481** | **0** |
+| …ground it covered, the control | 591px | 546px |
+| the gunner alone, bags torn off: he plugs it | **8/8** | **8/8** |
+| …ticks stopped against him | **1905** | **0** |
+
+**The civilian rows are read differently from the bot's, and the difference is
+worth knowing.** A civilian never leans on the bags in *either* mode, because
+`headingToward` has routed round them since the destructible layer went in — it
+walks a perfectly good arc round the wall toward a spot on the far side it can
+never arrive at. What was broken was the choosing, not the walking, so the
+reading is the goal rather than the body. Ground covered is the control beside
+it: refusing goals it cannot reach must not become standing still.
 
 **The honest cost is that last-but-one row, and it is worth stating plainly.**
 The old behaviour did sometimes come away with the rifle — and every single one
@@ -3682,6 +3712,61 @@ sandbags, facing whichever way you were. `server/src/emplacement.ts` owns it.
   concerned.
 - It barely scratches anything. Its job is `EMPLACEMENT_SLOW_MUL` — holding a
   street, not clearing one.
+
+#### The gun goes where you point it
+
+Reported as a surprise — *"I thought the emplacement already faces the same
+direction as you when you place it down"* — and it does. `arc` and `facing` are
+`owner.facing` and always were, measured at **0.0° off in both modes**. It was
+never the *direction*. It was the *position*.
+
+`deployEmplacement` worked out a spot 46px in front of the officer and then
+handed it to **`findSpawnNear`, which is a spread rather than a nudge**:
+`40 + random() * range` on a random bearing, so it never once returned the point
+it was given. The gun came down anywhere in a ring around that spot — including
+behind you. Measured over 16 bearings on open ground: **median 73px off, 41.7 at
+best, 107.6 at worst, 0 of 16 on the spot.**
+
+- **`findSpawnAt` is the fix and the names now carry the distinction.**
+  `findSpawnNear` scatters, which is exactly right for a SWAT team piling out of
+  a van; `findSpawnAt` takes the spot it is given when it fits and rings outward
+  a nav cell at a time when it does not. Both go through one `spawnSpotFits`, so
+  what counts as somewhere a body may stand is written once.
+- **No `Math.random`, and each ring turned against the last**, so the same
+  deploy twice puts the gun in the same place and a nudge is not always due
+  east.
+- **It answers null**, which makes `deployEmplacement`'s documented refusal —
+  *"returns false if there is nowhere to stand the gunner, in which case the
+  item is not spent"* — a real one. It could not fire before: `findSpawnNear`
+  never returns null, and its own last resort is `findSpawn`, which would have
+  put the gun **anywhere in the city**.
+- Measured after: **0.0px off, worst of 16, and the facing still 0.0°.**
+
+**And it has a consequence, which the harness caught rather than a player.** A
+gun that lands where it is aimed is a gun a player sites in a doorway, and the
+gunner is the one body in the game that cannot be shoved aside —
+`updateEmplacements` writes it back onto its mount every tick, and
+`resolveCollisions` keeps officers `OFFICER_SPACING_PAD` further apart than
+their circles demand, so what another officer meets is not a 24px body but a
+**36px plug**. Measured on a 56px doorway with the bags already torn down: the
+bot **never got past in 20s over 5 cities**, finishing 30-37px off him and still
+wanting what was behind him — which is the report this whole area is about,
+wearing a different hat.
+
+So **the gunner's own body joins his bags in the destructible layer**
+(`gunnerBox`, in both `softNavBoxes` and `hasWallClearPath`, because in the grid
+and not in that predicate is a wall every route is planned around and nobody
+ever asks for a route past). Anything alive goes round; a zombie walks at him,
+which is right, because eating him is how the emplacement is taken apart. He
+leaves the layer when the gun is dismounted and goes back to being an ordinary
+grey officer. Measured: he plugs the doorway **8/8**, and a body that asks
+`canWalkTo` gives the errand up rather than leaning on him — **1905 → 0** ticks
+stopped against him.
+
+`server/sandbagnav.ts` carries the placement half, with
+`setEmplacementScatters` as its own gate — separate from the routing ones on
+purpose, because "where it lands" and "what walks round it" are two decisions
+and folding them together would make either measurement read as the other.
 
 ### Being grabbed is a fight, not a cutscene
 
@@ -8839,6 +8924,12 @@ in the city was told to walk past it by name. Nothing else read the mark.
 Remote: `https://github.com/Corvick/Corvicks-Covid-Contingency.git` (branch `main`).
 `git pull` before starting, `git add -A && git commit && git push` when done —
 he works across two machines.
+
+**`git add -A` while the Vite dev server is running used to pick up a file that
+no longer exists.** Vite writes `client/vite.config.ts.timestamp-*.mjs` beside
+its config every time it reloads it and deletes it a moment later, so it lands
+in the index as `AD` — added, already gone — and one nearly went out in a
+commit. It is in `.gitignore` now.
 
 **Bump `GAME_VERSION` when shipping an update.** Patch for a fix or a tuning
 pass, minor for a new mechanic or anything that changes how a round plays, major

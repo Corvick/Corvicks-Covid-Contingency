@@ -46,7 +46,12 @@ import {
   type Entity,
 } from './src/world.js';
 import { computeFrozen, updateAi, rallyHumans, setSandbagsIgnoredByRoutes } from './src/ai.js';
-import { placeBarricade, resolveEmplacementCollisions, deployEmplacement } from './src/emplacement.js';
+import {
+  placeBarricade,
+  resolveEmplacementCollisions,
+  deployEmplacement,
+  setEmplacementScatters,
+} from './src/emplacement.js';
 import { closestOnBox, segmentHitsBox } from './src/geometry.js';
 import {
   TICK_RATE,
@@ -611,9 +616,102 @@ function gunnerSuite(): void {
   );
 }
 
+/**
+ * **The gun goes where the officer was pointing.**
+ *
+ * Reported as a surprise — *"I thought the emplacement already faces the same
+ * direction as you when you place it down"* — and it does: `arc` and `facing`
+ * are `owner.facing` and always were. It was never the *direction*. It was the
+ * *position*: `deployEmplacement` works out a spot 46px in front of the officer
+ * and then handed it to `findSpawnNear`, which is a spread — `40 + random() *
+ * range` on a random bearing — so it never once returned the spot it was given.
+ * The gun landed anywhere in a ring around it, including behind you.
+ *
+ * So the reading is the *offset from the spot the officer asked for*, and the
+ * facing is the control beside it: it has to come out at 0 in both modes, or
+ * the run is measuring something other than what was wrong.
+ *
+ * `setEmplacementScatters` is the gate and it is kept.
+ */
+function placementSuite(): void {
+  console.log('');
+  console.log('=== and the gun goes where it was pointed ===');
+  const world = createWorld();
+  bareCity(world);
+  const lane = openLane(world);
+  if (!lane) {
+    check(false, 'open ground to deploy on');
+    return;
+  }
+
+  const rows: Record<string, { offsets: number[]; facings: number[]; refused: number }> = {
+    OLD: { offsets: [], facings: [], refused: 0 },
+    NEW: { offsets: [], facings: [], refused: 0 },
+  };
+
+  for (const mode of ['OLD', 'NEW'] as const) {
+    setEmplacementScatters(mode === 'OLD');
+    for (let i = 0; i < 16; i++) {
+      const facing = (i / 16) * Math.PI * 2;
+      const owner = makeEntity('placer', 'officer', lane.wallX, lane.wallY);
+      owner.facing = facing;
+      world.entities.set('placer', owner);
+      rebuildEntityGrid(world);
+      const wantX = owner.x + Math.cos(facing) * 46;
+      const wantY = owner.y + Math.sin(facing) * 46;
+      const placed = deployEmplacement(world, owner, Date.now());
+      world.entities.delete('placer');
+      world.ai.delete('placer');
+      if (!placed) {
+        rows[mode].refused++;
+        continue;
+      }
+      const gun = [...world.emplacements.values()][0];
+      rows[mode].offsets.push(Math.hypot(gun.x - wantX, gun.y - wantY));
+      let d = gun.arc - facing;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      rows[mode].facings.push(Math.abs((d * 180) / Math.PI));
+      world.emplacements.delete(gun.id);
+      world.entities.delete(gun.id);
+      world.ai.delete(gun.id);
+      world.navDirty = false;
+      rebuildNav(world);
+    }
+  }
+  setEmplacementScatters(false);
+
+  for (const mode of ['OLD', 'NEW'] as const) {
+    const r = rows[mode];
+    console.log(
+      `  ${mode}  off the spot asked for: median ${f1(med(r.offsets))}px` +
+        `  min ${f1(Math.min(...r.offsets))}  max ${f1(Math.max(...r.offsets))}` +
+        `   facing off by ${f1(med(r.facings))}deg   refused ${r.refused}/16`,
+    );
+  }
+
+  check(rows.OLD.offsets.length > 8 && rows.NEW.offsets.length > 8, 'enough deploys staged');
+  check(
+    Math.min(...rows.OLD.offsets) >= 39,
+    'CONTROL: it never once landed on the spot before',
+    `nearest ${f1(Math.min(...rows.OLD.offsets))}px`,
+  );
+  check(
+    Math.max(...rows.NEW.offsets) < 0.01,
+    'it lands exactly on the spot on open ground',
+    `worst ${f1(Math.max(...rows.NEW.offsets))}px`,
+  );
+  check(
+    Math.max(...rows.OLD.facings) < 0.01 && Math.max(...rows.NEW.facings) < 0.01,
+    'CONTROL: the facing was never the problem and is unchanged',
+    `${f1(Math.max(...rows.OLD.facings))} / ${f1(Math.max(...rows.NEW.facings))}deg`,
+  );
+}
+
 walkSuite();
 hordeSuite();
 gunnerSuite();
+placementSuite();
 
 console.log(`\n${checks - failures}/${checks} checks passed${failures ? ` - ${failures} FAILED` : ''}`);
 process.exit(failures ? 1 : 0);

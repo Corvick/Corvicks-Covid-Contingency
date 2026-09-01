@@ -21,7 +21,7 @@
  * goes. `unstickTick` clears the route and never the goal, so nothing in the
  * loop could conclude anything.
  *
- * `setBotsIgnoreSealedGoals` is the gate and it is **kept**: "it walked away
+ * `setIgnoreSealedGoals` is the gate and it is **kept**: "it walked away
  * and did something else" is satisfied just as well by a bot that has stopped
  * looting altogether, so the control is the whole value of the run — and so is
  * the second scenario below, the same rifle behind the same doorway with no
@@ -46,6 +46,7 @@
 import {
   createWorld,
   resetWorld,
+  newAiState,
   rebuildNav,
   rebuildEntityGrid,
   resolveCollisions,
@@ -54,7 +55,7 @@ import {
   type World,
   type Entity,
 } from './src/world.js';
-import { computeFrozen, updateAi, setBotsIgnoreSealedGoals } from './src/ai.js';
+import { computeFrozen, updateAi, setIgnoreSealedGoals } from './src/ai.js';
 import {
   deployEmplacement,
   resolveEmplacementCollisions,
@@ -67,6 +68,7 @@ import {
   PATH_NODE_BUDGET_PER_TICK,
   SANDBAG_STANDOFF,
   PICKUP_REACH,
+  OFFICER_SPACING_PAD,
 } from '../shared/constants.js';
 
 const TICK_MS = 1000 / TICK_RATE;
@@ -452,17 +454,96 @@ function openRun(seed: number, door: number): Out | null {
 }
 
 /**
+ * **The same wall, and a civilian rather than a bot.**
+ *
+ * A bot's errand is a rifle on the floor. A civilian's longest-lived goal is
+ * its wander target — re-picked on arrival and on nothing else — so one stood
+ * outside a bagged doorway keeps drawing spots in the room behind it, walks at
+ * them, is pushed out, breaks out for `UNSTICK_COMMIT_MS` and comes straight
+ * back. Same loop, no loot in it.
+ *
+ * The reading is the goal rather than the body: **how many ticks it spends
+ * making for somewhere it cannot get to**, which is exactly the question
+ * `pickWanderTarget` now asks before choosing one. Ground covered is the
+ * control beside it — refusing goals it cannot reach must not turn into
+ * standing still.
+ */
+function civilianRun(seed: number): { unreachable: number; pressed: number; moved: number } | null {
+  const { world, bot } = withSeed(seed, stagedWorld);
+  // The bot is not in this one; parked well out of the way so it cannot walk
+  // into the scene and start shoving the subject about.
+  bot.x = 60;
+  bot.y = 60;
+  let now = Date.now();
+
+  for (const spot of doorways(world, BAIT_IN + 30, START_OUT + 40)) {
+    const inX = spot.x + spot.nx * BAIT_IN;
+    const inY = spot.y + spot.ny * BAIT_IN;
+    const outX = spot.x - spot.nx * START_OUT;
+    const outY = spot.y - spot.ny * START_OUT;
+    const gun = bagTheDoor(world, spot, now, () => outOfReach(world, outX, outY, inX, inY));
+    if (!gun || !gun.bags) continue;
+
+    // Right outside the doorway, so most of the wander ring lands in the room
+    // it cannot get into. Further out and the loop is diluted by ordinary
+    // street; on the threshold and the body starts inside the bags' own skirt.
+    const cx = spot.x - spot.nx * 90;
+    const cy = spot.y - spot.ny * 90;
+    const civ = makeEntity('civ', 'human', cx, cy);
+    world.entities.set('civ', civ);
+    const st = newAiState(now, cx, cy);
+    // No home to potter in and no refuge already chosen, so the open ring is
+    // what it draws from — which is the branch under test.
+    st.homeBuilding = -1;
+    st.wanderX = cx;
+    st.wanderY = cy;
+    st.pauseUntil = 0;
+    world.ai.set('civ', st);
+
+    let unreachable = 0;
+    let pressed = 0;
+    let moved = 0;
+    for (let i = 0; i < TICKS; i++) {
+      const wasX = civ.x;
+      const wasY = civ.y;
+      now += TICK_MS;
+      tick(world, now, TICK_MS / 1000);
+      moved += Math.hypot(civ.x - wasX, civ.y - wasY);
+      const s = world.ai.get('civ');
+      if (s && !world.nav.canWalkBetween(civ.x, civ.y, s.wanderX, s.wanderY)) unreachable++;
+      if (gun.bags && closestOnBox(gun.bags, civ.x, civ.y).dist < civ.radius + 6) pressed++;
+    }
+    return { unreachable, pressed, moved };
+  }
+  return null;
+}
+
+/**
  * **Does the gunner's own body play any part in this?**
  *
  * Asked outright, and the honest way to answer it is to take the bags away and
- * leave the man standing there. He is the one body in the game that cannot be
- * shoved out of the way for long — `updateEmplacements` pins him back onto his
- * mount every tick — so he is worth measuring rather than waving through on the
- * general rule that bodies are not geometry. What the run has to show is that
- * he seals nothing: entities are in no nav layer at all, and collision goes
- * round.
+ * leave the man standing there.
+ *
+ * The answer used to be no, and it was measured: entities are in no nav layer,
+ * collision shoves bodies apart, and a bot walked round him and took the rifle
+ * 10/10. That answer was true of a gunner who had landed 40-110px off the spot
+ * he was asked for, on a random bearing — which is what `deployEmplacement` did
+ * before it was fixed to put the gun where the officer was pointing. Now a
+ * player siting one in a doorway gets one *in the doorway*, and the answer
+ * changes with it: he is pinned back onto his mount every tick, and
+ * `OFFICER_SPACING_PAD` means another officer cannot come within 36px of him,
+ * so a 56px doorway is plugged. Measured before he was put in the destructible
+ * layer: **0/5 got past in 20s**, finishing 30-37px off him and still wanting
+ * what was behind him — the reported loop again, with the man instead of the
+ * bags.
+ *
+ * So what the run has to show now is the opposite of what it used to: that he
+ * *is* counted, and that a body therefore gives the errand up rather than
+ * leaning on him. The OLD column is bodies that do not ask.
  */
-function gunnerOnlyRun(seed: number): { sealed: boolean; got: boolean } | null {
+function gunnerOnlyRun(
+  seed: number,
+): { sealed: boolean; got: boolean; wanted: number; pressed: number } | null {
   const { world, bot } = withSeed(seed, stagedWorld);
   let now = Date.now();
 
@@ -479,20 +560,31 @@ function gunnerOnlyRun(seed: number): { sealed: boolean; got: boolean } | null {
     gun.bags = null;
     rebuildNav(world);
     const sealed = !world.nav.canWalkBetween(outX, outY, inX, inY);
+    const gunner = world.entities.get(gun.id);
 
     place(world, bot, spot);
     bait(world, spot);
 
     let got = false;
+    let wanted = 0;
+    let pressed = 0;
     for (let i = 0; i < TICKS; i++) {
       now += TICK_MS;
       tick(world, now, TICK_MS / 1000);
+      const onTheErrand = world.ai.get('bot-0')?.lootId === 'bait';
+      if (onTheErrand) wanted++;
+      // Two officers settle at `OFFICER_SPACING_PAD` past their circles, so
+      // anything at that distance is a body that has walked up and stopped.
+      if (onTheErrand && gunner) {
+        const gap = Math.hypot(bot.x - gunner.x, bot.y - gunner.y);
+        if (gap < bot.radius + gunner.radius + OFFICER_SPACING_PAD + 6) pressed++;
+      }
       if (!world.pickups.has('bait')) {
         got = true;
         break;
       }
     }
-    return { sealed, got };
+    return { sealed, got, wanted, pressed };
   }
   return null;
 }
@@ -514,17 +606,24 @@ function report(label: string, rows: Out[]): void {
 
 const sealed: Record<string, Out[]> = { OLD: [], NEW: [] };
 const open: Record<string, Out[]> = { OLD: [], NEW: [] };
-const gunnerOnly: { sealed: boolean; got: boolean }[] = [];
+const gunnerOnly: Record<
+  string,
+  { sealed: boolean; got: boolean; wanted: number; pressed: number }[]
+> = { OLD: [], NEW: [] };
+const civ: Record<string, { unreachable: number; pressed: number; moved: number }[]> = {
+  OLD: [],
+  NEW: [],
+};
 let skipped = 0;
 
 for (let run = 0; run < RUNS; run++) {
   const seed = 4100 + run;
   const staged: Record<string, Out | null> = { OLD: null, NEW: null };
   for (const mode of ['OLD', 'NEW'] as const) {
-    setBotsIgnoreSealedGoals(mode === 'OLD');
+    setIgnoreSealedGoals(mode === 'OLD');
     staged[mode] = sealedRun(seed);
   }
-  setBotsIgnoreSealedGoals(false);
+  setIgnoreSealedGoals(false);
 
   // `bagTheDoor` is gate-independent, so both modes settle on the same doorway;
   // taking it from either is what lets the control run on the same geometry.
@@ -533,19 +632,30 @@ for (let run = 0; run < RUNS; run++) {
     sealed.OLD.push(staged.OLD);
     sealed.NEW.push(staged.NEW);
     for (const mode of ['OLD', 'NEW'] as const) {
-      setBotsIgnoreSealedGoals(mode === 'OLD');
+      setIgnoreSealedGoals(mode === 'OLD');
       const b = openRun(seed, door);
       if (b) open[mode].push(b);
     }
-    setBotsIgnoreSealedGoals(false);
+    setIgnoreSealedGoals(false);
   } else {
     skipped++;
   }
 
-  const c = gunnerOnlyRun(seed);
-  if (c) gunnerOnly.push(c);
+  for (const mode of ['OLD', 'NEW'] as const) {
+    setIgnoreSealedGoals(mode === 'OLD');
+    const d = civilianRun(seed);
+    if (d) civ[mode].push(d);
+  }
+  setIgnoreSealedGoals(false);
+
+  for (const mode of ['OLD', 'NEW'] as const) {
+    setIgnoreSealedGoals(mode === 'OLD');
+    const c = gunnerOnlyRun(seed);
+    if (c) gunnerOnly[mode].push(c);
+  }
+  setIgnoreSealedGoals(false);
 }
-setBotsIgnoreSealedGoals(false);
+setIgnoreSealedGoals(false);
 
 console.log(`
 a rifle behind a doorway a pocket gunner is standing across  (${RUNS} cities each)`);
@@ -560,10 +670,34 @@ console.log(`  NEW  came away with it ${took(open.NEW)}/${open.NEW.length}`);
 
 console.log(`
 the gunner's body with the bags torn down off it`);
-console.log(
-  `  sealed the doorway ${gunnerOnly.filter((r) => r.sealed).length}/${gunnerOnly.length}` +
-    `   came away with the rifle ${gunnerOnly.filter((r) => r.got).length}/${gunnerOnly.length}`,
-);
+for (const mode of ['OLD', 'NEW'] as const) {
+  const r = gunnerOnly[mode];
+  if (r.length === 0) {
+    console.log(`  ${mode}  (nothing staged)`);
+    continue;
+  }
+  console.log(
+    `  ${mode}  he plugs the doorway ${r.filter((x) => x.sealed).length}/${r.length}` +
+      `   came away with the rifle ${r.filter((x) => x.got).length}/${r.length}` +
+      `   ticks walking at it ${r.reduce((a, x) => a + x.wanted, 0)}` +
+      `   ticks stopped against him ${r.reduce((a, x) => a + x.pressed, 0)}`,
+  );
+}
+
+console.log('');
+console.log('a civilian outside the same doorway — no loot in it at all');
+for (const mode of ['OLD', 'NEW'] as const) {
+  const r = civ[mode];
+  if (r.length === 0) {
+    console.log(`  ${mode}  (nothing staged)`);
+    continue;
+  }
+  console.log(
+    `  ${mode}  ticks making for somewhere it cannot reach ${r.reduce((a, x) => a + x.unreachable, 0)}` +
+      `   ticks pressed on the bags ${r.reduce((a, x) => a + x.pressed, 0)}` +
+      `   ground covered, median ${f1(med(r.map((x) => x.moved)))}px`,
+  );
+}
 
 console.log('');
 const oldRows = sealed.OLD;
@@ -599,10 +733,50 @@ check(
   'the control: the same rifle through an open doorway is still fetched',
   `${took(open.OLD)}/${open.OLD.length} -> ${took(open.NEW)}/${open.NEW.length}`,
 );
+const civSum = (m: string, k: 'unreachable' | 'pressed'): number =>
+  civ[m].reduce((a, x) => a + x[k], 0);
+check(civ.NEW.length >= 3, 'enough civilians staged', `${civ.NEW.length}`);
 check(
-  gunnerOnly.length > 0 && gunnerOnly.every((r) => !r.sealed),
-  'the gunner alone seals nothing',
-  `${gunnerOnly.filter((r) => r.sealed).length}/${gunnerOnly.length} sealed`,
+  civSum('NEW', 'unreachable') * 4 < civSum('OLD', 'unreachable'),
+  'a civilian stops making for somewhere it cannot get to',
+  `${civSum('OLD', 'unreachable')} -> ${civSum('NEW', 'unreachable')}`,
+);
+/*
+ * **No worse, not better — and 0 in both is the honest reading.**
+ *
+ * A civilian never leans on the bags in either mode, because `headingToward`
+ * has routed round them since the destructible layer went in: it walks a
+ * perfectly good arc *round* the wall toward a spot on the far side it can
+ * never arrive at. What was broken was the choosing, not the walking, which is
+ * why the row above is the one with the signal in it and this one is only here
+ * to catch the fix pushing bodies onto the wall.
+ */
+check(
+  civSum('NEW', 'pressed') <= civSum('OLD', 'pressed'),
+  'and is no more often leaning on the bags',
+  `${civSum('OLD', 'pressed')} -> ${civSum('NEW', 'pressed')}`,
+);
+check(
+  med(civ.NEW.map((x) => x.moved)) > med(civ.OLD.map((x) => x.moved)) * 0.8,
+  'the control: it is still going somewhere, not standing still',
+  `${f1(med(civ.OLD.map((x) => x.moved)))} -> ${f1(med(civ.NEW.map((x) => x.moved)))}px`,
+);
+const gunSum = (m: string, k: 'wanted' | 'pressed'): number =>
+  gunnerOnly[m].reduce((a, x) => a + x[k], 0);
+check(
+  gunnerOnly.NEW.length > 0 && gunnerOnly.NEW.every((r) => r.sealed),
+  'a pinned gunner in a doorway is counted as the plug he is',
+  `${gunnerOnly.NEW.filter((r) => r.sealed).length}/${gunnerOnly.NEW.length}`,
+);
+check(
+  gunSum('OLD', 'pressed') > 0,
+  'CONTROL: a body that does not ask walks up and stops against him',
+  `${gunSum('OLD', 'pressed')} ticks`,
+);
+check(
+  gunSum('NEW', 'pressed') * 4 < gunSum('OLD', 'pressed'),
+  'and one that asks gives the errand up instead',
+  `${gunSum('OLD', 'pressed')} -> ${gunSum('NEW', 'pressed')} ticks stopped against him`,
 );
 
 if (skipped > 0) {

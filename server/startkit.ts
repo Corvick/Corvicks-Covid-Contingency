@@ -19,7 +19,12 @@
  *     --strict --skipLibCheck --types node startkit.ts
  */
 import { createWorld, resetWorld, type World } from './src/world.js';
-import { giveStartingItem, newInventory, toWireInventory } from './src/inventory.js';
+import {
+  giveStartingItem,
+  newInventory,
+  toWireInventory,
+  STATION_RADIO_ID,
+} from './src/inventory.js';
 import { ALL_LOOT, ITEMS, type ItemId } from '../shared/items.js';
 import {
   ITEM_CITY_CAP,
@@ -99,6 +104,13 @@ for (let c = 0; c < CITIES; c++) {
   for (const p of world.pickups.values()) {
     if (p.id.startsWith('loot-test-')) continue;
     if (p.id.startsWith('loot-start-')) startPickupsLeft++;
+    // **The armoury's radio is outside `ITEM_CITY_CAP` in both directions**, by
+    // design and by name — it is not refused when the city already holds its
+    // two and it does not count toward them, so a round can legitimately
+    // finish with three. Counted here it read 11-13 cities of 40 "over the
+    // cap", which is the station's own 30% roll and nothing to do with the
+    // starting draw this file is about.
+    if (p.id === STATION_RADIO_ID) continue;
     onFloor.set(p.item, (onFloor.get(p.item) ?? 0) + 1);
   }
   // The city's own ceiling still has to hold *on the floor*.
