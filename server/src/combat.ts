@@ -51,6 +51,7 @@ import { angleDelta, segmentCircleT, segmentRectT, turnToward } from './geometry
 import {
   damageWindow,
   isInGrapple,
+  letGoOf,
   isWindowIntact,
   killEntity,
   stillAlive,
@@ -911,11 +912,21 @@ function shieldBash(world: World, shooter: Entity, now: number): void {
  * `world.exhausted` for the rest of the round. So the caller pays in whatever
  * currency it has and this does the shoving. Returns false when the cooldown
  * has not come round.
+ *
+ * **And `cooldownMs` is part of the bill, not a knob.** A dispatched officer
+ * has no stamina of any kind — see `SWAT_BASH_COOLDOWN_MS` — so the wait is
+ * the whole of what a shove costs it, and the one caller with nothing else to
+ * pay with is the one that passes a longer one.
  */
-export function shieldShove(world: World, shooter: Entity, now: number): boolean {
+export function shieldShove(
+  world: World,
+  shooter: Entity,
+  now: number,
+  cooldownMs: number = SHIELD_BASH_COOLDOWN_MS,
+): boolean {
   if (now < (world.bashReadyAt.get(shooter.id) ?? 0)) return false;
 
-  world.bashReadyAt.set(shooter.id, now + SHIELD_BASH_COOLDOWN_MS);
+  world.bashReadyAt.set(shooter.id, now + cooldownMs);
   // Drives the shove animation on the client. Set whether or not anything was
   // standing there — a bash into thin air still costs the stamina, so it had
   // better look like it happened.
@@ -942,10 +953,21 @@ export function shieldShove(world: World, shooter: Entity, now: number): boolean
       state.slowUntil = Math.max(state.slowUntil, now + SHIELD_BASH_SLOW_MS);
       state.slowMul = Math.min(state.slowMul || 1, SHIELD_BASH_SLOW_MUL);
     }
-    // Shoved off a victim as well as backwards.
-    for (const session of world.grapples.values()) session.zombieIds.delete(e.id);
+    // Shoved off a victim as well as backwards — and the grip ends with the
+    // last grabber, or the man just shoved clear stays frozen in it.
+    letGoOf(world, e.id);
   }
   return true;
+}
+
+/**
+ * True is a player's right hand as it was while something had hold of them:
+ * nothing at all. `server/swatbash.ts` reads it.
+ */
+let playerHeldCannotBash = false;
+
+export function setPlayerHeldCannotBash(v: boolean): void {
+  playerHeldCannotBash = v;
 }
 
 /**
@@ -956,6 +978,14 @@ export function shieldShove(world: World, shooter: Entity, now: number): boolean
  * button has to carry two actions, and only the server knows which of them is
  * available. `spent` latches the hold so it fires once per press rather than
  * every tick the button stays down.
+ *
+ * **`pinned` narrows it to the shield.** A grappled officer is let this far so
+ * that the one thing a shield is actually for is available in the one moment
+ * it matters — a shove takes whatever it catches off the man it had hold of,
+ * so it is the way out of the grip rather than a slower way to lose it. The
+ * bipod and the sling are not: planting a machine gun, or swinging a shield
+ * round onto your back, with something on your arm is not a thing anybody is
+ * doing, which is the same line `processShooting` already draws for the mine.
  */
 function processRightClick(
   world: World,
@@ -963,6 +993,7 @@ function processRightClick(
   inv: Inventory,
   down: boolean,
   now: number,
+  pinned = false,
 ): void {
   const id = shooter.id;
   const pressedAt = world.rightHeld.get(id);
@@ -972,7 +1003,7 @@ function processRightClick(
       world.rightHeld.set(id, now);
       return;
     }
-    if (!world.rightSpent.has(id) && now - pressedAt >= SHIELD_STOW_HOLD_MS && inv.shield > 0) {
+    if (!pinned && !world.rightSpent.has(id) && now - pressedAt >= SHIELD_STOW_HOLD_MS && inv.shield > 0) {
       inv.shieldUp = !inv.shieldUp;
       world.rightSpent.add(id);
     }
@@ -982,7 +1013,9 @@ function processRightClick(
   if (pressedAt === undefined) return;
   if (!world.rightSpent.has(id) && now - pressedAt < TAP_MAX_MS) {
     if (inv.shield > 0 && inv.shieldUp) shieldBash(world, shooter, now);
-    else if (world.deployWanted.has(id)) world.deployWanted.delete(id);
+    else if (pinned) {
+      // Nothing else a tap could mean is available with something on your arm.
+    } else if (world.deployWanted.has(id)) world.deployWanted.delete(id);
     else world.deployWanted.add(id);
   }
   world.rightHeld.delete(id);
@@ -1042,10 +1075,21 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
     if (!inv) continue;
     const command = world.commands.get(id);
 
-    // Right-click first: it decides whether the bipod is wanted at all, and a
-    // grappled officer has rather more pressing problems than either.
-    if (command && !frozen.has(id)) processRightClick(world, shooter, inv, command.rightDown, now);
-    else {
+    // Right-click first: it decides whether the bipod is wanted at all.
+    //
+    // **A grappled officer is let through, for the shield alone.** Being
+    // grabbed already stopped taking the gun off you; it stopped taking the
+    // shield off you too late, and a shove is the one thing that ends a grip
+    // from the victim's side — see `letGoOf`. Everything else right-click
+    // means is still refused, inside `processRightClick` rather than here,
+    // because "may I press the button" and "what does it do while I am held"
+    // are two questions. The same exception the NPCs get in
+    // `pinnedOfficerTick`, so a player is not the one body in the game that
+    // cannot use their own kit.
+    const pinned = !playerHeldCannotBash && isInGrapple(world, id);
+    if (command && (!frozen.has(id) || pinned)) {
+      processRightClick(world, shooter, inv, command.rightDown, now, pinned);
+    } else {
       world.rightHeld.delete(id);
       world.rightSpent.delete(id);
     }

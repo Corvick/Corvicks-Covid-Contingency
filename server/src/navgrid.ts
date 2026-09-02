@@ -107,6 +107,12 @@ export class NavGrid {
    * as wall for movement — leaving it out of the grid had routes drawn
    * straight through windows, and anyone following one pressed into the pane
    * until something ate them.
+   *
+   * **A counter is marked whether or not it is in that set**, and the rule
+   * lives here rather than in the caller because it is a fact about the map
+   * rather than about the round: a teller's bench outlives its screen. Here,
+   * no construction site can forget it — and there are several, since every
+   * harness builds its own grid.
    */
   constructor(
     map: MapData,
@@ -126,7 +132,7 @@ export class NavGrid {
 
     for (const wall of map.walls) this.markWall(wall);
     for (let i = 0; i < map.windows.length; i++) {
-      if (!broken.has(i)) this.markWall(map.windows[i]);
+      if (!broken.has(i) || map.windows[i].counter) this.markWall(map.windows[i]);
     }
     this.markPond(map);
     // Solid bodies that are not part of the map: a parked vehicle, in

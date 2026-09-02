@@ -133,6 +133,11 @@ import {
   SQUAD_CLOSE_TO,
   BUILDING_AVOID_MS,
   BOT_INDOOR_FLIGHT_COST,
+  BOT_ROOM_DANGER_NEAR,
+  BOT_ROOM_DANGER_COST,
+  BOT_WAY_OUT_STICK,
+  BOT_FALL_BACK_MARGIN,
+  BOT_INDOOR_REPLAN_MS,
   SQUAD_SLACK,
   SQUAD_SWEEP_SAMPLES,
   SQUAD_SWEEP_MIN,
@@ -253,6 +258,7 @@ import {
   SHIELD_BASH_RANGE,
   SHIELD_BASH_ARC,
   SHIELD_BASH_STAMINA,
+  SWAT_BASH_COOLDOWN_MS,
   STAMINA_RECOVERY_THRESHOLD,
   BOOTS_SPEED_MUL,
   BOOTS_STAMINA_MUL,
@@ -356,7 +362,7 @@ import {
   type Inventory,
 } from './inventory.js';
 import { placeBarricade, zombieAtSandbag } from './emplacement.js';
-import { OUTSIDE } from './rooms.js';
+import { OUTSIDE, type RoomMap } from './rooms.js';
 import { setNoPartialPaths } from './navgrid.js';
 
 
@@ -582,6 +588,23 @@ export function setLegacyBotCombat(v: boolean): void {
 }
 
 /**
+ * True is a dispatched officer's shield as it was: worn, up, soaking grabs,
+ * and never once thrown at anything. `server/swatbash.ts` reads it.
+ *
+ * Its own gate rather than part of `legacyBotCombat`, which is about a *bot*
+ * — folding the two together would make the bot's measurement and this one
+ * read as each other. Kept rather than deleted with the measurement for the
+ * reason every gate here is: this was an absence, and an absence has nothing
+ * to read wrong. "The operator bashed" means nothing without "and it never
+ * did before".
+ */
+let swatNeverBashes = false;
+
+export function setSwatNeverBashes(v: boolean): void {
+  swatNeverBashes = v;
+}
+
+/**
  * True is a bot officer at the pace it used to move at — 0.72 of a player
  * walking and 0.85 of one sprinting. `server/botfight.ts` reads it. Its own
  * gate rather than part of `legacyBotCombat`, because "how fast" and "what it
@@ -618,6 +641,24 @@ let botFleesIndoors = false;
 
 export function setBotFleesIndoors(v: boolean): void {
   botFleesIndoors = v;
+}
+
+/**
+ * True is a bot officer that is *already* indoors and knows nothing about the
+ * room graph while it runs — an escape destination picked off a ring scored
+ * through walls, and ground given up on a bearing scored the same way.
+ * `server/botrooms.ts` reads it.
+ *
+ * Its own gate rather than part of `botFleesIndoors`, and the two are
+ * deliberately separable: that one is "do not go in", this one is "and once
+ * you are in, this is how you get out". Folded together, either measurement
+ * would read as the other — and worse, the control for this one would be a bot
+ * that also could not be got into a building to be measured.
+ */
+let botIgnoresRooms = false;
+
+export function setBotIgnoresRooms(v: boolean): void {
+  botIgnoresRooms = v;
 }
 
 /**
@@ -4859,6 +4900,11 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
       state.threatX = threat.x;
       state.threatY = threat.y;
       e.facing = Math.atan2(threat.y - e.y, threat.x - e.x);
+      // Whatever had hold of you is at arm's length and you are facing it,
+      // which is the easiest shove an officer ever gets — and the moment a
+      // shield is actually for. Below the facing, or it lands where his feet
+      // were pointing.
+      officerShieldBash(world, e, now);
     }
     const away = Math.atan2(e.y - state.threatY, e.x - state.threatX);
     step(world, e, state, away, HUMAN_FLEE_SPEED, HUMAN_TURN_RATE, dt, now);
@@ -4915,6 +4961,13 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         damageMul * (onTheDog ? CITY_OFFICER_DOG_DAMAGE_MUL : 1),
       );
     }
+
+    // The aim is on the target and the shot is away, so the shield is facing
+    // whatever is closest — put it in if anything has come inside its reach.
+    // Above the retreat rather than below it: giving ground and shoving are
+    // the same answer to the same moment, and shoving first is what buys the
+    // ground to give.
+    officerShieldBash(world, e, now);
 
     // Walk backwards to hold the far edge of their sight line, never turning
     // away from the thing they're shooting at.
@@ -6296,9 +6349,32 @@ function botShieldBash(
 ): void {
   if (legacyBotCombat) return;
   if (inv.shield <= 0 || !inv.shieldUp) return;
-  if (state.botWinded || state.botStamina < SHIELD_BASH_STAMINA) return;
+  // **Stamina in the bar is the whole test, and `botWinded` used to be part of
+  // it.** That latch does not clear until `STAMINA_RECOVERY_THRESHOLD` (82), so
+  // a bot that had sprinted itself out and walked most of the way back could be
+  // sitting on sixty points of bar and still refuse to shove — which is not
+  // "as long as it has the stamina" by any reading. The cost is a quarter of
+  // the bar; having a quarter of the bar is the rule.
+  if (state.botStamina < SHIELD_BASH_STAMINA) return;
+  if (!worthShoving(world, e)) return;
+  if (!shieldShove(world, e, now)) return;
 
-  let any = false;
+  state.botStamina = Math.max(0, state.botStamina - SHIELD_BASH_STAMINA);
+  if (state.botStamina <= STAMINA_SPRINT_FLOOR) state.botWinded = true;
+}
+
+/**
+ * Is there anything in the shield's arc worth throwing it at?
+ *
+ * **Only when there is.** A player may bash thin air and pay for it; an NPC
+ * deciding to do that is one spending its getaway — or, for a dispatched
+ * officer, five seconds of its only answer to being surrounded — on nothing.
+ *
+ * The same reach and the same arc `shieldShove` itself uses, and read off
+ * `e.facing` for the same reason: that is the side the shield is on, and a
+ * bash aimed where the officer's feet were pointing hits nobody.
+ */
+function worthShoving(world: World, e: Entity): boolean {
   for (const other of world.entityGrid.queryCircle(e.x, e.y, SHIELD_BASH_RANGE, new Set<Entity>())) {
     if (other.type !== 'zombie') continue;
     const dx = other.x - e.x;
@@ -6306,16 +6382,43 @@ function botShieldBash(
     const d = Math.hypot(dx, dy);
     if (d > SHIELD_BASH_RANGE || d === 0) continue;
     if (Math.abs(angleDelta(Math.atan2(dy, dx), e.facing)) > SHIELD_BASH_ARC) continue;
-    any = true;
-    break;
+    return true;
   }
-  // Only when there is something to shove. A player may bash thin air and pay
-  // for it; a bot deciding to do that is a bot spending its getaway on nothing.
-  if (!any) return;
-  if (!shieldShove(world, e, now)) return;
+  return false;
+}
 
-  state.botStamina = Math.max(0, state.botStamina - SHIELD_BASH_STAMINA);
-  if (state.botStamina <= STAMINA_SPRINT_FLOOR) state.botWinded = true;
+/**
+ * **And a SWAT operator bashes with his, on a clock rather than on a bar.**
+ *
+ * Asked for as parity with the bot officers, which had the same absence for
+ * the same reason: the shield went up when it was issued and then only ever
+ * soaked grabs, because the one *active* thing it does needed a right-click
+ * and an NPC has no right button. A four-man stack pressed into a doorway had
+ * four shields and no way to use any of them.
+ *
+ * **What is different is the bill.** A bot pays `botStamina`, a player pays
+ * `world.stamina`, and a dispatched officer has neither — so it pays
+ * `SWAT_BASH_COOLDOWN_MS` instead, which is the whole of what a shove costs
+ * it. That is the only line here that is not shared with the bot's version:
+ * the reach, the arc, the push, the stagger and the "shoved off a victim as
+ * well as backwards" rule are all `shieldShove`, once.
+ *
+ * **Keyed off the bag, not off `world.swat`.** A shield up is a shield up,
+ * and the set membership would be a second opinion about the same fact —
+ * riflemen and the van's driver carry `newInventory()` with no shield in it,
+ * so they fall out on the first line without being named.
+ *
+ * Called from the two places the facing is fresh: after the fight branch has
+ * swung the aim onto the target, and inside the shaken branch, where whatever
+ * just let go of you is right there and is the easiest shove an officer ever
+ * gets.
+ */
+function officerShieldBash(world: World, e: Entity, now: number): void {
+  if (swatNeverBashes) return;
+  const inv = world.inventories.get(e.id);
+  if (!inv || inv.shield <= 0 || !inv.shieldUp) return;
+  if (!worthShoving(world, e)) return;
+  shieldShove(world, e, now, SWAT_BASH_COOLDOWN_MS);
 }
 
 /**
@@ -6587,6 +6690,388 @@ function giveGroundHeading(world: World, e: Entity, state: AiState, away: number
   }
   // Every direction blocked: back straight off and let collision sort it out.
   return bestScore === -Infinity ? away : bestAngle;
+}
+
+/**
+ * The way out of the building, one room at a time — a bot officer's answer to
+ * a pack coming in through a door behind it.
+ *
+ * Reported as *"bot officers are having trouble kiting zombies in buildings…
+ * they are dying simply by not knowing how to kite through multiple rooms when
+ * zombies are in front of them. A task like that should always lead to
+ * survival"*, with the shape of the answer stated outright: *"they need to
+ * remember the exit to the building and each room they go to, and that if
+ * there are zombies coming in from one entrance to kite away using another one
+ * ultimately leading to outside preferably (and not accidently heading towards
+ * a dead end)"*.
+ *
+ * **Nothing indoors was answering that question, and the two things that were
+ * asked instead are both street heuristics.** `escapeDestination` samples a
+ * ring at `ESCAPE_DISTANCE` and scores each spot on the danger field at its far
+ * end and its midpoint; `giveGroundHeading` probes a ring of bearings and
+ * scores each on straight-line clearance to the nearest threat. Neither reads
+ * a wall. Inside a house that is wrong twice over: the airiest spot on the
+ * ring is the room the pack is *not* in yet, which is very often the one with
+ * no second door; and a bearing with no zombie along it is a bearing into a
+ * corner. Both are perfectly good the moment the body is out in a street,
+ * which is why neither was ever noticed.
+ *
+ * So this is a search over the **room graph**, which is the structure that
+ * knows what a doorway is:
+ *
+ * - **"Remembering the exits" is free, and that is most of why this is
+ *   affordable.** `RoomMap` is static for the round — walls and doorways do not
+ *   move — so `Room.exits` is already the list of every way out of every room,
+ *   and a bot three partitions in needs no memory of having walked past a door
+ *   to know one is there. What actually *is* remembered is the far shorter
+ *   list of doorways this bot has tried and been refused: `refusedDoors` and
+ *   `doorIgnore`, which `doorTick` already fills in when it finds one bolted
+ *   by a player or hears something behind it. Routing through one of those is
+ *   how a bot ends up pressed on a slab it has already decided not to open.
+ * - **"Not a dead end" falls out of where the search is aimed.** The goal is
+ *   the *street*, so a cupboard is never on a route by construction — it is
+ *   only ever reachable, never passed through. The one place it has to be said
+ *   out loud is the retreat in `fallBackRoom`.
+ * - **"Away from the entrance they are coming in by" is the cost function.**
+ *   A doorway with `DOORWAY_MOB` at it is refused outright, which is the
+ *   threshold and the reasoning `exitPointFor` already uses; under that they
+ *   are priced. The pack's own door is therefore the dearest way out of the
+ *   building and any other is preferred, without a line of code about which
+ *   door anybody came in by.
+ *
+ * Three answers, in order, and the order is the ask:
+ *
+ *  1. **A way out the pack is not standing in.** Cheapest route to a street
+ *     door over uncontested doorways.
+ *  2. **Failing that, a room further from them that still has somewhere to go
+ *     from it.** Deliberately not the *deepest* room — that is `deeperRoom`,
+ *     and it is what a civilian wants; an officer backing into a box is the
+ *     death being reported.
+ *  3. **Failing that, out past them.** Every door held and nowhere better to
+ *     stand is the moment to squeeze — the same second pass, and the same
+ *     argument, as `exitPointFor`'s `allowBeaten`: a lone zombie between
+ *     somebody and the only door is a thing to be got round rather than a
+ *     reason to stand still.
+ *
+ * Returns null when the answer is "stay in this room", which drops the caller
+ * back on the behaviour it had — giving ground on clearance while shooting,
+ * which with one room to work in is right.
+ *
+ * The cost is a walk of one building's rooms, twenty at the outside and a
+ * landmark at that, every `BOT_INDOOR_REPLAN_MS`, for a bot that is indoors
+ * with something in sight. An ordinary block is a single undivided room with
+ * no interior doorways at all, so over most of the map this answers off the
+ * first room and never looks at a second.
+ */
+function wayOutOfHere(
+  world: World,
+  e: Entity,
+  state: AiState,
+  now: number,
+): { x: number; y: number } | null {
+  if (botFleesIndoors || botIgnoresRooms) return null;
+  const rooms = world.rooms;
+  const here = rooms.roomAt(e.x, e.y);
+  if (here === OUTSIDE) return null;
+
+  // Held, unless we have arrived in the room we were making for. Arriving is
+  // what makes a kite a kite: the plan is one hop, and the next one is chosen
+  // from where that put us against where the pack has got to meanwhile.
+  if (state.wayOutAt > now && state.wayOutRoom !== here) {
+    return { x: state.wayOutX, y: state.wayOutY };
+  }
+
+  /**
+   * **What a spot costs for having zombies near it, read off the danger
+   * field**, which is geodesic — how far the nearest of them has to *walk* to
+   * stand on it, so the wall between here and the next room counts and the one
+   * behind the pack does not.
+   *
+   * **Not counted off `state.threatPoints`, and that was the first version of
+   * this.** That list is line-of-sight filtered and refreshed on the
+   * perception tick, so it holds what the officer can see *now* — and the
+   * moment he backs out of the room the pack he is running from vanishes from
+   * it, the doorway they are filling reads clear, and the cheapest way out
+   * becomes the one straight back through them. Measured, the plan flipped
+   * between two routes every dozen ticks and the officer walked into the pack
+   * on the second of them: 130px of clearance down to 26 in eight ticks, with
+   * `threatPoints` reading 1. That is the fumbling in the report, reproduced
+   * by the fix meant to cure it.
+   *
+   * Reading the danger field here is not new omniscience either — it is what
+   * every flight in this game already reads, `escapeDestination` included, and
+   * the split this project draws is that *flight* reads danger where anything
+   * calmer reads rumour. This is flight.
+   */
+  const nearThem = (x: number, y: number): number => {
+    const d = world.danger.distanceAt(x, y);
+    if (d >= BOT_ROOM_DANGER_NEAR) return 0;
+    return (1 - Math.max(0, d) / BOT_ROOM_DANGER_NEAR) * BOT_ROOM_DANGER_COST;
+  };
+
+  /**
+   * …and how many bodies are actually standing *in* a gap, which is the one
+   * thing the field cannot say: it measures a distance, and three of them
+   * filling a doorway is a fact about the doorway.
+   *
+   * Visible ones only, and that is the right way round for a *refusal*: it can
+   * only ever add one, so the flicker above cannot turn it into a reason to
+   * walk at anybody.
+   */
+  const atDoor = (index: number): number => {
+    const spec = world.map.doors[index];
+    let n = 0;
+    for (const p of state.threatPoints) {
+      if (Math.hypot(p.x - spec.x, p.y - spec.y) < DOOR_BLOCK_RADIUS) n++;
+    }
+    return n;
+  };
+
+  /**
+   * **The margin that stops it dithering**, and it is the fifth time this file
+   * has reached for one — `BOT_BOLT_DIST` against `BOT_SAFE_DIST`,
+   * `BOT_SWAP_MARGIN`, `longestGun` and `ZOMBIE_TARGET_STICK` are the others.
+   * The room already being walked into is scored cheaper than a fresh one, so
+   * a route only changes when the new one is properly better rather than when
+   * a body shuffled in a doorway two rooms away.
+   *
+   * **`wayOutAt > 0` is what says there is an incumbent at all, and leaving it
+   * out was a real bug rather than tidiness.** A fresh `AiState` starts
+   * `wayOutRoom` at -1, which is `OUTSIDE` — so with no plan whatsoever the
+   * margin fell on "step straight out of the nearest door", every officer's
+   * very first plan was discounted 30% for going outdoors, and the nearest
+   * door is the one the pack is filing through. Measured, the officer walked
+   * from 274px of clearance to 28 in nineteen ticks, at the door they came in
+   * by, with a clean route two rooms the other way.
+   */
+  const stick = (room: number): number =>
+    state.wayOutAt > 0 && room === state.wayOutRoom ? BOT_WAY_OUT_STICK : 1;
+
+  /**
+   * A doorway this bot could actually get through.
+   *
+   * A cell gate is the one door in the game nothing opens in a hurry, and a
+   * door a *player* bolted is one a bot leaves standing rather than undoing a
+   * teammate's work — both are what `doorTick` already decides at the handle,
+   * and routing at one is walking to somewhere it will then refuse to go.
+   * `refusedDoors` and `doorIgnore` are the same fact learned the hard way:
+   * this bot has stood at that door and been turned away from it.
+   */
+  const passable = (index: number): boolean => {
+    if (state.refusedDoors.includes(index)) return false;
+    if (state.doorIgnore === index && now < state.doorIgnoreUntil) return false;
+    const door = world.doors[index];
+    if (!door || door.broken || door.open) return true;
+    return !door.barred && !door.playerLocked;
+  };
+
+  /**
+   * Cheapest route to the street, given back as the point to walk at for its
+   * first hop.
+   *
+   * Dijkstra rather than a plain BFS because the doorways are priced, and a
+   * linear scan for the cheapest open room rather than a heap because a
+   * building is a handful of rooms and the heap would cost more than it saves.
+   */
+  const routeOut = (allowMob: boolean): Hop | null => {
+    const cost = new Map<number, number>([[here, 0]]);
+    const first = new Map<number, Hop>();
+    const open: number[] = [here];
+    let exit: Hop | null = null;
+    let exitCost = Infinity;
+
+    while (open.length > 0) {
+      let pick = 0;
+      for (let i = 1; i < open.length; i++) {
+        if (cost.get(open[i])! < cost.get(open[pick])!) pick = i;
+      }
+      const id = open.splice(pick, 1)[0];
+      const soFar = cost.get(id)!;
+      // Nothing still open can beat the exit already found.
+      if (soFar >= exitCost) break;
+
+      for (const index of rooms.rooms[id].exits) {
+        if (!passable(index)) continue;
+        const mob = atDoor(index);
+        if (mob >= DOORWAY_MOB && !allowMob) continue;
+        const far = rooms.farSideOf(index, id);
+        const spec = world.map.doors[index];
+        let leg =
+          1 +
+          nearThem(spec.x, spec.y) +
+          (far === OUTSIDE ? 0 : nearThem(rooms.rooms[far].x, rooms.rooms[far].y));
+        if (id === here) {
+          /*
+           * **The way to the first doorway is priced too, and leaving it out
+           * was the whole of what made this pick a route through the pack.**
+           *
+           * Every other cost here is a fact about a room or a gap, and none of
+           * them knows where in the room the officer is standing. So a street
+           * door on the far side of the pack, two hundred pixels clear of them
+           * itself, scored as a perfectly good way out — and the walk to it
+           * ran straight past the bodies in the middle of the floor. Measured,
+           * that is exactly what happened: the plan flipped to it, and the
+           * nearest zombie went 130px to 26 in eight ticks.
+           *
+           * It is the same mistake `escapeDestination` names in its own
+           * scoring — "scoring only the far end happily picks somewhere lovely
+           * on the other side of the zombie, and then the router walks them
+           * straight past it" — and it gets the same one-line answer, a sample
+           * at the midpoint.
+           */
+          leg += nearThem((e.x + spec.x) / 2, (e.y + spec.y) / 2);
+          // And the margin, which only the walked hop can be sticky about.
+          leg *= stick(far);
+        }
+        const next = soFar + leg;
+        /*
+         * The first hop is the only part that gets walked; everything past it
+         * is there to say which first hop is worth taking.
+         *
+         * Out to the street that is the point a short way past the slab; into
+         * another room it is that room's own middle rather than its threshold
+         * — the same split, and the same reason, as `roomHopToward`. Arriving
+         * *at* a doorway is standing in the gap, where the room underfoot has
+         * not changed yet and the next hop would be chosen from the wrong end
+         * of it.
+         */
+        const step: Hop =
+          id === here
+            ? far === OUTSIDE
+              ? { room: OUTSIDE, ...rooms.aimBeyond(index, id) }
+              : { room: far, x: rooms.rooms[far].x, y: rooms.rooms[far].y }
+            : first.get(id)!;
+
+        if (far === OUTSIDE) {
+          if (next < exitCost) {
+            exitCost = next;
+            exit = step;
+          }
+          continue;
+        }
+        if (next >= (cost.get(far) ?? Infinity)) continue;
+        cost.set(far, next);
+        first.set(far, step);
+        if (!open.includes(far)) open.push(far);
+      }
+    }
+    return exit;
+  };
+
+  /**
+   * `hop.room` is where this leg *ends*, and it is what the latch above reads.
+   *
+   * It has to be the next room rather than "out of the building", even when
+   * the route it came off runs three doorways further: the latch drops on
+   * arrival, and a plan stamped `OUTSIDE` while the body is still indoors can
+   * never arrive at all. It then stands for the whole of `BOT_INDOOR_REPLAN_MS`
+   * with the pack moving under it.
+   */
+  const plan = (hop: Hop): Hop => {
+    state.wayOutRoom = hop.room;
+    state.wayOutX = hop.x;
+    state.wayOutY = hop.y;
+    state.wayOutAt = now + BOT_INDOOR_REPLAN_MS;
+    return hop;
+  };
+
+  const clean = routeOut(false);
+  if (clean) return plan(clean);
+
+  const back = fallBackRoom(rooms, here, nearThem, passable, atDoor);
+  if (back) return plan(back);
+
+  const squeeze = routeOut(true);
+  if (squeeze) return plan(squeeze);
+
+  state.wayOutAt = 0;
+  return null;
+}
+
+/**
+ * A room there is no going on from: one doorway, and it is not a way out.
+ *
+ * The street door matters. A front room with a single opening is a perfectly
+ * good place to be backed into, because the opening is the way out of the
+ * building — and counting doorways alone reads it as a cupboard. Measured on
+ * the harness, that mistake alone put a hundred ticks a run in "backed into a
+ * dead end" on runs that were walking out of the front door.
+ */
+function deadEnd(rooms: RoomMap, id: number): boolean {
+  const exits = rooms.rooms[id].exits;
+  if (exits.length >= 2) return false;
+  return !exits.some((index) => rooms.farSideOf(index, id) === OUTSIDE);
+}
+
+/** A leg of that route: somewhere to walk to, and the room it lands in. */
+interface Hop {
+  room: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * Nowhere out: the room to give ground into instead.
+ *
+ * Scored on the same danger field the route out is, which is geodesic — how
+ * far the nearest of them has to *walk* to get there. That is the right notion
+ * and straight-line distance is not: the far end of a long hall is no further
+ * from a zombie than its near end, and the cupboard off it is.
+ *
+ * **A room with one doorway is refused, and this is the only place that rule
+ * has to be written down.** Everywhere else it is free, the street being the
+ * goal; here the goal is a room, and the room furthest from the pack is very
+ * often furthest precisely because it is a box with one way in. Backing into
+ * one is the death that was reported, and it is exactly what `deeperRoom`
+ * hands back — that function is a civilian's, and hiding is a plan for
+ * somebody with no gun.
+ *
+ * Returns null for "here is already the best of them", which is not a failure:
+ * it is the moment to stop walking and fight, and the caller reads it so.
+ */
+function fallBackRoom(
+  rooms: RoomMap,
+  here: number,
+  nearThem: (x: number, y: number) => number,
+  passable: (index: number) => boolean,
+  atDoor: (index: number) => number,
+): Hop | null {
+  // Where we can get to, over doorways that are not held.
+  const hops = new Map<number, number>([[here, 0]]);
+  const first = new Map<number, number>();
+  const walk: number[] = [here];
+  for (let head = 0; head < walk.length; head++) {
+    const id = walk[head];
+    for (const index of rooms.rooms[id].exits) {
+      if (!passable(index) || atDoor(index) >= DOORWAY_MOB) continue;
+      const far = rooms.farSideOf(index, id);
+      if (far === OUTSIDE || hops.has(far)) continue;
+      hops.set(far, hops.get(id)! + 1);
+      first.set(far, id === here ? far : first.get(id)!);
+      walk.push(far);
+    }
+  }
+
+  const cost = (id: number): number => nearThem(rooms.rooms[id].x, rooms.rooms[id].y);
+  let bestRoom = -1;
+  // Strictly better by a margin, so backing up one room is a decision rather
+  // than the arithmetic wobbling — the same reason the route out is sticky.
+  let best = cost(here) - BOT_FALL_BACK_MARGIN;
+  for (const [id, dist] of hops) {
+    if (id === here) continue;
+    if (deadEnd(rooms, id)) continue; // a box is not somewhere to go
+    const c = cost(id);
+    // Nearer wins a tie: the point is to buy ground, not to cross the building
+    // to buy the same ground.
+    if (c < best || (c === best && bestRoom >= 0 && dist < hops.get(bestRoom)!)) {
+      best = c;
+      bestRoom = id;
+    }
+  }
+  if (bestRoom < 0) return null;
+
+  const step = first.get(bestRoom)!;
+  return { room: step, x: rooms.rooms[step].x, y: rooms.rooms[step].y };
 }
 
 /**
@@ -7055,8 +7540,12 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const speed =
         botStaminaTick(state, true, dt, inv) * (boosted ? ESCAPE_SPEED_MULTIPLIER : 1);
 
-      // Out in the street, not into the nearest house — see `botFleeStep`.
-      const to = escapeDestination(world, e, state, now, !botFleesIndoors);
+      // Out in the street, not into the nearest house — see `botFleeStep`,
+      // and once already in one, out of it a room at a time — see
+      // `wayOutOfHere`.
+      const to =
+        wayOutOfHere(world, e, state, now) ??
+        escapeDestination(world, e, state, now, !botFleesIndoors);
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
@@ -7168,9 +7657,31 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // The breakout bearing knows about walls; here it has to know about
       // houses too, or "I am getting nowhere" is answered with a committed
       // blind walk through a front door. See `breakoutHeading`.
-      if (unstickTick(world, e, state, now, dt, speed, !botFleesIndoors)) return;
+      //
+      // Unless it is already indoors, where the ring that picks one is a
+      // street heuristic reading clearance through walls, and the answer it
+      // gives is the back bedroom. Indoors the way out is a route over the
+      // room graph instead, one doorway at a time — see `wayOutOfHere`.
+      const out = wayOutOfHere(world, e, state, now);
+      /*
+       * **And a route over the room graph gets no unstick, deliberately.**
+       *
+       * `unstickTick` wants `UNSTICK_MIN_PROGRESS` in `UNSTICK_CHECK_MS` — 38
+       * px/s — and then commits `UNSTICK_COMMIT_MS` of a blind bearing that
+       * knows about walls and nothing about doorways. Indoors the officer
+       * stops for a whole second at every locked handle (`DOOR_NPC_UNLOCK_MS`),
+       * which is a second of no progress at all, so it fires the moment the
+       * door swings and walks him off the route he had just opened.
+       *
+       * That is the trap this project has already recorded once, against
+       * `hidesDeeper` — hiders spent 4.5-9.1s of a 20s move-in committed to a
+       * breakout they had no need of, and two were walked out of the building
+       * by it. The replan budget is what covers a route that genuinely will
+       * not work; the breakout was making work.
+       */
+      if (!out && unstickTick(world, e, state, now, dt, speed, !botFleesIndoors)) return;
       // And the destination is somewhere in the street — see `botFleeStep`.
-      const to = escapeDestination(world, e, state, now, !botFleesIndoors);
+      const to = out ?? escapeDestination(world, e, state, now, !botFleesIndoors);
       const desired = to
         ? headingToward(world, e, state, to.x, to.y, now)
         : safestHeading(world, e, state);
@@ -7284,9 +7795,35 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       // BOT_BOLT_DIST. Backing off is scored against every zombie it knows of
       // rather than taken straight from the one it is shooting — the bearing
       // directly away from your target is how you walk into the second one.
+      /*
+       * **Indoors, giving ground is a route rather than a bearing**, and this
+       * is the branch the report is actually about — kiting runs from
+       * `BOT_BOLT_DIST` out to `backAt`, which is exactly the band a pack
+       * walking in through a door occupies.
+       *
+       * `giveGroundHeading` scores a ring of bearings on straight-line
+       * clearance to the nearest threat, which is a street measurement: it
+       * cannot see the wall two feet behind the winning bearing, so inside a
+       * house the answer is reliably a corner. `wayOutOfHere` asks the room
+       * graph instead — which doorway leads away from them and on towards the
+       * street — and hands back the next room to walk into, so backing off is
+       * backing through a doorway and the pack has to file through after.
+       *
+       * Still gone round rather than walked at: the route is scored on rooms
+       * and doorways, which is far too coarse to have noticed the one standing
+       * in the middle of the floor between here and the door. That is
+       * `dodgeThreats`, exactly as the bolt above uses it.
+       *
+       * Null is "this room is the best of them", and it drops straight back on
+       * the old bearing — which with one room to work in is the right answer,
+       * and is the whole of the city's ordinary blocks.
+       */
+      const out = state.botGiving ? wayOutOfHere(world, e, state, now) : null;
       const bearing = state.botClosing
         ? aim
-        : giveGroundHeading(world, e, state, Math.atan2(-dy, -dx));
+        : out
+          ? dodgeThreats(world, e, state, headingToward(world, e, state, out.x, out.y, now))
+          : giveGroundHeading(world, e, state, Math.atan2(-dy, -dx));
       // **Giving ground is a sprint.** Kiting used to back off at a fraction of
       // a *walk*, which is slower than everything it was backing away from — so
       // the gap it was trying to keep closed anyway and the kite was a slower
@@ -7667,6 +8204,8 @@ function followTheChase(
  * Zombies can see straight through glass but not walk through it, so a pane
  * between a zombie and its target becomes something to beat on. Returns true
  * when the zombie spent this tick attacking instead of moving.
+ *
+ * Counters are the exception and are left alone — see below.
  */
 function attackBlockingWindow(
   world: World,
@@ -7685,6 +8224,11 @@ function attackBlockingWindow(
   for (const index of panes) {
     if (!isWindowIntact(world, index)) continue;
     const pane = world.map.windows[index];
+    // **Never a counter.** The bench outlives the screen, so smashing one
+    // opens no way through at all — see `isWindowSolid`. Left in here, a
+    // zombie spends `WINDOW_HEALTH` worth of seconds on a slab it is still
+    // standing behind afterwards, with the way round it open the whole time.
+    if (pane.counter) continue;
 
     // Only care about panes that actually sit between us and the target.
     const nearestX = clamp(e.x, pane.x, pane.x + pane.w);
@@ -8706,6 +9250,29 @@ function pinnedOfficerTick(world: World, e: Entity, state: AiState, now: number)
   const aim = Math.atan2(attacker.y - e.y, attacker.x - e.x);
   e.facing = aim;
   state.heading = aim;
+
+  /*
+   * **And the shield goes in, which is the one moment it is actually for.**
+   *
+   * A shove takes whatever it catches off the man it had hold of — that is
+   * `shieldShove`'s own rule, and with the last grabber gone `letGoOf` ends
+   * the grip — so this is a pinned officer's one way out of a grapple rather
+   * than a slower way to lose it. It was unreachable until now for a reason
+   * that has nothing to do with shields: a grappled body is in
+   * `computeFrozen`, `updateAi` skips it outright, and this branch is all
+   * that runs. It fired the gun and nothing else.
+   *
+   * Below the facing, because the shove is aimed off `e.facing` and the arm
+   * being held is the whole reason that is pointed at the attacker. Above the
+   * gun, because breaking the grip is the more urgent of the two and both can
+   * happen on the same tick — they are different hands.
+   *
+   * **The bill is the same one each of them pays standing up**: a bot spends a
+   * quarter of its bar, a dispatched officer waits out
+   * `SWAT_BASH_COOLDOWN_MS`. Being held does not make a shove cheaper.
+   */
+  if (inv && world.bots.has(e.id)) botShieldBash(world, e, state, inv, now);
+  else officerShieldBash(world, e, now);
 
   if (inv) {
     fireHeld(world, e, inv, aim, now);

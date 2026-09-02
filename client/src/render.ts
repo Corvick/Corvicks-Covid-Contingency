@@ -587,7 +587,7 @@ export function drawWalls(ctx: CanvasRenderingContext2D, walls: Wall[], view: Vi
  * slab has a top surface rather than being a hole — and the **screen line**,
  * which is what says the thing you cannot walk through is glass.
  */
-function drawCounter(ctx: CanvasRenderingContext2D, p: WindowPane): void {
+function drawCounter(ctx: CanvasRenderingContext2D, p: WindowPane, smashed: boolean): void {
   const along = p.w >= p.h;
   const depth = along ? p.h : p.w;
   const span = along ? p.w : p.h;
@@ -615,37 +615,46 @@ function drawCounter(ctx: CanvasRenderingContext2D, p: WindowPane): void {
     ctx.fillRect(p.x + p.w - 3, p.y, 3, p.h);
   }
 
-  // The screen, standing on the bench: a bright line up the middle of it.
+  // The screen, standing on the bench: a bright line up the middle of it —
+  // or what is left of it once somebody has put a round through it.
   const mid = along ? p.y + p.h / 2 : p.x + p.w / 2;
-  ctx.fillStyle = 'rgba(147, 197, 253, 0.45)';
-  if (along) ctx.fillRect(p.x + 2, mid - COUNTER_GLASS / 2, p.w - 4, COUNTER_GLASS);
-  else ctx.fillRect(mid - COUNTER_GLASS / 2, p.y + 2, COUNTER_GLASS, p.h - 4);
-  ctx.strokeStyle = 'rgba(198, 222, 255, 0.75)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (const off of [-COUNTER_GLASS / 2, COUNTER_GLASS / 2]) {
-    if (along) {
-      ctx.moveTo(p.x + 2, mid + off);
-      ctx.lineTo(p.x + p.w - 2, mid + off);
-    } else {
-      ctx.moveTo(mid + off, p.y + 2);
-      ctx.lineTo(mid + off, p.y + p.h - 2);
+  if (smashed) {
+    drawSmashedScreen(ctx, p, along, mid);
+  } else {
+    ctx.fillStyle = 'rgba(147, 197, 253, 0.45)';
+    if (along) ctx.fillRect(p.x + 2, mid - COUNTER_GLASS / 2, p.w - 4, COUNTER_GLASS);
+    else ctx.fillRect(mid - COUNTER_GLASS / 2, p.y + 2, COUNTER_GLASS, p.h - 4);
+    ctx.strokeStyle = 'rgba(198, 222, 255, 0.75)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const off of [-COUNTER_GLASS / 2, COUNTER_GLASS / 2]) {
+      if (along) {
+        ctx.moveTo(p.x + 2, mid + off);
+        ctx.lineTo(p.x + p.w - 2, mid + off);
+      } else {
+        ctx.moveTo(mid + off, p.y + 2);
+        ctx.lineTo(mid + off, p.y + p.h - 2);
+      }
     }
+    ctx.stroke();
   }
-  ctx.stroke();
 
   // The speak-hole through the screen, and the deal tray cut across the bench
-  // beneath it — both at the middle of the run, where the clerk sits.
+  // beneath it — both at the middle of the run, where the clerk sits. The tray
+  // is cut into the bench and stays; the hole is a hole *in the screen*, so it
+  // goes with it.
   const cx = p.x + p.w / 2;
   const cy = p.y + p.h / 2;
   ctx.fillStyle = 'rgba(20, 24, 30, 0.85)';
   if (along) ctx.fillRect(cx - COUNTER_TRAY / 2, p.y + 2, COUNTER_TRAY, p.h - 4);
   else ctx.fillRect(p.x + 2, cy - COUNTER_TRAY / 2, p.w - 4, COUNTER_TRAY);
-  ctx.strokeStyle = 'rgba(176, 196, 222, 0.8)';
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.arc(cx, cy, Math.min(depth, span) * 0.22, 0, Math.PI * 2);
-  ctx.stroke();
+  if (!smashed) {
+    ctx.strokeStyle = 'rgba(176, 196, 222, 0.8)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.min(depth, span) * 0.22, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 
   // And the steel posts at each end, which is what frames it.
   ctx.fillStyle = 'rgba(160, 172, 190, 0.7)';
@@ -662,7 +671,79 @@ function drawCounter(ctx: CanvasRenderingContext2D, p: WindowPane): void {
 const COUNTER_GLASS = 5;
 const COUNTER_TRAY = 11;
 
-/** Intact panes read as glass; smashed ones leave an empty gap in the wall. */
+/**
+ * **A teller's screen shot out, with the bench still standing.**
+ *
+ * The whole job is to say two things at once: the thing that stood there is
+ * gone, and the thing you cannot walk through is still here. So the glazing
+ * channel is drawn *empty* and dark down the middle of the bench — where a
+ * bright line used to be — with a few stubs of glass still standing in the
+ * frame and a scatter of fragments across the counter top.
+ *
+ * Everything in it is hashed off the pane's own position rather than rolled,
+ * the same rule the dog's saliva strands and the acid's churn follow: this
+ * runs on every frame the counter is on screen, and a `Math.random()` anywhere
+ * in it is a pile of broken glass that reshuffles itself sixty times a second.
+ */
+function drawSmashedScreen(
+  ctx: CanvasRenderingContext2D,
+  p: WindowPane,
+  along: boolean,
+  mid: number,
+): void {
+  const start = (along ? p.x : p.y) + 2;
+  const span = (along ? p.w : p.h) - 4;
+  const depth = along ? p.h : p.w;
+  // One helper for both orientations, so nothing below has to say `along`
+  // twice and the two cases cannot drift apart.
+  const bar = (from: number, len: number, thick: number) => {
+    if (along) ctx.fillRect(from, mid - thick / 2, len, thick);
+    else ctx.fillRect(mid - thick / 2, from, thick, len);
+  };
+
+  // The empty channel the screen stood in.
+  ctx.fillStyle = 'rgba(13, 16, 21, 0.66)';
+  bar(start, span, COUNTER_GLASS);
+
+  const rand = rng((p.x * 131 + p.y * 977) | 0);
+  // Stubs still in the frame. Walked along the run rather than placed at a
+  // fixed count, so a wider counter breaks into *more* pieces rather than
+  // longer ones — the same reasoning the cell gate's teeth are drawn on.
+  let at = start;
+  while (at < start + span) {
+    const len = Math.min(3 + rand() * 7, start + span - at);
+    const gap = 4 + rand() * 13;
+    if (len > 1.5) {
+      ctx.fillStyle = 'rgba(147, 197, 253, 0.5)';
+      bar(at, len, COUNTER_GLASS * (0.45 + rand() * 0.55));
+      // A bright edge on the break itself, which is what makes a stub read as
+      // a shard rather than as a short piece of the old line.
+      ctx.fillStyle = 'rgba(214, 233, 255, 0.85)';
+      bar(at, Math.min(len, 1.4), COUNTER_GLASS);
+    }
+    at += len + gap;
+  }
+
+  // And what came out of it, lying on the bench either side.
+  ctx.fillStyle = 'rgba(198, 222, 255, 0.5)';
+  for (let i = 0; i < 8; i++) {
+    const off = (rand() - 0.5) * (depth - 7);
+    const down = start + rand() * span;
+    const s = 0.9 + rand() * 1.7;
+    if (along) ctx.fillRect(down, mid + off, s, s);
+    else ctx.fillRect(mid + off, down, s, s);
+  }
+}
+
+/**
+ * Intact panes read as glass; smashed ones leave an empty gap in the wall.
+ *
+ * **A counter is the exception and is drawn either way.** It is furniture
+ * rather than a hole with glass in it, so putting a round through the screen
+ * leaves the bench exactly where it was — still solid to walk into, and still
+ * something to see and shoot over, which it already was. The server half of
+ * that is `isWindowSolid`.
+ */
 export function drawWindows(
   ctx: CanvasRenderingContext2D,
   windows: WindowPane[],
@@ -670,8 +751,9 @@ export function drawWindows(
   view: Viewport,
 ): void {
   for (let i = 0; i < windows.length; i++) {
-    if (broken.has(i)) continue;
     const p = windows[i];
+    const smashed = broken.has(i);
+    if (smashed && !p.counter) continue;
     if (
       p.x > view.x + view.w ||
       p.x + p.w < view.x ||
@@ -681,7 +763,7 @@ export function drawWindows(
       continue;
     }
     if (p.counter) {
-      drawCounter(ctx, p);
+      drawCounter(ctx, p, smashed);
       continue;
     }
     ctx.fillStyle = 'rgba(147, 197, 253, 0.34)';

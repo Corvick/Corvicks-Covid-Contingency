@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.24.6';
+export const GAME_VERSION = '0.25.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3370,11 +3370,32 @@ export const SHIELD_BASH_SLOW_MUL = 0.35;
 export const SHIELD_BASH_SHOW_MS = 260;
 export const SHIELD_BASH_COOLDOWN_MS = 700;
 /**
- * And what it costs. Roughly half a second of sprint per shove, out of the
- * same bar — so a shield is not a way to stand your ground indefinitely, and
- * bashing your way clear leaves you without the legs to use the gap.
+ * And what it costs: **a quarter of the bar**, out of the same one the legs
+ * spend — so a shield is not a way to stand your ground indefinitely, four
+ * shoves is a full bar, and bashing your way clear leaves you without the legs
+ * to use the gap.
+ *
+ * Derived from `STAMINA_MAX` rather than written down as 25, because it is a
+ * *share* and the day the bar's size changes is the day a flat figure quietly
+ * stops being a quarter of it.
  */
-export const SHIELD_BASH_STAMINA = 24;
+export const SHIELD_BASH_STAMINA_SHARE = 0.25;
+export const SHIELD_BASH_STAMINA = STAMINA_MAX * SHIELD_BASH_STAMINA_SHARE;
+/**
+ * **A dispatched officer pays in time rather than in breath.**
+ *
+ * `world.stamina` is the per-connection player map maintained by
+ * `updatePlayers`, and a bot's reserve is `botStamina` on its own AiState — a
+ * grey officer has neither, and handing one a bar nothing else in its life
+ * reads or refills would be a whole new currency for the sake of one item. So
+ * the bill is a much longer cooldown instead: seven times the player's, which
+ * is what keeps a four-man stack from shoving a street flat while a player
+ * still has to choose between the shove and the legs to use the gap.
+ *
+ * Read off the shield in the bag rather than off `world.swat`, so it covers
+ * exactly whoever is carrying one — which today is SWAT and nobody else.
+ */
+export const SWAT_BASH_COOLDOWN_MS = 5000;
 /** TESTING: scatter one of every item around player one's start point. */
 export const TEST_DROP_ALL_ITEMS = true;
 export const TEST_DROP_RADIUS = 90;
@@ -3885,6 +3906,70 @@ export const BUILDING_AVOID_MS = 900;
  * direction that is worse for a reason.
  */
 export const BOT_INDOOR_FLIGHT_COST = 600;
+
+/**
+ * **What a bot officer already indoors and being chased does instead**, and
+ * the three numbers that decide which room it kites into next.
+ *
+ * `BOT_INDOOR_FLIGHT_COST` above is the other half of the same report and only
+ * ever answers "do not go *in*". It says nothing at all to a bot that is
+ * already inside — which is where they were dying, reported as *"they fumble
+ * around and sometimes back the right choices but more often than not going
+ * into a building with zombies leads them to die"*. Indoors, the ring of
+ * destinations `escapeDestination` scores and the ring of bearings
+ * `giveGroundHeading` probes are both street heuristics: both read clearance
+ * on a straight line *through walls*, so the spot with the most air round it
+ * is routinely the back bedroom, and the pack files in behind.
+ *
+ * So the way out is planned over the **room graph** instead, which is the same
+ * argument `roomHopToward` and `deeperRoom` already make. It is also what
+ * makes "remember the way out of every room" free rather than a thing to
+ * build: the graph is static for the round, so a bot never has to have *seen*
+ * an exit to know it is three doorways that way.
+ *
+ * `DOORWAY_MOB` bodies actually filling a gap refuse it outright on the first
+ * pass — the existing threshold and the existing reason, that under it one or
+ * two are a thing to be got round rather than a wall.
+ *
+ * A hop between rooms costs 1. On top of that a doorway and the room beyond it
+ * are each priced by how near the pack is to them, read off the **danger
+ * field** — geodesic, so it is how far the nearest of them has to *walk*, and
+ * a wall between them and the next room counts for what it is worth. That
+ * pricing is what makes the pack's own door the dearest way out of the
+ * building and any other one preferred, with no line of code about which door
+ * anybody came in by.
+ *
+ *  - **`BOT_ROOM_DANGER_NEAR`** is how close counts as near, and it is
+ *    `BOT_SAFE_DIST` on purpose — the figure this bot already uses everywhere
+ *    else for "I am not clear of it".
+ *  - **`BOT_ROOM_DANGER_COST`** is what standing on top of them is worth in
+ *    hops, tapering to nothing at the edge. Six, so a clear way round of up to
+ *    six extra rooms beats a doorway they are filling, and a doorway they are
+ *    merely near costs a room or two.
+ *  - **`BOT_WAY_OUT_STICK`** is the margin on the route already being walked,
+ *    the same shape as `ZOMBIE_TARGET_STICK` and for the same reason: the
+ *    field is rebuilt several times a second under a pack that is moving, and
+ *    a plan re-derived from scratch against it flips between two ways out.
+ *    Measured without it, the officer changed his mind every dozen ticks and
+ *    walked into the pack on the second route — 130px of clearance down to 26.
+ *  - **`BOT_FALL_BACK_MARGIN`** is the same margin for the retreat, in the
+ *    same units as the cost above.
+ */
+export const BOT_ROOM_DANGER_NEAR = 220;
+export const BOT_ROOM_DANGER_COST = 20;
+export const BOT_WAY_OUT_STICK = 0.7;
+export const BOT_FALL_BACK_MARGIN = 1;
+/**
+ * How long a chosen next room is held before the room graph is walked again.
+ *
+ * Latched at all, because a plan re-decided every tick is a bot turning round
+ * in its own doorway — the fault `settleRoom` and the zombies' latched room
+ * both exist to avoid. Short, because this is a *kite*: the pack moves from
+ * room to room, and a plan made against where it stood four seconds ago is the
+ * fumbling that was reported. Arriving replans immediately whatever this says,
+ * so it only ever bounds a leg that is taking a while.
+ */
+export const BOT_INDOOR_REPLAN_MS = 400;
 
 /**
  * The dirt path's texture, and the lamps at either end of it.

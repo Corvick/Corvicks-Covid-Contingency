@@ -442,6 +442,23 @@ export interface AiState {
   doorWatch: number;
   doorWatchUntil: number;
   /**
+   * Bots only: the way out of a building, one room at a time.
+   *
+   * `wayOutRoom` is the room being kited into next — `OUTSIDE` when the next
+   * doorway is a street door — and `wayOutX`/`wayOutY` is the point to walk at
+   * to get there. `wayOutAt` is when the room graph is walked again; 0 is "no
+   * plan", and arriving in `wayOutRoom` replans whatever it says.
+   *
+   * Latched rather than recomputed per tick for the reason every latched room
+   * in this file is: the room underfoot changes halfway through a doorway, and
+   * a plan re-decided at that moment is a body turning round in its own
+   * threshold. See `wayOutOfHere`.
+   */
+  wayOutRoom: number;
+  wayOutX: number;
+  wayOutY: number;
+  wayOutAt: number;
+  /**
    * Dispatched squads. `squadSlot` 0 leads and `sweeps`; the rest keep station
    * on the leader through `escortId`, at a bearing derived from their slot so
    * the four of them move as a group rather than stacking on one point.
@@ -1411,6 +1428,10 @@ export function newAiState(now: number, x: number, y: number): AiState {
     nextDoorGuardAt: 0,
     doorWatch: -1,
     doorWatchUntil: 0,
+    wayOutRoom: -1,
+    wayOutX: 0,
+    wayOutY: 0,
+    wayOutAt: 0,
     squadSlot: -1,
     sweeps: false,
     squadBearing: 0,
@@ -1563,6 +1584,27 @@ export function isWindowIntact(world: World, index: number): boolean {
   return (world.windowHealth[index] ?? 0) > 0;
 }
 
+/**
+ * Can a body walk through this pane? Intact glass cannot be walked through —
+ * and neither can a **counter** whose glass has gone. A teller's station is a
+ * bench with a screen standing on it, and shooting the screen out does not
+ * take the bench away.
+ *
+ * It is deliberately not asked about sight or gunfire, and it never has to be:
+ * both go through glass whether or not it survives — `hasLineOfSight` ignores
+ * panes outright and `fire` only stops at one to damage it — so a shot-out
+ * counter is exactly "see over it, shoot over it, do not walk through it",
+ * which is what it already was with the screen intact. What breaking it
+ * changes is the picture, not the geometry.
+ *
+ * A counter is therefore the one pane that is never a way through, which is
+ * also why `attackBlockingWindow` leaves them alone: tearing at one buys a
+ * zombie nothing but the seconds it spends, and the doorway beside it is open.
+ */
+export function isWindowSolid(world: World, index: number): boolean {
+  return isWindowIntact(world, index) || world.map.windows[index]?.counter === true;
+}
+
 /** Applies damage to a pane; returns true when this hit smashed it. */
 export function damageWindow(world: World, index: number, amount: number): boolean {
   if (!isWindowIntact(world, index)) return false;
@@ -1571,7 +1613,10 @@ export function damageWindow(world: World, index: number, amount: number): boole
   world.windowHealth[index] = 0;
   world.brokenWindows.push(index);
   // A smashed pane is a new way through — the nav grid has to learn about it.
-  world.navDirty = true;
+  // A counter is the exception: the bench outlives the screen, so nothing about
+  // where anybody may walk has moved and a rebuild would be 4ms spent for
+  // nothing. `NavGrid` keeps marking it either way; this only saves the work.
+  if (!world.map.windows[index]?.counter) world.navDirty = true;
   return true;
 }
 
@@ -1843,7 +1888,7 @@ export function hasWallClearPath(
     maxX,
     maxY,
     (index) =>
-      isWindowIntact(world, index) && segmentRectT(x1, y1, x2, y2, world.map.windows[index]) !== null,
+      isWindowSolid(world, index) && segmentRectT(x1, y1, x2, y2, world.map.windows[index]) !== null,
   );
   if (blockedByPane) return false;
 
@@ -2713,6 +2758,29 @@ export function killEntity(world: World, e: Entity, now: number, angle?: number)
   removeEntity(world, e.id);
 }
 
+/**
+ * **This zombie has let go of whoever it had hold of.**
+ *
+ * Two things take a grabber off a victim without killing it — a shield shove
+ * and a zap mine — and both used to do it by hand with a bare
+ * `session.zombieIds.delete(id)`. That leaves a session behind with nobody in
+ * it, and an empty session is not nothing: `computeFrozen` freezes a victim
+ * for as long as one exists, so the man who had just been shoved clear stood
+ * rooted, unable to move, path or shoot, until the original grip's own
+ * `endsAt` came round — and then `resolveGrapple` ran on it anyway.
+ *
+ * That was invisible while nothing a *victim* did could empty a session; it is
+ * load-bearing now that a pinned officer can shove his way out of one. So the
+ * emptied session is dropped here, which is exactly what `releaseGrapples`
+ * already does for the same reason when a grabber dies.
+ */
+export function letGoOf(world: World, zombieId: string): void {
+  for (const [targetId, session] of world.grapples) {
+    if (!session.zombieIds.delete(zombieId)) continue;
+    if (session.zombieIds.size === 0) world.grapples.delete(targetId);
+  }
+}
+
 /** True when this entity is locked in a grapple, as victim or as attacker. */
 export function isInGrapple(world: World, id: string): boolean {
   if (world.grapples.has(id)) return true;
@@ -3508,11 +3576,12 @@ export function resolveCollisions(world: World): void {
     world.wallGrid.queryCircle(e.x, e.y, e.radius + 4, walls);
     for (const wall of walls) resolveCircleRect(e, wall);
 
-    // Unbroken glass is as solid as wall for movement, just not for sight.
+    // Unbroken glass is as solid as wall for movement, just not for sight —
+    // and a counter stays solid once its screen has gone. See `isWindowSolid`.
     panes.clear();
     world.windowGrid.queryCircle(e.x, e.y, e.radius + 4, panes);
     for (const index of panes) {
-      if (isWindowIntact(world, index)) resolveCircleRect(e, world.map.windows[index]);
+      if (isWindowSolid(world, index)) resolveCircleRect(e, world.map.windows[index]);
     }
 
     // A shut door is as solid as the wall it hangs in.

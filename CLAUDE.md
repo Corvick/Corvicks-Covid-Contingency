@@ -2495,6 +2495,56 @@ rectangle, not a line in a wall, and glass the whole way through.
   lobby into the office here" is satisfied just as well by a plan where you
   cannot walk from the lobby into the office at all.
 
+##### And the bench outlives the screen
+
+Asked for as *"when the glass breaks there should be a 'wall' but this wall is
+special because it is impassible but you can still see over it and shoot over
+it (like a bank tellers window being shot out, the counter is still there)"*.
+A smashed pane was deleted outright — out of collision, out of the nav grid,
+and `drawWindows` skipped it, so putting a round through the teller's screen
+left an empty gap in the wall and you could walk through the counter.
+
+- **`isWindowSolid` is the whole of it**: intact glass, *or* a counter. Every
+  question about **walking** asks it — the collision pass, `hasWallClearPath`
+  and the nav grid — and nothing else does, because nothing else needs to. A
+  pane has never stopped sight or gunfire in either state: `hasLineOfSight`
+  ignores panes outright and `fire` only stops at one to damage it. So a
+  shot-out counter is exactly "see over it, shoot over it, do not walk through
+  it", which is what it already was with the screen in. **What breaking it
+  changes is the picture, not the geometry.**
+- **The nav grid keeps the rule rather than the caller.** `rebuildNav` is the
+  only place that passes a broken set today, but which panes outlive their
+  glass is a fact about the *map*, and every harness builds a grid of its own —
+  so `NavGrid` marks a counter whether or not it is in that set, and no
+  construction site can forget.
+- **Ordinary glass is untouched**, and that is the point of the scoping: a
+  smashed shop front is still a way in, so the horde keeps windows as an entry
+  route and `WINDOW_HEALTH` still means something. A counter is furniture.
+- **So a zombie never tears at one.** `attackBlockingWindow` skips counters
+  outright: smashing one opens no way through, and left in, a zombie spends a
+  whole pane's worth of seconds on a slab it is still standing behind
+  afterwards — with the way round it open the entire time.
+- **`damageWindow` does not dirty the nav grid for a counter.** Nothing about
+  where anybody may walk has moved, and a rebuild is ~4ms spent for nothing.
+- **The drawing is the bench with the glass gone**, not the bench with nothing
+  on it. An empty glazing channel dark down the middle where the bright line
+  was, a few stubs still standing in the frame, and fragments across the top;
+  the deal tray stays, because it is cut into the bench, and the speak-hole
+  goes, because it is a hole *in the screen*. The stubs are walked along the
+  run rather than placed at a fixed count — a wider counter breaks into more
+  pieces rather than longer ones, the cell gate's teeth again — and every one
+  of them is hashed off the pane's own position, since this runs every frame
+  the thing is on screen and a `Math.random()` in it is broken glass that
+  reshuffles itself sixty times a second.
+
+Measured headlessly over six cities, breaking the counter through `damageWindow`
+and rebuilding: walk across it **false → false**, see across it **true → true**,
+its centre cell still blocked **6/6**, and a body stood dead in the middle of
+the bench shoved back out **6/6**. **The control is an ordinary pane on the same
+city — walk across it false → true, and its cell unblocked, 6/6** — which is
+what says a window is still a way in. The throwaway rig was deleted; the drawing
+half is not measured and `stationrig.ts` still only reads an intact counter.
+
 #### The half away from the breach, and usually the far end of it
 
 **`generateMap` rolls the outbreak now, and `populate` reads it back.**
@@ -3781,10 +3831,16 @@ from one place and no call site had to learn about it.
   thing anybody is doing. Only the grapple case is let through.
 - **NPCs needed their own way in**, because `updateAi` skips a frozen entity
   outright. `pinnedOfficerTick` is that, and it is deliberately tiny — face
-  whatever has hold of you and pull the trigger. No movement, no pathing, no
-  looting, no turn rate: the arm is being held, so it fires where it already
-  points. Measured over two seeds: 4 and 12 shots across 499 and 1008 ticks
-  spent grappled, which is what a 5s cooldown buys.
+  whatever has hold of you, pull the trigger, and put the shield in if you are
+  carrying one. No movement, no pathing, no looting, no turn rate: the arm is
+  being held, so it fires where it already points. Measured over two seeds: 4
+  and 12 shots across 499 and 1008 ticks spent grappled, which is what a 5s
+  cooldown buys.
+- **The shield is the second thing it may do, and it is a way out rather than a
+  weapon** — see **And being held is when he most wants it**. A shove takes
+  whatever it catches off the man it had hold of, so with the last grabber gone
+  the grip is over. A pinned *player* gets the same exception, through
+  `processRightClick` rather than through here.
 - **It bailed out on the city's own officers for two years of code.** It opened
   with `const inv = ...; if (!inv) return;` — and a grey officer the city
   started with has **no inventory at all**: they shoot through `officerGrade`,
@@ -6686,6 +6742,10 @@ those is a walk into a room with one way out and a horde in the doorway.
   path very well in buildings" is as true of one zombie as of ten, and a
   threshold is one more line for a wavering count to sit on — the cure for which
   this file has already written down four times.
+- **It says nothing to a bot that is already inside one**, which is the other
+  half of the same report and is the section below — `wayOutOfHere`. This one
+  is "do not go in"; that one is "and once you are in, this is how you get
+  out", and they have separate gates for exactly that reason.
 - **Looting and the corner-complex raid are untouched.** Neither is flight, and
   `BOT_LOOT_MIN_CLEARANCE` already keeps an errand away from a crowd. Measured
   as a control: a rifle on a front-room floor in a quiet city is fetched **36/36
@@ -6754,6 +6814,204 @@ failing, and the last two are new traps worth keeping:*
   band (1/36 against 6/36). Neither is a result. Those bands carry the one
   claim they can support, which is that the bot did not walk inside; the chasing
   band carries the rest.
+
+#### And once it is in one, it kites out of it a room at a time
+
+Reported as *"bot officers are having trouble kiting zombies in buildings. I
+understand being caught with your back against the wall getting them killed but
+as of right now they are dying simply by not knowing how to kite through
+multiple rooms when zombies are in front of them. A task like that should
+always lead to survival (multiple zombies chasing from one direction when in a
+building). They need to remember the exit to the building and each room they go
+to, and that if there are zombies coming in from one entrance to kite away
+using another one ultimately leading to outside preferably (and not accidently
+heading towards a dead end)."*
+
+**The section above only ever answers "do not go *in*", and it says nothing at
+all to a bot that is already inside.** Which is most of them: they go in after
+loot, they raid the corner complex, and a pack arrives while they are in there.
+And the two things they asked once inside are both **street heuristics** —
+`escapeDestination` samples a ring at `ESCAPE_DISTANCE` and scores each spot on
+the danger field at its far end and its midpoint, `giveGroundHeading` probes a
+ring of bearings and scores each on straight-line clearance to the nearest
+threat. Neither reads a wall. Indoors that is wrong twice over: the airiest
+spot on the ring is the room the pack has not reached yet, which is very often
+the one with no second door; and a bearing with no zombie along it is a bearing
+into a corner.
+
+`wayOutOfHere` is the answer and it is a search over the **room graph**, which
+is the one structure in the game that knows what a doorway is. Each of the
+three things the report asks for falls out of a different part of it:
+
+- **"Remember the exit to the building and each room they go to" is free**, and
+  that is most of why this was affordable. `RoomMap` is static for the round —
+  walls and doorways do not move — so `Room.exits` is already every way out of
+  every room, and a bot three partitions in needs no memory of having walked
+  past a door to know one is there. What *is* remembered is the much shorter
+  list of doorways this bot has tried and been turned away from: `refusedDoors`
+  and `doorIgnore`, which `doorTick` already fills in when it finds one a
+  player bolted or hears something behind it. A cell gate and a player's bolt
+  are refused with them — routing at one is walking to somewhere the officer
+  will then refuse to go.
+- **"Not a dead end" falls out of where the search is aimed.** The goal is the
+  *street*, so a cupboard is never on a route by construction: it is reachable,
+  never passed through. The only place the rule has to be written down is the
+  retreat, `fallBackRoom`.
+- **"Kite away from the entrance they are coming in by" is the cost
+  function**, not a rule about doors. Nothing anywhere records which door the
+  pack used; it is simply the dearest one, because the cost is read off the
+  danger field.
+
+Three answers, in order, and the order is the ask: **a way out they are not
+standing in**; failing that, **a room further from them that still has
+somewhere to go from it**; failing that, **out past them** — the same second
+pass, and the same argument, as `exitPointFor`'s `allowBeaten`. Null means
+"this room is the best of them", which drops the caller back on the bearing it
+had, and that is right when there is one room to work in — which is the whole
+of the city's ordinary blocks.
+
+- **The cost is read off `danger.ts`, not off `state.threatPoints`, and the
+  first version was the other way round.** That list is line-of-sight filtered
+  and refreshed on the perception tick, so it holds what the officer can see
+  *now* — and the moment he backs out of the room, the pack he is running from
+  leaves it, the doorway they are filling reads clear, and the cheapest way out
+  becomes the one straight back through them. Measured, the plan flipped
+  between two routes every dozen ticks and he walked into the pack on the
+  second: **130px of clearance down to 26 in eight ticks**, with `threatPoints`
+  reading 1. That is the fumbling in the report, reproduced by the fix meant to
+  cure it. The danger field is geodesic — how far the nearest of them has to
+  *walk* — so a wall between them and the next room counts for what it is
+  worth, and reading it here is not new omniscience: *flight* reads danger and
+  anything calmer reads rumour, and this is flight.
+- **What the field cannot say is how many bodies are in a gap**, which is a
+  fact about the doorway rather than a distance. `DOORWAY_MOB` of them refuses
+  it outright on the first pass, off `threatPoints` — visible ones only, which
+  is the right way round for a *refusal*, since it can only ever add one and so
+  the flicker above can never turn it into a reason to walk at anybody.
+- **The walk to the first doorway is priced too, and leaving it out was the
+  whole of what sent it through the pack.** Every other cost here is a fact
+  about a room or a gap and none of them knows where in the room the officer is
+  standing — so a street door on the far side of the pack, itself two hundred
+  pixels clear of them, scored as a perfectly good way out while the walk to it
+  ran straight past the bodies on the floor. It is the mistake
+  `escapeDestination` names in its own scoring, and it gets the same one-line
+  answer: a sample at the midpoint.
+- **`BOT_ROOM_DANGER_NEAR` is 220 and not `BOT_SAFE_DIST`**, which is what it
+  was first. At 330 every room in a landmark is "near" and every hop costs four
+  to six, so *moving at all* was dearer than the one-hop route straight out of
+  the door they were coming in by — and the search's own "nothing still open
+  can beat the exit already found" then stopped it before it had looked at a
+  second exit. Measured on one city: the pack's door cost 6.38 and the search
+  found **exactly one candidate**. At 220 and a cost of 20 the same city reads
+  10.82 against **7.00 two rooms the other way**.
+- **`BOT_WAY_OUT_STICK` is the margin that stops it dithering**, the fifth time
+  this file has reached for one — `BOT_BOLT_DIST` against `BOT_SAFE_DIST`,
+  `BOT_SWAP_MARGIN`, `longestGun` and `ZOMBIE_TARGET_STICK` are the others. The
+  field is rebuilt several times a second under a pack that is moving, and a
+  plan re-derived from scratch against it flips.
+  - **It has to know there is no incumbent, and that was a real bug.** A fresh
+    `AiState` starts `wayOutRoom` at -1, which *is* `OUTSIDE` — so with no plan
+    at all the margin fell on "step straight out of the nearest door", every
+    officer's very first plan was discounted 30% for going outdoors, and the
+    nearest door is the one the pack is filing through.
+- **The plan is latched to the room the leg *ends* in**, not to "out of the
+  building", even when the route behind it runs three doorways further.
+  Arriving is what drops the latch, and a plan stamped `OUTSIDE` while the body
+  is still indoors can never arrive — it then stands for the whole of
+  `BOT_INDOOR_REPLAN_MS` with the pack moving under it.
+- **A route over the room graph gets no `unstickTick`, deliberately.** That
+  wants `UNSTICK_MIN_PROGRESS` in `UNSTICK_CHECK_MS` — 38px/s — and then
+  commits `UNSTICK_COMMIT_MS` of a blind bearing that knows about walls and
+  nothing about doorways. Indoors an officer stops for a whole second at every
+  locked handle (`DOOR_NPC_UNLOCK_MS`), so it fires the moment the door swings
+  and walks him off the route he had just opened. Same trap, same answer as
+  `hidesDeeper`: the replan budget covers a route that genuinely will not work,
+  and the breakout was making work.
+- **It is wired into all three flight branches**, including the kiting one,
+  which is the branch the report is actually about — `BOT_BOLT_DIST` out to
+  `backAt` is exactly the band a pack walking in through a door occupies. There
+  the route is still put through `dodgeThreats`, because a plan scored on rooms
+  and doorways is far too coarse to have noticed the one standing in the middle
+  of the floor.
+- **`deadEnd` counts a street door.** A front room with a single opening is a
+  perfectly good place to be backed into, because the opening is the way out of
+  the building; counting doorways alone reads it as a cupboard, and on the
+  harness that mistake alone put a hundred ticks a run in the wrong column on
+  runs that were walking out of the front door.
+
+`server/botrooms.ts` is the harness — headless, no socket, no port.
+`setBotIgnoresRooms` is the gate and it is **kept**, and it is deliberately
+*not* folded into `setBotFleesIndoors`: that one is "do not go in" and this one
+is "and once you are in, this is how you get out", and folded together either
+measurement would read as the other — worse, the control for this one would be
+a bot that could not be got into a building to be measured. Paired, both modes
+on the same seeded city from the same staging. **The pack cannot be shot down**
+by default, which is what makes the run measure kiting rather than the bolt
+action; a killable one is `TOUGH=1`.
+
+| an officer indoors, nine in through one door, 30s, 49 cities | OLD | NEW |
+|---|---|---|
+| got out of the building | 11-12/49 | **19/49** |
+| …by a door other than the pack's | 9-10 | **15** |
+| **still an officer at the end** | **8-9/49** | **17/49** |
+| ticks with a hand on it | 1800-1829 | 1541 |
+| ticks in a dead-end room | 118-131 | **62** |
+| rooms walked through, median | 2 | **3** |
+| ground covered, median — the control | 781-787px | 797.4px |
+
+**Ground covered is the control and it is load-bearing**: "it did not walk into
+the pack" is satisfied perfectly by an officer who has stopped moving at all,
+which is a worse bug than the one being fixed.
+
+*Ranges rather than single figures, and the reason is worth knowing before
+re-running it.* The cities are seeded and the run is paired, so it looks as
+though it ought to be exact — and the NEW column is, across invocations. The
+OLD column moves by one, because `resetWorld` takes no clock and stamps every
+fresh `AiState` with the real `Date.now()`: the zombies' first perception ticks
+are staggered off wall time, which is a few milliseconds different every run.
+Quote the range.
+
+**It is still not "always survival", and that should not be claimed.** Nine
+zombies at 280px in a building is a fight the officer loses more often than he
+wins — `GRAPPLE_NO_ESCAPE_AT` is 3, so the third pair of hands is the end of it
+whatever the route was. What doubled is how often he is alive at the end and
+how often he is out of the building; what did not change is that a landmark
+with one street door has nowhere to send anybody, which is a `mapgen` question
+and the same conclusion **Barricading** and **Running past a pile in the
+doorway** both reach.
+
+*Five things about measuring this were the rig lying rather than the code
+failing, and the first three are the useful ones:*
+
+- **`DoorRuntime.insideSign` is `0` on about half the exterior doors**, and
+  `buildingIndexAt` reads -1 several tiles inside some edge buildings — it
+  walks `rects`, and a door hung on a shared run is not always inside one. Read
+  either way, one of the two doors on nearly every landmark was thrown away:
+  the rig staged 6 cities in 8 and every one of them a single-room block, which
+  is not the report. The room map is the structure the feature is written
+  against and it is the one to ask.
+- **The officer walks at the pack before he has perceived it.** `newAiState`
+  staggers the first perception tick, and a bot with nothing perceived falls
+  through to patrol — where `botPatrolTarget` picks an *outdoor* spot, which
+  from inside a building is out of the nearest street door, which is the one
+  they are filing through. Measured, that is a grapple by tick 16 in both modes
+  on every city: the rig staging its own subject into a fight before either
+  behaviour had run. `state.nextSenseAt = 0` is the staging, and it is the
+  report anyway — an officer indoors who has *seen* them coming.
+- **"As far back from the door as the floor allows" is the far corner**, which
+  is the back-against-a-wall case the report explicitly sets aside. Staged
+  there the officer had open ground in exactly one direction and it was the one
+  the pack was in, and both modes sprinted east into them. It is the floor cell
+  nearest the middle of the room that is at least `STAND_BACK` off the slab.
+- **A third of cities have no building with two ways out rooms apart**, so a
+  short run is a lottery — the same code read 3/7 → 3/7 on eight cities and
+  11/49 → 19/49 on sixty-four. Below `ASSERT_MIN` the harness prints the table
+  and claims nothing, which is the honest answer rather than a pass or a fail
+  on a sample that supports neither.
+- And the pack has to start far enough out to be a chase rather than an ambush.
+  At 210px the officer is in contact inside a second and both modes read the
+  same; the front rank stands at the slab with the rest backed out into the
+  street, which puts it at **280-300px**.
 
 #### The radio is not a smoke grenade, and a sling is why it was
 
@@ -8036,7 +8294,10 @@ button has to carry two actions and only the server knows which are available,
 so the HUD is *told* what the bipod is doing (`deployWanted` on the wire)
 rather than keeping its own copy and drifting out of step.
 
-- **Tap**: bash if the shield is up, otherwise work the bipod. The shove is
+- **Tap**: bash if the shield is up, otherwise work the bipod. **While
+  something has hold of you the bash is all it does** — see **And being held is
+  when he most wants it**; the bipod and the sling are refused, and the shove is
+  the way out of the grip. The shove is
   drawn: `bashUntil` on the server becomes `bashing` on the wire for
   `SHIELD_BASH_SHOW_MS`, and the client throws the shield arc forward, thickens
   it and puts three short motion lines ahead of it. Set whether or not anything
@@ -8056,8 +8317,9 @@ shield-specific window rather than more charges.
 The shield is **worn, not held**: it costs a utility slot like kevlar, goes up
 the moment you pick it up, and stays where you put it while you get on with
 your guns. **A bot officer bashes with it too** — see **Giving ground costs
-nothing, and the shield is a weapon**; `shieldShove` is the shared half and the
-stamina is the half that is not. It turns a grab away outright from whichever side it covers —
+nothing, and the shield is a weapon** — **and so does a SWAT operator**, see
+**And an operator throws his, on a clock**. `shieldShove` is the shared half
+and what pays for it is the half that is not. It turns a grab away outright from whichever side it covers —
 `SHIELD_FRONT_ARC` in front while up, `SHIELD_BACK_ARC` behind while slung —
 spending one of `SHIELD_POINTS` and buying the same `KEVLAR_IMMUNE_MS` breather
 the vest does. Being caught from the *other* side is the whole cost of it.
@@ -8249,6 +8511,181 @@ you actually asked for when you picked the handset up.
 - **A post inside a building is drawn back toward the leader** until it is
   somewhere they could actually stand. Walking at one is what parks somebody in
   a doorway.
+
+#### And an operator throws his, on a clock
+
+Asked for as *"can we let my swat NPC characters that are called in to use the
+bash ability with their shield just like their blue bot officer counterparts.
+except instead of using stamina its on a 5 second cooldown."* The absence was
+the same one the bots had, for the same reason: the shield went up when it was
+issued and then only ever soaked grabs, because the one *active* thing it does
+needed a right-click and an NPC has no right button. A four-man stack pressed
+into a doorway had four shields and no way to use any of them.
+
+- **`SWAT_BASH_COOLDOWN_MS` (5000) is the whole of the bill**, and that is the
+  one line not shared with the bot's version. `world.stamina` is the
+  per-connection player map `updatePlayers` maintains and `botStamina` lives on
+  a bot's AiState; a dispatched officer has neither, and handing one a bar
+  nothing else in its life reads or refills would be a new currency for the
+  sake of one item. So the wait is what it costs — seven times the player's
+  `SHIELD_BASH_COOLDOWN_MS`, which is what keeps a stack from shoving a street
+  flat while a player still has to choose between the shove and the legs to use
+  the gap.
+- **`shieldShove` took the cooldown as a parameter rather than growing a
+  branch on who is shoving.** The reach, the arc, the push, the stagger and the
+  "shoved off a victim as well as backwards" rule stay one definition; what
+  varies is who pays and how, which is the split that function was already
+  written around.
+- **Keyed off the bag, not off `world.swat`.** A shield up is a shield up, and
+  the set membership would be a second opinion about the same fact — riflemen
+  and the van's driver carry a `newInventory()` with no shield in it, so they
+  fall out on the first line without being named. The city's own grey officers
+  have no inventory at all.
+- **Called from the two places the facing is fresh**, which is the same rule
+  the bot's obeys: after the fight branch has swung the aim onto the target,
+  and inside the shaken branch, where whatever just let go of you is at arm's
+  length and is the easiest shove an officer ever gets. `shieldShove` picks who
+  it hits off `e.facing`, so one taken where his feet were pointing hits
+  nobody.
+- **Above the retreat rather than below it.** Giving ground and shoving are the
+  same answer to the same moment, and shoving first is what buys the ground to
+  give.
+- **Only when there is something in the arc** (`worthShoving`, split out of the
+  bot's version and now shared). A player may bash thin air and pay for it; an
+  operator doing it spends five seconds of its only answer to being surrounded
+  on nothing.
+- **The client needed nothing.** `bashUntil` becomes `bashing` on the wire for
+  any entity, and `drawEntity` already draws the thrust and the motion lines
+  for anything carrying `shield` — which SWAT do, and always did.
+
+`server/swatbash.ts` is the harness — headless, no socket, no port.
+`setSwatNeverBashes` is the gate and it is **kept**, and it is deliberately not
+folded into `setLegacyBotCombat`: that one is about a bot, and together either
+measurement would read as the other. Twelve cities, an unkillable zombie pinned
+on his chest and re-pinned every tick, 20s each:
+
+| | OLD | NEW |
+|---|---|---|
+| runs that bashed | **0/12** | **12/12** |
+| shoves | 0 | **48** — one every cooldown, for the whole run |
+| furthest the zombie was thrown | 8.1px | **46.3px** against a 46px push |
+| gap between shoves | — | **5033ms**, shortest 5033 |
+| **rounds fired — the control** | 12/12 | 12/12 |
+
+The 8.1px in the control is `resolveCollisions` pushing two bodies out of each
+other, which happens whatever the shield is doing — so the bar is set well
+under a shove and well over the separation rather than at zero.
+
+*One thing about staging it was the rig lying rather than the code failing.* **A
+zombie pinned on an officer's chest takes hold of him**, so a run staged that
+way is a grapple, a shove out of it, and then the next grab — the reading came
+out at **one shove a run** rather than one every cooldown, because it was
+measuring the grapple cycle rather than the clock. The operator is held out of
+every grapple for the length of *that* staging; what a pinned one does is the
+section below, where it is the point rather than an interruption.
+
+#### And being held is when he most wants it
+
+Reported straight back: *"swat should always be able to bash as long its not on
+cooldown, and for bot officers as long as they have stamina."* They could not —
+and the reason had nothing to do with shields. **A grappled body is in
+`computeFrozen`, `updateAi` skips it outright, and `pinnedOfficerTick` is all
+that runs** — which pointed the gun at whatever had hold of you and pulled the
+trigger, and did nothing else. The one moment the shield is actually for was
+the one moment it was unreachable.
+
+- **The shove is thrown from `pinnedOfficerTick`, above the gun and below the
+  facing.** Below the facing because `shieldShove` picks who it catches off
+  `e.facing`, and the arm being held is the whole reason that is pointed at the
+  attacker; above the gun because breaking the grip is the more urgent of the
+  two, and both happen on the same tick — they are different hands.
+- **The bill is the one each of them pays standing up.** A bot spends a quarter
+  of its bar, a dispatched officer waits out `SWAT_BASH_COOLDOWN_MS`. Being
+  held does not make a shove cheaper, and neither of them gets a way out that
+  is free.
+- **It is a way out rather than a shove, because of a line that was already
+  there.** `shieldShove` takes whatever it catches off the man it had hold of —
+  written for a player rescuing somebody else — so with the last grabber gone
+  the grip is over.
+
+**`letGoOf` is what makes that true, and without it the fix does nothing
+visible.** Two things take a grabber off a victim without killing it — a shield
+shove and a zap mine — and both did it with a bare
+`session.zombieIds.delete(id)`. That leaves a session behind with **nobody in
+it**, and an empty session is not nothing: `computeFrozen` freezes the victim
+for as long as one exists. So the man who had just shoved himself clear stood
+rooted, unable to move, path or shoot, until the original grip's own `endsAt`
+came round — and then `resolveGrapple` ran on it anyway and bit him.
+
+- **It was invisible while nothing a victim did could empty a session**, which
+  was true right up until this. `releaseGrapples` has always dropped an emptied
+  one when a grabber *dies*; this is the same rule for a grabber that merely
+  lets go, in one place both callers share.
+- **The mine gets it too**, and that is a fix rather than a side effect: a mine
+  that drops the zombie holding you is supposed to free you.
+
+**And `botWinded` came off the bot's test.** That latch does not clear until
+`STAMINA_RECOVERY_THRESHOLD` (82), so a bot that had sprinted itself out and
+walked most of the way back could be sitting on sixty points of bar and still
+refuse to shove — which is not "as long as it has the stamina" by any reading.
+Having the quarter is the rule. **A player still has the `world.exhausted`
+latch**, which was not asked about and is left alone.
+
+**`SHIELD_BASH_STAMINA` is a quarter of `STAMINA_MAX` now** (24 → 25), derived
+rather than written down, because it is a *share* and the day the bar's size
+changes is the day a flat figure quietly stops being a quarter of it. Four
+shoves is a full bar.
+
+**And a player gets it too**, which was the obvious follow-up: leaving the one
+body a person actually drives as the only one that could not use its own kit
+would have been the asymmetry rather than the rule. `processShooting` skipped
+`processRightClick` outright for anything frozen; a grappled officer is let
+through now, exactly as `fireHeld` already was.
+
+- **The exception is the shield and nothing else**, and it is narrowed inside
+  `processRightClick` rather than at the gate — "may I press the button" and
+  "what does it do while I am held" are two questions. The bipod is still
+  refused (`updateDeploy` is untouched, so it can neither go up nor come down),
+  and so is slinging the shield onto your back: planting a machine gun or
+  swinging a shield round behind you with something on your arm is not a thing
+  anybody is doing, which is the line this file already drew for the mine.
+- **A tap is still a tap.** The press is recorded while pinned even though the
+  hold does nothing, so the release still reads as one inside `TAP_MAX_MS`.
+- **It costs a player the same quarter of the bar it costs anyone**, and the
+  `world.exhausted` latch still applies to them — that is the player's own
+  stamina economy and nobody asked for it to change. Bots dropped their
+  equivalent latch above because the rule asked for was "as long as they have
+  stamina"; the two are deliberately not the same test.
+- `setPlayerHeldCannotBash` is its own gate in `combat.ts`, because the player
+  path is a different one end to end — right-click reported raw and resolved
+  server-side against an AI branch — and one gate over both would make either
+  measurement read as the other.
+
+Measured in `swatbash.ts` on a staged grip — built by hand rather than walked
+into, so the cooldown is clear at the moment the hands go on, with `escapeAt`
+null so the shield is the only way out. Twelve cities each:
+
+| a zombie with hold of him, a 2000ms grip | OLD | NEW |
+|---|---|---|
+| SWAT: broke the grip | **0/12** | **12/12** |
+| …held for | 2033ms | **33ms** — the first tick |
+| bot: broke the grip | **0/12** | **12/12** |
+| …held for | 2033ms | **33ms** |
+| …bar spent | 0.0 | **25.0** of 100, for one shove |
+| player: broke the grip | **0/12** | **12/12** |
+| …held for | 2033ms | **66ms** — press, release, out |
+| …bar spent | 0.0 | **25.0** of 100 |
+
+The player's two ticks against the NPCs' one is the tap itself: the button goes
+down on one and comes up on the next, and a tap is what a bash is. It is driven
+through the real `processShooting` with a real `Command` for that reason —
+what is under test is the gate in front of the button's resolution, so nothing
+short of the real one measures it.
+
+And on `botfight.ts`'s own bash rig, which does *not* grant the immunity this
+one does and so walks into real grapples: the bot's shoves go **19 → 32** over
+six cities, which is the winded latch coming off and the pinned branch opening
+together. Nothing else in that file moved.
 
 **Grey officers had no unstick at all, and a sweeping squad is what found it.**
 `unstickTick` is what every bot and civilian runs to notice it is getting

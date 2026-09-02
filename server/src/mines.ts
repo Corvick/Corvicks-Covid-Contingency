@@ -5,7 +5,7 @@ import {
   ZAP_STUN_MS,
   ZAP_FLASH_MS,
 } from '../../shared/constants.js';
-import type { Entity, World } from './world.js';
+import { letGoOf, type Entity, type World } from './world.js';
 
 /**
  * A zap mine. Put down at your feet, arms after a moment, and drops whatever
@@ -55,7 +55,7 @@ export function updateMines(world: World, now: number): void {
       tripped = true;
       world.stunned.set(e.id, Math.max(world.stunned.get(e.id) ?? 0, now + ZAP_STUN_MS));
       // Dropped where they stood, including off anyone they had hold of.
-      for (const session of world.grapples.values()) session.zombieIds.delete(e.id);
+      letGoOf(world, e.id);
     }
     if (!tripped) continue;
 
