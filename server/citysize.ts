@@ -206,7 +206,10 @@ for (const pop of [CITY_POP_MAX, 750, CITY_POP_BASE, 300, CITY_POP_MIN]) {
       callBackup(world, caller as never, Date.now());
       row.vanTried++;
       const v = [...world.vehicles.values()][0];
-      if (v && vanFits(world, v.targetX, v.targetY, v.heading)) row.vanOk++;
+      // The resting pose, not the approach line: with the arc model the body
+      // comes to rest turned by `slew * driftDir` off `heading`, and that is
+      // the orientation `slideFits` cleared.
+      if (v && vanFits(world, v.targetX, v.targetY, v.heading + v.slew * v.driftDir)) row.vanOk++;
 
       // Drive it in and let the doors open. 30Hz, up to 40 seconds.
       row.crewTried++;

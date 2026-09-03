@@ -8364,47 +8364,257 @@ wrong fight, because you had it.
   number counting down reads as ammunition; the only question here is "can I
   press it yet", and a bar answers that without being read.
 
-**The van comes in hot and stops like it, and the stop is a curve.** Straight
-in at `VAN_APPROACH_SPEED`, then `VAN_BRAKE_DIST` out the brakes bite and it
-washes `VAN_DRIFT` sideways while the back end comes round, and stops there. A
-dead-straight approach with the body rotated at the end of it is not the shot
-— the vehicle has to *travel* sideways.
+**The van comes in dead straight, *then* turns, and once it turns it travels
+the way the nose points — and on a FISHHOOK it keeps travelling that way after
+the turn is over.** Straight in at `VAN_APPROACH_SPEED`; at the brake point the
+brakes bite, and what happens inside that brake is the arrival.
 
-Three things move at once and they are deliberately separate: how fast it is
-going, how far off the line it has slid, and which way the body points.
-`heading` is the approach line and never bends; the lateral offset is walked
-along it as a smoothstep; `facing` is `heading + VAN_SLEW_ANGLE` scaled by that
-same curve, and is what goes on the wire.
+**Asked for three times, and the first two answers were wrong in the same way.**
+The first slid the body straight down the approach line with a lateral offset
+bolted on — a crab, reported as *"the van is always traveling in a straight
+line"*. The second made the path a genuine arc that follows the nose, which was
+right and still not it: *"more of a fishhook travel… more turning and more
+travel to the right or left at the end"*. **The missing piece was not the
+angle.** With the turn finishing at the resting spot, the biggest angle is only
+ever reached at the instant the van stops — so it is never *travelled* at, and
+no amount of extra slew buys the sideways run. A hook needs a **run-out**.
 
-- **The easing is not cosmetic.** The drawn angle is the travel line plus the
-  slew, so a curve still bending at the instant it stops would leave the van
-  resting at some other angle than it does now. Flattening the sideways speed
-  to nothing by the end is what keeps the final pose exactly as it was.
-- **The drift direction is chosen and checked at call time.** It comes to rest
-  offset from the spot `parkingSpot` validated, so the offset spot goes
-  through `bodyFits` too — either side will do, and it falls back to arriving
-  straight if neither fits.
-- **Tyre marks follow the curve, not a chord.** The client walks the same
-  smoothstep, so the rubber lies where the tyres were. `skidAngle` is on the
-  wire for this: the marks lie along the *travel* line, which by then is not
-  the body angle. Drawing them straight was fine while the path was and is
-  plainly wrong now — the rubber would leave the road and rejoin it.
-- **The tyres smoke while it slides**, thickest at the wheels and thinning back
-  down the marks, and keep smoking for `TYRE_SMOKE_LINGER_MS` after it stops.
-  Smoke that ends the instant the vehicle does reads as a switch being thrown.
-  Client-side and hashed off the puff index, so it costs the wire one boolean
-  and keeps no particle state but a single timestamp per skid.
+- **Three numbers, in order, and they are three different things**
+  (`shared/vancurve.ts`). `turnHold` is the fraction of the brake driven dead
+  straight before the wheel goes over. `turnDone` is where the turn *finishes*:
+  at 1 the van is still coming round as it stops, which is a lean; below 1 the
+  wheel comes back straight early and the van runs out the rest of the brake on
+  its new heading. `VAN_TRAVEL_FOLLOW` (0.85 → **0.88**) is how much of the
+  body's rotation the *travel* direction picks up — 1 is a car with the wheel
+  turned, below 1 the back kicks out and the body over-rotates relative to where
+  it is going, which is the screech.
+- **`brake` is per-style, not one constant.** `VAN_BRAKE_DIST` is gone. A
+  fishhook is a longer manoeuvre than a lean (330px against 210) and cannot be
+  squeezed into a lean's runway — one brake distance for all three is the same
+  mistake as one turn angle for all three.
+- **Three styles, and all three are equally likely.** **FISHHOOK** (`heavy`) is
+  ~80° over 330px with the turn done at 0.66, so **a third of the manoeuvre is
+  spent running out sideways**. **HOOK** is ~46° over 250px, still coming round
+  as it stops. **LEAN** is ~18° over 210px.
+- **Every style that fits is found, and then one is drawn uniformly** — asked
+  for as *"I would like all entrances to be equally likely to show up"*. A
+  weighted roll with a fall-through cannot deliver that: whatever the weights, a
+  style that does not fit hands its turn to the next one down, so the styles
+  that fit most often are the ones seen most often. It was 43/46/11 that way.
+  Weighting *against* the fit rates would need them written down as constants,
+  and they are a property of the map generator rather than of this file. So all
+  three are searched and the choice is made among the ones that landed — equal
+  likelihood **among what this street can take**, which is the only equality
+  available.
+- **A style is a family, not one shape, and the fishhook is why.** An 80° swing
+  of a 152px body wants a wide street, so at full strength it could be placed
+  for two callers in three where a hook or a lean fit ninety-eight — and no
+  choice made among them survives that. What makes a fishhook a fishhook is the
+  **run-out** (`turnDone < 1`); the angle and the length are free to give. A spot
+  too tight for 80° over 330px is offered 66°, then 54°, then 46° over 270 —
+  every one still a fishhook, and the gentlest still runs out **59px across**
+  the approach line after its turn is done.
+- **The whole parking walk is shared, with all three styles riding on it.** Each
+  asked separately is the obvious way to write it and costs three times over:
+  the lane sweep and the `bodyFits` at every candidate stop are the same work
+  whichever manoeuvre is being considered, and only `slideFits` differs.
+  Measured that way a radio call was **median 5.4ms, worst 34ms** — a whole
+  tick. Sharing the walk, each style still takes the first stopping place that
+  works for it, in the same order, for one sweep. `parkingSpot` takes an
+  `AcceptSpot` predicate and answers **null** for a style search, because "no
+  street on this map takes a fishhook" is a real answer.
+- **Candidates at the preferred depth are offered first, and that ordering is
+  load-bearing rather than tidy.** How deep the van parks *is* how much
+  manoeuvre it is allowed, so a shallow stop has too little checkable brake for
+  the ambitious shapes and only the gentlest pass. Walking outward from
+  `LANE_START`, a style therefore took the first shallow spot that worked for
+  *any* of its shapes and stopped looking — three steps before the one that
+  would have taken its best. Measured, **89 fishhooks in 90 came out as the
+  tamest of the four** and the full-strength one never appeared at all; the
+  arrival's bend off the approach line read a median of 90px against 125. Deep
+  first, then inward as a fallback for a lane that runs out early — and it made
+  the call **four times cheaper** as well, since a deep spot usually works on
+  the first candidate where a shallow one is refused a dozen times.
+- **`BACKUP_PARK_MIN` went 285 → 560, and that was the thing actually strangling
+  it.** `slideFits` can only check the parts of the brake fully on the map, so
+  **how deep the van parks *is* how much manoeuvre it is allowed**. At 285 the
+  checkable run was under 100px — enough for a lean and nothing else, whatever
+  the slew was set to. It degrades rather than refuses: a lane that runs out
+  early still parks, just shallower, and the turn is crammed down to fit.
+- **A crammed turn is a pivot, and a pivot is worse than no turn at all.**
+  Reported off a screenshot as *"this van had no more room and did an awkward
+  turn where it was turning but not moving… if it has no more room it should
+  stop and it doesn't have to do the turn"*. `callBackup` tightens the turn to
+  fit whatever length of brake is checkable, and the only floor on that was a
+  *fraction* of the brake — 12%, which at a HOOK's 250px is **30px of travel
+  for 46° of rotation**. A body that rotates faster than it translates is not
+  driving round anything; from above it reads as the animation glitching.
+  - **`VAN_MIN_TURN_RADIUS` (62) is the floor, and a radius is the right unit
+    for it** — how far the centre travels per radian. Smoothstep concentrates
+    the rotation, so the number that matters is the tightest radius on the
+    curve, at the peak of the ease: `span · brake / (1.5 · slew)`. A nominal
+    FISHHOOK is **66px**, a HOOK 125, a LEAN 262; 62 sits just under the
+    tightest style so nothing that fits its street is refused.
+  - **Refused, not squeezed.** A style that cannot make its turn at that radius
+    is skipped and the next one down the ladder — a shorter, gentler manoeuvre —
+    is tried, ending in a dead-straight arrival. Stopping is a perfectly good
+    answer.
+  - Measured over 240 arrivals: **40 turns tighter than 62px, worst 23px** on a
+    152px van — about one arrival in six was a pivot — against **0 of 239** with
+    the rule in, worst 66px, which is a nominal fishhook. The cost is about
+    seven fishhooks in fifty-six, and every one of those was a spot that could
+    only ever have produced the reported fault.
+- **The resting spot is `brakeStart + fullPathDisplacement`, not `spot`.** A
+  turning van does not come to rest where a straight one would; `callBackup`
+  integrates the whole arc, works out where it actually ends up, and re-checks
+  *that* pose. A dead-straight arrival rests exactly on `spot`.
+- **`braked` is the curve travelled, integrated forward.** A curved path's
+  projection onto the approach line is not its progress. The inbound→braking
+  transition snaps the body exactly onto the brake point, so there is no seam
+  where the straight run meets the arc.
+- **The wire carries four numbers** — `sl` (signed rotation at rest), `th`,
+  `td`, `bk` — absent together for a straight arrival. The client rebuilds the
+  same arc `vanPathDisplacement` integrates and matches the van's current
+  position to the nearest sample to know how much of the tyre-mark curve to
+  draw. Four numbers on at most a couple of bodies a round, against the client
+  guessing the shape of a curve the server is driving — which is the thing
+  `shared/vancurve.ts` exists to stop.
+- **`slideFits`'s step is adaptive, and with a fishhook it has to be.** A
+  uniform step is right for a body that only slides; between two poses of one
+  that is also *rotating*, the far corner moves by the translation **plus**
+  `r · Δθ`. Stepped at a flat 12px the corner jumped 23px between checks and a
+  van clipped a frontage the pad had waved through — measured, 1 arrival in 64.
+  The increment comes off smoothstep's own derivative now: fine where the wheel
+  is over, coarse where it is running straight, and the check count barely
+  moves.
+- **And it is walked backwards, from the resting spot toward the brake point.**
+  Same poses, same answer — but almost every refusal is at the *end*, where the
+  body is deepest into the city and most rotated, while the brake point is out
+  near the open cordon. Forwards, a spot that was never going to work paid for
+  the whole curve before finding out.
+- **`bodyFits` filters the buildings once per pose and asks the nav grid
+  first.** It used to run a few dozen times per radio call; a style now gets the
+  run of the parking search, so it runs a couple of thousand times at ~120
+  sample points each — and `buildingIndexAt` walks every building in the city on
+  every one of them, 160 bbox tests a point at the top of the slider. Measured
+  **10.1us a call**, which put the worst radio call at **24ms**, most of a tick.
+  The van's bounding box overlaps one or two footprints at most and
+  `nav.isBlocked` is an array index. After: `callBackup` **p50 3.47 → 0.91ms,
+  worst 24 → 8ms**.
+- **`STYLE_SEARCH_LOOKS` (30) bounds it.** Past thirty candidate stopping places
+  the next style down is a better answer than a stall. Swept: 10 looks gives 24%
+  fishhooks, 20 gives 43%, 30 gives 57%, 44 gives 60% — so 30 is where it stops
+  buying anything.
+- **The van is 152×58**, up from 122×46 and 104×40 before that, asked for each
+  time. The **ratio is held at ~2.6:1** — "I like the overall shape though (like
+  a rectangle)" is a bigger box, not a plank. `BACKUP_LANE_CLEARANCE` went 36 →
+  40 with it, and the drawn detailing (the POLICE bar, the roof hatches, the cab
+  door leaf) grew to match; the hatches are spread off `L` now rather than
+  written down, so they cannot bunch at the tail the next time it grows.
+- **The tyre smoke is a cloud of separate puffs, not one shape.** Each puff is
+  its own body: thrown off the tyre at a fixed point on the skid, "born" the
+  fraction of the way through the slide that point sits at, then billowing and
+  thinning on its own clock for `TYRE_SMOKE_LINGER_MS`. No two share an age,
+  which is what stopped it reading as one smear that faded as a unit. A HOOK
+  throws `TYRE_SMOKE_PUFFS + 12`, darker. Still stateless — position, size and
+  roll are a pure function of the puff index, the wire state and the clock.
+#### The arrival stuttered, and it was three separate things
+
+Reported as *"there is also some stuttering in the vans movement"*. Nothing in
+the simulation was uneven — the server ticks on a fixed `dt` and the brake curve
+is a smooth quadratic — so all three were in how the motion reached the screen.
+
+- **Vehicles were not interpolated, and everything else was.** The note above
+  `snapshotAt` in `main.ts` is about entities: the world simulates at 30Hz, the
+  screen draws at up to 144, and a body drawn at the newest snapshot moves once
+  every few frames. `vehicles` was reassigned straight off the snapshot and drawn
+  where the last tick put it, so a van slid in 30Hz steps while every body
+  around it moved continuously — the exact fault that note describes, left
+  un-fixed for the one thing on screen whose whole job is a two-second movement
+  you watch. `syncVehicles` folds each snapshot into the same
+  `advanceInterpolation` the entities use.
+  - **Matched by index rather than by an id on the wire.** `vehiclesToWire` maps
+    `world.vehicles.values()` in insertion order and nothing ever removes one
+    (only `resetWorld` clears the lot), so slot *i* is the same vehicle from one
+    snapshot to the next, for no wire bytes. The guard is what makes that safe
+    rather than merely true today: a slot whose `kind` changed, or that moved
+    further than anything can drive in a tick, is snapped instead of walked. If
+    the assumption ever breaks the worst case is the behaviour this replaced.
+- **The van jumped backwards onto the brake point.** It drives the approach in
+  whole ticks of `VAN_APPROACH_SPEED` — 13px each — so it arrives somewhere
+  *past* where braking should begin, and the transition put it back on the
+  point: a visible hitch on the one frame the manoeuvre starts. `braked` starts
+  at the overshoot instead, which costs nothing because the first stretch of
+  every curve is dead straight along the same heading the approach was on, so
+  the pose at that distance *is* where the body already is.
+- **An eighth of a pixel on the wire, where every other body is rounded whole.**
+  At the end of the brake the van is down to `VAN_BRAKE_SPEED_MIN` — about 2.3px
+  a tick — so whole-pixel rounding moves each step by up to 40% of itself, and
+  the client interpolates *between* the rounded points, which turns that into
+  speed wobble on the slowest and most-watched part of the arrival. There are
+  never more than a dozen vehicles in a round, so the extra characters are
+  nothing against four hundred bodies.
+
+#### What a radio call costs
+
+Bounded on purpose, because a style now gets the run of the parking search and
+that is a lot of geometry for one tick to check.
+
+- **`bodyFits` filters the buildings down to *rectangles*, once per pose.**
+  Buildings are a bbox plus a list of row rects and a landmark has thirty of
+  them, so filtering only to the building left every one of the ~120 sample
+  points walking that list; `buildingIndexAt` walks every building in the city
+  per point, 160 bbox tests at the top of the slider. Filtering to the rects
+  that actually overlap the body makes the inner loop two or three tests, and
+  `nav.isBlocked` — an array index — is asked first and settles nearly every
+  refusal on its own.
+- **`SLIDE_WORK_BUDGET` (2000) is a hard ceiling**, counted in `bodyFits`, which
+  is where the time goes. `STYLE_SEARCH_LOOKS` bounds how many *stopping places*
+  are considered and is the right knob for that, but it does not bound the work.
+  Over budget `slideFits` fails closed — a gentler style or a dead-straight
+  arrival, the same answer a genuinely tight street gets.
+  - **Checked before `laneReach`, not only inside the candidate loop.** A spent
+    budget otherwise still paid a full lane sweep for every remaining lane —
+    seventy-odd across four sides — for candidates it was about to refuse.
+- Measured over 320 seeded calls: **p50 0.47ms, p90 2.06ms, p99 5.87ms, worst
+  6.72ms**, against p50 5.44 / worst 34 for the first version that searched
+  every style separately.
+
+- **`client/vanrig.ts` is the demo**, because a live arrival is over in two
+  seconds. It replays the real `vanBrakePose` / `vanBrakeSpeed` /
+  `vanPathDisplacement` curve: a live loop of all six, and a filmstrip of each
+  below. **The filmstrip keeps each pose's real offset across the approach
+  line** rather than sitting eight vans on one baseline, so the row traces the
+  path — and the marks are stripped from every frame but the last, eight
+  overlapping copies of one trail being a smear where one full trail under the
+  parked van is the trajectory. Measured off the motion:
+
+  | | rest angle | resting spot off the line | run-out | …of it sideways | body ahead of travel |
+  |---|---|---|---|---|---|
+  | FISHHOOK | **±80°** | **±179px** | **112px** | **±106px** | 9° |
+  | HOOK | ±46° | ±50px | 0 | 0 | 6° |
+  | LEAN | ±18° | ±18px | 0 | 0 | 2° |
+
+  Approach deviation **0px**; dead straight for the first **13 / 29 / 34%** of
+  the brake motion; left and right exact mirrors on angle, bend *and* run-out.
+  **The run-out column is the whole of what was asked for** — 106px of travel
+  across the approach line *after* the turn has finished, which neither of the
+  first two attempts had at all. Open `/vanrig.html` on the dev server.
 
 The **car does none of it**. Two officers turning up is a smaller event than a
 SWAT team arriving and should read as one — but it is **62×28** now rather than
-the 46×22 it started at. Next to an 82×38 van it read as a toy, and two people
+the 46×22 it started at. Next to a 152×58 van it read as a toy, and two people
 have to be able to get out of the thing. Its two doors swing open together, one
 either side at the cabin, which is where `seatFor` puts the pair.
 
-*The door's rotation is negated against the side it is on.* The leaf points in
+*A door's rotation is negated against the side it is on.* The leaf points in
 -x, so swinging it outward on the +y flank takes a **negative** angle; signed
-the other way it swings inward and gets drawn white on the white roof, which is
-exactly as visible as not drawing it at all.
+the other way it swings inward. The **van's rear doors had this wrong** —
+signed so they swung *forward* over the body rather than back along the flanks
+the way a van's actually open; `-side * VAN_REAR_DOOR_ARC` fixes it. The **cab
+door** was hinged at its back edge and drawn ahead of the hinge, opening the
+wrong way round; it hinges at the *forward* edge now, panel lying back along
+the flank when shut.
 
 **The doors open, and they stay open.** The rear doors swing first and the team
 comes out of them; the cab door swings and the driver comes out of that. The
@@ -8413,10 +8623,15 @@ swing something to happen during. An emptied van standing on a corner with its
 back doors hanging open is the whole story of what happened there, told to
 anybody who arrives later.
 
-**Who gets out of where is not decoration.** `stepDown` holds the side it was
-given rather than using `findSpawnNear`, which scatters in a random direction
-and had the team spread around the whole vehicle with the driver arriving
-behind it. Measured: 4 out the back, 1 out the front.
+**Who gets out of where is not decoration, and they come out of the van rather
+than beside it.** `stepDown` holds the side it was given rather than using
+`findSpawnNear`, which scatters in a random direction and had the team spread
+around the whole vehicle with the driver arriving behind it. `unload` used to
+hand it a point a body length clear of the tail; it hands it the door line
+itself now (`+ 6`, clearing the bodywork and nothing more), so the officer
+appears *in* the open doorway and walks out from there. The van grew to 152×58
+partly for this — a crew stepping out of the tail wants a tail long enough to
+have stepped out of. Measured: 4 out the back, 1 out the front.
 
 #### A squad sweeps; it does not stand at your shoulder
 
@@ -8721,7 +8936,7 @@ which is the bit worth watching.
   down its length by three across its width, `VAN_LANE_CLEARANCE` proud —
   against `buildingIndexAt` *and* the nav grid, and `laneClear` sweeps the same
   width down the whole run in from the edge. The old patrol car asked
-  `nav.isBlocked` at one point, which an 82×38 body walks straight past: half
+  `nav.isBlocked` at one point, which a 152×58 body walks straight past: half
   of it can be in a shop while its centre stands in the street.
 - **Never on the side the outbreak walked in from.** `world.outbreakSide` is
   recorded when the breach is placed and the van picks the nearest *other*
@@ -8786,37 +9001,79 @@ there is nothing left to fall back to: it stops where it stops. Pulling up short
 of a blocked street was always the right answer; the old code agreed and then
 reached round its own rule to do it.
 
-- **The braking curve is checked, not just the resting spot.** The last
-  `VAN_BRAKE_DIST` washes `VAN_DRIFT` (52px) sideways and swings
-  `VAN_SLEW_ANGLE` (24°) across — far outside the 15px of slack the lane sweep
-  carries — so a clear lane says nothing about it. It was the last thing left
-  putting a van through a shop.
-- **`brakePose` is the one definition of that curve**, and `updateBackup` reads
-  it too rather than integrating its own copy. Where the body sits and which way
-  it points are a pure function of how much braking distance is left, so the
-  check and the motion are provably the same; written twice they would agree
-  until the day somebody tuned one of them.
+- **The braking curve is checked, not just the resting spot.** Once
+  `vanTurnEase` lifts off zero the nose comes round up to `VAN_FISHHOOK_SLEW`,
+  the body **curves off the approach line** to follow it, and then runs out
+  sideways for the rest of the manoeuvre — ending **~179px across** for a
+  fishhook, which is more than the van's own length and a very long way outside
+  the slack the lane sweep carries. So a clear lane says nothing about it and
+  `slideFits` walks the real curve. It was the last thing left putting a van
+  through a shop. A van whose turn `slideFits` refuses arrives dead straight and
+  rests exactly on `spot`; see **The van comes in dead straight**.
+- **`shared/vancurve.ts` is the one definition of that curve**, read by the
+  server's motion, `slideFits`, and the rig alike. Where the body sits and
+  which way it points are a pure function of how far it has driven, so the
+  check and the motion cannot drift apart.
 - **The part of the slide still inside the cordon is deliberately not checked.**
-  The brakes bite `VAN_BRAKE_DIST` out and the nearest a van ever parks is
-  `BACKUP_PARK_MIN` in, so braking begins 92px *before* the body is clear of the
-  boundary wall — which is the wall it is supposed to come through. Checked
-  anyway, that wall refuses every slide on every call: measured, **0 of 50** vans
-  kept their skid and every one arrived dead straight.
+  The boundary wall is there and it is the wall the van is *supposed* to come
+  through. Checked anyway, it refuses every slide on every call: measured,
+  **0 of 50** vans kept their skid and every one arrived dead straight.
+  `callBackup` raises `turnHold` so the turn itself never begins that shallow,
+  which is what makes skipping those poses safe.
 - **The breach side is a preference, not a safety rule.** All four sides are
   tried now — the ones away from the outbreak first, then the one it would
   rather avoid — because a lane it can actually drive down beats a side it
-  likes. The last resort parks on the cordon itself, where by construction there
-  is nothing to be inside of; measured at 0 uses in 120 calls.
-- **`bodyFits` samples five by five, not five by three.** The gaps in a
-  three-across sample are 34px at the van's clearance, wide enough for the corner
-  of a building to sit between two of them: 1 arrival in 100 came to rest in
-  geometry the coarser sample called a fit.
+  likes. When no side has a clean lane, the fallback **sweeps each edge for a
+  spot the body fits on** rather than plonking it a van-length inside the edge
+  unchecked (which is exactly where a perimeter building sits); the true last
+  resort is the cordon strip.
+- **The run in is swept twice as finely as the stopping places are chosen.**
+  `LANE_PROBE_STEP` is half `BACKUP_LANE_STEP`, with five samples across rather
+  than three, because a building corner narrower than the step sits between two
+  samples and is driven through: measured, **1 arrival in 720** did exactly that
+  on the dead-straight run in, with the check meant to catch it having stepped
+  over it. The corridor's rects are filtered a `LANE_CHUNK` at a time — per
+  *point* is what `buildingIndexAt` does and it walks the whole city each time,
+  while per *lane* is worse still, a 1000px corridor on a diagonal having a
+  bounding box over a quarter of the map.
+- **`bodyFits` steps its sample grid off the body size** (~13px), not a fixed
+  5×5. The gaps in a three-across sample are 34px, wide enough for a building
+  corner to sit in; a fixed 5×5 was enough at 82×38 but the longer body took
+  the *along* gap back to 25px and a corner clipped through it again.
+  `BACKUP_LANE_CLEARANCE` has gone 30 → 36 → 40 with the body.
 
-`server/vehiclecheck.ts` is the harness — headless, no socket, no port. Measured
-over 120 arrivals with callers spread across the map, vans and cars alternating:
-**0 parked with the body in geometry, 0 drove through one on the way, 0 cut the
-map**, and **48 of 60 vans kept their skid**, refused only where it genuinely
-would not fit.
+`server/vehiclecheck.ts` is the harness — headless, no socket, no port. It
+tallies the *style* now rather than a "kept its turn" boolean: a lean keeps a
+turn and the whole ask was for the big one, and the style is readable straight
+off the record — only a FISHHOOK finishes its turn early (`turnDone < 1`), and
+only a HOOK is heavy without doing that. Measured over 112 arrivals with callers
+spread across the map, vans and cars alternating:
+
+| | |
+|---|---|
+| parked with the body in geometry | **0/112** |
+| drove through geometry on the way | **0/112** |
+| parked somewhere that cut the map | **0/112** |
+| vans that kept a turn | **55-56/56** |
+| style taken | **FISHHOOK 12-20 · HOOK 18-23 · LEAN 18-20 · straight 0-1** |
+| resting spot off the approach line | median 29-50px, **worst 179px** |
+| tightest turn radius | median 83px, **worst 66px** |
+| **turns tighter than `VAN_MIN_TURN_RADIUS` — a pivot** | **0/56** |
+| an officer getting past the parked body | 14/14, median 4.9s |
+
+Ranges over three runs, because the map is not seeded — quote the range and
+never a single run. **Three rows carry what was asked for.** The style tally is
+even, which is *"all entrances equally likely"*; 179px of bend is more than the
+van's own length, so the arrival *moves* across the street rather than rotating
+on the spot at the end of it; and the pivot row is the guard on that second one.
+On a seeded rig, which is the only way to compare two settings, the split reads
+**FISHHOOK 30% · HOOK 34% · LEAN 35% · straight 1%** over 320 calls.
+
+**One arrival in a few hundred still drives through a building corner**, always
+on the `parkingSpot` fallback that gives up the clean approach to keep the clean
+rest — see the note on it below. That is the documented trade rather than a
+regression, and the rig now counts *buildings* rather than the nav grid so it
+can tell the two apart.
 
 *Two of those figures were the harness lying before they were ever the code
 failing.* Counting from the map edge reports **16/16 driving through geometry**

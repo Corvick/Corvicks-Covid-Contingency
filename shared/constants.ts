@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.25.0';
+export const GAME_VERSION = '0.27.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -3718,24 +3718,44 @@ export const BACKUP_ENTRY_OFFSET = 200;
  * the search takes the *first* clear spot, so a low floor had everything
  * pulling up on the kerb the moment it was through the cordon, close enough to
  * the perimeter that the arrival happened half off the edge of the screen.
+ *
+ * **560, up from 285, and this is what had been strangling the arrival.** The
+ * turn happens in the last stretch of the brake and `slideFits` can only check
+ * the parts of that stretch fully on the map — so how deep the van parks *is*
+ * how much manoeuvre it is allowed. At 285 the checkable run was under 100px:
+ * enough for a lean and nothing else, whatever the slew was set to. A FISHHOOK
+ * is a `VAN_FISHHOOK_BRAKE` manoeuvre and needs that much verified street in
+ * front of it.
+ *
+ * It degrades rather than refuses: `stopOnLane` walks outward keeping the last
+ * spot the body fits on and stops once past this floor, so a lane that runs out
+ * early still parks — just shallower, and `callBackup` then crams the turn down
+ * to whatever that leaves.
  */
-export const BACKUP_PARK_MIN = 240;
+export const BACKUP_PARK_MIN = 560;
 export const BACKUP_PARK_MAX = 800;
 export const BACKUP_DOOR_INTERVAL_MS = 420;
 /** How long a door takes to swing open, and how far it swings. */
 export const BACKUP_DOOR_SWING_MS = 320;
 export const VAN_REAR_DOOR_ARC = 2.1;
-export const VAN_CAB_DOOR_ARC = 1.5;
+export const VAN_CAB_DOOR_ARC = 1.7;
 /**
  * Much bigger than the patrol car it replaces (46×22). It is an armoured box
- * with six people in the back, and at the old size the thing that turned up
- * with a SWAT team in it looked like a hatchback.
+ * with a team of five in the back, and it wants to read as one from above:
+ * a crew genuinely stepping out of the tail needs a tail long enough to have
+ * stepped out of, and the doors — see `VAN_REAR_DOOR_ARC` — have to swing wide
+ * enough that the gap they leave is plainly a way out rather than a seam.
+ *
+ * 152x58, up from 122x46 and 104x40 before that. Asked for three times; the
+ * shape was right every time and the size was not. The **ratio is held at
+ * ~2.6:1**, which is what "I like the overall shape though (like a rectangle)"
+ * is asking for — a bigger box that is still a box, rather than a plank.
  */
-export const VAN_LENGTH = 82;
-export const VAN_WIDTH = 38;
+export const VAN_LENGTH = 152;
+export const VAN_WIDTH = 58;
 /**
  * The patrol car the second and third radio calls send instead. Bigger than
- * the 46×22 it started at — next to an 82×38 van it read as a toy, and two
+ * the 46×22 it started at — next to the van it read as a toy, and two
  * officers have to be able to get out of the thing.
  */
 export const CAR_LENGTH = 62;
@@ -3745,11 +3765,17 @@ export const CAR_DOOR_ARC = 1.35;
 /**
  * How much room a vehicle needs either side of the lane it drives in down, and
  * how finely that lane is checked. It must not arrive *through* a building —
- * the old car was a point test against the nav grid, which a 38px-wide body
+ * the old car was a point test against the nav grid, which a 40px-wide body
  * with a 20px shoulder either side of it walks straight past. Sized off the
  * van, which is the wider of the two, so one lane test serves both.
+ *
+ * 40, up from 36 and 30 before that. The longer body needs the room: the nav grid is a coarse
+ * 14px cell test, so a bare corner of a rotated footprint can clip a building
+ * edge the fit check waved through, and the extra margin each side is what
+ * absorbs that. The slack the slew's *sweep* needs on top of this is added
+ * only for the slide check — see `bodyFits`'s `pad`.
  */
-export const BACKUP_LANE_CLEARANCE = 30;
+export const BACKUP_LANE_CLEARANCE = 40;
 export const BACKUP_LANE_STEP = 24;
 /**
  * Lanes to try either side of the one lined up with the caller, before giving
@@ -3760,39 +3786,101 @@ export const BACKUP_LANE_OFFSETS = [0, 150, -150, 300, -300, 460, -460, 620, -62
 
 /**
  * The van comes in hot and stops like it. It runs at `VAN_APPROACH_SPEED`,
- * starts braking `VAN_BRAKE_DIST` out, and slews up to `VAN_SLEW_ANGLE` off
- * the line it is travelling — the body turns while the momentum doesn't, which
- * is the whole of what a handbrake stop looks like from above. The tyre marks
- * are laid from the moment the brakes go on and stay there afterwards.
+ * drives **dead straight** until the brake point, then brakes — and the *turn*
+ * is a separate event inside that brake, not a lean blended over the whole
+ * approach. `shared/vancurve.ts` (`VAN_TURN_HOLD`, `vanTurnEase`,
+ * `vanBrakePose`) is the one definition of the curve; the server drives with
+ * it, `slideFits` checks against it, the rig replays it.
+ *
+ * **How long the brake is belongs to the style, not to this file** — see
+ * `VAN_FISHHOOK_BRAKE` / `VAN_HOOK_BRAKE` / `VAN_LEAN_BRAKE`. There used to be
+ * one `VAN_BRAKE_DIST` for all of them, which is the same mistake as one turn
+ * angle for all of them: a fishhook is a longer manoeuvre than a lean and
+ * cannot be squeezed into a lean's runway.
  *
  * Deliberately the van only. A two-officer patrol car turning up is a smaller
  * event than a SWAT team arriving, and it should read as one.
  */
 export const VAN_APPROACH_SPEED = 400;
-export const VAN_BRAKE_DIST = 210;
 export const VAN_BRAKE_SPEED_MIN = 70;
-export const VAN_SLEW_ANGLE = 0.42;
 /**
- * And the stop is a *curve*, not a straight line with the body twisted at the
- * end of it. Straight in, then the brakes go on and it washes `VAN_DRIFT`
- * sideways while the back end comes round, and stops there — which is the
- * whole of what the shot looks like in a film, and what a dead-straight
- * approach with a rotated body conspicuously is not.
+ * **Three arrival styles**, rolled per call — and left or right within each,
+ * 50/50. `SLEW` is the body's total rotation at rest; the *path* curves toward
+ * that heading by `VAN_TRAVEL_FOLLOW` of it, so the van drives in the direction
+ * it turns rather than sliding straight down the approach line. `BRAKE` is how
+ * long the manoeuvre is, and `DONE` is where in it the wheel comes back
+ * straight — see `shared/vancurve.ts`.
  *
- * The sideways offset is eased so its lateral speed is nearly zero by the end.
- * That matters for more than smoothness: the drawn body angle is the travel
- * tangent plus the slew, so a curve still bending at the moment it stops would
- * leave the van resting at some other angle than the one it rests at now.
- * Flattening it out is what keeps the final pose exactly as it was.
+ *  - **FISHHOOK** (`heavy`): the one actually asked for. A long straight run, a
+ *    hard ~80° turn, and then — this is the part nothing before it had — **a
+ *    third of the manoeuvre spent running out sideways on the new heading**.
+ *    `VAN_FISHHOOK_DONE` at 0.66 is what buys that: with the turn instead
+ *    finishing at the resting spot, the biggest angle is only ever reached at
+ *    the instant the van stops, so it is never *travelled* at — and no amount
+ *    of extra slew produces the hook, which is why the previous two attempts
+ *    both came out as a lean with a bigger final angle on it.
+ *  - **HOOK**: a hard screeching turn that is still coming round as it stops.
+ *  - **LEAN**: a gentle curve, the nose coming round a little and the body
+ *    following it into the spot.
+ *
+ * `slideFits` gates all three and they fall through in that order — a FISHHOOK
+ * that will not fit the street drops to a HOOK, then a LEAN, then to a
+ * dead-straight arrival.
  */
-export const VAN_DRIFT = 52;
 /**
- * Rubber burning off the tyres while it slides. It keeps drifting and thinning
- * for a moment after the van has stopped — smoke that ends the instant the
- * vehicle does reads as a switch being thrown rather than as smoke.
+ * **The tightest the van may turn: how far its centre travels per radian.**
+ *
+ * Reported as a van that "did an awkward turn where it was turning but not
+ * moving", with the note that *"if it has no more room it should stop and it
+ * doesn't have to do the turn"* — and that is exactly a turn radius. A body
+ * rotating 46° while its centre covers 30px is not driving round anything; it
+ * is pivoting on itself, and from above that reads as the animation glitching
+ * rather than as a vehicle.
+ *
+ * The cause was `callBackup` cramming the turn into whatever length of brake was
+ * checkable, with only a floor on the *fraction* of the brake it could occupy —
+ * 12%, which at a HOOK's 250px brake is 30px. That floor is this instead.
+ * Smoothstep concentrates the rotation, so the number that matters is the
+ * tightest radius on the curve, at the peak of the ease:
+ *
+ *     dθ/dq = slew · 1.5 / span      ds/dq = brake
+ *     R_min = span · brake / (1.5 · slew)
+ *
+ * A nominal FISHHOOK is **66px** — 0.43 of the van's own length, a handbrake
+ * turn and deliberately so. A nominal HOOK is 125px and a LEAN 262px. 62 sits
+ * just under the fishhook, so nothing that fits its street is refused and
+ * anything tighter than the tightest style was ever meant to be is.
+ *
+ * A style whose turn cannot be fitted at this radius is not squeezed — it is
+ * **skipped**, and the next one down the ladder is tried, ending in a
+ * dead-straight arrival. Stopping is a perfectly good answer; pivoting is not.
  */
-export const TYRE_SMOKE_PUFFS = 22;
-export const TYRE_SMOKE_LINGER_MS = 1600;
+export const VAN_MIN_TURN_RADIUS = 62;
+export const VAN_FISHHOOK_SLEW = 1.4; // ~80°
+export const VAN_FISHHOOK_BRAKE = 330;
+export const VAN_FISHHOOK_HOLD = 0.24;
+export const VAN_FISHHOOK_DONE = 0.66;
+export const VAN_HOOK_SLEW = 0.8; // ~46°
+export const VAN_HOOK_BRAKE = 250;
+export const VAN_LEAN_SLEW = 0.32; // ~18°
+export const VAN_LEAN_BRAKE = 210;
+/**
+ * Rubber burning off the tyres while it slides.
+ *
+ * Each puff is drawn as its own body with its own age: it is thrown off the
+ * tyre at a fixed point on the skid, spends `TYRE_SMOKE_EMIT_MS` being made as
+ * the van travels that stretch, and then billows and thins for the rest of
+ * `TYRE_SMOKE_LINGER_MS`. Because no two puffs share an age, the set reads as
+ * a cloud of separate things rather than one shape stretched down the marks —
+ * which is what it looked like when every puff shared one fade.
+ *
+ * Still stateless: position, size and roll are all a pure function of the puff
+ * index, the wire state and the clock, with nothing kept between frames but the
+ * one timestamp of when the tyres stopped scrubbing.
+ */
+export const TYRE_SMOKE_PUFFS = 20;
+export const TYRE_SMOKE_EMIT_MS = 900;
+export const TYRE_SMOKE_LINGER_MS = 2200;
 
 /**
  * The crew: black gear, a riot shield each, and a semi-automatic rifle they

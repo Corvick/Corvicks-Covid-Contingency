@@ -36,6 +36,12 @@ import { ITEMS, type ItemId } from '../../shared/items.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { acidLobes } from '../../shared/acidshape.js';
 import {
+  VAN_TURN_HOLD,
+  vanBodyAngle,
+  vanPathDisplacement,
+  type BrakeParams,
+} from '../../shared/vancurve.js';
+import {
   BARRICADE_HALF_DEPTH,
   BARRICADE_HALF_WIDTH,
   ENTITY_COLOR,
@@ -82,7 +88,9 @@ import {
   PARK_LAMP_GLOW,
   VAN_REAR_DOOR_ARC,
   VAN_CAB_DOOR_ARC,
+  VAN_LEAN_BRAKE,
   TYRE_SMOKE_PUFFS,
+  TYRE_SMOKE_EMIT_MS,
   TYRE_SMOKE_LINGER_MS,
   ZAP_FLASH_MS,
   ZAP_MINE_RADIUS,
@@ -4765,24 +4773,25 @@ export function drawStamina(
 const skidStopped = new Map<string, number>();
 
 /**
- * Rubber burning off the tyres. Thickest at the wheels, thinning back down the
- * marks, drifting off to the side as it rises — and it keeps going for
- * `TYRE_SMOKE_LINGER_MS` after the van has come to rest, because smoke that
- * stops the instant the vehicle does reads as a switch being thrown.
+ * Rubber burning off the tyres — a cloud of separate puffs, not one shape
+ * stretched down the marks.
  *
- * Positions are hashed off the puff index rather than stored, so this is a
- * pure function of the wire state and the clock, with nothing to keep alive
- * between frames but one timestamp.
+ * Each puff is its own body. It is thrown off the tyre at a fixed point on the
+ * skid; it is "born" the fraction of the way through the slide that point sits
+ * at, so the puff at the brake point is already `TYRE_SMOKE_EMIT_MS` old the
+ * moment the van halts while the one under the wheels is fresh; and it then
+ * billows and thins on its own clock for the rest of `TYRE_SMOKE_LINGER_MS`.
+ * No two share an age, which is the whole of what stopped it reading as one
+ * smear that fades as a unit.
+ *
+ * Still stateless: position, size and roll are a pure function of the puff
+ * index, the wire state and the clock, with nothing kept between frames but the
+ * single timestamp of when the tyres stopped scrubbing.
  */
 function drawTyreSmoke(
   ctx: CanvasRenderingContext2D,
   v: BackupVehicleState,
-  ux: number,
-  uy: number,
-  nx: number,
-  ny: number,
-  along: number,
-  off: number,
+  centreAt: (t: number) => { cx: number; cy: number; face: number },
   now: number,
 ): void {
   const key = `${v.skidX},${v.skidY}`;
@@ -4790,39 +4799,54 @@ function drawTyreSmoke(
   const stoppedAt = skidStopped.get(key);
   if (stoppedAt === undefined) return;
 
+  // ≈0 while still sliding (`braking` keeps bumping `stoppedAt`), then grows.
   const since = now - stoppedAt;
   if (since > TYRE_SMOKE_LINGER_MS) {
     skidStopped.delete(key);
     return;
   }
-  // Fades away once the sliding stops rather than being cut off.
-  const settling = 1 - since / TYRE_SMOKE_LINGER_MS;
 
+  // A HOOK throws a lot more rubber off than a gentle LEAN.
+  const puffs = v.heavy ? TYRE_SMOKE_PUFFS + 12 : TYRE_SMOKE_PUFFS;
+  const axleBack = -VAN_LENGTH * 0.3;
   ctx.save();
-  for (let i = 0; i < TYRE_SMOKE_PUFFS; i++) {
-    // Where along the marks this puff sits: 0 at the wheels, 1 back at the
-    // start. Laid out with a bias toward the wheels, which is where it is
-    // actually being made.
-    const seed = Math.sin(i * 12.9898) * 43758.5453;
-    const jitter = seed - Math.floor(seed);
-    const back = (i / TYRE_SMOKE_PUFFS) ** 1.6;
-    const t = 1 - back;
+  ctx.fillStyle = '#c3ccd8';
+  for (let i = 0; i < puffs; i++) {
+    const s1 = Math.sin(i * 12.9898) * 43758.5453;
+    const s2 = Math.sin(i * 78.233 + 1.7) * 24634.6345;
+    const s3 = Math.sin(i * 39.425 + 4.1) * 12923.1231;
+    const h1 = s1 - Math.floor(s1);
+    const h2 = s2 - Math.floor(s2);
+    const h3 = s3 - Math.floor(s3);
 
-    const ease = t * t * (3 - 2 * t);
-    const side = i % 2 === 0 ? -1 : 1;
-    const lift = back * 26 + jitter * 8;
-    const px =
-      v.skidX! + ux * along * t + nx * (off * ease + side * (VAN_WIDTH / 2 - 4) + lift * 0.35);
-    const py =
-      v.skidY! + uy * along * t + ny * (off * ease + side * (VAN_WIDTH / 2 - 4) + lift * 0.35);
+    // Where on the slide the tyre was when it threw this one: near 1 at the
+    // wheels-end, biased toward it. The scrub is heaviest where the wheel goes
+    // over, which is the turn, so smoke that lands before the turn is thin.
+    const emit = 1 - ((i + h1) / puffs) ** 1.6;
+    // Age = time since the van stopped, plus the time it spent being made while
+    // the van covered the rest of the slide, plus scatter.
+    const age = since + (1 - emit) * TYRE_SMOKE_EMIT_MS + h2 * 90;
+    const life = age / TYRE_SMOKE_LINGER_MS;
+    if (life >= 1) continue;
 
-    // Older puffs are further back, bigger and fainter — a plume, not a line
-    // of identical dots.
-    const radius = 5 + back * 16 + jitter * 4;
-    const alpha = (1 - back) * 0.3 * settling;
-    if (alpha <= 0.01) continue;
+    // On the reconstructed curve, at the rear axle, alternating tyres.
+    const c = centreAt(emit);
+    const fc = Math.cos(c.face);
+    const fs = Math.sin(c.face);
+    const tyreOut = (i % 2 === 0 ? -1 : 1) * (VAN_WIDTH / 2 - 2);
+    const grow = life * life * 0.6 + life * 0.4;
+    // Billows outward on its own bearing and lags backward a touch as it ages.
+    const drift = grow * (v.heavy ? 40 : 26);
+    const bearing = h3 * Math.PI * 2;
+    const px = c.cx + fc * axleBack - fs * tyreOut + Math.cos(bearing) * drift - fc * grow * 10;
+    const py = c.cy + fs * axleBack + fc * tyreOut + Math.sin(bearing) * drift - fs * grow * 10;
+
+    const radius = 4 + grow * (v.heavy ? 24 : 19) + h2 * 5;
+    // Quick to appear, slow to go.
+    const alpha =
+      (v.heavy ? 0.36 : 0.3) * Math.min(1, life / 0.12) * (1 - life) * (1 - life);
+    if (alpha < 0.012) continue;
     ctx.globalAlpha = alpha;
-    ctx.fillStyle = '#cbd5e1';
     ctx.beginPath();
     ctx.arc(px, py, radius, 0, Math.PI * 2);
     ctx.fill();
@@ -4843,36 +4867,75 @@ export function drawBackupVehicles(
     if (v.skidX === undefined || v.skidY === undefined || v.skidAngle === undefined) continue;
     if (!visible(view, v.x, v.y, 500)) continue;
 
-    // The marks follow the *curve* the van actually took, which is a straight
-    // run along the braking line with a smoothstepped wash out to one side.
-    // Drawing them as a straight chord from the brake point to the van was
-    // fine while the path was straight and is plainly wrong now: the rubber
-    // would leave the road and rejoin it.
-    const ux = Math.cos(v.skidAngle);
-    const uy = Math.sin(v.skidAngle);
-    const nx = -uy;
-    const ny = ux;
-    // How far along, and how far off, the van has got.
-    const along = (v.x - v.skidX) * ux + (v.y - v.skidY) * uy;
-    const off = (v.x - v.skidX) * nx + (v.y - v.skidY) * ny;
-    if (along < 4) continue;
+    // Reconstruct the *arc* the van actually took — the same integral
+    // `shared/vancurve.ts` drives it with. `skidX/skidY` is where the brakes
+    // bit (the server snaps the body exactly there), `skidAngle` the approach
+    // line, `sl` the signed body rotation at rest (`slew * driftDir`, absent
+    // for a dead-straight arrival), `th` a raised turn-hold. The path bends off
+    // the approach line to follow the nose, so it is sampled forward from the
+    // skid rather than projected onto a straight line — and the van's current
+    // position is matched to the nearest sample to know how much to draw.
+    const sl = v.sl ?? 0;
+    const params: BrakeParams = {
+      targetX: 0,
+      targetY: 0,
+      heading: v.skidAngle,
+      slew: Math.abs(sl),
+      driftDir: sl < 0 ? -1 : 1,
+      turnHold: v.th ?? VAN_TURN_HOLD,
+      turnDone: v.td ?? 1,
+      brake: v.bk ?? VAN_LEAN_BRAKE,
+    };
+    const SAMPLES = 36;
+    const arc: Array<{ cx: number; cy: number; face: number }> = [];
+    for (let i = 0; i <= SAMPLES; i++) {
+      const q = i / SAMPLES;
+      const d = vanPathDisplacement(params, 0, q);
+      arc.push({ cx: v.skidX + d.dx, cy: v.skidY + d.dy, face: vanBodyAngle(params, q) });
+    }
+    // How far along the arc the body has got — nearest sample to its position.
+    let iNow = 0;
+    let best = Infinity;
+    for (let i = 0; i <= SAMPLES; i++) {
+      const dd = (arc[i].cx - v.x) ** 2 + (arc[i].cy - v.y) ** 2;
+      if (dd < best) {
+        best = dd;
+        iNow = i;
+      }
+    }
+    if (iNow < 1) continue;
+    // `t` in [0,1] walks the travelled stretch of the arc, interpolating
+    // between samples so `drawTyreSmoke` keeps its unchanged closure contract.
+    const centreAt = (t: number): { cx: number; cy: number; face: number } => {
+      const f = t * iNow;
+      const lo = Math.min(iNow, Math.floor(f));
+      const hi = Math.min(iNow, lo + 1);
+      const k = f - lo;
+      return {
+        cx: arc[lo].cx + (arc[hi].cx - arc[lo].cx) * k,
+        cy: arc[lo].cy + (arc[hi].cy - arc[lo].cy) * k,
+        face: arc[lo].face + (arc[hi].face - arc[lo].face) * k,
+      };
+    };
 
+    // The two rear tyres, in the body's frame: forward of the tail, near the
+    // flanks. Drawn at their real positions along the reconstructed curve, so
+    // they sweep wide as the body comes round.
+    const axleBack = -VAN_LENGTH * 0.3;
     ctx.save();
-    ctx.strokeStyle = 'rgba(18, 20, 24, 0.5)';
-    ctx.lineWidth = 5;
+    ctx.strokeStyle = v.heavy ? 'rgba(13, 14, 18, 0.6)' : 'rgba(18, 20, 24, 0.48)';
+    ctx.lineWidth = v.heavy ? 6 : 5;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     for (const side of [-1, 1]) {
-      const ox = nx * side * (VAN_WIDTH / 2 - 5);
-      const oy = ny * side * (VAN_WIDTH / 2 - 5);
+      const tyreOut = side * (VAN_WIDTH / 2 - 4);
       ctx.beginPath();
-      for (let i = 0; i <= 14; i++) {
-        const t = i / 14;
-        // The same smoothstep the server walks the van along, so the rubber
-        // lies exactly where the tyres were.
-        const ease = t * t * (3 - 2 * t);
-        const px = v.skidX + ux * along * t + nx * off * ease + ox;
-        const py = v.skidY + uy * along * t + ny * off * ease + oy;
+      for (let i = 0; i <= 24; i++) {
+        const c = centreAt(i / 24);
+        const fc = Math.cos(c.face);
+        const fs = Math.sin(c.face);
+        const px = c.cx + fc * axleBack - fs * tyreOut;
+        const py = c.cy + fs * axleBack + fc * tyreOut;
         if (i === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       }
@@ -4881,7 +4944,7 @@ export function drawBackupVehicles(
     ctx.lineCap = 'butt';
     ctx.restore();
 
-    drawTyreSmoke(ctx, v, ux, uy, nx, ny, along, off, now);
+    drawTyreSmoke(ctx, v, centreAt, now);
   }
 
   for (const vehicle of vehicles) {
@@ -5050,7 +5113,7 @@ function drawSwatVan(
     ctx.fillRect(-L + 8, -W + 2, VAN_LENGTH - 32, 6);
     ctx.fillRect(-L + 8, W - 8, VAN_LENGTH - 32, 6);
     ctx.fillStyle = 'rgba(226, 232, 240, 0.85)';
-    ctx.fillRect(-L + 16, -1.5, 26, 3);
+    ctx.fillRect(-L + 22, -1.5, 46, 3);
 
     // Rear doors, at the tail — the end the crew step out of. Shut they are a
     // seam; open they swing out and stay out, and an emptied van standing on a
@@ -5073,9 +5136,13 @@ function drawSwatVan(
       const leaf = VAN_WIDTH / 2 - 3;
       for (const side of [-1, 1]) {
         ctx.save();
-        // Hinged at the outer corner of the tail, swinging back and outward.
+        // Hinged at the outer corner of the tail. The free edge — at the
+        // centreline when shut — swings *back* along the flank and outward, the
+        // way a van's rear doors actually open. The rotation is negated against
+        // the side: signed the other way the doors swung forward over the body,
+        // which is the "wrong way" this drawing had.
         ctx.translate(-L + 2, side * (W - 3));
-        ctx.rotate(side * VAN_REAR_DOOR_ARC * rear);
+        ctx.rotate(-side * VAN_REAR_DOOR_ARC * rear);
         ctx.fillStyle = '#2b3340';
         ctx.strokeStyle = '#0b0f16';
         ctx.lineWidth = 1.5;
@@ -5087,17 +5154,21 @@ function drawSwatVan(
       }
     }
 
-    // The cab door, on the driver's side at the front.
+    // The cab door, on the driver's side at the front. Hinged at its *forward*
+    // edge like a real front door: the panel lies back along the flank when
+    // shut and its rear edge swings out and a touch forward. It used to be
+    // hinged at the back and drawn ahead of the hinge, so it opened the wrong
+    // way round.
     const cab = van.cabOpen ?? 0;
     if (cab > 0) {
       ctx.save();
-      ctx.translate(L - 20, -W + 2);
-      ctx.rotate(-VAN_CAB_DOOR_ARC * cab);
+      ctx.translate(L - 6, -W + 2);
+      ctx.rotate(VAN_CAB_DOOR_ARC * cab);
       ctx.fillStyle = '#2b3340';
       ctx.strokeStyle = '#0b0f16';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.rect(0, -4, 17, 4);
+      ctx.rect(-23, -4, 23, 4);
       ctx.fill();
       ctx.stroke();
       ctx.restore();
@@ -5110,10 +5181,12 @@ function drawSwatVan(
     ctx.fillRect(6, -W + 3, 9, 4);
     ctx.fillRect(6, W - 7, 9, 4);
 
-    // Roof hatches down the spine.
+    // Roof hatches down the spine — five now the box is longer again, and
+    // spread off `L` rather than written down, so they cannot end up bunched at
+    // the tail the next time the van grows.
     ctx.strokeStyle = 'rgba(10, 14, 20, 0.85)';
     ctx.lineWidth = 1;
-    for (const hx of [-16, 0]) ctx.strokeRect(hx, -7, 13, 14);
+    for (let i = 0; i < 5; i++) ctx.strokeRect(-L + 14 + i * ((L * 2 - 46) / 5), -8, 14, 16);
 
     // Headlights at the nose.
     ctx.fillStyle = '#fef9c3';

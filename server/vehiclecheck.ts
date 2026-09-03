@@ -34,6 +34,7 @@ import {
   CAR_WIDTH,
   ENTITY_RADIUS,
   BOUNDARY_THICKNESS,
+  VAN_MIN_TURN_RADIUS,
 } from '../shared/constants.js';
 
 const TICK_MS = 1000 / TICK_RATE;
@@ -94,7 +95,16 @@ function bareWorld(): World {
   return world;
 }
 
-/** Does the body, where it now stands, overlap a building or blocked ground? */
+/**
+ * Does the body, where it now stands, overlap a building?
+ *
+ * **Buildings only, and that is the point.** `world.nav` carries `NAV_INFLATE`
+ * (10px a side), so a body standing perfectly clear of a frontage with its nose
+ * in the skirt reads as blocked — measured, the "drove through geometry" this
+ * rig reported on a swept lane was that and nothing else, with **0 of 25
+ * samples actually inside a footprint**. The inflation is there so a *route*
+ * keeps its distance from a wall; what a body overlaps is the wall.
+ */
 function bodyClash(world: World, x: number, y: number, facing: number, kind: 'van' | 'car'): number {
   const length = kind === 'van' ? VAN_LENGTH : CAR_LENGTH;
   const width = kind === 'van' ? VAN_WIDTH : CAR_WIDTH;
@@ -106,7 +116,6 @@ function bodyClash(world: World, x: number, y: number, facing: number, kind: 'va
       const px = x + cos * along * length - sin * across * width;
       const py = y + sin * along * length + cos * across * width;
       if (buildingIndexAt(world, px, py) >= 0) worst++;
-      else if (world.nav.isBlocked(px, py)) worst++;
     }
   }
   return worst;
@@ -125,6 +134,12 @@ console.log('--- arriving: does the body ever end up in geometry? ---');
   let vans = 0;
   let drifted = 0;
   let pinched = 0;
+  // Which of the three styles the street actually took. "Kept a turn" is not
+  // the claim any more — a LEAN keeps a turn, and the whole ask was for the
+  // big one — so the ladder is tallied rather than the boolean.
+  const styles: Record<string, number> = { FISHHOOK: 0, HOOK: 0, LEAN: 0, straight: 0 };
+  const bends: number[] = [];
+  const radii: number[] = [];
   const runIn: number[] = [];
   const lost: number[] = [];
 
@@ -155,9 +170,37 @@ console.log('--- arriving: does the body ever end up in geometry? ---');
       if (!vehicle) continue;
       if (kind === 'van') {
         vans++;
-        // Did it keep its skid? `slideFits` can refuse the drift outright, and
+        // Did it keep its skid? `slideFits` can refuse the turn outright, and
         // a van that always arrives dead straight is the old behaviour back.
-        if (vehicle.drift > 0) drifted++;
+        if (vehicle.slew > 0) drifted++;
+        // The style is readable off the record: only a FISHHOOK finishes its
+        // turn early (`turnDone < 1`), and only a HOOK is heavy without doing
+        // that.
+        styles[
+          vehicle.slew === 0
+            ? 'straight'
+            : vehicle.turnDone < 1
+              ? 'FISHHOOK'
+              : vehicle.heavy
+                ? 'HOOK'
+                : 'LEAN'
+        ]++;
+        if (vehicle.slew > 0) {
+          // How far the resting spot sits off the approach line — the arrival
+          // stated as a distance rather than as an angle.
+          const bx = vehicle.targetX - vehicle.x;
+          const by = vehicle.targetY - vehicle.y;
+          bends.push(
+            Math.abs(-Math.sin(vehicle.heading) * bx + Math.cos(vehicle.heading) * by),
+          );
+          // **How tight the turn is, which is the difference between driving
+          // round something and pivoting on the spot.** Reported as a van
+          // "turning but not moving"; smoothstep concentrates the rotation, so
+          // the number is the radius at the peak of the ease. See
+          // `VAN_MIN_TURN_RADIUS`.
+          const span = Math.max(0.001, vehicle.turnDone - vehicle.turnHold);
+          radii.push((span * vehicle.brake) / (1.5 * vehicle.slew));
+        }
       }
       // How much of the walkable map is reachable before it lands.
       const reachBefore = walkableShare(world);
@@ -213,6 +256,19 @@ console.log('--- arriving: does the body ever end up in geometry? ---');
       `  parked with the body in geometry: ${clashedAtRest}/${parked}\n` +
       `  drove through geometry on the way: ${clashedEnRoute}/${parked} (worst ${worstEnRoute} of 25 sample points)\n` +
       `  vans that kept their skid: ${drifted}/${vans}\n` +
+      `  style taken: ${Object.entries(styles)
+        .map(([k, n]) => `${k} ${n}`)
+        .join(' · ')}\n` +
+      `  resting spot off the approach line: median ${med(bends).toFixed(0)}px, worst ${Math.max(
+        0,
+        ...bends,
+      ).toFixed(0)}px\n` +
+      `  tightest turn radius: median ${med(radii).toFixed(0)}px, worst ${Math.min(
+        Infinity,
+        ...radii,
+      ).toFixed(0)}px — pivots (under ${VAN_MIN_TURN_RADIUS}px): ${
+        radii.filter((r) => r < VAN_MIN_TURN_RADIUS).length
+      }/${radii.length}\n` +
       `  parked somewhere that cut the map: ${pinched}/${parked} (worst loss ${(100 * Math.max(0, ...lost)).toFixed(2)}% of walkable ground)`,
   );
 }

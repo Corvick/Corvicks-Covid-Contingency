@@ -27,15 +27,28 @@ import {
   SWAT_RIFLE_AMMO,
   SHIELD_POINTS,
   VAN_APPROACH_SPEED,
-  VAN_BRAKE_DIST,
-  VAN_BRAKE_SPEED_MIN,
-  VAN_DRIFT,
+  VAN_FISHHOOK_BRAKE,
+  VAN_FISHHOOK_DONE,
+  VAN_FISHHOOK_HOLD,
+  VAN_FISHHOOK_SLEW,
+  VAN_HOOK_BRAKE,
+  VAN_HOOK_SLEW,
+  VAN_LEAN_BRAKE,
+  VAN_LEAN_SLEW,
   VAN_LENGTH,
-  VAN_SLEW_ANGLE,
+  VAN_MIN_TURN_RADIUS,
   VAN_WIDTH,
   WORLD_HEIGHT,
   WORLD_WIDTH,
 } from '../../shared/constants.js';
+import {
+  VAN_TURN_HOLD,
+  vanBrakePose,
+  vanBrakeSpeed,
+  vanPathDisplacement,
+  type BrakeParams,
+} from '../../shared/vancurve.js';
+import type { Wall } from '../../shared/types.js';
 import { resolveCircleBox, type OrientedBox } from './geometry.js';
 import { newInventory } from './inventory.js';
 import {
@@ -80,12 +93,28 @@ export interface BackupVehicle {
   skidX: number | null;
   skidY: number | null;
   /**
-   * Which way it washes out as it stops, and how far. Picked at call time and
-   * checked then, so the spot it actually comes to rest on is one that has
-   * been through `bodyFits` like any other.
+   * The stop. `driftDir` is which way it hooks (+1 / -1); `slew` the body
+   * rotation at rest — a HOOK large, a LEAN small, 0 for a dead-straight
+   * arrival. Picked at call time and checked then by `slideFits`, so the
+   * resting pose has been through `bodyFits` like any other. `heavy` is a
+   * FISHHOOK or a HOOK: the client draws it a wider arc of rubber and more
+   * smoke. `braked` is how many px of the brake curve have been travelled —
+   * integrated forward rather than read off the position, because the path is a
+   * curve and its projection onto the approach line is not the true progress.
+   *
+   * `brake`, `turnHold` and `turnDone` are the style: how long the manoeuvre
+   * is, where in it the wheel goes over, and where it comes back straight. A
+   * FISHHOOK finishes its turn well before it stops and spends the rest of the
+   * brake running out sideways, which is the whole of what makes it one.
    */
   driftDir: number;
-  drift: number;
+  slew: number;
+  braked: number;
+  brake: number;
+  /** Where in the brake the turn begins — raised for a shallow park. */
+  turnHold: number;
+  turnDone: number;
+  heavy: boolean;
   /** Who called it. The crew no longer escort them, but the van remembers. */
   callerId: string;
   dropped: number;
@@ -144,40 +173,142 @@ function distanceToSide(side: Side, x: number, y: number): number {
 /**
  * Is there room for the body, centred here and lying along `facing`?
  *
- * The old patrol car asked `nav.isBlocked` at a single point, which a body 82
- * by 38 walks straight past — half of it can be inside a shop while its centre
- * stands in the street. This tests the corners and the flanks, and
+ * The old patrol car asked `nav.isBlocked` at a single point, which a body
+ * 152 by 58 walks straight past — half of it can be inside a shop while its
+ * centre stands in the street. This tests the corners and the flanks, and
  * `buildingIndexAt` as well as the nav grid, because "not in a building" is
  * the thing actually being asked and a doorway is walkable nav.
  *
  * Always sized off the **van**, whichever is actually coming: the van is the
  * wider of the two and a spot that fits it fits the car, which keeps one lane
  * test honest for both and means the two arrive down the same sort of street.
+ *
+ * `pad` inflates the tested footprint past its real clearance. `slideFits`
+ * passes extra: between two checked poses on the brake curve the body both
+ * slides *and* rotates, so the swept region overshoots each pose by more than
+ * the straight run's slack covers, and the drift is better refused on a tight
+ * street than allowed to clip a corner mid-slew. The resting spot and the
+ * straight run in ask with `pad` 0 — `BACKUP_LANE_CLEARANCE` is already the
+ * margin there — so a street the van fits on still qualifies.
  */
-function bodyFits(world: World, x: number, y: number, facing: number): boolean {
+function bodyFits(world: World, x: number, y: number, facing: number, pad = 0): boolean {
+  slideWork++;
   const cos = Math.cos(facing);
   const sin = Math.sin(facing);
-  const hl = VAN_LENGTH / 2;
-  const hw = VAN_WIDTH / 2 + BACKUP_LANE_CLEARANCE / 2;
+  const hl = VAN_LENGTH / 2 + pad;
+  const hw = VAN_WIDTH / 2 + BACKUP_LANE_CLEARANCE / 2 + pad;
 
-  // Five by five rather than five by three. The gaps in a three-across sample
-  // are 34px wide at the van's clearance, which is enough for the corner of a
-  // building to sit between two samples: measured, 1 arrival in 100 came to
-  // rest with the body in geometry that this reports as fitting.
-  for (const along of [-hl, -hl / 2, 0, hl / 2, hl]) {
-    for (const across of [-hw, -hw / 2, 0, hw / 2, hw]) {
+  // Stepped at ~13px rather than a fixed 5×5. A 3-across sample leaves 34px
+  // gaps a building corner sits in; a fixed 5×5 was enough at 82×38 but the
+  // longer body took the *along* gap back to 25px and a corner clipped through
+  // it again. Deriving the sample count from the size keeps the gap under a
+  // wall's inflated width whatever the van measures.
+  const nl = Math.max(4, Math.ceil((hl * 2) / 13));
+  const nw = Math.max(4, Math.ceil((hw * 2) / 13));
+
+  // **The buildings are filtered once per pose rather than per sample point,
+  // and the nav grid is asked first.** This used to run a few dozen times per
+  // radio call; a style now gets the run of the parking search, so it runs a
+  // couple of thousand times, and at 152 by 58 that is ~120 sample points each.
+  // `buildingIndexAt` walks every building in the city on every one of them —
+  // 160 bbox tests a point at the top of the population slider — which measured
+  // **10.1us per call** and put the worst radio call at 24ms, most of a tick.
+  // The van's own bounding box overlaps one or two footprints at most, and
+  // `nav.isBlocked` is an array index, so it is asked first and settles nearly
+  // every refusal on its own.
+  const ex = Math.abs(cos) * hl + Math.abs(sin) * hw;
+  const ey = Math.abs(sin) * hl + Math.abs(cos) * hw;
+  // **Down to the rectangles, once per pose, into a module-level scratch.**
+  // Buildings are kept as a bbox plus a list of row rects, and a landmark has
+  // thirty of them; filtering only to the *building* left every one of the
+  // hundred-odd sample points walking that list. Filtering to the rects that
+  // actually overlap the body turns the inner loop into two or three tests.
+  // Measured on the calls that hurt, this is where their milliseconds were: the
+  // per-work cost in a dense quarter ran at twice the open-street figure.
+  //
+  // The scratch is module-level rather than fresh because this runs a couple of
+  // thousand times inside one radio call. Safe: nothing here is re-entrant.
+  nearRects.length = 0;
+  for (const b of world.map.buildings) {
+    if (b.x >= x + ex || b.x + b.w <= x - ex || b.y >= y + ey || b.y + b.h <= y - ey) continue;
+    for (const r of b.rects) {
+      if (r.x >= x + ex || r.x + r.w <= x - ex || r.y >= y + ey || r.y + r.h <= y - ey) continue;
+      nearRects.push(r);
+    }
+  }
+
+  for (let i = 0; i <= nl; i++) {
+    const along = -hl + (hl * 2 * i) / nl;
+    for (let j = 0; j <= nw; j++) {
+      const across = -hw + (hw * 2 * j) / nw;
       const px = x + cos * along - sin * across;
       const py = y + sin * along + cos * across;
       if (px < 40 || py < 40 || px > WORLD_WIDTH - 40 || py > WORLD_HEIGHT - 40) return false;
-      if (buildingIndexAt(world, px, py) >= 0) return false;
       if (world.nav.isBlocked(px, py)) return false;
+      // "Not in a building" is the thing actually being asked and a doorway is
+      // walkable nav, so this is not covered by the line above.
+      for (const r of nearRects) {
+        if (px > r.x && px < r.x + r.w && py > r.y && py < r.y + r.h) return false;
+      }
     }
   }
   return true;
 }
 
+/** Scratch for `bodyFits` and `laneReach` — see the notes there. */
+const nearRects: Wall[] = [];
+const laneRects: Wall[] = [];
+
+/** How much of a lane one building filter covers — see `laneReach`. */
+const LANE_CHUNK = 240;
+
+/**
+ * How finely the run in is swept, against `BACKUP_LANE_STEP`'s 24px for
+ * choosing where to stop. Half, and five samples across rather than three,
+ * because a building corner narrower than the step sits between two samples and
+ * is driven through — measured, **1 arrival in 720** did exactly that on the
+ * dead-straight run in, with the check meant to catch it having stepped over
+ * it.
+ */
+const LANE_PROBE_STEP = BACKUP_LANE_STEP / 2;
+
 /** Where the run in actually begins: the first point with the whole body past the cordon. */
 const LANE_START = BACKUP_ENTRY_OFFSET + BOUNDARY_THICKNESS + VAN_LENGTH;
+
+/**
+ * How far the body's furthest corner may travel between two poses `slideFits`
+ * checks, and how much the checked footprint is inflated to cover what happens
+ * in between. Half the step, near enough: the swept region between two poses
+ * bulges out by about that much.
+ */
+const SLIDE_CORNER_PX = 9;
+const SLIDE_PAD = 5;
+
+/**
+ * How many candidate stopping places one style may try before the next style
+ * down is a better answer than a stall. `parkingSpot` would otherwise walk every
+ * lane on every side, and each look costs a full walk of that style's braking
+ * curve — measured, a radio call is ~1ms with this and several times that
+ * without.
+ */
+const STYLE_SEARCH_LOOKS = 30;
+
+/**
+ * **A hard ceiling on the geometry one radio call may check**, counted in
+ * `bodyFits` — which is where the time actually goes, at ~10us each.
+ *
+ * `STYLE_SEARCH_LOOKS` bounds how many *stopping places* are considered and is
+ * the right knob for that, but it does not bound the work: a caller whose
+ * street takes no fishhook pays every variant, in both directions, at all
+ * thirty of them, and that measured **21ms — most of a tick**. This is the
+ * backstop. Over budget `slideFits` fails closed, which means a gentler style
+ * or a dead-straight arrival: the same answer it gives for a street that is
+ * genuinely too tight, and the safe direction.
+ *
+ * 900 is about 9ms. The median call spends under a tenth of it.
+ */
+const SLIDE_WORK_BUDGET = 2000;
+let slideWork = 0;
 
 /**
  * How far down this lane the body can be driven before something stops it.
@@ -192,7 +323,7 @@ const LANE_START = BACKUP_ENTRY_OFFSET + BOUNDARY_THICKNESS + VAN_LENGTH;
  * get", there is nothing left to fall back to: it stops where it stops.
  *
  * The cross-section is swept rather than the centre line rayed, because a lane
- * that threads between two buildings with a metre to spare is one an 82-by-38
+ * that threads between two buildings with a metre to spare is one a 152-by-58
  * body cannot actually take. Consecutive sections overlap — the step is well
  * under the body length — so everything the body sweeps through is tested.
  *
@@ -215,21 +346,69 @@ function laneReach(
   const hw = VAN_WIDTH / 2 + BACKUP_LANE_CLEARANCE / 2;
   let reached = -1;
 
-  for (let d = LANE_START; d <= maxD; d += BACKUP_LANE_STEP) {
+  // **The buildings are filtered to the corridor once, so the sweep can afford
+  // to be fine.** At three cross-samples every 24px this missed a frontage
+  // narrow enough to sit between two of them: measured, **1 arrival in 720**
+  // drove through a building corner on the dead-straight run in, with the check
+  // that was meant to catch it having stepped over it. Five samples every 12px
+  // is four times the tests, and cutting `buildingIndexAt` — which walks every
+  // building in the city per point — down to the rects that actually overlap
+  // this corridor pays for all of it and more.
+  // **The buildings are filtered a chunk of the lane at a time.** Per *point*
+  // is what `buildingIndexAt` does and it walks every building in the city each
+  // time; per *lane* was tried and is worse still, because a 1000px corridor on
+  // a diagonal has a bounding box covering most of a quarter of the map and the
+  // filtered list comes out longer than the bbox rejection it replaced — that
+  // version took a radio call from p90 4.7ms to 12.1ms. A chunk's box catches a
+  // handful of footprints, and a lane that is blocked early never builds the
+  // filters for the rest of it.
+  let chunkEnd = -1;
+  for (let d = LANE_START; d <= maxD; d += LANE_PROBE_STEP) {
+    if (d > chunkEnd) {
+      const c1 = Math.min(maxD, d + LANE_CHUNK);
+      const ax = entry.x + ux * d;
+      const ay = entry.y + uy * d;
+      const bx2 = entry.x + ux * c1;
+      const by2 = entry.y + uy * c1;
+      const minX = Math.min(ax, bx2) - hw;
+      const maxX = Math.max(ax, bx2) + hw;
+      const minY = Math.min(ay, by2) - hw;
+      const maxY = Math.max(ay, by2) + hw;
+      laneRects.length = 0;
+      for (const b of world.map.buildings) {
+        if (b.x >= maxX || b.x + b.w <= minX || b.y >= maxY || b.y + b.h <= minY) continue;
+        for (const r of b.rects) {
+          if (r.x >= maxX || r.x + r.w <= minX || r.y >= maxY || r.y + r.h <= minY) continue;
+          laneRects.push(r);
+        }
+      }
+      chunkEnd = c1;
+    }
+    // A handful of point tests against a `bodyFits`'s hundred-odd, so charged a
+    // fraction of one — but charged, or a search that never reaches a candidate
+    // spends its whole cost outside the ceiling that is supposed to bound it.
+    slideWork += 0.03;
     const cx = entry.x + ux * d;
     const cy = entry.y + uy * d;
     let clear = true;
-    for (const across of [-hw, 0, hw]) {
+    for (const across of [-hw, -hw / 2, 0, hw / 2, hw]) {
       const px = cx - uy * across;
       const py = cy + ux * across;
       if (px < 40 || py < 40 || px > WORLD_WIDTH - 40 || py > WORLD_HEIGHT - 40) {
         clear = false;
         break;
       }
-      if (buildingIndexAt(world, px, py) >= 0 || world.nav.isBlocked(px, py)) {
+      if (world.nav.isBlocked(px, py)) {
         clear = false;
         break;
       }
+      for (const r of laneRects) {
+        if (px > r.x && px < r.x + r.w && py > r.y && py < r.y + r.h) {
+          clear = false;
+          break;
+        }
+      }
+      if (!clear) break;
     }
     if (!clear) break;
     reached = d;
@@ -238,9 +417,21 @@ function laneReach(
 }
 
 /**
+ * A spot the manoeuvre being asked for actually works from, or null.
+ *
+ * `accept` is how a *style* gets a say in where the van parks, and adding it is
+ * what took the fishhook from a thing that fit one street in three to one that
+ * fits most of them. The stop and the manoeuvre are not independent: an 80°
+ * swing of a 152px body wants a different fifty pixels of street than a lean
+ * does, and picking the spot first and then asking what fits there throws away
+ * every other spot on a lane that was already swept clear.
+ */
+type AcceptSpot = (spot: { x: number; y: number }, entry: { x: number; y: number }, stopD: number) => boolean;
+
+/**
  * Where it comes to rest on this lane: the first spot at or past
- * `BACKUP_PARK_MIN` that the body fits on, or failing that the deepest spot
- * short of it that it does.
+ * `BACKUP_PARK_MIN` that the body fits on and `accept` is happy with, or failing
+ * that the deepest such spot short of it.
  *
  * Pulling up short of a blocked street is the right answer and always was; the
  * old code agreed and then reached for a fallback that skipped the lane test
@@ -252,17 +443,44 @@ function stopOnLane(
   ux: number,
   uy: number,
   facing: number,
+  accept?: AcceptSpot,
 ): { x: number; y: number } | null {
+  // **Before `laneReach`, not after.** Checked only inside the candidate loop,
+  // a spent budget still paid a full lane sweep for every remaining lane —
+  // seventy-odd of them across four sides — for candidates it was then going to
+  // refuse anyway. That was most of the tail of a radio call.
+  if (accept && slideWork > SLIDE_WORK_BUDGET) return null;
   const reach = laneReach(world, entry, ux, uy, BACKUP_ENTRY_OFFSET + BACKUP_PARK_MAX);
   if (reach < 0) return null;
 
   let best: { x: number; y: number } | null = null;
-  for (let d = LANE_START; d <= reach; d += BACKUP_LANE_STEP) {
+  const deep = BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN;
+
+  /** Offer one candidate; true once the caller has everything it wants. */
+  const offer = (d: number): boolean => {
+    if (accept && slideWork > SLIDE_WORK_BUDGET) return true;
     const px = entry.x + ux * d;
     const py = entry.y + uy * d;
-    if (!bodyFits(world, px, py, facing)) continue;
+    if (!bodyFits(world, px, py, facing)) return false;
+    if (accept && !accept({ x: px, y: py }, entry, d)) return false;
     best = { x: px, y: py };
-    if (d >= BACKUP_ENTRY_OFFSET + BACKUP_PARK_MIN) break;
+    return d >= deep;
+  };
+
+  // **Candidates at the preferred depth are offered first, and that ordering is
+  // load-bearing rather than tidy.** How deep the van parks *is* how much
+  // manoeuvre it is allowed — a shallow stop has too little checkable brake for
+  // the ambitious shapes and only the gentlest pass. Walking outward from
+  // `LANE_START`, a style therefore takes the first shallow spot that works for
+  // *any* of its shapes and stops looking, three steps before the one that
+  // would have taken its best: measured, **89 fishhooks in 90 came out as the
+  // tamest of the four**, and the full-strength one never appeared at all.
+  // Deep first, then inward as a fallback for a lane that runs out early.
+  for (let d = Math.max(LANE_START, deep); d <= reach; d += BACKUP_LANE_STEP) {
+    if (offer(d)) return best;
+  }
+  for (let d = LANE_START; d < Math.min(reach + 1, deep); d += BACKUP_LANE_STEP) {
+    if (offer(d)) return best;
   }
   return best;
 }
@@ -281,12 +499,18 @@ function stopOnLane(
  * **side the outbreak walked in from**, because backup arriving out of the
  * breach is backup arriving through the horde, and it reads as the game
  * spawning your reinforcements in the worst place on the map on purpose.
+ *
+ * With an `accept` it is a *style's* search and answers null rather than
+ * falling back: "no street on this map takes a fishhook" is a real answer and
+ * the caller has a gentler style to try. Without one it is the final search and
+ * must produce something, so the fallbacks below stay.
  */
 function parkingSpot(
   world: World,
   x: number,
   y: number,
-): { spot: { x: number; y: number }; entry: { x: number; y: number } } {
+  accept?: AcceptSpot,
+): { spot: { x: number; y: number }; entry: { x: number; y: number } } | null {
   const near: Side[] = ([0, 1, 2, 3] as Side[]).sort(
     (a, b) => distanceToSide(a, x, y) - distanceToSide(b, x, y),
   );
@@ -307,93 +531,120 @@ function parkingSpot(
         const len = Math.hypot(dx, dy) || 1;
         const ux = dx / len;
         const uy = dy / len;
-        const spot = stopOnLane(world, entry, ux, uy, Math.atan2(dy, dx));
+        const spot = stopOnLane(world, entry, ux, uy, Math.atan2(dy, dx), accept);
         if (spot) return { spot, entry };
       }
     }
   }
+  if (accept) return null;
 
-  // Nowhere on any side of the map has a lane a vehicle could drive down,
-  // which takes a remarkable city — measured at 0 in 80 calls. Park it on the
-  // cordon itself, on the nearest edge, where by construction there is nothing
-  // to be inside of.
+  // No side has a lane clear the *whole way* in. Rare, and rarer still that it
+  // matters — but the old answer was to plonk the body a van-length inside the
+  // edge with no check at all, and a building built onto the perimeter is
+  // exactly where that lands it. So sweep for a spot the body actually *fits*
+  // on, straight, giving up the clean approach but never the clean rest: a van
+  // that scraped something on the way in and then stopped clear is a far better
+  // failure than one parked through a wall for the rest of the round.
+  for (const side of near) {
+    const along = side === 0 || side === 2 ? x : y;
+    for (const offset of BACKUP_LANE_OFFSETS) {
+      const entry = entryOn(side, along + offset);
+      const dx = x - entry.x;
+      const dy = y - entry.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len;
+      const uy = dy / len;
+      const facing = Math.atan2(dy, dx);
+      for (let d = LANE_START; d <= LANE_START + 460; d += BACKUP_LANE_STEP) {
+        const px = entry.x + ux * d;
+        const py = entry.y + uy * d;
+        if (bodyFits(world, px, py, facing)) return { spot: { x: px, y: py }, entry };
+      }
+    }
+  }
+
+  // Genuinely nowhere. Sit on the cordon strip — body's inner edge at the
+  // boundary — which is the shallowest it can be and still be on the map.
   const side = near[0] ?? 0;
   const entry = entryOn(side, side === 0 || side === 2 ? x : y);
   const dx = x - entry.x;
   const dy = y - entry.y;
   const len = Math.hypot(dx, dy) || 1;
+  const cordon = BACKUP_ENTRY_OFFSET + BOUNDARY_THICKNESS + VAN_LENGTH / 2;
   return {
-    spot: { x: entry.x + (dx / len) * LANE_START, y: entry.y + (dy / len) * LANE_START },
+    spot: { x: entry.x + (dx / len) * cordon, y: entry.y + (dy / len) * cordon },
     entry,
   };
 }
 
-/**
- * Where the body is and which way it points with `along` still to run.
- *
- * The stop is three things moving at once — how fast it is going, how far it
- * has slid off the line, and which way it is pointing — and only the last two
- * are position. Both are a pure function of how much of the braking distance
- * is left, so the curve can be evaluated anywhere on it rather than only
- * integrated forward. That is what lets `callBackup` check the whole slide
- * against the geometry it is about to take place in, using the very same
- * formula the van will follow: written twice, the check and the motion would
- * agree until the day somebody tuned one of them.
- */
-function brakePose(
-  v: Pick<BackupVehicle, 'targetX' | 'targetY' | 'heading' | 'drift' | 'driftDir'>,
-  along: number,
-): { x: number; y: number; facing: number } {
-  const t = Math.max(0, Math.min(1, 1 - along / VAN_BRAKE_DIST));
-  // Smoothstep, so the sideways speed is nearly nothing by the time it stops.
-  // Not only for smoothness: the drawn angle is the travel tangent plus the
-  // slew, and a curve still bending at the stop would leave it resting at some
-  // other angle than it does.
-  const ease = t * t * (3 - 2 * t);
-  const cos = Math.cos(v.heading);
-  const sin = Math.sin(v.heading);
-  const off = v.drift * v.driftDir * ease;
-  return {
-    x: v.targetX - cos * along - sin * off,
-    y: v.targetY - sin * along + cos * off,
-    facing: v.heading + VAN_SLEW_ANGLE * v.driftDir * ease,
-  };
+/** The pose `along` px short of the resting spot — `shared/vancurve.ts` owns
+ *  the curve, this is just the local alias for it. */
+function brakePose(v: BrakeParams, along: number): { x: number; y: number; facing: number } {
+  return vanBrakePose(v, along);
 }
 
 /**
  * Can it actually perform this stop here?
  *
- * The straight run in is `laneReach`'s business. This is the last
- * `VAN_BRAKE_DIST` of it, where the body washes `VAN_DRIFT` (52px) sideways
- * and swings `VAN_SLEW_ANGLE` (24°) across — well outside the 15px of slack
- * the lane sweep carries, so the lane being clear says nothing about it. It
- * was the one thing left driving a van through a building: measured, 1 arrival
- * in 80, with 6 of 25 footprint samples in geometry at the worst of it.
+ * The straight run in is `laneReach`'s business. This is the last `v.brake` of
+ * it, where — once `vanTurnEase` lifts off zero — the nose comes round up to
+ * `VAN_FISHHOOK_SLEW` and the body curves off the approach line to follow it,
+ * and then runs out sideways for the rest of the manoeuvre. That is a long way
+ * outside the slack the lane sweep carries, so the lane being clear says
+ * nothing about it and this walks the real curve.
  *
- * `stopD` is how far the resting spot is from the entry point, and the part of
- * the curve still short of `LANE_START` is **not** checked. The brakes bite
- * `VAN_BRAKE_DIST` out and the nearest a van ever parks is
- * `BACKUP_PARK_MIN` in, so braking begins 92px *before* the body is clear of
- * the cordon — which is the wall it is supposed to come through. Checked
- * anyway, the boundary wall refuses every slide on every call: measured,
- * **0 of 50** vans kept their skid, and every one arrived dead straight.
+ * `stopD` is how far the resting spot is from the entry point, and a pose still
+ * short of `LANE_START` is skipped — the boundary wall is there and it is the
+ * wall the van is *meant* to come through. `callBackup` raises `turnHold` so
+ * the turn itself never begins that shallow.
  */
-function slideFits(
-  world: World,
-  v: Pick<BackupVehicle, 'targetX' | 'targetY' | 'heading' | 'drift' | 'driftDir'>,
-  stopD: number,
-): boolean {
-  const steps = Math.ceil(VAN_BRAKE_DIST / BACKUP_LANE_STEP);
-  for (let i = 0; i <= steps; i++) {
-    // Down to and including zero, which is where it comes to rest — the end of
-    // the curve is the one point that must not be missed by a step size that
-    // does not divide the distance.
-    const along = VAN_BRAKE_DIST * (1 - i / steps);
-    if (stopD - along < LANE_START) continue; // still coming through the cordon
-    const pose = brakePose(v, along);
-    if (!bodyFits(world, pose.x, pose.y, pose.facing)) return false;
+function slideFits(world: World, v: BrakeParams, stopD: number): boolean {
+  // **The step is adaptive, and with a fishhook it has to be.** A uniform step
+  // in distance is right for a body that only slides; between two poses of one
+  // that is also *rotating*, the far corner moves by the translation **plus**
+  // `r · Δθ`, and a fishhook does 80° inside a third of its brake. Stepped at a
+  // flat 12px the corner jumped 23px between checks, and a van clipped a
+  // frontage the pad had waved through — measured, 1 arrival in 64.
+  //
+  // So the increment is chosen from the local rate: fine where the wheel is
+  // over, coarse where it is running straight, and the total number of checks
+  // barely moves. `r` is the corner of the tested footprint, which is what has
+  // to clear anything.
+  const r = Math.hypot(VAN_LENGTH / 2, VAN_WIDTH / 2 + BACKUP_LANE_CLEARANCE / 2);
+  const span = Math.max(0.001, v.turnDone - v.turnHold);
+  let checked = 0;
+  // **Walked backwards, from the resting spot toward the brake point.** It is
+  // the same set of poses either way and the answer is identical, but almost
+  // every refusal is at the *end* — that is where the body is deepest into the
+  // city and most rotated, and where the brake point is still out near the open
+  // cordon. Forwards, a spot that was never going to work paid for the whole
+  // curve before finding out: with a style now given the run of the parking
+  // search, that is the difference between a ~1ms radio call and a 30ms one.
+  let q = 1;
+  for (;;) {
+    const along = v.brake * (1 - q);
+    // Still coming through the cordon — the boundary wall is there and it is
+    // the wall the van is meant to come through. `callBackup` raises `turnHold`
+    // so the turn itself never begins this shallow, so skipping here is safe.
+    if (stopD - along >= LANE_START) {
+      if (slideWork > SLIDE_WORK_BUDGET) return false;
+      const pose = brakePose(v, along);
+      // The end of the curve is the real resting spot and is checked without
+      // the pad — refusing the turn for a spot the van genuinely sits on is the
+      // wrong call. Everywhere earlier on the slide, pad against the sweep.
+      if (!bodyFits(world, pose.x, pose.y, pose.facing, q >= 1 ? 0 : SLIDE_PAD)) return false;
+      checked++;
+    }
+    if (q <= 0) break;
+    // Smoothstep's own derivative, so the increment tightens exactly where the
+    // body is swinging fastest.
+    const u = Math.max(0, Math.min(1, (q - v.turnHold) / span));
+    const spin = (v.slew * 6 * u * (1 - u)) / span;
+    q = Math.max(0, q - SLIDE_CORNER_PX / (v.brake + r * spin));
   }
-  return true;
+  // Every pose was still coming through the cordon — cannot vouch for it, and
+  // arriving straight is the safe default.
+  return checked > 0;
 }
 
 /**
@@ -408,24 +659,207 @@ export function callBackup(
   now: number,
   kind: 'van' | 'car' = 'van',
 ): void {
-  const { spot, entry } = parkingSpot(world, caller.x, caller.y);
-  const heading = Math.atan2(spot.y - entry.y, spot.x - entry.x);
+  // Three arrival styles, each a different length of manoeuvre — its own brake,
+  // its own turn, its own run-out — and each searched against the **whole
+  // parking walk**: the stop and the manoeuvre are not independent, and
+  // choosing the spot first and then asking what fits there is what kept the
+  // big arrival rare. See `AcceptSpot`.
+  slideWork = 0;
+  interface Shape {
+    slew: number;
+    brake: number;
+    hold: number;
+    done: number;
+    heavy: boolean;
+  }
+  /**
+   * **A style is a family, not one shape, and the fishhook is why.**
+   *
+   * An 80° swing of a 152px body wants a wide street, so at full strength it
+   * could only be placed for two callers in three where a hook or a lean fit
+   * ninety-eight — and "all entrances equally likely" cannot survive that
+   * however the choice among them is made. What makes a fishhook a fishhook is
+   * the **run-out**: the turn finishing early and the van travelling sideways
+   * afterwards (`turnDone < 1`). The angle and the length are free to give. So a
+   * spot too tight for 80° over 330px is offered 66°, then 54°, then 46° over
+   * 270 — every one of them still a fishhook, and the gentlest still runs out
+   * **59px across** the approach line after its turn is done.
+   */
+  const STYLES: Shape[][] = [
+    (
+      [
+        [1.4, VAN_FISHHOOK_BRAKE],
+        [1.15, VAN_FISHHOOK_BRAKE],
+        [0.95, 300],
+        [0.8, 270],
+      ] as const
+    ).map(([slew, brake]) => ({
+      slew,
+      brake,
+      hold: VAN_FISHHOOK_HOLD,
+      done: VAN_FISHHOOK_DONE,
+      heavy: true,
+    })),
+    [{ slew: VAN_HOOK_SLEW, brake: VAN_HOOK_BRAKE, hold: VAN_TURN_HOLD, done: 1, heavy: true }],
+    [{ slew: VAN_LEAN_SLEW, brake: VAN_LEAN_BRAKE, hold: VAN_TURN_HOLD, done: 1, heavy: false }],
+  ];
 
-  // Which way it washes out, decided here rather than while it is moving: the
-  // spot it comes to rest on is offset from the one that was checked, so it
-  // has to be checked too. Either side will do, so try both and only then give
-  // the drift up — a van that arrives dead straight is the old behaviour and
-  // is exactly what this is for.
-  let driftDir = Math.random() < 0.5 ? 1 : -1;
-  let drift = kind === 'van' ? VAN_DRIFT : 0;
-  if (drift > 0) {
-    const base = { targetX: spot.x, targetY: spot.y, heading, drift };
-    const stopD = Math.hypot(spot.x - entry.x, spot.y - entry.y);
-    // The whole slide, not the two points it used to check — the resting spot
-    // and its halfway mark say nothing about the swing the body takes to get
-    // there, and the swing is what clips the corner of a shop.
-    if (!slideFits(world, { ...base, driftDir }, stopD)) driftDir = -driftDir;
-    if (!slideFits(world, { ...base, driftDir }, stopD)) drift = 0;
+  interface Arrival {
+    entry: { x: number; y: number };
+    heading: number;
+    driftDir: number;
+    slew: number;
+    brake: number;
+    turnHold: number;
+    turnDone: number;
+    heavy: boolean;
+    restX: number;
+    restY: number;
+  }
+
+  /** Would this shape work from this stopping place? */
+  const tryShape = (
+    st: Shape,
+    spot: { x: number; y: number },
+    entry: { x: number; y: number },
+    stopD: number,
+    first: number,
+  ): Arrival | null => {
+    const h = Math.atan2(spot.y - entry.y, spot.x - entry.x);
+    // Cram the turn into whatever length of the brake is fully on the map to be
+    // checked — `slideFits` skips anything shallower than `LANE_START`, the
+    // boundary wall being the wall the van is meant to come through.
+    const checkable = stopD - LANE_START;
+    const hold = Math.max(st.hold, 1 - (checkable - 8) / st.brake);
+    // **A crammed turn is a pivot, and a pivot is worse than no turn.** The line
+    // above tightens the turn to fit the street; `VAN_MIN_TURN_RADIUS` is how
+    // tight it may get before the body is rotating faster than it is travelling
+    // and the arrival reads as the animation glitching. Refused rather than
+    // squeezed: a spot with no room for this shape is simply not its spot.
+    if (st.done - hold < (1.5 * st.slew * VAN_MIN_TURN_RADIUS) / st.brake) return null;
+    for (const dir of [first, -first]) {
+      const partial: BrakeParams = {
+        targetX: 0,
+        targetY: 0,
+        heading: h,
+        slew: st.slew,
+        driftDir: dir,
+        turnHold: hold,
+        turnDone: st.done,
+        brake: st.brake,
+      };
+      const full = vanPathDisplacement(partial, 0, 1);
+      // A turning van does not come to rest on `spot`. It rests at
+      // `brakeStart + fullPathDisplacement` — `spot` nudged by however far the arc
+      // bent off straight — and that real pose is what is checked.
+      const p: BrakeParams = {
+        ...partial,
+        targetX: spot.x - Math.cos(h) * st.brake + full.dx,
+        targetY: spot.y - Math.sin(h) * st.brake + full.dy,
+      };
+      if (!slideFits(world, p, stopD)) continue;
+      return {
+        entry,
+        heading: h,
+        driftDir: dir,
+        slew: st.slew,
+        brake: st.brake,
+        turnHold: hold,
+        turnDone: st.done,
+        heavy: st.heavy,
+        restX: p.targetX,
+        restY: p.targetY,
+      };
+    }
+    return null;
+  };
+
+  /**
+   * **One walk of the parking search, with all three styles riding on it.**
+   *
+   * Each style asked separately was the obvious way to write this and costs
+   * three times over: the lane sweep and the `bodyFits` at every candidate stop
+   * are the same work whichever manoeuvre is being considered, and only
+   * `slideFits` differs. Measured that way a radio call was **median 5.4ms,
+   * worst 34ms** — a whole tick. Sharing the walk, each style still takes the
+   * first stopping place that works for it, in the same order, for one sweep.
+   *
+   * The callback answers "stop walking", which is exactly what `stopOnLane`
+   * already means by a true: here that is once every style has found somewhere,
+   * or once the budget is spent.
+   */
+  const results: Array<Arrival | null> = STYLES.map(() => null);
+  if (kind === 'van') {
+    // Which way it hooks is rolled once for the call, so the three candidates
+    // differ in shape rather than in which side of the street they end up on.
+    const first = Math.random() < 0.5 ? 1 : -1;
+    let looks = 0;
+    parkingSpot(world, caller.x, caller.y, (spot, entry, stopD) => {
+      if (looks++ >= STYLE_SEARCH_LOOKS) return true;
+      let outstanding = 0;
+      for (let i = 0; i < STYLES.length; i++) {
+        if (results[i] !== null) continue;
+        for (const st of STYLES[i]) {
+          const got = tryShape(st, spot, entry, stopD, first);
+          if (got) {
+            results[i] = got;
+            break;
+          }
+        }
+        if (results[i] === null) outstanding++;
+      }
+      return outstanding === 0;
+    });
+  }
+
+  /**
+   * **Every style that fits is found, and then one is drawn uniformly.**
+   *
+   * Asked for as *"I would like all entrances to be equally likely to show
+   * up"*, and a weighted roll with a fall-through cannot deliver it: whatever
+   * the weights, a style that does not fit hands its turn to the next one down,
+   * so the styles that fit most often are the ones seen most often. Weighting
+   * *against* the fit rate would need those rates written down as constants,
+   * and they are a property of the map generator rather than of this file.
+   *
+   * So the choice is made among the ones that actually landed. That is equal
+   * likelihood **among what this street can take**, which is the only equality
+   * available — a fishhook cannot be made to happen where there is no room for
+   * one, which is what the gentler shapes above are for.
+   */
+  const options = results.filter(Boolean) as Arrival[];
+  const picked = options.length > 0 ? options[Math.floor(Math.random() * options.length)] : null;
+
+  let driftDir = 1;
+  let slew = 0;
+  let brake = VAN_LEAN_BRAKE;
+  let turnHold = VAN_TURN_HOLD;
+  let turnDone = 1;
+  let heavy = false;
+  let restX = 0;
+  let restY = 0;
+  let heading = 0;
+  let entry: { x: number; y: number };
+
+  if (picked) {
+    entry = picked.entry;
+    heading = picked.heading;
+    driftDir = picked.driftDir;
+    slew = picked.slew;
+    brake = picked.brake;
+    turnHold = picked.turnHold;
+    turnDone = picked.turnDone;
+    heavy = picked.heavy;
+    restX = picked.restX;
+    restY = picked.restY;
+  } else {
+    // Nothing turns here: the plain search, and a dead-straight arrival resting
+    // exactly on the spot it picked. Stopping is a perfectly good answer.
+    const plain = parkingSpot(world, caller.x, caller.y)!;
+    entry = plain.entry;
+    heading = Math.atan2(plain.spot.y - entry.y, plain.spot.x - entry.x);
+    restX = plain.spot.x;
+    restY = plain.spot.y;
   }
 
   world.vehicles.set(`backup-${counter}`, {
@@ -433,15 +867,20 @@ export function callBackup(
     kind,
     x: entry.x,
     y: entry.y,
-    targetX: spot.x,
-    targetY: spot.y,
+    targetX: restX,
+    targetY: restY,
     facing: heading,
     heading,
     phase: 'inbound',
     skidX: null,
     skidY: null,
     driftDir,
-    drift,
+    slew,
+    braked: 0,
+    brake,
+    turnHold,
+    turnDone,
+    heavy,
     callerId: caller.id,
     dropped: 0,
     nextDropAt: 0,
@@ -495,6 +934,11 @@ function seatFor(kind: 'van' | 'car', index: number): { along: number; across: n
  * the driver could arrive behind it. This holds the side it was given —
  * nudged outward along the same bearing when the exact spot is blocked, and
  * only widened into a proper search if the whole side is against a wall.
+ *
+ * `unload` now hands it a point right on the door line rather than a body
+ * length clear of it, so the first offer it tries — `out: 0` — is the doorway
+ * itself: the officer appears in the open doors and walks off from there,
+ * instead of materialising in the street beside the van.
  */
 function stepDown(
   world: World,
@@ -519,8 +963,11 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
   const seat = seatFor(vehicle.kind, vehicle.dropped);
   const cos = Math.cos(vehicle.facing);
   const sin = Math.sin(vehicle.facing);
-  const outX = vehicle.x + cos * seat.along * (length / 2 + 22) - sin * seat.across * (width / 2 + 18);
-  const outY = vehicle.y + sin * seat.along * (length / 2 + 22) + cos * seat.across * (width / 2 + 18);
+  // Right on the door line — `+ 6` clears the bodywork and nothing more — so
+  // `stepDown` puts the officer in the open doorway and lets him walk out,
+  // rather than dropping him a body length into the street.
+  const outX = vehicle.x + cos * seat.along * (length / 2 + 6) - sin * seat.across * (width / 2 + 6);
+  const outY = vehicle.y + sin * seat.along * (length / 2 + 6) + cos * seat.across * (width / 2 + 6);
 
   const spawn = stepDown(world, vehicle, outX, outY);
   const id = `backup-${counter++}`;
@@ -711,7 +1158,12 @@ export function placeCityCar(
       skidX: null,
       skidY: null,
       driftDir: 1,
-      drift: 0,
+      slew: 0,
+      braked: 0,
+      brake: VAN_LEAN_BRAKE,
+      turnHold: VAN_TURN_HOLD,
+      turnDone: 1,
+      heavy: false,
       callerId: '',
       // Its crew got out long before the round started, so there is nobody
       // left in it to unload.
@@ -798,7 +1250,12 @@ export function placePoliceCars(world: World, now: number): number {
       skidX: null,
       skidY: null,
       driftDir: 1,
-      drift: 0,
+      slew: 0,
+      braked: 0,
+      brake: VAN_LEAN_BRAKE,
+      turnHold: VAN_TURN_HOLD,
+      turnDone: 1,
+      heavy: false,
       callerId: '',
       dropped: crewSize('car'),
       nextDropAt: 0,
@@ -868,63 +1325,67 @@ export function updateBackup(world: World, now: number, dt: number): void {
       continue;
     }
 
-    // Distance still to run *along the approach line*, which is the thing the
-    // whole stop is parameterised on. Measured along the line rather than
-    // straight to the target, because once it starts washing sideways the two
-    // are different and only the first one is monotonic.
-    const along =
-      (vehicle.targetX - vehicle.x) * Math.cos(vehicle.heading) +
-      (vehicle.targetY - vehicle.y) * Math.sin(vehicle.heading);
+    const cosH = Math.cos(vehicle.heading);
+    const sinH = Math.sin(vehicle.heading);
 
     // A car simply drives up and stops. A two-officer patrol arriving is a
     // smaller event than a SWAT team and should read as one.
     if (vehicle.kind === 'car') {
+      const along = (vehicle.targetX - vehicle.x) * cosH + (vehicle.targetY - vehicle.y) * sinH;
       if (along < BACKUP_ARRIVE_DIST) {
         park(world, vehicle, now);
         continue;
       }
-      vehicle.x += Math.cos(vehicle.heading) * BACKUP_SPEED * dt;
-      vehicle.y += Math.sin(vehicle.heading) * BACKUP_SPEED * dt;
+      vehicle.x += cosH * BACKUP_SPEED * dt;
+      vehicle.y += sinH * BACKUP_SPEED * dt;
       continue;
     }
 
-    // A van comes in hot and stops like it: straight in, then the brakes go on
-    // `VAN_BRAKE_DIST` out and it washes sideways while the back end comes
-    // round, and stops there. Three things are moving at once and they are
-    // deliberately separate — how fast it is going, how far it has slid off
-    // the line, and which way the body is pointing.
-    if (along > VAN_BRAKE_DIST) {
-      vehicle.x += Math.cos(vehicle.heading) * VAN_APPROACH_SPEED * dt;
-      vehicle.y += Math.sin(vehicle.heading) * VAN_APPROACH_SPEED * dt;
-      continue;
-    }
-
+    // A van comes in hot: **dead straight** down the approach line until it
+    // reaches the point where the brakes bite, then the last stretch is a
+    // *curve* — the nose comes round and the body travels the way it points.
     if (vehicle.phase !== 'braking') {
+      // Where the curve begins — the whole brake still to go. Recomputed rather
+      // than stored: it costs one path integral a tick during a one-to-two-second
+      // approach, and stores nothing that could drift.
+      const start = vanBrakePose(vehicle, vehicle.brake);
+      const toStart = (start.x - vehicle.x) * cosH + (start.y - vehicle.y) * sinH;
+      if (toStart > 0) {
+        vehicle.x += cosH * VAN_APPROACH_SPEED * dt;
+        vehicle.y += sinH * VAN_APPROACH_SPEED * dt;
+        continue;
+      }
+      // **The overshoot is carried, not snapped back.** The van drives the
+      // approach in whole ticks of `VAN_APPROACH_SPEED` — 13px each — so it
+      // arrives somewhere *past* the brake point rather than on it, and putting
+      // it back on the point is a visible jump backwards of up to a whole step
+      // on the one frame the manoeuvre begins. Starting `braked` at the
+      // overshoot instead keeps the motion continuous, and costs nothing: the
+      // first stretch of every curve is dead straight along the same heading
+      // the approach was on, so the pose at that distance *is* where the body
+      // already is.
       vehicle.phase = 'braking';
-      vehicle.skidX = vehicle.x;
-      vehicle.skidY = vehicle.y;
+      vehicle.skidX = start.x;
+      vehicle.skidY = start.y;
+      vehicle.braked = Math.min(vehicle.brake, -toStart);
     }
 
-    if (along < BACKUP_ARRIVE_DIST) {
-      vehicle.facing = vehicle.heading + VAN_SLEW_ANGLE * vehicle.driftDir;
+    // `braked` is the curve travelled so far, integrated forward — the
+    // projection of a curved path onto the approach line is not its progress.
+    const rem = vehicle.brake - vehicle.braked;
+    if (rem < BACKUP_ARRIVE_DIST) {
+      const rest = brakePose(vehicle, 0);
+      vehicle.x = rest.x;
+      vehicle.y = rest.y;
+      vehicle.facing = rest.facing;
       park(world, vehicle, now);
       continue;
     }
-
-    // 0 at the moment the brakes bite, 1 at the stop.
-    const t = Math.max(0, Math.min(1, 1 - along / VAN_BRAKE_DIST));
-    // Eased so most of the speed goes early: it lands on the spot rather than
-    // crawling the last stretch.
-    const speed =
-      VAN_BRAKE_SPEED_MIN + (VAN_APPROACH_SPEED - VAN_BRAKE_SPEED_MIN) * (1 - t) * (1 - t);
-
-    // Only the speed is integrated. Where the body sits and which way it points
-    // are read straight off `brakePose` at the new distance-to-run, which is
-    // the same curve `callBackup` checked the geometry against — and, being a
-    // pure function of `along`, exactly what the old forward-walked version
-    // computed. It cannot drift out of step with the check.
-    const nextAlong = Math.max(0, along - speed * dt);
-    const pose = brakePose(vehicle, nextAlong);
+    vehicle.braked = Math.min(
+      vehicle.brake,
+      vehicle.braked + vanBrakeSpeed(rem, vehicle.brake) * dt,
+    );
+    const pose = brakePose(vehicle, Math.max(0, vehicle.brake - vehicle.braked));
     vehicle.x = pose.x;
     vehicle.y = pose.y;
     vehicle.facing = pose.facing;
@@ -955,8 +1416,16 @@ export function vehiclesToWire(world: World): BackupVehicleState[] {
   return [...world.vehicles.values()].map((v) => {
     const state: BackupVehicleState = {
       kind: v.kind,
-      x: Math.round(v.x),
-      y: Math.round(v.y),
+      // **An eighth of a pixel, where every other body on the wire is rounded
+      // whole.** At the end of the brake the van is down to
+      // `VAN_BRAKE_SPEED_MIN` — about 2.3px a tick — so whole-pixel rounding
+      // moves each step by up to 40% of itself, and the client interpolates
+      // *between* the rounded points, which turns that into visible speed
+      // wobble on the slowest and most-watched part of the arrival. There are
+      // never more than a dozen vehicles in a round, so the extra characters
+      // are nothing against four hundred bodies.
+      x: Math.round(v.x * 8) / 8,
+      y: Math.round(v.y * 8) / 8,
       facing: v.facing,
       parked: v.phase === 'parked',
     };
@@ -968,6 +1437,19 @@ export function vehiclesToWire(world: World): BackupVehicleState[] {
       state.skidAngle = Math.round(v.heading * 100) / 100;
     }
     if (v.silent) state.silent = true;
+    if (v.heavy) state.heavy = true;
+    if (v.slew !== 0) {
+      // The four numbers that rebuild the arc: signed body rotation at rest,
+      // where the turn starts, where it finishes, and how long the manoeuvre is.
+      // `sl` absent means a dead-straight arrival and the marks are a chord.
+      // Four numbers on at most a couple of bodies a round, and the alternative
+      // is the client guessing the shape of a curve the server is driving —
+      // which is the thing `shared/vancurve.ts` exists to stop.
+      state.sl = Math.round(v.slew * v.driftDir * 1000) / 1000;
+      state.th = Math.round(v.turnHold * 1000) / 1000;
+      state.td = Math.round(v.turnDone * 1000) / 1000;
+      state.bk = Math.round(v.brake);
+    }
     if (v.phase === 'braking') state.braking = true;
     if (v.rearOpen > 0) state.rearOpen = Math.round(v.rearOpen * 100) / 100;
     if (v.cabOpen > 0) state.cabOpen = Math.round(v.cabOpen * 100) / 100;

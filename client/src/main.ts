@@ -641,6 +641,7 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
     // out on the first frame.
     buildSites = msg.buildSites ?? [];
     vehicles = msg.vehicles;
+    syncVehicles(vehicles);
     mines = msg.mines;
     corpses = msg.corpses;
     towers = msg.towers;
@@ -1458,6 +1459,60 @@ function syncTracked(incoming: EntityState[], now: number): void {
   }
 }
 
+/**
+ * **Vehicles are interpolated too, and for a long time they were not.**
+ *
+ * Everything above is about entities; `vehicles` was reassigned straight off the
+ * snapshot and drawn where the last tick put it. The world simulates at 30Hz
+ * and the screen draws at up to 144, so a van slid in 30Hz steps while every
+ * body around it moved continuously — reported as stuttering, and it is exactly
+ * the fault the note above `snapshotAt` describes, left un-fixed for the one
+ * thing on screen whose whole job is a two-second movement you watch.
+ *
+ * **Matched by index rather than by an id on the wire.** `vehiclesToWire` maps
+ * `world.vehicles.values()` in insertion order and nothing ever removes one
+ * (only `resetWorld` clears the lot), so slot *i* is the same vehicle from one
+ * snapshot to the next — and it costs no wire bytes for a handful of bodies.
+ * The guard below is what makes that safe rather than merely true today: a slot
+ * whose kind changed, or that moved further than anything can drive in a tick,
+ * is snapped instead of walked. If the assumption ever breaks the worst case is
+ * the behaviour this replaced.
+ */
+interface VehicleLerp {
+  kind: 'van' | 'car';
+  fromX: number;
+  fromY: number;
+  fromFacing: number;
+  toX: number;
+  toY: number;
+  toFacing: number;
+}
+let vehicleLerp: VehicleLerp[] = [];
+
+/** Fold a fresh snapshot's vehicles into the interpolation. */
+function syncVehicles(incoming: BackupVehicleState[]): void {
+  const next: VehicleLerp[] = [];
+  for (let i = 0; i < incoming.length; i++) {
+    const v = incoming[i];
+    const prev = vehicleLerp[i];
+    const same =
+      prev !== undefined &&
+      prev.kind === v.kind &&
+      Math.abs(v.x - prev.toX) < TELEPORT_PX &&
+      Math.abs(v.y - prev.toY) < TELEPORT_PX;
+    next.push({
+      kind: v.kind,
+      fromX: same ? prev.toX : v.x,
+      fromY: same ? prev.toY : v.y,
+      fromFacing: same ? prev.toFacing : v.facing,
+      toX: v.x,
+      toY: v.y,
+      toFacing: v.facing,
+    });
+  }
+  vehicleLerp = next;
+}
+
 /** The shorter way round the circle, so a body turning past π doesn't spin. */
 function shortestTurn(from: number, to: number): number {
   let d = to - from;
@@ -1485,6 +1540,15 @@ function advanceInterpolation(now: number): void {
     entry.state.x = entry.fromX + (entry.toX - entry.fromX) * t;
     entry.state.y = entry.fromY + (entry.toY - entry.fromY) * t;
     entry.state.facing = entry.fromFacing + shortestTurn(entry.fromFacing, entry.toFacing) * t;
+  }
+  // Written into the snapshot objects themselves, which is safe because they
+  // are parsed fresh every tick — `vehicleLerp` is what carries the previous
+  // pose across, not the array being drawn.
+  for (let i = 0; i < vehicles.length && i < vehicleLerp.length; i++) {
+    const lerp = vehicleLerp[i];
+    vehicles[i].x = lerp.fromX + (lerp.toX - lerp.fromX) * t;
+    vehicles[i].y = lerp.fromY + (lerp.toY - lerp.fromY) * t;
+    vehicles[i].facing = lerp.fromFacing + shortestTurn(lerp.fromFacing, lerp.toFacing) * t;
   }
 }
 

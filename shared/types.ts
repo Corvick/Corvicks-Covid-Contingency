@@ -282,6 +282,20 @@ export interface BackupVehicleState {
   skidAngle?: number;
   /** Still sliding: the tyres are smoking. */
   braking?: boolean;
+  /** A FISHHOOK or HOOK arrival — a hard screeching turn. The client draws it a
+   *  wider arc of rubber and more smoke than an ordinary LEAN. */
+  heavy?: boolean;
+  /**
+   * The braking curve, for the client to rebuild the tyre marks along: signed
+   * body rotation at rest (`slew * driftDir`), where in the brake the turn
+   * starts and finishes, and how long the brake is in px. All four are absent
+   * together for a dead-straight arrival, and only ever ride a van that is
+   * actually turning — see `shared/vancurve.ts`.
+   */
+  sl?: number;
+  th?: number;
+  td?: number;
+  bk?: number;
   /** How far the back doors and the cab door have swung, 0-1. */
   rearOpen?: number;
   cabOpen?: number;
