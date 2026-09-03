@@ -10,6 +10,16 @@
 # GitHub Pages. Sharing the game becomes sending somebody a URL.
 name: Publish to GitHub Pages
 
+# Pages has to be switched on once, by hand, before the first publish:
+#   Settings > Pages > Build and deployment > Source: GitHub Actions
+#
+# `actions/configure-pages` with `enablement: true` is meant to do that from
+# here and cannot -- the workflow token may not create a Pages site that has
+# never existed, and the step fails *before* the build, skipping it entirely.
+# Tried, measured, removed: it turned "the deploy step failed" into "nothing
+# built at all", which is strictly worse. Once the setting is on, this works
+# and nothing needs to be clicked again.
+
 on:
   push:
     branches: [main]
@@ -33,14 +43,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # Turns Pages on for the repo if it is off, so publishing needs no trip
-      # through the repo settings -- and is a no-op once it is on. If an org
-      # policy refuses it the deploy below fails with a Not Found, and the
-      # manual equivalent is Settings > Pages > Source: GitHub Actions.
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/setup-node@v4
         with:
