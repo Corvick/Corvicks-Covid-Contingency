@@ -34,6 +34,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Turns Pages on for the repo if it is off, so publishing needs no trip
+      # through the repo settings -- and is a no-op once it is on. If an org
+      # policy refuses it the deploy below fails with a Not Found, and the
+      # manual equivalent is Settings > Pages > Source: GitHub Actions.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
