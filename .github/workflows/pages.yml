@@ -1,0 +1,71 @@
+# Publish the game as a website.
+#
+# The game is peer-to-peer: the host's browser runs the engine and guests
+# connect straight to it, so `client/` built is the whole thing. There is
+# nothing here to run a Node process for -- `server/` is still used for dev,
+# spectating and LAN-with-a-known-address, and none of that is what a friend
+# opening a link needs.
+#
+# So this builds the client on every push to main and hands the result to
+# GitHub Pages. Sharing the game becomes sending somebody a URL.
+name: Publish to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # So a publish can be forced without an empty commit -- re-running a failed
+  # deploy, or picking up a Pages setting changed in the repo's own settings.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One publish at a time, and never cancel one in flight: a half-deployed site
+# is worse than an old one, and pushes can land close together.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      # `npm ci` rather than `npm install`: the lockfile is committed, and a
+      # published build should be the versions that were actually tested.
+      - name: Install
+        working-directory: client
+        run: npm ci
+
+      - name: Build
+        working-directory: client
+        env:
+          # A project site lives at /<repo>/, not at the domain root, and a
+          # bundle built for `/` 404s on every asset there. Read off the repo
+          # rather than written down, so renaming it does not silently break
+          # the publish. See `base` in client/vite.config.ts.
+          PAGES_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: client/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

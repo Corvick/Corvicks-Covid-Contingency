@@ -173,20 +173,20 @@ export function setupMenu(hooks: MenuHooks): Menu {
      */
     if (!pendingJoin || !name) return '';
     const code = pendingJoin;
+    // Cleared *before* the join rather than after it, so no second caller can
+    // spend the same invite — see the `welcome` handler for why that mattered.
     pendingJoin = '';
-    hooks.goGuest(
-      code,
-      () => hooks.send({ type: 'lobbyJoin', code, gamertag: name }),
-      (why) => {
-        // Land it on the JOIN screen with the code still in the box, which is
-        // where a refusal has always gone and where it can be corrected.
-        show('join');
-        codeInput.value = code;
-        joinError.textContent = why;
-        codeInput.focus();
-        codeInput.select();
-      },
-    );
+    /*
+     * Fill the box and press the button, rather than joining by a route of its
+     * own. `doJoin` owns the `joining` latch, the "connecting…" line and the
+     * refusal that lands back here with the code still in the box; the parallel
+     * copy this replaced had none of the three, so an invite link gave no sign
+     * it was doing anything and took a second click on top of the first.
+     */
+    codeInput.value = code;
+    refreshJoinButton();
+    show('join');
+    doJoin();
     return code;
   };
 
@@ -209,13 +209,7 @@ export function setupMenu(hooks: MenuHooks): Menu {
     // Arriving on an invite, the name screen is the only thing between the
     // click and the lobby — so answering it goes straight there rather than
     // dropping them on a menu to find JOIN for themselves.
-    const sent = takeInvite();
-    if (sent) {
-      codeInput.value = sent;
-      refreshJoinButton();
-      show('join');
-      return;
-    }
+    if (takeInvite()) return;
     show('online');
   };
 
@@ -368,7 +362,18 @@ export function setupMenu(hooks: MenuHooks): Menu {
    * and paste it to four people, for whom it means "your own PC". A button that
    * hands out a broken link is worse than no button, so it says so instead.
    */
-  const inviteLink = (code: string) => `${location.origin}/?join=${code}`;
+  /**
+   * The directory this page is served from, with any filename dropped.
+   *
+   * A link built from `location.origin` alone is right only at a site root.
+   * Published to GitHub Pages the game lives under `/<repo>/`, and origin plus
+   * a bare `/` is a 404 on the host's own front page — so the one button whose
+   * entire job is handing out a working address would hand out a broken one.
+   * `/x/y/` and `/x/y/index.html` both come out `/x/y/`.
+   */
+  const servedUnder = location.pathname.replace(/[^/]*$/, '');
+
+  const inviteLink = (code: string) => `${location.origin}${servedUnder}?join=${code}`;
   const linkIsLocal =
     location.hostname === 'localhost' ||
     location.hostname === '::1' ||
@@ -876,11 +881,16 @@ export function setupMenu(hooks: MenuHooks): Menu {
       /* nothing remembered — they get asked */
     }
     if (name) {
-      // Put the code where a refusal can land and wait for the socket; the
-      // `welcome` handler below is what actually spends it.
-      codeInput.value = pendingJoin;
-      refreshJoinButton();
-      show('join');
+      /*
+       * Spend it now.
+       *
+       * This used to park the code in the box and wait for the socket's
+       * `welcome` to spend it, which was honest while joining meant talking to
+       * a server. On the peer-to-peer path there is no server, so no `welcome`
+       * ever came and the link sat on the JOIN screen with the right code in it
+       * doing nothing — which is what a broken link looks like from the outside.
+       */
+      takeInvite();
     } else {
       askName();
     }
@@ -897,12 +907,19 @@ export function setupMenu(hooks: MenuHooks): Menu {
       if (msg.type === 'welcome') {
         connected = true;
         showBuild(msg.build);
-        const sent = takeInvite();
-        if (sent) {
-          codeInput.value = sent;
-          refreshJoinButton();
-          show('join');
-        }
+        /*
+         * **It deliberately does not spend an invite any more.**
+         *
+         * `welcome` used to mean "the server socket is up", and spending the
+         * invite here was how a remembered gamertag went straight into a lobby.
+         * But it is also the first thing a *host peer* says to a guest — so
+         * once joining went peer-to-peer, pressing JOIN on an invite link
+         * connected, received this, and spent the still-pending invite a second
+         * time, which called `goGuest` again and tore down the connection it
+         * had just made. Measured: the guest found the host, then reported
+         * `no peer with id … found` for the rest of the round. The invite is
+         * spent where it arrives instead.
+         */
       } else if (msg.type === 'lobby') {
         view = msg.lobby;
         renderLobby();

@@ -5,6 +5,18 @@ import { HOST_SELF, type HostIn, type HostOut } from './p2pwire.js';
 
 const RECONNECT_DELAY_MS = 800;
 /**
+ * How many times to try a server that has never once answered before deciding
+ * there isn't one.
+ *
+ * The retry exists because the dev server restarts on every edit — a case that
+ * by definition has connected at least once. A build published to a static host
+ * has no server at all and never will, so the same loop runs for the life of
+ * the page: a failed WebSocket and a red console line every 800ms, forever,
+ * behind a menu that works perfectly without it. Giving up is only ever applied
+ * to a connection that has never succeeded; once one has, it retries as before.
+ */
+const NO_SERVER_ATTEMPTS = 3;
+/**
  * How often to probe. Once a second is plenty: this is a number somebody reads
  * off a HUD to decide whether a tunnel is costing them anything, not a control
  * loop, and a rolling window of these already smooths it.
@@ -150,6 +162,14 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
    */
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
 
+  /**
+   * Whether a socket to `host` has ever opened. Tells "the server restarted"
+   * apart from "there is no server here", which want opposite answers.
+   */
+  let everConnected = false;
+  /** Consecutive failures with nothing having connected yet. */
+  let deadOpens = 0;
+
   function open() {
     const socket = new WebSocket(`${scheme}//${host}`);
     ws = socket;
@@ -175,7 +195,11 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
       netStats.bytes += raw.length;
       netStats.messages++;
     });
-    socket.addEventListener('open', () => console.log('[net] connected'));
+    socket.addEventListener('open', () => {
+      everConnected = true;
+      deadOpens = 0;
+      console.log('[net] connected');
+    });
     socket.addEventListener('close', () => {
       // Closed because we moved the game off the socket, not because anything
       // went wrong. Reconnecting would put a server back in the picture.
@@ -183,8 +207,20 @@ export function connect(onMessage: (msg: ServerMessage) => void): Connection {
       // drops the socket without starting a worker, and without this line the
       // retry timer quietly reconnects underneath a peer-to-peer session.
       if (worker || guest) return;
-      console.log('[net] disconnected — retrying');
       if (ws === socket) ws = null;
+      /*
+       * Nothing has ever answered here, so stop asking.
+       *
+       * This is the published-to-a-static-host case: the page is the whole
+       * game and there is no server anywhere. Said once and then dropped —
+       * hosting, joining and playing offline all work from here, and each of
+       * them closes the socket for good on its way past.
+       */
+      if (!everConnected && ++deadOpens >= NO_SERVER_ATTEMPTS) {
+        console.log('[net] no server at ' + host + ' — peer-to-peer only');
+        return;
+      }
+      console.log('[net] disconnected — retrying');
       // The window is about *this* connection. Carrying it across a reconnect
       // would average the old route's timings into the new one's.
       pings.length = 0;

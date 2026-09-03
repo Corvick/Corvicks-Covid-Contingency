@@ -834,6 +834,104 @@ principle be scanned for live four-letter rooms — where before, a stranger als
 needed your URL. `BaseRoomConfig.password` end-to-end encrypts a room and is the
 lever if that ever matters.
 
+### So the game is a website, and nobody downloads anything
+
+Reported as *"can I have an easy way to share this game with my friends. right
+now they are downloading on the github page. also the way the game opens command
+prompts is off putting"*. Both halves have the same answer, and it is a
+consequence of the peer-to-peer change above rather than anything new:
+**`client/` built is the whole game.** The engine runs in the host's browser and
+guests connect straight to it, so there is nothing left for a friend to install,
+and nothing for either side to run a Node process for.
+
+`.github/workflows/pages.yml` builds the client on every push to `main` and
+publishes it to GitHub Pages. Sharing the game is sending somebody a URL, and
+the host opens that same URL — so the command prompts are gone for everybody,
+not hidden.
+
+- **The prompts were never gratuitous and are deliberately not suppressed.**
+  `cmd /k` is what makes closing the window the way to stop the game, and those
+  scripts are also the only thing that finds node across the two machines this
+  is developed on — one an installer build, one a portable unzip with no admin
+  rights. A `.vbs` shim hiding them would take the stop button and the "Node.js
+  was not found" message with it. The two `.bat` files are untouched and still
+  right for dev, spectating and LAN.
+- **`base` is set from the environment, not written down.** A GitHub Pages
+  *project* site is at `/<repo>/`, and a bundle built for `/` asks for
+  `/assets/index.js` there and 404s on every file — a white page with no error
+  worth the name. The workflow passes `PAGES_BASE` off the repo name so renaming
+  it cannot silently break the publish, and every local build still gets the `/`
+  it already had.
+- **Nothing about the round changed.** `server/`, `serve.ts` and both `.bat`
+  files are as they were; this adds a way to *ship* the client and takes nothing
+  away.
+
+Three things had to be fixed before it would work, and the first is a real bug
+that was not about hosting at all.
+
+**An invite link joined and then tore its own connection down.** `?join=CODE`
+parked the code in the box and waited for `welcome` to spend it — honest while
+`welcome` meant "the server socket is up". It is also the first thing a **host
+peer** says to a guest. So on the peer-to-peer path pressing JOIN connected,
+received `welcome`, and spent the still-pending invite a *second* time, which
+called `goGuest` again and closed the working connection. Measured before the
+fix: the guest found the host and then logged `no peer with id … found` for the
+rest of the round. On a static host it was worse still — there is no server, so
+no `welcome` ever came and the link simply sat on the JOIN screen with the right
+code in it doing nothing.
+
+- **The invite is spent where it arrives** — at page load, or when the gamertag
+  is answered — and `welcome` no longer spends one at all.
+- **`takeInvite` presses `doJoin` rather than joining by a route of its own.**
+  That function owns the `joining` latch, the "connecting…" line and the refusal
+  that lands back on the JOIN screen with the code still in the box; the
+  parallel copy it replaced had none of the three, so an invite gave no sign it
+  was working and took a second click on top of the first.
+- **`pendingJoin` is cleared before the join, not after**, so nothing can spend
+  one twice however the callbacks land.
+
+**The link has to carry the path the game is served under.** `inviteLink` was
+`${location.origin}/?join=`, which is right only at a site root; under
+`/<repo>/` the one button whose entire job is handing out a working address
+would hand out a 404. `servedUnder` is `location.pathname` with any filename
+dropped, so `/x/y/` and `/x/y/index.html` both come out `/x/y/`.
+
+**And the socket gives up when there is nothing there.** `net.ts` opens a
+WebSocket at import and retries every 800ms forever, which is right for the dev
+server restarting on every edit — a case that by definition has connected once.
+Published statically there is no server and never will be, so it failed and
+retried for the life of the page behind a menu that works perfectly without it.
+`NO_SERVER_ATTEMPTS` (3) applies **only to a connection that has never
+succeeded**; once one has, it retries exactly as before.
+
+Measured on the real configuration — `client/dist` built with the Pages base and
+served by a plain static file server under `/Corvicks-Covid-Contingency/`, with
+no Node game server running anywhere:
+
+| | |
+|---|---|
+| assets and the host worker under the subpath | **200**, no 404 |
+| socket retries before giving up | **3**, then `no server … — peer-to-peer only` |
+| lobby created | `NDPQ`, room opened on the relay |
+| **invite link → in the lobby** | **0 clicks**, seated as OFFICER 2 |
+| joins logged by that guest | **1** — against 2 and seven orphaned-peer warnings before |
+| round started, two players | **522 entities · 2 clients · tick 5.9-8.8ms** |
+
+**What is not measured, and should not be claimed.** Nothing about NAT — two
+tabs on one machine exercise signalling and the data channel and nothing about
+traversal, and the 10-20% of peer pairs that cannot connect directly is
+unchanged by any of this. Nothing about more than two players. And the relays
+are still somebody else's: every run logged `pow: insufficient leading-zero
+bits` from `relay.nostr.place` and write refusals from `hornetstorage.net`, and
+it worked anyway because Trystero uses several.
+
+*One trap, and it is Windows-only.* Building with the Pages base from Git Bash
+gives a wrong answer silently: MSYS path conversion turns
+`PAGES_BASE=/Corvicks-Covid-Contingency/` into a Windows path, and the bundle
+comes out asking for `/Users/…/Programs/Git/Corvicks-Covid-Contingency/assets/`.
+Prefix the command with `MSYS_NO_PATHCONV=1`. The workflow runs on Linux and is
+unaffected — this only bites somebody reproducing the published build by hand.
+
 ### Playing over the internet
 
 The codes say *which room*; they say nothing about *which machine*, and that
