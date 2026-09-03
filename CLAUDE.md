@@ -866,6 +866,16 @@ not hidden.
   files are as they were; this adds a way to *ship* the client and takes nothing
   away.
 
+**Pages has to be switched on by hand, once, and it cannot be done from here.**
+Settings > Pages > Build and deployment > Source: **GitHub Actions**. The
+obvious fix is `actions/configure-pages` with `enablement: true`, which is meant
+to create the site from the workflow — it was tried and it fails: the workflow
+token may not create a Pages site that has never existed, and the step runs
+*before* the build, so it took "the deploy failed" and made it "nothing built at
+all". Removed, with the reason recorded in the workflow so it does not get added
+back. `workflow_dispatch` is on the workflow so the first publish can be forced
+from the Actions tab once the setting is on, rather than needing an empty commit.
+
 Three things had to be fixed before it would work, and the first is a real bug
 that was not about hosting at all.
 
