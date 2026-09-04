@@ -3,6 +3,31 @@
 Top-down 2D multiplayer web game. 5 human officers vs 1 zombie master, with
 hundreds of civilian and zombie NPCs. Server-authoritative.
 
+## How this is meant to be played
+
+**With friends who are somewhere else — a different house, a different city,
+not the same wifi — over the published website and nothing else:**
+
+**https://corvick.github.io/Corvicks-Covid-Contingency/**
+
+Everybody opens that URL. The host presses PLAY ONLINE > CREATE LOBBY, and
+sends the others COPY INVITE LINK; opening that link drops them straight into
+the lobby. Nobody installs anything, nobody runs a Node process, nobody
+forwards a port, and no `.bat` file is involved on any machine including the
+host's. The host's *browser tab* is the server — see **The code is now enough,
+because the game is peer to peer** — so the only requirements are that the host
+keeps the tab open and that the page has been published from `main`.
+
+**That is the target, and everything else in this file is development.**
+`server/`, `Launch Zombie Game.bat`, `Host Online.bat`, `serve.ts`, tunnels
+and `?server=` are all still right and all still work; none of them is how the
+game gets played with people any more. When something in here has to give,
+the LAN and tunnel paths give and the published URL does not.
+
+**If a friend cannot get in, run `cd client && node relaycheck.mjs` first** —
+it is a two-relay outage that has already cost several sessions once. See **Why
+sending somebody the code never worked**.
+
 ## Stack & layout
 
 - **TypeScript throughout.** No game engine, no UI framework.
@@ -866,15 +891,28 @@ not hidden.
   files are as they were; this adds a way to *ship* the client and takes nothing
   away.
 
-**Pages has to be switched on by hand, once, and it cannot be done from here.**
-Settings > Pages > Build and deployment > Source: **GitHub Actions**. The
-obvious fix is `actions/configure-pages` with `enablement: true`, which is meant
-to create the site from the workflow — it was tried and it fails: the workflow
-token may not create a Pages site that has never existed, and the step runs
-*before* the build, so it took "the deploy failed" and made it "nothing built at
-all". Removed, with the reason recorded in the workflow so it does not get added
-back. `workflow_dispatch` is on the workflow so the first publish can be forced
-from the Actions tab once the setting is on, rather than needing an empty commit.
+**The game is live at https://corvick.github.io/Corvicks-Covid-Contingency/.**
+That URL is the whole of what a friend needs: they open it, they are in the
+menu, and nothing is installed anywhere. The host opens the same one.
+
+**Pages had to be switched on by hand, once, and it now is** — Settings > Pages
+> Build and deployment > Source: **GitHub Actions**. It stays on; nothing here
+needs clicking again. The obvious way to do it from the workflow is
+`actions/configure-pages` with `enablement: true`, which was tried and fails:
+the workflow token may not create a Pages site that has never existed, and the
+step runs *before* the build, so it took "the deploy failed" and made it
+"nothing built at all". Removed, with the reason recorded in the workflow so it
+does not get added back. `workflow_dispatch` is on the workflow so a publish can
+be forced from the Actions tab without an empty commit.
+
+**Its first four runs failed at `deploy-pages` and the build was never the
+problem** — `npm ci`, `npm run build` and `upload-pages-artifact` all passed
+every time, and the deploy answered `404: Ensure GitHub Pages has been enabled`.
+That is the one error this whole arrangement produces when the switch is off,
+and it is worth recognising on sight: **a green build and a red deploy is the
+setting, never the code.** `GET /repos/{owner}/{repo}/pages` answering 404 is
+the same fact from the other side, and `has_pages` on the repo object is *not* —
+it read `true` throughout, while no Pages site existed at all.
 
 Three things had to be fixed before it would work, and the first is a real bug
 that was not about hosting at all.
@@ -941,6 +979,106 @@ gives a wrong answer silently: MSYS path conversion turns
 comes out asking for `/Users/…/Programs/Git/Corvicks-Covid-Contingency/assets/`.
 Prefix the command with `MSYS_NO_PATHCONV=1`. The workflow runs on Linux and is
 unaffected — this only bites somebody reproducing the published build by hand.
+
+### Why sending somebody the code never worked
+
+Reported after several sessions spent trying to connect to a friend on another
+network, with nothing ever working. **It was never NAT and it was never the
+game.** The lobby, the code, the invite link and the whole peer-to-peer path
+were all correct. What was broken sat one layer under all of it: the two
+browsers could not find each other, because the relays they announce themselves
+on were refusing them.
+
+**Trystero picks its five signalling relays by hashing the app id and nothing
+else** — `shuffle(defaultRelayUrls, strToNum(appId)).slice(0, 5)`, the seed
+being the sum of the character codes of `corvicks-covid-contingency`. There is
+no per-room and no per-player component, so **one app gets the same five relays
+for every room, every player and every round, forever.** A good draw works
+always and a bad draw fails always; there is nothing in between to make it look
+intermittent, which is exactly why several sessions of trying got nowhere.
+
+Ours was a bad draw. Measured against the real `createEvent` the library signs
+its presence with — kind 21463, ephemeral, which is itself the kind some relays
+quietly refuse:
+
+| the five this app drew | writes accepted |
+|---|---|
+| `wss://relay.nostr.place` | **0 of 4** — `pow: insufficient leading-zero bits` |
+| `wss://hornetstorage.net/relay` | **0 of 4** — `access denied`, reads *and* writes |
+| `wss://relay.sigit.io` | 4 of 4, 606ms |
+| `wss://nostr.data.haus` | 4 of 4, 696ms |
+| `wss://yabu.me/v2` | 4 of 4, 798ms |
+
+**Two of the five were dead permanently, and the three survivors were the three
+slowest writable relays in the whole 47-relay pool** — against 325ms for the
+best of them. A host that cannot write cannot announce itself, so two fifths of
+the signalling was simply gone and the remainder was the slow end of the
+network, against an eight-second join timeout.
+
+- **Reproduced with two tabs on one machine**, which is what settles the cause:
+  there is no NAT between two tabs on one desk. The guest timed out and both
+  consoles showed nothing but those two relays refusing, over and over.
+- **A read test would have missed it, and that is the trap worth keeping.**
+  Both dead relays answer *reads* perfectly well — `relay.nostr.place` reads in
+  2.3s and has never once accepted a write from this game. Anything checking
+  these has to publish a **signed** event, which is why `relaycheck.mjs` uses
+  the game's own `createEvent` rather than a ping or a subscription.
+- **And reputation would have picked a worse relay than measurement did.**
+  `relay.damus.io` is the best known relay on the network, passes a single
+  write, and accepts **0 of 8** in a burst at the cadence a room actually
+  announces at — rate-limited. It is out of the list for that reason and no
+  other.
+
+**So `SIGNAL_RELAYS` in `client/src/p2p.ts` is pinned**, and every entry is
+4-of-4 on repeated signed writes and 8-of-8 under burst.
+
+- **`nostr.data.haus` and `relay.sigit.io` are kept from the old draw
+  deliberately.** **Two peers meet only on a relay they have in common**, so
+  anybody still running a cached older bundle shares two with this one and can
+  still be found. It is also why this list wants *adding to* rather than
+  swapping out wholesale.
+- **One `ROOM_CONFIG` for both ends**, rather than two literals at the two
+  `joinRoom` calls. A host and a guest that drift apart on relays stop being
+  able to meet, and nothing anywhere errors when they do.
+- **`JOIN_TIMEOUT_MS` went 8s → 15s**, and it is the trade that moved rather
+  than the judgement. An invite link carries the code now, so most joins involve
+  nobody typing anything and the typo the short timeout protected is the rarer
+  half; and a real join gathers ICE and hole-punches, which two tabs on one desk
+  never did — every measurement of the old figure was taken in the one case that
+  skips the slow part. Of the two failures, a join that would have worked being
+  called a bad code is much the worse: the only response it leaves the player is
+  to retype a code that was right the first time.
+- **A timeout now tells "no relay reachable" from "nobody is hosting that".**
+  Answering both with one refusal is most of what hid this for so long — every
+  failure read as a wrong code, which is the one thing the player could not fix.
+  The relays are counted *before* `room.leave()`, which tears the sockets down
+  and would otherwise report zero every time and turn every genuine typo into
+  "your internet is broken".
+
+Measured on the published site, host and guest in two tabs, and the controlled
+comparison is in one console: joining `DSPW` on the old bundle logged the two
+relay refusals and timed out, joining `WGHQ` on the new one logged
+`[p2p] host is Yu336…` with **no relay failure at all**. Both seated, round
+started, and the host's engine reported **2 clients · 526 entities · tick
+6.3-10.8ms**, with survivors falling as the outbreak spread.
+
+**`client/relaycheck.mjs` is the harness**, and it exists because this will
+happen again — the relays are somebody else's and they rot. `node relaycheck.mjs`
+checks the pinned list; `--all` sweeps the whole 47-relay pool to repin from. It
+is **the first thing to run when somebody cannot connect**, before suspecting
+NAT, the code or the game. Run it on *both* machines: a relay reachable from one
+country and not another produces exactly this symptom and cannot be seen from
+one end.
+
+**What is still not measured, and should not be claimed.** Nothing about NAT.
+Two tabs on one machine exercise signalling and the data channel and nothing
+about traversal, so the **10-20% of peer pairs that cannot connect directly** —
+symmetric NAT, mostly mobile and corporate — is exactly as it was. The tell is
+specific: healthy relays, `[p2p] joining room` in the guest's console, and
+`[p2p] host is` never arriving. The fix for that is a TURN relay —
+`BaseRoomConfig` takes `turnConfig` and `rtcConfig` — and it is bandwidth
+somebody has to pay for. Nothing about more than two players has been run
+either.
 
 ### Playing over the internet
 
@@ -9684,6 +9822,14 @@ in the city was told to walk past it by name. Nothing else read the mark.
   the server is something you can expose to the internet, so a plain `spectate`
   just watches whatever is already running and is safe to point at a live game.
   `?spectate=new` and the bare `restart` message need the flag.
+- **`cd client && node relaycheck.mjs` before believing any "cannot connect"
+  report.** Matchmaking runs on public Nostr relays that are somebody else's
+  and that rot without warning, and when they do the game says "no lobby with
+  the code XXXX" — which points at the code, which is never the problem. It has
+  already been the answer once, for two of the five relays at the same time.
+  `--all` sweeps the whole pool to re-pin `SIGNAL_RELAYS` from. Run it on both
+  machines: a relay reachable from one country and not another looks identical
+  from one end.
 - **Two ways to test without touching his game**, and they cover almost
   everything:
   - *Headless.* Import `createWorld` and run the tick order above in a loop
