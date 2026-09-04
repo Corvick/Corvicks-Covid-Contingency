@@ -23,6 +23,7 @@ import {
   ZOMBIE_OFFICER_HEALTH_MUL,
   FRESH_ZOMBIE_SLOW_MS,
   PLAYER_RADIUS,
+  DOG_MAX_HEALTH,
 } from '../shared/constants.js';
 
 let fails = 0;
@@ -87,7 +88,10 @@ function turn(id: string, sets: Array<(w: World, id: string) => void>): { world:
   world.ai.set(id, newAiState(Date.now(), e.x, e.y));
   for (const mark of sets) mark(world, id);
   convert(world, e, Date.now() - FRESH_ZOMBIE_SLOW_MS * 10);
-  world.ai.get(id)!.slowMul = 1;
+  // A blue officer's own turn carries no `AiState` at all any more — see
+  // `convertOfficerToDog` — so this is skipped rather than asserted past.
+  const state = world.ai.get(id);
+  if (state) state.slowMul = 1;
   // The candidate list a shot is tested against is the spatial grid, not
   // `world.entities` directly — nothing populates it until this is called, the
   // same trap every other harness in this project already pays for.
@@ -106,7 +110,12 @@ console.log('=== max health, through the real convert() ===');
     ['a converted ambient grey officer', [cityOfficer], Math.round(base * ZOMBIE_OFFICER_HEALTH_MUL)],
     ['a converted patrol-car rifleman', [rifleman], Math.round(base * ZOMBIE_OFFICER_HEALTH_MUL)],
     ['a converted van driver (dispatched, not swat)', [dispatched], Math.round(base * ZOMBIE_OFFICER_HEALTH_MUL)],
-    ['a converted bot officer (unmentioned, unboosted)', [bot], base],
+    // A blue officer's own turn is a dog now, not an ordinary shambler at all
+    // — see `officerdog.ts` — so this no longer measures `zombieHealthFor`
+    // the way every other row here does. Kept as a control anyway: it is
+    // what says this table's own tiers stayed put for everybody else while
+    // that one seat's fate changed underneath it.
+    ['a converted bot officer (now a dog, not "unboosted")', [bot], DOG_MAX_HEALTH],
     ['an ordinary converted civilian', [], base],
   ];
   for (const [label, sets, want] of cases) {

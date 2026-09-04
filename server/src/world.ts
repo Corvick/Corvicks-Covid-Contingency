@@ -897,6 +897,21 @@ export interface World {
   dogs: Set<string>;
   dogState: Map<string, DogState>;
   /**
+   * A blue officer who turned rather than died, and came up as this instead
+   * of an ordinary shambler — every rule `dogs` carries (the body, the bite,
+   * the respawn out of the horde) applies to one of these exactly as it does
+   * to team 2's own seat, since it is the same membership.
+   *
+   * What this set adds on top is the one thing that seat can do that a
+   * shambler cannot ask for: it has no Q, E or F, whoever is behind it. A
+   * real connection still drives the legs and the jaws through its own
+   * `command`, same as any dog; one with nobody behind it — a bot, or a
+   * player who has since disconnected — is driven instead by
+   * `driveOfficerDogAi`, which never touches an ability and needs none of
+   * `DogState` beyond what `dogTick` already builds lazily for it.
+   */
+  officerDogs: Set<string>;
+  /**
    * Dogs that have run out of horde to come back out of. They hold no entity
    * from that moment and are out of the round — which is what makes every
    * zombie the officers put down worth something to them.
@@ -1273,6 +1288,58 @@ export function spawnDog(world: World, id: string): void {
   world.dogCooldowns.delete(id);
   world.stamina.set(id, STAMINA_MAX);
   world.exhausted.delete(id);
+}
+
+/**
+ * A bot or a real player in an officer's slot — as against the grey ambient
+ * garrison, the radio's own dispatched crews, SWAT or soldiers, none of whom
+ * are a "blue officer" in the sense this game means it. Both stand in one of
+ * the five seats the lobby hands out, so both get the same fate on turning.
+ */
+export function isBlueOfficer(world: World, id: string): boolean {
+  return world.playerIds.has(id) || world.bots.has(id);
+}
+
+/**
+ * A blue officer's own answer to turning, in place of the ordinary shambler
+ * `convert` would otherwise make of them: the same zombie dog team 2 plays,
+ * joining `world.dogs` on exactly the terms that seat already carries — the
+ * body, the held-open bite, and rising again out of a shambler once the
+ * horde has one to give up. `world.officerDogs` is the one thing layered on
+ * top, and it exists so the ability keys can be refused regardless of who or
+ * what is behind this id: nobody chose to press Q, E or F to get here.
+ *
+ * Called from `convert` in place of the ordinary conversion, so everything
+ * that call already did — crediting the kill, `totalConverted`, clearing
+ * `pendingInfections` — has already happened by the time this runs.
+ */
+export function convertOfficerToDog(world: World, target: Entity, now: number): void {
+  target.type = 'zombie';
+  target.radius = DOG_RADIUS;
+  target.maxHealth = DOG_MAX_HEALTH;
+  target.health = DOG_MAX_HEALTH;
+  target.speedMul = 1;
+
+  world.dogs.add(target.id);
+  world.officerDogs.add(target.id);
+  world.dogsOut.delete(target.id);
+  world.dogDeaths.delete(target.id);
+  world.dogBirths.delete(target.id);
+  // Made fresh on the next tick, the same as a brand new seat — see
+  // `dogStateFor` in `dog.ts`.
+  world.dogState.delete(target.id);
+  world.dogCooldowns.delete(target.id);
+  world.stamina.set(target.id, STAMINA_MAX);
+  world.exhausted.delete(target.id);
+
+  world.speedBoosts.delete(target.id);
+  world.speech.delete(target.id);
+  // Nothing here is an ordinary AI zombie: a live connection drives this
+  // through `updateDogs` off its own `command`, exactly like team 2's own
+  // seat, and one with nobody behind it is driven by `driveOfficerDogAi`
+  // instead — neither reads an `AiState` the way a shambler does.
+  world.ai.delete(target.id);
+  releaseGrapples(world, target.id);
 }
 
 /**
@@ -2219,6 +2286,7 @@ export function createWorld(): World {
     cityOfficers: new Set(),
     dogs: new Set(),
     dogState: new Map(),
+    officerDogs: new Set(),
     dogsOut: new Set(),
     corpses: [],
     dogDeaths: new Map(),
@@ -2319,6 +2387,22 @@ export function resetWorld(world: World): void {
   world.grappleImmune.clear();
   world.pendingInfections.clear();
   world.infectedByDog.clear();
+  /**
+   * An officer's turn into a dog is a fact about the round that just ended,
+   * not about the seat — unlike `world.dogs`, which is a lobby choice and
+   * deliberately outlives a restart. Left in `world.dogs`, a converted
+   * officer's id would still read as team 2's own seat next round, on top of
+   * whichever entity `spawnPlayer` puts there fresh.
+   */
+  for (const id of world.officerDogs) {
+    world.dogs.delete(id);
+    world.dogState.delete(id);
+    world.dogsOut.delete(id);
+    world.dogDeaths.delete(id);
+    world.dogBirths.delete(id);
+    world.dogCooldowns.delete(id);
+  }
+  world.officerDogs.clear();
   // Which *seat* somebody took outlives a restart; what they did with it does
   // not. A fresh city has bitten nobody.
   world.dogConversions.clear();

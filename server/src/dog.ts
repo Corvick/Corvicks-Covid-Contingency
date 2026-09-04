@@ -1039,6 +1039,10 @@ export function startDogAbility(
   slot: number,
   now: number,
 ): 'roared' | 'spat' | 'morphing' | 'lashed' | 'refused' {
+  // A blue officer's turn, not team 2's own seat. Nobody chose to press one
+  // of these to get here, and the hexagons say so too — see `abilityBar` —
+  // so this is refused whatever the slot, ahead of even the slot check below.
+  if (world.officerDogs.has(id)) return 'refused';
   // Slot 2 is drawn and does nothing: there is nothing in it yet. Said out
   // loud rather than falling through, because "the key did nothing" and "the
   // key was refused" are different things and only the second is a bug.
@@ -1525,6 +1529,11 @@ function abilityBar(
   now: number,
 ): Array<DogAbilityHud | null> {
   const bar: Array<DogAbilityHud | null> = new Array(DOG_ABILITY_SLOTS).fill(null);
+  // A blue officer's turn gets none of these, whatever the cooldowns and
+  // unlocks below would otherwise say — every hexagon reads exactly like the
+  // permanently-empty one at slot 2 always has, rather than like something
+  // that merely hasn't come up on the bar yet.
+  if (world.officerDogs.has(id)) return bar;
   const roaring = dog !== undefined && dog.roarStartedAt > 0;
   const banked = world.dogConversions.get(id) ?? 0;
   const turned = world.dogTurned.get(id) ?? 0;

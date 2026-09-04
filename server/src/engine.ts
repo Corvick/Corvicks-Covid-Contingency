@@ -99,7 +99,7 @@ import {
   type World,
 } from './world.js';
 import { dogHudFor, lashesToWire, startDogAbility, tentaclesToWire, updateDogs } from './dog.js';
-import { computeFrozen, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
+import { computeFrozen, driveOfficerDogAi, followMe, holdPosition, rallyHumans, updateAi } from './ai.js';
 import { processShooting, steerAim } from './combat.js';
 import { allDoorsToWire, doorAt, doorsToWire } from './doors.js';
 import { ducksToWire, updateDucks } from './ducks.js';
@@ -925,6 +925,7 @@ export function disconnect(id: string): void {
     world.spectators.delete(id);
     world.commands.delete(id);
     world.dogs.delete(id);
+    world.officerDogs.delete(id);
     world.dogState.delete(id);
     world.dogsOut.delete(id);
     world.dogDeaths.delete(id);
@@ -1279,6 +1280,10 @@ function tick(): void {
     mark('grid+frozen');
 
     updatePlayers(dt, frozen, now);
+    // Before `updateDogs`, which is the whole point: a converted officer with
+    // nobody behind it needs a command made up before that function can read
+    // one, exactly as a real connection's own input already has been by now.
+    driveOfficerDogAi(world, now, dt);
     // Before the AI and before collision: a shaken victim is dragged onto the
     // jaws here and pushed back out of anything it was dragged into below,
     // which is the same deal every other body in the world gets.

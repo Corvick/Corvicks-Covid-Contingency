@@ -391,18 +391,22 @@ import {
 } from './doors.js';
 import {
   buildingIndexAt,
+  convertOfficerToDog,
   damageWindow,
   doorsOf,
   hasLineOfSight,
   hasWallClearPath,
+  isBlueOfficer,
   isInBush,
   isInGrapple,
   isWindowIntact,
   newAiState,
   rollSpeedMul,
   speedAt,
+  walkableNear,
   acidCloudAt,
   type AiState,
+  type Command,
   type Entity,
   type World,
 } from './world.js';
@@ -8841,13 +8845,29 @@ export function convert(world: World, target: Entity, now: number): void {
    * through however it got here.
    */
   world.totalConverted++;
+  world.pendingInfections.delete(target.id);
+
+  /**
+   * **A blue officer's turn is the same seat team 2 plays, not an ordinary
+   * shambler.** `isBlueOfficer` is the bot and the real player alike — both
+   * stand in one of the five seats the lobby hands out, as against the grey
+   * garrison, the radio's own dispatched crews, SWAT or soldiers, none of
+   * whom this touches. Everything else about becoming a zombie below —
+   * elite health, a fresh `AiState`, the reddening's own line — is what an
+   * ordinary conversion needs and this one does not: `convertOfficerToDog`
+   * is the whole of what it gets instead.
+   */
+  if (target.type === 'officer' && isBlueOfficer(world, target.id)) {
+    convertOfficerToDog(world, target, now);
+    return;
+  }
+
   target.type = 'zombie';
   const maxHealth = zombieHealthFor(world, target.id);
   target.health = maxHealth;
   target.maxHealth = maxHealth;
   target.speedMul = rollSpeedMul('zombie');
   world.speedBoosts.delete(target.id);
-  world.pendingInfections.delete(target.id);
 
   const state = newAiState(now, target.x, target.y);
   // Newly turned and single-minded: it wants whoever is standing right there,
@@ -9357,7 +9377,10 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
 
   for (const e of world.entities.values()) {
     // Players keep manual control even after they turn — no AI magnet.
-    if (world.playerIds.has(e.id)) continue;
+    // A dog is a player too, whichever kind: `updateDogs` is the whole of
+    // its tick, whether that is a real connection's own command or one
+    // `driveOfficerDogAi` made up for it — see the note by `world.dogs`.
+    if (world.playerIds.has(e.id) || world.dogs.has(e.id)) continue;
     if (frozen.has(e.id)) {
       // Pinned, but an officer with a gun is not out of the fight. This is the
       // only thing a frozen entity may do, and it is deliberately its own tiny
@@ -9395,5 +9418,123 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
       else updateNpcOfficer(world, e, state, now, dt);
     }
     else if (e.type === 'zombie') updateZombie(world, e, state, now, dt);
+  }
+}
+
+/** Facing held, nothing pressed — what a dog mid-death or mid-birth needs from a command it cannot otherwise supply for itself. */
+function idleCommand(facing: number): Command {
+  return {
+    input: { up: false, down: false, left: false, right: false },
+    aim: facing,
+    aimX: 0,
+    aimY: 0,
+    shooting: false,
+    sprint: false,
+    interact: false,
+    rightDown: false,
+  };
+}
+
+/**
+ * A converted officer with nobody's hand on the controls.
+ *
+ * A real connection behind one of `world.officerDogs` keeps sending its own
+ * `input` messages exactly as it did as an officer — the seat is the same,
+ * and so is the wire — so `updateDogs` already has a command to read for it.
+ * A bot, or a player who has since dropped, has nothing supplying one at all,
+ * and this is what makes one up: called once a tick, before `updateDogs`, so
+ * whatever it decides is what the dog acts on this tick, through the very
+ * same `dogTick` team 2's own seat runs through.
+ *
+ * Deliberately the plainest thing that will do — the nearest living target in
+ * sight, walked at with the trigger held, and a slow wander when there is
+ * none. No traits, no room search, no looting, and no ability ever asked
+ * for: `startDogAbility` refuses every one of `world.officerDogs` outright,
+ * whatever a command here might say, so there is nothing to gain by asking.
+ */
+export function driveOfficerDogAi(world: World, now: number, dt: number): void {
+  for (const id of world.officerDogs) {
+    // A live connection is already feeding `world.commands` its own input —
+    // this is only for the seats with nobody behind them.
+    if (world.playerIds.has(id)) continue;
+    const e = world.entities.get(id);
+    if (!e) continue;
+
+    // Down, or lying on the shambler it is coming out of: `updateDogs` still
+    // has to reach that branch to advance the clock, and it can only do that
+    // with a command in hand — but nothing here about aiming or moving means
+    // anything while either is true.
+    if (world.dogDeaths.has(id) || world.dogBirths.has(id)) {
+      world.commands.set(id, idleCommand(e.facing));
+      continue;
+    }
+
+    const state = getAi(world, e, now);
+
+    let target: Entity | null = null;
+    let bestDist = ZOMBIE_SIGHT_RADIUS;
+    for (const other of world.entityGrid.queryCircle(e.x, e.y, ZOMBIE_SIGHT_RADIUS, new Set<Entity>())) {
+      if (other.type !== 'human' && other.type !== 'officer') continue;
+      const dist = Math.hypot(other.x - e.x, other.y - e.y);
+      if (dist >= bestDist) continue;
+      if (!hasLineOfSight(world, e.x, e.y, other.x, other.y)) continue;
+      bestDist = dist;
+      target = other;
+    }
+    // Read by `senseTarget`'s own chaser lookup and by `targetClaims`, so an
+    // ordinary zombie can follow this one in on a sighting exactly as it
+    // would follow any other, and the crowd spreads out around it rather
+    // than piling onto whoever it has already found.
+    state.targetId = target ? target.id : null;
+
+    let gx: number;
+    let gy: number;
+    if (target) {
+      gx = target.x;
+      gy = target.y;
+    } else {
+      // A slow wander when nothing is worth chasing — no traits, no rooms,
+      // just somewhere else to be. `walkableNear` is the same spiral the
+      // roar's own order and a spectator's move command already lean on.
+      if (Math.hypot(state.wanderX - e.x, state.wanderY - e.y) < 40) {
+        const angle = Math.random() * Math.PI * 2;
+        const reach = 220 + Math.random() * 260;
+        const spot = walkableNear(world, e.x + Math.cos(angle) * reach, e.y + Math.sin(angle) * reach);
+        state.wanderX = spot.x;
+        state.wanderY = spot.y;
+      }
+      gx = state.wanderX;
+      gy = state.wanderY;
+    }
+
+    const heading = headingToward(world, e, state, gx, gy, now);
+    // `slideToward`'s own fallback biases off this when a route can't be
+    // found, the same way every other caller of `headingToward` keeps it
+    // current — left at its random start it would fan out from a bearing
+    // that never once matched where the dog was actually walking.
+    state.heading = heading;
+    const aim = target ? Math.atan2(target.y - e.y, target.x - e.x) : heading;
+
+    world.commands.set(id, {
+      // Quantised onto the eight directions a real WASD command could ever
+      // produce, since that is the whole of what `moveDog` reads.
+      input: {
+        up: Math.sin(heading) < -0.35,
+        down: Math.sin(heading) > 0.35,
+        left: Math.cos(heading) < -0.35,
+        right: Math.cos(heading) > 0.35,
+      },
+      aim,
+      aimX: target ? target.x : e.x + Math.cos(aim) * 200,
+      aimY: target ? target.y : e.y + Math.sin(aim) * 200,
+      // Held the whole time something is worth chasing, exactly as a player
+      // hunting one down would leave it — `jawsTick` is what turns that into
+      // an open-shut rhythm, and `catchInJaws` into whether anything is
+      // actually within reach and lined up.
+      shooting: target !== null,
+      sprint: target !== null && bestDist > 150,
+      interact: false,
+      rightDown: false,
+    });
   }
 }
