@@ -834,11 +834,15 @@ as the outbreak spread. The whole city, for two people, in a tab.
   pane is not compositing, so the guest's canvas read back blank — that is the
   documented limitation, not a fault, and it means somebody has to look at a
   real frame.
-- **Nothing about NAT.** Two tabs on one machine exercise signalling and the
-  data channel and nothing about traversal. Roughly **10–20% of peer pairs
-  cannot connect directly** — symmetric NAT, mostly mobile and corporate — and
-  fixing that needs a TURN relay, which is bandwidth somebody pays for.
-  `BaseRoomConfig` takes `turnConfig` and `rtcConfig` when that day comes.
+- **NAT is answered now, by two friends on their own networks.** Both joined
+  the published site and played, so the direct connection holds across real
+  home NATs and no TURN relay is in the game. What that is *not* is a general
+  guarantee: it is two peer pairs, and the **10–20% of pairs that cannot
+  connect directly** — symmetric NAT, mostly mobile tethering and corporate —
+  is a property of the networks rather than of the code, so the next person may
+  still be one of them. `BaseRoomConfig` takes `turnConfig` and `rtcConfig`
+  when that day comes; see the trade under **Why sending somebody the code
+  never worked**.
 - **Three is measured now; more than three is not.** A host and two guests on
   the published site ran a round at **3 clients · 527 entities · tick
   6.7-14.0ms**, with `serialise+send` 1.0-2.2ms — see **Why sending somebody
@@ -969,10 +973,12 @@ no Node game server running anywhere:
 | joins logged by that guest | **1** — against 2 and seven orphaned-peer warnings before |
 | round started, two players | **522 entities · 2 clients · tick 5.9-8.8ms** |
 
-**What is not measured, and should not be claimed.** Nothing about NAT — two
-tabs on one machine exercise signalling and the data channel and nothing about
-traversal, and the 10-20% of peer pairs that cannot connect directly is
-unchanged by any of this. Nothing about more than two players. And the relays
+**What was not measured here, and was answered later.** Nothing in this table
+touches NAT — two tabs on one machine exercise signalling and the data channel
+and nothing about traversal — nor more than two players. Both were settled
+afterwards by two friends on their own networks joining the published URL and
+playing; see **Why sending somebody the code never worked**, which is also where
+the relay fault that made every one of those joins fail is written up. The relays
 are still somebody else's: every run logged `pow: insufficient leading-zero
 bits` from `relay.nostr.place` and write refusals from `hornetstorage.net`, and
 it worked anyway because Trystero uses several.
@@ -1074,21 +1080,105 @@ NAT, the code or the game. Run it on *both* machines: a relay reachable from one
 country and not another produces exactly this symptom and cannot be seen from
 one end.
 
-**What is still not measured, and should not be claimed.** Nothing about NAT.
-Two tabs on one machine exercise signalling and the data channel and nothing
-about traversal, so the **10-20% of peer pairs that cannot connect directly** —
-symmetric NAT, mostly mobile and corporate — is exactly as it was. The tell is
-specific: healthy relays, `[p2p] joining room` in the guest's console, and
-`[p2p] host is` never arriving. The fix for that is a TURN relay —
-`BaseRoomConfig` takes `turnConfig` and `rtcConfig` — and it is bandwidth
-somebody has to pay for.
+**And it worked, for two friends on their own networks.** Both joined the
+published URL and played. That is the half of this nothing here could test —
+two tabs on one desk exercise signalling and the data channel and never once
+touch NAT traversal — and it is the only evidence that actually settles the
+original report. **No TURN relay is in the game and none was needed.**
 
-**Three players is measured and four is not.** A host and two guests joined the
-published site by invite link and ran a round: **3 clients · 527 entities · tick
-6.7-14.0ms**, `serialise+send` 1.0-2.2ms against 0.6ms for one. That is the
-first time more than two has been run at all, and it is two tabs and a third on
-one machine — so it says the star topology and the host's serialisation hold up,
-and nothing about four people on four networks.
+**Three players is measured, and four is not.** A host and two guests on one
+machine ran a round at **3 clients · 527 entities · tick 6.7-14.0ms**, with
+`serialise+send` 1.0-2.2ms against 0.6ms for one — that says the star topology
+and the host's per-viewer serialisation hold up. The live round with two real
+friends is the same count over real networks. Four and five have still never
+been run.
+
+**What is still not claimed.** Two peer pairs connecting is not every pair
+connecting. The **10-20% that cannot go direct** — symmetric NAT, mostly mobile
+tethering and corporate — is a property of the networks involved rather than of
+this code, so it is a thing the next player may hit and these two did not. **The
+tell is specific**: healthy relays, `[p2p] joining room` in their console, and
+`[p2p] host is` never arriving. Only then is TURN the answer, and it is worth
+knowing what it costs before reaching for it.
+
+#### What a TURN relay would cost, if it is ever needed
+
+Measured rather than guessed, because the naive figure is an order of magnitude
+out and argues the wrong way. **TURN is not a signalling helper** — when ICE
+falls back to it, *every* byte between the two peers goes through it, which
+host-authoritative means one whole snapshot stream per relayed guest at 30Hz.
+
+| a guest's stream | per snapshot | sustained |
+|---|---|---|
+| an officer, 20s in | 3.1-4.0 KB | **0.35-0.44 GB/hour** |
+| an officer, 150s in and the city nearly gone | 5.2 KB | **0.58 GB/hour** |
+| a dog | 3.4 KB | 0.38 GB/hour |
+| **a spectator — the whole board** | **59.8 KB** | **6.6 GB/hour** |
+
+**The fog is doing all of the work there: a player costs about a seventeenth of
+a spectator**, which is also an independent corroboration of the 56KB figure
+quoted under **Aiming past your own screen**. Ranges because the map is not
+seeded; quote the range and never a single run.
+
+**It climbs as the round goes on** — about 40% between 20s and 150s — because
+zombies converge on you, so more bodies are in view even though the total
+entity count is roughly conserved. **A dog is not measurably dearer than an
+officer**, which is worth saying because the wider `DOG_SIGHT_RADIUS` (945
+against 720) predicts it should be: at one run each the difference is inside the
+run-to-run spread.
+
+So four relayed guests is roughly 1.4-2.3 GB/hour, and **only pairs that
+actually fall back cost anything** — with four friends that is likely nought or
+one, so the realistic figure is a few hundred megabytes an hour. Affordable,
+which the spectator number on its own would have said it was not.
+
+**The bandwidth is not the strongest objection, though. Three others are:**
+
+- **Latency, which this game cannot hide.** A relay is a third machine in the
+  path, easily 50-150ms of round trip on a poorly placed one, and the HUD's own
+  thresholds are green under 70ms of input latency and red past 120. There is no
+  client-side prediction anywhere in this game — that is written down under
+  **The HUD says what the connection costs** and it is exactly why this is felt
+  rather than smoothed over.
+- **A credential in a public bundle is a public credential.** The client is
+  served off Pages and anybody can read it, and TURN is a general-purpose
+  relay — the usual answer is short-lived HMAC credentials handed out by a
+  server, and **that reintroduces the always-on server this whole architecture
+  exists to delete**. The honest choice is a public credential that may be
+  abused and throttled, or giving up "nobody hosts anything".
+- **It is the same bet that caused the original fault.** A free public TURN is
+  one more piece of somebody else's infrastructure that can throttle, vanish or
+  start refusing — which is precisely what `hornetstorage.net` and
+  `relay.nostr.place` did. Paid TURN avoids that and costs money.
+
+`server/turncost.ts` is the harness — headless, no socket, no port.
+`SEAT=dog` and `SEAT=spectator` are the other two rows, and `WARMUP_S` is how
+far into the round to measure.
+
+*Three things about it were the rig lying rather than the code failing, and
+every one of them is a trap this file has already recorded for something else:*
+
+- **A connection with no entity is a spectator.** `spectating =
+  world.spectators.has(id) || !viewer`, so a probe that only calls `connect` is
+  handed `wholeBoard()` and reports the worst case as a player's — **the tell
+  was a player and a spectator measuring byte for byte identical**, at 58.7 KB.
+  A guest has to be seated in a lobby and the round actually started, which is
+  the only way anybody gets an entity.
+- **`LobbyTeam` is `'humans' | 'dogs'`, not an index.** `sit` reads `team ===
+  'humans' ? lobby.humans : lobby.dogs`, so `team: 0` lands in a *dog* seat and
+  the run reports a dog's cost as an officer's. It printed `guest is a DOG` for
+  both, which is the only reason it was caught — so the staging says what the
+  guest actually became rather than what was asked for.
+- **`tick()` takes no arguments**, and this is the clock trap in a new place.
+  The rule written under performance is to advance a clock and pass it as
+  `now` — through *this* entry point there is nowhere to pass it, and
+  `tick(now)` compiles anyway because nothing at `server/` root is typechecked.
+  Measured that way the world is frozen: **526 entities and 0 zombies after a
+  "300-tick warmup"**, with the outbreak never starting. It runs on
+  `startClock()` and real wall time now, and prints the zombie count so a
+  frozen run cannot be quoted. *The figures barely moved* — a snapshot is sized
+  by the bodies in view and the entity count is roughly conserved — which is
+  luck rather than a reason to skip it.
 
 ### Playing over the internet
 
