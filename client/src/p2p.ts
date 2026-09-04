@@ -25,7 +25,7 @@
  * and no guest can desync from another guest because no guest simulates
  * anything.
  */
-import { joinRoom, selfId } from 'trystero';
+import { getRelaySockets, joinRoom, selfId } from 'trystero';
 import type { ClientMessage, ServerMessage } from '../../shared/types.js';
 
 /**
@@ -33,6 +33,81 @@ import type { ClientMessage, ServerMessage } from '../../shared/types.js';
  * same four letters in somebody else's Trystero app on the same public relay.
  */
 const APP_ID = 'corvicks-covid-contingency';
+
+/**
+ * The relays two browsers meet on, pinned rather than left to the default.
+ *
+ * **Trystero picks its five relays by hashing the app id and nothing else** —
+ * `shuffle(defaultRelayUrls, strToNum(appId)).slice(0, 5)` — so one app gets
+ * the same five for every room, every player and every round, forever. That is
+ * fine until the draw is a bad one, and ours was. Measured against the real
+ * `createEvent` this library signs its presence with: `relay.nostr.place`
+ * refuses every write (`pow: insufficient leading-zero bits`) and
+ * `hornetstorage.net` refuses reads *and* writes (`access denied`) — **0 of 4
+ * on four separate runs each**. Two of the five were dead permanently, and the
+ * three survivors were the three slowest writable relays in the entire
+ * 47-relay pool (606, 696 and 798ms against 325 for the best of them).
+ *
+ * **That is why sending somebody a code did not work.** It was never NAT and
+ * never the game: the host could not announce itself to enough of the network
+ * for a guest to find it inside the join timeout. Reproduced with two tabs on
+ * one machine, where there is no NAT to blame at all — the guest timed out and
+ * the console showed nothing but those two relays refusing, over and over.
+ *
+ * Every entry here is measured rather than picked by reputation: 4 of 4 on
+ * repeated signed writes, and **8 of 8 on a burst at the cadence Trystero
+ * actually announces at**. That second test is the one that matters and the one
+ * `relay.damus.io` fails outright — 0 of 8, rate-limited — despite being the
+ * best known relay on the network. Reputation would have chosen it.
+ *
+ * **`nostr.data.haus` and `relay.sigit.io` are kept deliberately.** They are
+ * two of the three survivors of the old default draw, so somebody still running
+ * a cached older bundle shares a relay with this one and can still be found.
+ * **Two peers only ever meet on a relay they have in common**, which is also
+ * why this list wants adding to rather than swapping out wholesale.
+ */
+const SIGNAL_RELAYS = [
+  'wss://nos.lol',
+  'wss://relay.mostr.pub',
+  'wss://bucket.coracle.social',
+  'wss://purplerelay.com',
+  'wss://nostr.data.haus',
+  'wss://relay.sigit.io',
+];
+
+/**
+ * One config object for both ends, and it has to stay that way.
+ *
+ * A host and a guest meet only if they publish to a relay they share, so the
+ * two `joinRoom` calls below must not be allowed to drift apart — two separate
+ * literals is exactly how one end gains a relay the other lacks and the room
+ * quietly stops working for everybody, with no error anywhere to say so.
+ */
+const ROOM_CONFIG = {
+  appId: APP_ID,
+  relayConfig: { urls: SIGNAL_RELAYS },
+};
+
+/**
+ * How many signalling relays are open right now.
+ *
+ * "Nobody is hosting that code" and "this machine reached no relay at all" are
+ * the same event from the player's side, and answering both with one refusal is
+ * what let a wholly broken relay set look like a mistyped code for as long as
+ * it did. Worth one line to tell them apart.
+ *
+ * Answers -1 when it cannot tell, which the caller treats as "say nothing about
+ * relays" rather than as zero — claiming the network is down on the strength of
+ * a failed introspection call would be the same mistake pointing the other way.
+ */
+function openRelays(): number {
+  try {
+    const sockets = getRelaySockets() as Record<string, { readyState?: number } | undefined>;
+    return Object.values(sockets).filter((s) => s?.readyState === 1).length;
+  } catch {
+    return -1;
+  }
+}
 
 /**
  * The action name rides on every single message, and a snapshot goes out thirty
@@ -58,9 +133,19 @@ const ACTION_GAME = 'G';
  * known host either connects or refuses almost at once. Too short and a code
  * that would have worked is reported as wrong, which is the most confusing
  * failure available here; too long and a genuine typo leaves somebody watching
- * a spinner. Eight seconds is the compromise.
+ * a spinner.
+ *
+ * **Fifteen seconds rather than the eight it was**, and it is the trade that
+ * moved rather than the judgement. Two things changed. An invite link carries
+ * the code now, so most joins involve nobody typing anything at all and the
+ * typo this was held short for is the rarer half. And a real join across the
+ * internet has to gather ICE candidates and hole-punch, which is the part that
+ * does not happen between two tabs on one desk — the case every measurement of
+ * this was taken in. Of the two failures, a join that would have worked being
+ * called a bad code is much the worse: the only response it leaves the player
+ * is to retype a code that was right the first time.
  */
-export const JOIN_TIMEOUT_MS = 8000;
+export const JOIN_TIMEOUT_MS = 15000;
 
 /** Our own peer id, for logging. Trystero draws it once per page. */
 export const selfPeerId = selfId;
@@ -102,7 +187,7 @@ export function hostRoom(
     onMessage: (peerId: string, msg: ClientMessage) => void;
   },
 ): HostRoom {
-  const room = joinRoom({ appId: APP_ID }, code);
+  const room = joinRoom(ROOM_CONFIG, code);
   const game = room.makeAction(ACTION_GAME);
   type Payload = Parameters<typeof game.send>[0];
 
@@ -162,7 +247,7 @@ export function guestRoom(
     onHostLost: () => void;
   },
 ): GuestRoom {
-  const room = joinRoom({ appId: APP_ID }, code);
+  const room = joinRoom(ROOM_CONFIG, code);
   const game = room.makeAction(ACTION_GAME);
   type Payload = Parameters<typeof game.send>[0];
 
@@ -173,8 +258,23 @@ export function guestRoom(
   const timer = setTimeout(() => {
     if (settled) return;
     settled = true;
+    /*
+     * Read the relays *before* leaving the room — `leave` tears the sockets
+     * down, so asking afterwards answers zero every time and would turn every
+     * ordinary wrong code into "your internet is broken".
+     */
+    const reachable = openRelays();
     void room.leave();
-    handlers.onFail('no lobby with the code ' + code);
+    console.warn(
+      '[p2p] join timed out after ' + JOIN_TIMEOUT_MS + 'ms —',
+      reachable,
+      'relay(s) open',
+    );
+    handlers.onFail(
+      reachable === 0
+        ? 'could not reach the matchmaking relays — check your connection'
+        : 'no lobby with the code ' + code,
+    );
   }, JOIN_TIMEOUT_MS);
 
   game.onMessage = (data, context) => {
