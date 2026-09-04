@@ -839,7 +839,11 @@ as the outbreak spread. The whole city, for two people, in a tab.
   cannot connect directly** — symmetric NAT, mostly mobile and corporate — and
   fixing that needs a TURN relay, which is bandwidth somebody pays for.
   `BaseRoomConfig` takes `turnConfig` and `rtcConfig` when that day comes.
-- **Nothing about more than two.** Five guests has never been run.
+- **Three is measured now; more than three is not.** A host and two guests on
+  the published site ran a round at **3 clients · 527 entities · tick
+  6.7-14.0ms**, with `serialise+send` 1.0-2.2ms — see **Why sending somebody
+  the code never worked**. Four and five guests have still never been run, and
+  the cost that grows with them is the host's per-viewer serialisation.
 - **The relays are somebody else's and they visibly wobble.** Every run logged
   `relay failure from wss://relay.nostr.place/ - pow: insufficient leading-zero
   bits` and a dead `wss://hornetstorage.net/relay`. It worked anyway because
@@ -1077,8 +1081,14 @@ symmetric NAT, mostly mobile and corporate — is exactly as it was. The tell is
 specific: healthy relays, `[p2p] joining room` in the guest's console, and
 `[p2p] host is` never arriving. The fix for that is a TURN relay —
 `BaseRoomConfig` takes `turnConfig` and `rtcConfig` — and it is bandwidth
-somebody has to pay for. Nothing about more than two players has been run
-either.
+somebody has to pay for.
+
+**Three players is measured and four is not.** A host and two guests joined the
+published site by invite link and ran a round: **3 clients · 527 entities · tick
+6.7-14.0ms**, `serialise+send` 1.0-2.2ms against 0.6ms for one. That is the
+first time more than two has been run at all, and it is two tabs and a third on
+one machine — so it says the star topology and the host's serialisation hold up,
+and nothing about four people on four networks.
 
 ### Playing over the internet
 
