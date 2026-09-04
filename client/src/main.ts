@@ -66,7 +66,15 @@ import type {
 } from '../../shared/types.js';
 import { connect, takeNetStats, pingStats } from './net.js';
 import { trackInput, spectatorPan } from './input.js';
-import { playRoar } from './sound.js';
+import {
+  playRoar,
+  playZombieGroan,
+  playZombieAttack,
+  playZombieHit,
+  occlusion,
+  stopAllSounds,
+  type Spatial,
+} from './sound.js';
 import {
   drawBeacons,
   drawBushes,
@@ -577,7 +585,23 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
     victoryPanel.classList.add('hidden');
   } else if (msg.type === 'state') {
     syncTracked(msg.entities, performance.now());
-    hearRoars(msg.entities);
+    // An offline round's worker keeps ticking after `lobbyLeave` — leaving a
+    // lobby does not disconnect from it, see `goOffline` in `net.ts` — so
+    // without this, a zombie behind the menu would go on groaning and
+    // attacking forever after quitting. `started` is exactly "there is a
+    // round on screen to make a noise about".
+    //
+    // `!paused` is a separate condition and not covered by `started` at all:
+    // the world freezes but snapshots keep arriving the whole time it's
+    // paused (see `world.paused`), and `hearZombies`'s groan clock reads
+    // `performance.now()` — real wall time, not game time — so without this a
+    // paused round would sit there quietly ticking its own groan timers down
+    // and firing new ones on schedule, sound going on entirely on its own
+    // while nothing on screen moves.
+    if (started && !paused) {
+      hearRoars(msg.entities);
+      hearZombies(msg.entities, performance.now());
+    }
     spectating = msg.spectating;
     survivors = msg.survivors;
     infectedCount = msg.infected;
@@ -738,6 +762,12 @@ function standDown(): void {
   pushY = 0;
   dogHud = null;
   roaringDogs.clear();
+  zombieVoices.clear();
+  attackingZombies.clear();
+  // The offline worker keeps ticking after this — see the note beside
+  // `hearRoars`'s call site — so this is what actually silences a round
+  // rather than merely stopping new sounds from being scheduled.
+  stopAllSounds();
   tracked.clear();
   tracers = [];
   gameOverPanel.classList.add('hidden');
@@ -1178,6 +1208,11 @@ function setPaused(on: boolean): void {
   paused = on;
   pausePanel.classList.toggle('hidden', !on);
   send({ type: 'lobbyPause', on });
+  // The state handler's `!paused` check stops anything *new* from being
+  // scheduled, but a groan that was already mid-play when the panel went up
+  // would otherwise run out its own two or three seconds over a frozen
+  // scene. Cut it off outright instead, the same as quitting does.
+  if (on) stopAllSounds();
 }
 
 document.getElementById('pause-resume')!.addEventListener('click', () => setPaused(false));
@@ -1345,6 +1380,54 @@ function copyInto(into: EntityState, from: EntityState): void {
 const ROAR_EARSHOT = 1400;
 
 /**
+ * How loud, which way, and how muffled a world sound should be for whoever is
+ * plugged in right now — a player's own body, or a spectator's camera centre.
+ *
+ * One function for every positional sound in the game, so a zombie's groan and
+ * the dog's roar both answer "where is this, and how clear a line does it have
+ * to me" the same way. `range` is where it falls to nothing; past that this
+ * returns silence outright rather than a number close to it, so a caller never
+ * has to ask twice.
+ */
+function spatialFor(x: number, y: number, range: number): Spatial {
+  const me = self();
+  const ear = me ?? { x: spectateX, y: spectateY };
+  const dx = x - ear.x;
+  const dy = y - ear.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist >= range) return { gain: 0, pan: 0, muffle: 0 };
+
+  // Steeply curved rather than linear or gently curved: most of the range is
+  // meant to read as "somewhere out there", with only the last stretch close
+  // to the source actually loud. A flatter curve (this was 1.4) kept mid-
+  // distance zombies far too present — audible at something close to their
+  // point-blank volume from most of the way across the hearing range.
+  const distFalloff = Math.pow(Math.max(0, 1 - dist / range), 3);
+
+  // Pulled all the way back as a spectator, the whole mix goes quiet — a wide
+  // shot of the city is not somewhere a street should sound like you're
+  // standing in it. A player's own camera never drops this low (`cameraZoom`
+  // is always >= 1), so `zoomMul` is 1 through ordinary play and this line
+  // does nothing until somebody actually zooms out to watch.
+  const { scale } = cameraFor(me);
+  const zoomMul = Math.pow(Math.max(0, Math.min(1, scale)), 1.6);
+
+  // Reaches hard left/right well inside the hearing range (this was 0.7),
+  // because the point of panning is to say which way to look — a sound stayed
+  // reads as coming from dead centre, out of both speakers alike, unless it
+  // is a long way to one side, which is the opposite of "clear".
+  const panRange = Math.max(1, range * 0.4);
+  const pan = Math.max(-1, Math.min(1, dx / panRange));
+
+  const hits = map ? occlusion(ear.x, ear.y, x, y, map.walls) : 0;
+  const muffle = Math.min(1, hits / 2.5);
+  // A wall does not just dull a sound, it takes some of it away too.
+  const gain = distFalloff * zoomMul * (1 - muffle * 0.6);
+
+  return { gain, pan, muffle };
+}
+
+/**
  * Which dogs were roaring last snapshot.
  *
  * The wire carries a flag that is true for two solid seconds at 30Hz, so the
@@ -1357,9 +1440,7 @@ let roaringDogs = new Set<string>();
  * Hear anything that started roaring since the last snapshot.
  *
  * Driven off the entities rather than off `dogHud`, so somebody else's dog is
- * heard too — which is the point of a two-second tell. The falloff is measured
- * from whatever the camera is on: your own body if you have one, the middle of
- * the view if you are spectating.
+ * heard too — which is the point of a two-second tell.
  */
 function hearRoars(incoming: EntityState[]): void {
   const started: string[] = [];
@@ -1372,17 +1453,178 @@ function hearRoars(incoming: EntityState[]): void {
   roaringDogs = nowRoaring;
   if (started.length === 0) return;
 
-  const me = self();
-  const ear = me ?? { x: spectateX, y: spectateY };
   for (const id of started) {
-    const dog = tracked.get(id)?.state;
     // Your own animal is in your own head and is not subject to the falloff.
-    if (id === selfId || !dog) {
-      playRoar(1);
+    if (id === selfId) {
+      playRoar({ gain: 1, pan: 0, muffle: 0 });
       continue;
     }
-    const away = Math.hypot(dog.x - ear.x, dog.y - ear.y);
-    playRoar(Math.max(0, 1 - away / ROAR_EARSHOT));
+    const dog = tracked.get(id)?.state;
+    if (!dog) {
+      playRoar({ gain: 1, pan: 0, muffle: 0 });
+      continue;
+    }
+    playRoar(spatialFor(dog.x, dog.y, ROAR_EARSHOT));
+  }
+}
+
+/**
+ * A stable 0-1 hash of an id, so a zombie's voice — its rough pitch and
+ * timbre — stays the same from one groan to the next without every zombie in
+ * the city sounding identical. Everything past this is `Math.random()`; only
+ * the part that has to stay recognisable as *this* zombie is hashed.
+ */
+function hashId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (Math.imul(h, 31) + id.charCodeAt(i)) | 0;
+  return ((h >>> 0) % 100000) / 100000;
+}
+
+/**
+ * How far a zombie's groan or bite carries. Shorter than the dog's roar on
+ * purpose — a moan down the street is ambience and is not meant to reach
+ * across the whole one.
+ */
+const ZOMBIE_HEARING_RANGE = 1050;
+/**
+ * Wide on purpose, and wider than they first were — see the note on
+ * `ZOMBIE_VOICE_BUDGET`. A zombie groaning every four to eleven seconds reads
+ * as constant chatter once the sounds this engine makes stop being the only
+ * thing on the mix; a genuinely intermittent groan is worth more than a
+ * frequent one, and this game is not finished adding sounds.
+ */
+const ZOMBIE_GROAN_MIN_MS = 8000;
+const ZOMBIE_GROAN_MAX_MS = 20000;
+
+/** How likely a zombie is to react to being shot, and how long before it may
+ *  react again. Most hits pass in silence — a zombie taking a magazine to the
+ *  chest is not a magazine's worth of yelps — and the cooldown is what stops
+ *  a sustained burst re-asking the question thirty times a second. */
+const ZOMBIE_HIT_SOUND_CHANCE = 0.3;
+const ZOMBIE_HIT_SOUND_COOLDOWN_MS = 1200;
+
+interface ZombieVoice {
+  /** When it's next due to groan, so long as it isn't busy attacking something. */
+  nextGroanAt: number;
+  /** Its stable timbre — see `hashId`. */
+  voice: number;
+  /** Health as of the last snapshot, so a drop can be read as "this zombie
+   *  was just hit" with no flag of its own on the wire. */
+  lastHealth: number;
+  /** Earliest the next hit-reaction may be considered, win or lose the roll. */
+  nextHitSoundAt: number;
+}
+
+/** One entry per zombie currently or recently on screen. */
+const zombieVoices = new Map<string, ZombieVoice>();
+/** Ids mid-attack last snapshot, for edge-detecting the bite/claw bark. */
+let attackingZombies = new Set<string>();
+
+/**
+ * How many zombie voices — groans, attacks and hit-reactions together — may
+ * start inside one short window.
+ *
+ * A handful of shamblers groaning nearby is atmosphere; a few hundred in a big
+ * city with the camera pulled down into the middle of them is every voice this
+ * engine owns firing on the same tick, which stops being audio and starts
+ * being noise. This is a ceiling for that case alone — normal play, a handful
+ * of zombies in earshot, never comes close to spending it. Tightened
+ * alongside the groan interval above for the same reason: this game is not
+ * finished adding sounds, and the zombies should not be spending the whole
+ * budget on their own.
+ */
+const ZOMBIE_VOICE_BUDGET = 4;
+const ZOMBIE_VOICE_WINDOW_MS = 280;
+let voiceBudgetAt = 0;
+let voiceBudgetLeft = ZOMBIE_VOICE_BUDGET;
+
+function takeVoiceBudget(now: number): boolean {
+  if (now - voiceBudgetAt > ZOMBIE_VOICE_WINDOW_MS) {
+    voiceBudgetAt = now;
+    voiceBudgetLeft = ZOMBIE_VOICE_BUDGET;
+  }
+  if (voiceBudgetLeft <= 0) return false;
+  voiceBudgetLeft--;
+  return true;
+}
+
+/**
+ * Groan and bite, for every shambler on screen.
+ *
+ * The dog is left out of this entirely — it has its own roar, and its jaws
+ * are a player's own doing rather than an ambient tell. Everything else here
+ * is a wandering or grappling zombie, which is most of what a round sounds
+ * like once the outbreak has taken hold.
+ */
+function hearZombies(incoming: EntityState[], now: number): void {
+  const attackingNow = new Set<string>();
+  for (const e of incoming) {
+    if (e.type !== 'zombie' || e.dog) continue;
+
+    let v = zombieVoices.get(e.id);
+    if (!v) {
+      // A fresh one doesn't groan on the very tick it comes into view — the
+      // first wait is staggered, so a horde arriving together doesn't groan
+      // as a single chorus. `lastHealth` starts at its current health rather
+      // than, say, its max, so a zombie that was already hurt before it came
+      // into view doesn't read as having just been shot on its first tick.
+      v = {
+        nextGroanAt: now + Math.random() * ZOMBIE_GROAN_MAX_MS,
+        voice: hashId(e.id),
+        lastHealth: e.health,
+        nextHitSoundAt: 0,
+      };
+      zombieVoices.set(e.id, v);
+    }
+
+    // A rough "was this zombie just shot" — there's no flag for it on the
+    // wire, so a health drop since last snapshot stands in for one. Checked
+    // (and the cooldown spent) whether or not the chance roll below actually
+    // plays anything, or a sustained burst would re-roll thirty times a
+    // second instead of once per cooldown window.
+    if (e.health < v.lastHealth && e.health > 0 && now >= v.nextHitSoundAt) {
+      v.nextHitSoundAt = now + ZOMBIE_HIT_SOUND_COOLDOWN_MS;
+      if (Math.random() < ZOMBIE_HIT_SOUND_CHANCE) {
+        const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE);
+        if (spatial.gain > 0.012 && takeVoiceBudget(now)) playZombieHit(spatial, v.voice);
+      }
+    }
+    v.lastHealth = e.health;
+
+    // Attacking a person (`grappling`) or a door/wall (`breaking`) is the
+    // same bark — both are the zombie actually doing something, as against
+    // groaning at nothing in particular.
+    const attacking = !!(e.grappling || e.breaking);
+    if (attacking) {
+      attackingNow.add(e.id);
+      // Postpones the next groan, so the two don't talk over each other —
+      // but never brings it forward, or a zombie that keeps losing and
+      // regaining its grip would never groan at all.
+      v.nextGroanAt = Math.max(v.nextGroanAt, now + ZOMBIE_GROAN_MIN_MS);
+      if (!attackingZombies.has(e.id)) {
+        const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE);
+        if (spatial.gain > 0.012 && takeVoiceBudget(now)) playZombieAttack(spatial, v.voice);
+      }
+      continue;
+    }
+
+    if (now >= v.nextGroanAt) {
+      const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE);
+      if (spatial.gain > 0.015 && takeVoiceBudget(now)) playZombieGroan(spatial, v.voice);
+      v.nextGroanAt =
+        now + ZOMBIE_GROAN_MIN_MS + Math.random() * (ZOMBIE_GROAN_MAX_MS - ZOMBIE_GROAN_MIN_MS);
+    }
+  }
+  attackingZombies = attackingNow;
+
+  // Forget anything that's left the fog for good, so a long round doesn't
+  // grow this forever. Fog already caps how many zombies are visible at once,
+  // so this is rarely more than a few dozen entries and checking it often is
+  // cheap.
+  if (zombieVoices.size > 250) {
+    for (const id of zombieVoices.keys()) {
+      if (!attackingNow.has(id) && !tracked.has(id)) zombieVoices.delete(id);
+    }
   }
 }
 
