@@ -1393,13 +1393,6 @@ export function drawEntity(
       ctx.strokeStyle = e.type === 'zombie' ? ENTITY_COLOR.zombie : '#ffffff';
       ctx.stroke();
     }
-    if (isSelf) {
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
-      ctx.lineWidth = SIMPLE_RING_PX / scale;
-      ctx.strokeStyle = '#ffffff';
-      ctx.stroke();
-    }
     return;
   }
 
@@ -1653,7 +1646,8 @@ export function drawEntity(
   }
 
   // Kevlar reads as a grey band inside the body rather than a halo around it,
-  // so it never competes with the white self-ring or the infected ring.
+  // so it never competes with the infected ring — and now that there is no
+  // self-ring, it is also most of how you pick your own officer out of a group.
   if (e.armour) {
     ctx.lineWidth = 3.5;
     ctx.strokeStyle = 'rgba(214, 222, 233, 0.92)';
@@ -1714,13 +1708,12 @@ export function drawEntity(
     ctx.lineCap = 'butt';
   }
 
-  if (isSelf) {
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
-    ctx.stroke();
-  }
+  // No self-ring. It used to be a white outline round your own officer; it read
+  // as clutter on a screen that already has a fog hole centred on you, and
+  // `drawSelfMarker` still throws a chevron to the edge if the camera pans off
+  // you. The kevlar band and — offline — the debug heap at your feet are how
+  // you find yourself now.
+  void isSelf;
 }
 
 // ------------------------------------------------------------------- the dog
@@ -2223,12 +2216,11 @@ function drawDog(
 
   if (e.dead) ctx.restore();
 
-  // **No self-ring on a dog.** Every other body gets a white outline when it is
-  // yours, and on a dog it was the loudest thing on screen — a bright hard
-  // ellipse round the one entity whose whole design is being dark and hard to
-  // read. It is also the least necessary one: there are at most two dogs in a
-  // round, the camera is on yours, and `drawSelfMarker` already puts a chevron
-  // where it went if the pan takes it off screen.
+  // **No self-ring, on a dog or anything else.** It used to be a white outline
+  // round your own body; it was loudest of all on the dog, a bright hard ellipse
+  // round the one entity whose whole design is being dark and hard to read, and
+  // it was clutter on the others. The camera is on you and `drawSelfMarker`
+  // throws a chevron to the edge if the pan takes you off screen.
   void isSelf;
 }
 
@@ -6651,26 +6643,23 @@ export function drawInventory(
     const g = inv.guns[i];
     cells.push({ key: String(i + 1), item: g?.item ?? null, ammo: g?.ammo ?? null });
   }
+  // Every vest is its own slot, and each shows the hits it has left. The nth
+  // `'kevlar'` cell reads the nth entry of `kevlarUses`, which is why this needs
+  // a running count rather than a lookup by slot index.
+  let kevlarCell = 0;
   for (let i = 0; i < inv.utilitySlots; i++) {
     const item = inv.utilities[i] ?? null;
-    cells.push({
-      key: String(i + 1 + inv.gunSlots),
-      item,
-      // Bundles count down in the bag the way rounds do in a magazine.
-      ammo:
-        item === 'grenade'
-          ? inv.grenades
-          : item === 'zapMine'
-            ? inv.mines
-            : item === 'cureGun'
-              ? inv.cureDoses
-              : // Three calls in a radio and a minute between them, and both
-                // of those are decisions rather than trivia — the count has to
-                // be on the bar the same way a bundle's is.
-                item === 'radio'
-                ? inv.radioUses
-                : null,
-    });
+    // Bundles count down in the bag the way rounds do in a magazine.
+    let ammo: number | null = null;
+    if (item === 'grenade') ammo = inv.grenades;
+    else if (item === 'zapMine') ammo = inv.mines;
+    else if (item === 'cureGun') ammo = inv.cureDoses;
+    // Three calls in a radio and a minute between them, and both of those are
+    // decisions rather than trivia — the count belongs on the bar like a
+    // bundle's.
+    else if (item === 'radio') ammo = inv.radioUses;
+    else if (item === 'kevlar') ammo = inv.kevlarUses[kevlarCell++] ?? null;
+    cells.push({ key: String(i + 1 + inv.gunSlots), item, ammo });
   }
 
   const size = 34;
@@ -6736,9 +6725,13 @@ export function drawInventory(
     }
   });
 
-  // Carried protective gear.
+  // Carried protective gear. The worn vest's hits, then how many spares are
+  // waiting behind it — each spare is its own slot on the bar as well.
   const badges: string[] = [];
-  if (inv.kevlar > 0) badges.push(`KEVLAR ${inv.kevlar}`);
+  if (inv.kevlarUses.length > 0) {
+    const spare = inv.kevlarUses.length - 1;
+    badges.push(spare > 0 ? `KEVLAR ${inv.kevlarUses[0]} +${spare}` : `KEVLAR ${inv.kevlarUses[0]}`);
+  }
   if (inv.shield) badges.push('SHIELD');
   if (badges.length > 0) {
     ctx.fillStyle = '#93c5fd';

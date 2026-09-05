@@ -87,7 +87,15 @@ export interface Inventory {
   guns: Array<GunSlot | null>;
   utilities: ItemId[];
   activeSlot: number;
-  kevlar: number;
+  /**
+   * Hits left on each Kevlar vest, one entry per `'kevlar'` in `utilities` and
+   * in the same order — so a stockpile of vests costs a utility slot apiece.
+   * `[0]` is the vest being worn: `spendKevlar` takes hits off it and, when it
+   * is spent, drops it and its slot so the next one becomes the worn one with
+   * no gap. A dropped vest carries its wear on the pickup (`pickup.ammo`), so
+   * drop-and-grab is not a way to mend one.
+   */
+  kevlarUses: number[];
   /** Riot shield charges left, or 0 for no shield. */
   shield: number;
   /** In front of you rather than slung on your back. */
@@ -127,7 +135,7 @@ export function newInventory(): Inventory {
     guns: Array(GUN_SLOTS + GUNSLING_SLOTS).fill(null),
     utilities: [],
     activeSlot: 0,
-    kevlar: 0,
+    kevlarUses: [],
     shield: 0,
     shieldUp: false,
     dual: false,
@@ -151,6 +159,36 @@ export function gunSlots(inv: Inventory): number {
 /** Utility slots this bag can use right now. The pack pays for its own slot. */
 export function utilitySlots(inv: Inventory): number {
   return UTILITY_SLOTS + (inv.pack ? BACKPACK_SLOTS : 0);
+}
+
+/**
+ * Put one Kevlar vest in the bag: a utility slot and its own wear entry. `uses`
+ * defaults to a fresh vest; a dropped one comes back at whatever was left of it.
+ *
+ * The caller owns the slot check — every guaranteed grant (a blue officer's
+ * starting vest, the SWAT leader's) adds to a bag with room, and `collect` does
+ * its own before calling this.
+ */
+export function addKevlarVest(inv: Inventory, uses = KEVLAR_POINTS): void {
+  inv.utilities.push('kevlar');
+  inv.kevlarUses.push(uses);
+}
+
+/**
+ * Spend one hit of the worn vest. When its last hit goes, the vest and the slot
+ * it held are dropped and the next vest in the bag becomes the worn one — the
+ * wearer is never left unarmoured mid-fight while a spare is still in the bag,
+ * and only once there are none left does the slot free up.
+ *
+ * A no-op with no vest, so callers can gate on whatever they already check.
+ */
+export function spendKevlar(inv: Inventory): void {
+  if (inv.kevlarUses.length === 0) return;
+  inv.kevlarUses[0]--;
+  if (inv.kevlarUses[0] > 0) return;
+  inv.kevlarUses.shift();
+  const at = inv.utilities.indexOf('kevlar');
+  if (at >= 0) inv.utilities.splice(at, 1);
 }
 
 /** Scatter loot through the city. Most buildings come up empty. */
@@ -803,13 +841,13 @@ function applyUtility(
     world.followCharges.set(playerId, (world.followCharges.get(playerId) ?? 0) + 1);
     return 'used';
   }
-  // Kevlar is worn, not consumed on pickup — it takes up a utility slot until
-  // its three uses are spent, so wearing one costs you a slot you could have
-  // filled with something else.
-  if (item === 'kevlar') {
-    inv.kevlar = KEVLAR_POINTS;
-    return 'carry';
-  }
+  // Kevlar is worn, not consumed on pickup, and every vest costs its own
+  // utility slot — a second one picked up on top of the one you have on rides
+  // in the bag as a spare and drops in the instant the worn one is torn off.
+  // The vest is added slot-side in `collect` (see `addKevlarVest`), so the
+  // slot-full check can refuse it before anything is written and so its wear
+  // travels with the pickup.
+  if (item === 'kevlar') return 'carry';
   // Worn like the vest, and like the vest it costs a slot for as long as it
   // lasts. It goes up the moment you pick it up — a shield on your back is a
   // decision, not a default.
@@ -904,7 +942,10 @@ export function collect(
       return `used ${def.label}`;
     }
     if (inv.utilities.length >= utilitySlots(inv)) return 'utility slots full';
-    inv.utilities.push(pickup.item);
+    // A vest keeps its own wear, and a dropped one is picked up at whatever was
+    // left of it — so taking it off and putting it back on is not a repair.
+    if (pickup.item === 'kevlar') addKevlarVest(inv, pickup.ammo ?? KEVLAR_POINTS);
+    else inv.utilities.push(pickup.item);
     world.pickups.delete(pickup.id);
     return `picked up ${def.label}`;
   }
@@ -983,12 +1024,23 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
   const gunSlot = heldGunSlot(inv);
   const ammo = gunSlot ? gunSlot.ammo : undefined;
 
-  if (inv.activeSlot <= gunSlots(inv)) inv.guns[inv.activeSlot - 1] = null;
-  else inv.utilities.splice(inv.activeSlot - gunSlots(inv) - 1, 1);
+  const utilIdx = inv.activeSlot > gunSlots(inv) ? inv.activeSlot - gunSlots(inv) - 1 : -1;
 
   // Worn kit is worn *because* the slot is occupied. Dropping the vest has to
-  // take the protection with it, or you keep the armour and free the slot.
-  if (item === 'kevlar') inv.kevlar = 0;
+  // take the protection with it, or you keep the armour and free the slot — and
+  // the vest that goes on the floor carries its own wear (`kevlarUses` entry),
+  // so drop-and-grab cannot bring it back to full. The wear is read off the
+  // matching entry — the Nth vest slot is the Nth entry — before the splice.
+  let kevlarWear: number | undefined;
+  if (item === 'kevlar' && utilIdx >= 0) {
+    const nth = inv.utilities.slice(0, utilIdx).filter((u) => u === 'kevlar').length;
+    kevlarWear = inv.kevlarUses[nth] ?? KEVLAR_POINTS;
+    inv.kevlarUses.splice(nth, 1);
+  }
+
+  if (inv.activeSlot <= gunSlots(inv)) inv.guns[inv.activeSlot - 1] = null;
+  else inv.utilities.splice(utilIdx, 1);
+
   if (item === 'grenade') inv.grenades = 0;
   if (item === 'zapMine') inv.mines = 0;
   if (item === 'cureGun') inv.cureDoses = 0;
@@ -1011,6 +1063,7 @@ export function dropHeld(world: World, inv: Inventory, x: number, y: number): st
   const id = `loot-drop-${Math.random().toString(36).slice(2, 9)}`;
   const dropped: PickupState = { id, item, x, y };
   if (ammo !== undefined) dropped.ammo = ammo;
+  if (kevlarWear !== undefined) dropped.ammo = kevlarWear;
   if (uses !== undefined) dropped.uses = uses;
   if (readyAt !== undefined) dropped.readyAt = readyAt;
   world.pickups.set(id, dropped);
@@ -1109,7 +1162,7 @@ export function toWireInventory(
     guns: inv.guns,
     utilities: inv.utilities,
     activeSlot: inv.activeSlot,
-    kevlar: inv.kevlar,
+    kevlarUses: inv.kevlarUses,
     shield: inv.shield,
     shieldUp: inv.shieldUp,
     dual: inv.dual,

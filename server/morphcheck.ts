@@ -819,10 +819,10 @@ function testArmour(): void {
   check('a shield turns it away', !r.world.pendingInfections.has('shielded'));
   check('and one charge is gone', inv('shielded').shield === 2, `${inv('shielded').shield}/3`);
   check('a vest turns it away', !r.world.pendingInfections.has('vested'));
-  check('and one charge is gone', inv('vested').kevlar === 2, `${inv('vested').kevlar}/3`);
+  check('and one charge is gone', inv('vested').kevlarUses[0] === 2, `${inv('vested').kevlarUses[0]}/3`);
   check('carrying both spends the shield, not the vest',
-    inv('both').shield === 2 && inv('both').kevlar === 3,
-    `shield ${inv('both').shield}/3, vest ${inv('both').kevlar}/3`);
+    inv('both').shield === 2 && inv('both').kevlarUses[0] === 3,
+    `shield ${inv('both').shield}/3, vest ${inv('both').kevlarUses[0]}/3`);
   check('and somebody with nothing on is infected', r.world.pendingInfections.has('bare'));
 
   const wire = lashesToWire(r.world, r.clock);
@@ -920,8 +920,8 @@ function kit(over: { shield?: number; kevlar?: number; shieldUp?: boolean }): In
     inv.utilities.push('riotShield');
   }
   if (over.kevlar) {
-    inv.kevlar = over.kevlar;
     inv.utilities.push('kevlar');
+    inv.kevlarUses.push(over.kevlar);
   }
   return inv;
 }

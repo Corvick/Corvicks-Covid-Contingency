@@ -21,11 +21,11 @@ import {
   rebuildEntityGrid, resolveCollisions, countSurvivors, type Entity, type World,
 } from './src/world.js';
 import { computeFrozen, updateAi, attemptGrab } from './src/ai.js';
-import { newInventory } from './src/inventory.js';
+import { addKevlarVest, collect, dropHeld, newInventory, spendKevlar } from './src/inventory.js';
 import {
   TICK_RATE, ENTITY_RADIUS, PATH_BUDGET_PER_TICK,
   GRAPPLE_MIN_MS, GRAPPLE_MAX_MS, GRAPPLE_NO_ESCAPE_AT, GRAPPLE_PILE_TURN_MS,
-  KEVLAR_GRAPPLE_MS, INSTANT_INFECT_BASE, BASE_ESCAPE_CHANCE,
+  KEVLAR_GRAPPLE_MS, KEVLAR_POINTS, INSTANT_INFECT_BASE, BASE_ESCAPE_CHANCE,
   INSTANT_INFECT_PER_EXTRA_ZOMBIE,
   HUMAN_RADIUS, ZOMBIE_RADIUS, GRAPPLE_REACH_BONUS,
 } from '../shared/constants.js';
@@ -54,8 +54,7 @@ function trial(zombies: number, kevlar: boolean): Outcome {
   world.ai.set(victim.id, newAiState(Date.now(), victim.x, victim.y));
   if (kevlar) {
     const inv = newInventory();
-    inv.kevlar = 3;
-    inv.utilities.push('kevlar');
+    addKevlarVest(inv);
     world.inventories.set(victim.id, inv);
   }
 
@@ -303,6 +302,67 @@ console.log('after a release, does the victim actually get a run?');
   check(instantRegrab === 0, 'nobody is re-taken on the tick they are released');
   check(median(regrab) > 1000, 'a release buys more than a moment');
   check(median(gaps) > 2 * REACH, 'a release buys real ground');
+}
+
+// --- spare vests: one slot each, they drop in on their own, and wear sticks
+//
+// Every blue officer starts in a vest and can carry more. Each is its own
+// utility slot with its own wear (`kevlarUses`), the worn one is `[0]`, and
+// `spendKevlar` shifts a spent vest off so the next takes the hits with no gap.
+// None of this throws — a broken version just leaves the wearer unarmoured a
+// grab early, or mends a vest for free on a drop.
+console.log('');
+console.log('spare vests in the bag:');
+{
+  world.entities.clear(); world.ai.clear(); world.grapples.clear();
+  world.inventories.clear(); world.pickups.clear();
+
+  const inv = newInventory();
+  addKevlarVest(inv); // the starting vest
+  check(inv.kevlarUses.length === 1 && inv.kevlarUses[0] === KEVLAR_POINTS
+    && inv.utilities.filter((u) => u === 'kevlar').length === 1,
+    'one vest, one slot, full');
+
+  // Two more off the floor while already kitted.
+  world.pickups.set('k1', { id: 'k1', item: 'kevlar', x: 0, y: 0 });
+  check(collect(world, 'p', inv, 0, 0, 'k1') === 'picked up Kevlar', 'a second vest is picked up');
+  world.pickups.set('k2', { id: 'k2', item: 'kevlar', x: 0, y: 0 });
+  collect(world, 'p', inv, 0, 0, 'k2');
+  check(inv.kevlarUses.length === 3 && inv.utilities.filter((u) => u === 'kevlar').length === 3,
+    'three vests, three slots (' + inv.kevlarUses.length + ')');
+  check(inv.kevlarUses.every((u) => u === KEVLAR_POINTS), 'picking up a spare does not refill the worn one');
+
+  console.log('  three vests, slots           ' +
+    inv.utilities.filter((u) => u === 'kevlar').length + '   wear ' + JSON.stringify(inv.kevlarUses));
+
+  // Wear the worn one down; the next drops in with no gap, slot held throughout.
+  let slotLostEarly = false;
+  const hits = KEVLAR_POINTS * 3;
+  for (let i = 0; i < hits; i++) {
+    spendKevlar(inv);
+    const vests = inv.utilities.filter((u) => u === 'kevlar').length;
+    if (i < hits - 1 && (vests === 0 || vests !== inv.kevlarUses.length)) slotLostEarly = true;
+  }
+  check(!slotLostEarly, 'a vest and its slot are held until that vest is spent');
+  check(inv.kevlarUses.length === 0 && !inv.utilities.includes('kevlar'),
+    'the last slot clears only when the last vest is gone');
+  spendKevlar(inv);
+  check(inv.kevlarUses.length === 0, 'spending with no vest is a no-op');
+  console.log('  after ' + hits + ' hits              vests ' +
+    inv.utilities.filter((u) => u === 'kevlar').length + '   wear ' + JSON.stringify(inv.kevlarUses));
+
+  // Wear persists across a drop: a half-spent vest comes back half-spent.
+  const bag = newInventory();
+  addKevlarVest(bag);
+  bag.kevlarUses[0] = 1; // one hit left on the only vest
+  bag.activeSlot = 4; // 0 pistol, 1-3 guns, 4 is the first utility — the vest
+  const msg = dropHeld(world, bag, 10, 10);
+  check(msg === 'dropped Kevlar' && bag.kevlarUses.length === 0, 'the worn vest is dropped');
+  const onFloor = [...world.pickups.values()].find((p) => p.item === 'kevlar' && p.id.startsWith('loot-drop-'));
+  check(onFloor?.ammo === 1, 'the dropped vest remembers it had one hit left (' + onFloor?.ammo + ')');
+  collect(world, 'p2', bag, 10, 10, onFloor!.id);
+  check(bag.kevlarUses[0] === 1, 'and it is picked back up still one hit from gone — no free repair');
+  console.log('  dropped at 1 hit, picked up   ' + bag.kevlarUses[0] + ' hit  (no free repair)');
 }
 
 console.log('');

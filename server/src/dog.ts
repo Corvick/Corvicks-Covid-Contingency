@@ -84,6 +84,7 @@ import { angleDelta, clamp, turnToward } from './geometry.js';
 import { layCloud, spitAcid } from './acid.js';
 import { bouncesOff } from './heli.js';
 import { attemptGrab } from './ai.js';
+import { spendKevlar } from './inventory.js';
 import { damageDoor } from './doors.js';
 import {
   beginDogBirth,
@@ -589,12 +590,10 @@ function spendArmour(
     }
   }
 
-  if (inv.kevlar > 0) {
-    inv.kevlar--;
-    if (inv.kevlar <= 0) {
-      const at = inv.utilities.indexOf('kevlar');
-      if (at >= 0) inv.utilities.splice(at, 1);
-    }
+  if (inv.kevlarUses.length > 0) {
+    // Spends the worn vest; a spare in the bag drops in behind it. See
+    // `spendKevlar`.
+    spendKevlar(inv);
     return 'kevlar';
   }
 

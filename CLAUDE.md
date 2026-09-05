@@ -3436,7 +3436,9 @@ which changes how a grab plays without changing how fast the outbreak spreads.
 that matters most because **the bug was an absence rather than a line** —
 nothing granted immunity, so there was nothing to read wrong. Put back
 deliberately, it fails 3 checks and reproduces the original 33ms and 28px
-exactly.
+exactly. It also covers the spare-vest arithmetic — three vests worn down to
+nothing with the slot held until each is spent, and a half-worn one dropped and
+picked back up still half-worn — see **Kevlar** below.
 
 ### A joining zombie can shorten the grapple clock, never lengthen it
 
@@ -3486,15 +3488,41 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
 ### Items, orders and scenery
 
 - **Kevlar denies a grab outright** rather than soaking damage: the grapple
-  lasts half a second, ends with no infection, and spends one of three uses.
+  lasts half a second, ends with no infection, and spends one of three hits.
   It is an early return in `resolveGrapple` — the escape and infection rolls
   below it never run, which is what makes "can't be infected" absolute.
   Shrugging one off also buys `KEVLAR_IMMUNE_MS` where **nothing can lay a hand
   on you at all** (`world.grappleImmune`). Without that window the vest is worth
   almost nothing in the only situation it exists for: in a crowd the next zombie
-  grabs on the same tick the last one let go, and all three uses are gone inside
+  grabs on the same tick the last one let go, and all three hits are gone inside
   a second and a half with the wearer never having moved. The zombies keep
   chasing meanwhile — they just can't get a grip.
+  - **Every blue officer opens the round in one** — a player, a bot, and the
+    SWAT squad leader alike, through one `addKevlarVest` called from the three
+    spawn paths and `dispatchOfficer`. It fills a utility slot like any other
+    vest, on top of whatever `giveStartingItem` rolls, so a fresh officer has
+    two utility slots used of six. The grey garrison get nothing — they have no
+    inventory at all — so an officer with the grey armour band drawn inside the
+    body is one of the five-slot crew, which is also most of how you pick your
+    own out now that **the white self-ring is gone**.
+  - **Each vest is its own utility slot and keeps its own wear.** `inv.kevlar`
+    (one number) became `inv.kevlarUses` (`number[]`), one entry per `'kevlar'`
+    in `inv.utilities` and in the same order. `[0]` is the vest being worn;
+    `spendKevlar` takes the hits off it and, the moment it is spent, `shift`s it
+    off and removes one `'kevlar'` slot — so **a spare drops in with no gap**
+    and the slot only frees up once the last vest is gone. Picking one up while
+    already kitted is an ordinary `collect` into a fresh slot (`addKevlarVest`),
+    never a refill of the worn one.
+  - **A dropped vest carries its wear on the pickup** (`PickupState.ammo`, the
+    same field a dropped gun's rounds ride), so taking a two-hit vest off and
+    putting it back on gives you back a two-hit vest — drop-and-grab is not a
+    repair. Dropping still frees the slot and takes the protection with it, like
+    every other bit of worn kit.
+  - **A bot replaces a lost vest but does not stockpile.** `lootWanted` wants
+    `kevlar` only while `inv.kevlarUses.length === 0`, i.e. its own has been
+    torn off — the player is the one who chooses to carry spares.
+  - `server/grapplecheck.ts` covers the arithmetic; `server/startkit.ts` checks
+    every blue officer starts vested.
 - **The grenade launcher is never in the loot table.** Rarity 0 keeps it out by
   construction and it gets one roll for the whole city, so most rounds have
   none. Its shell and the smoke grenade are both real projectiles that bounce.
@@ -7969,12 +7997,14 @@ anything else ever needs to look better than live shapes will allow.
     forked tip rather than a stroke, it lolls to one side, and it moves on its
     own clock — a tongue that sits politely still inside the mouth is one nobody
     notices.
-- **A dog gets no self-ring.** Every other body draws a white outline when it is
-  yours; on a dog it was the loudest thing on screen, a bright hard ellipse
-  round the one entity whose whole design is being dark and hard to read. It is
-  also the least necessary one — at most two dogs exist, the camera is on yours,
-  and `drawSelfMarker` still puts a chevron where it went if the pan takes it
-  off screen.
+- **Nothing draws a self-ring any more.** It used to be a white outline round
+  your own body — clutter on a screen that already has a fog hole centred on
+  you, and loudest of all on the dog, a bright hard ellipse round the one entity
+  whose whole design is being dark and hard to read. Removed from `drawEntity`
+  in both the full and the far-out-dot paths. The camera is on you, the kevlar
+  band (which every blue officer now wears) picks your body out of a group, and
+  `drawSelfMarker` still throws a chevron to the edge if the pan takes you off
+  screen.
 - **The eyes stay live**, not baked: they are additive and have to lie over
   whatever the halves are doing. The glow radius is small on purpose — at any
   radius it wants to be, the wash covers the whole skull and the head comes out
@@ -9564,6 +9594,11 @@ SWAT out of a van and the soldiers off a helicopter get nothing.
 - **Three spawn paths, one call**: `populate` for bots, `resetWorld`'s respawn
   loop for players on a restart, and `spawnPlayer` for somebody joining a round
   already under way.
+- **The starting vest is separate from this** and rides the same three paths —
+  `addKevlarVest(inv)` right after `newInventory()`, before the draw. It is a
+  guaranteed grant rather than a roll, so it does not go through `collect` /
+  `giveStartingItem` at all. See the Kevlar bullet under **Items, orders and
+  scenery**.
 
 `server/startkit.ts` is the harness. Measured over 4000 draws and 40 cities of
 five bots each: **200/200 bots came away with something**, 0 draws came to

@@ -116,6 +116,7 @@ import {
 } from './geometry.js';
 import { generateMap } from './mapgen.js';
 import {
+  addKevlarVest,
   dropDebugKit,
   giveStartingItem,
   heldItem,
@@ -2521,7 +2522,11 @@ export function resetWorld(world: World): void {
     world.exhausted.delete(id);
     world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
     world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
-    world.inventories.set(id, newInventory());
+    const inv = newInventory();
+    // Every blue officer opens the round in a vest, on top of the one random
+    // thing `giveStartingItem` rolls. It fills a utility slot like any other.
+    addKevlarVest(inv);
+    world.inventories.set(id, inv);
     giveStartingItem(world, id, spawn.x, spawn.y);
     // A restart is a spawn: the heap comes with them to the new city. After
     // `spawnPickups` above, which clears the table.
@@ -3281,7 +3286,11 @@ function populate(world: World): void {
     state.guardsDoors = false;
     state.hidesDeeper = false;
     world.ai.set(id, state);
-    world.inventories.set(id, newInventory());
+    const inv = newInventory();
+    // A bot stands in a player's slot, so it opens the round in a vest like a
+    // player does. See `addKevlarVest`.
+    addKevlarVest(inv);
+    world.inventories.set(id, inv);
     world.stamina.set(id, STAMINA_MAX);
     // A bot stands in a player's slot, so it starts with what a player's slot
     // starts with. It had neither before, which meant every order that costs a
@@ -3817,7 +3826,7 @@ export function toWire(
   if (ai && ai.handHeld && ai.partnerId) state.hand = ai.partnerId;
   if (ai && now < ai.breakingUntil) state.breaking = true;
   const worn = world.inventories.get(e.id);
-  if (worn && worn.kevlar > 0) state.armour = true;
+  if (worn && worn.kevlarUses.length > 0) state.armour = true;
   // Which way the shield faces is the whole of how it works, so it has to be
   // visible on the body rather than only in the HUD.
   if (worn && worn.shield > 0) state.shield = worn.shieldUp ? 1 : -1;

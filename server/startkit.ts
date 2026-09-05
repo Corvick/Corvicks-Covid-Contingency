@@ -20,6 +20,7 @@
  */
 import { createWorld, resetWorld, type World } from './src/world.js';
 import {
+  addKevlarVest,
   giveStartingItem,
   newInventory,
   toWireInventory,
@@ -35,6 +36,7 @@ import {
   DOOR_PLAYER_UNLOCK_MS,
   DOOR_PLAYER_OPEN_MS,
   TAP_MAX_MS,
+  KEVLAR_POINTS,
   RALLY_STARTING_CHARGES,
 } from '../shared/constants.js';
 
@@ -62,7 +64,12 @@ const share = (a: number, b: number): string => `${((100 * a) / Math.max(1, b)).
 function gotSomething(world: World, id: string): boolean {
   const inv = world.inventories.get(id);
   if (!inv) return false;
-  if (JSON.stringify(inv) !== JSON.stringify(newInventory())) return true;
+  // The baseline is a fresh bag *plus the starting vest* every blue officer now
+  // opens the round in — otherwise every bot reads as "got something" off the
+  // vest alone and the draw's hit rate becomes meaningless.
+  const base = newInventory();
+  addKevlarVest(base);
+  if (JSON.stringify(inv) !== JSON.stringify(base)) return true;
   return (world.rallyCharges.get(id) ?? 0) > RALLY_STARTING_CHARGES;
 }
 
@@ -90,6 +97,7 @@ let nothing = 0;
 
 let withSomething = 0;
 let bots = 0;
+let vested = 0;
 let overCap = 0;
 let startPickupsLeft = 0;
 let rarityZero = 0;
@@ -122,6 +130,13 @@ for (let c = 0; c < CITIES; c++) {
   for (const id of world.bots) {
     bots++;
     if (gotSomething(world, id)) withSomething++;
+    const inv = world.inventories.get(id);
+    // Started in a vest: at least one full one (a draw of `kevlar` on top adds a
+    // second, so >= rather than ===).
+    if (inv && inv.kevlarUses.length >= 1 && inv.kevlarUses[0] === KEVLAR_POINTS
+      && inv.utilities.filter((u) => u === 'kevlar').length === inv.kevlarUses.length) {
+      vested++;
+    }
   }
 }
 
@@ -136,7 +151,8 @@ const line = (item: ItemId, n: number): string => {
   return `    ${item.padEnd(16)} ${String(n).padStart(4)}  ${share(n, total).padStart(6)}  table says ${share(tickets, ALL_LOOT.length)}`;
 };
 console.log(`--- a random item for every blue officer`);
-console.log(`  bots that got one        ${withSomething}/${bots} (${share(withSomething, bots)})`);
+console.log(`  bots that started in a vest ${vested}/${bots}  (must be ${bots})`);
+console.log(`  bots that got a draw too  ${withSomething}/${bots} (${share(withSomething, bots)})`);
 console.log(`  draws that came to nothing ${nothing}/${DRAWS}  (must be 0)`);
 console.log(`  rarity-0 items drawn     ${rarityZero}  (must be 0)`);
 console.log(`  loot-start- left on map  ${startPickupsLeft}  (must be 0)`);

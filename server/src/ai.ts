@@ -360,6 +360,7 @@ import {
   heldGunSlot,
   heldItem,
   nearestZombieBearing,
+  spendKevlar,
   utilitySlots,
   type Inventory,
 } from './inventory.js';
@@ -5741,12 +5742,14 @@ function lootWanted(
         if (hasRoom) want = worth;
         else if (worth - spare.worth >= BOT_SWAP_MARGIN) want = worth - spare.worth;
       }
-    } else if (p.item === 'kevlar' && inv.kevlar <= 0 && utilityRoom) {
+    } else if (p.item === 'kevlar' && inv.kevlarUses.length === 0 && utilityRoom) {
       // The two items in the city that stop an infection outright are the vest
       // and the shield, and both were scored as afterthoughts — a vest is three
       // grabs a bot simply walks away from, plus the breather after each one.
       // Nothing else in a utility slot is worth as much to something that is
-      // supposed to still be standing at the end.
+      // supposed to still be standing at the end. Every blue officer starts in
+      // a vest, so this is really "mine has been torn off" — a bot does not
+      // stockpile spares, it just replaces what it has lost.
       want = 72;
     } else if (p.item === 'riotShield' && inv.shield <= 0 && utilityRoom) {
       // Worn, so carrying it is using it. Not while there is a bipod in the
@@ -9024,7 +9027,7 @@ export function attemptGrab(
   }
   if (!session) {
     // A vest turns a grab into a brief scuffle it loses.
-    const armoured = inv !== undefined && inv.kevlar > 0;
+    const armoured = inv !== undefined && inv.kevlarUses.length > 0;
     const endsAt = now + (armoured ? KEVLAR_GRAPPLE_MS : holdMs);
     // Whether this grip breaks in the victim's favour, and *when*, are both
     // settled here rather than at the deadline. Rolled at the end, every escape
@@ -9111,16 +9114,12 @@ function resolveGrapple(world: World, targetId: string, session: GrappleLike, no
   const target = world.entities.get(targetId);
   if (!target) return;
 
-  // Kevlar denies the grab outright: no infection, one use spent, and the vest
-  // is gone once its third use goes. It is the whole outcome, not a modifier
-  // on one — nothing below this runs.
+  // Kevlar denies the grab outright: no infection, one hit spent off the worn
+  // vest, and a spare in the bag drops in behind it (`spendKevlar`). It is the
+  // whole outcome, not a modifier on one — nothing below this runs.
   const inv = world.inventories.get(targetId);
-  if (inv && inv.kevlar > 0) {
-    inv.kevlar--;
-    if (inv.kevlar <= 0) {
-      const at = inv.utilities.indexOf('kevlar');
-      if (at >= 0) inv.utilities.splice(at, 1);
-    }
+  if (inv && inv.kevlarUses.length > 0) {
+    spendKevlar(inv);
     // A moment where nothing can get hold of them again, so the vest buys a
     // chance to run rather than three grabs in the same second.
     world.grappleImmune.set(targetId, now + KEVLAR_IMMUNE_MS);

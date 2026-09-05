@@ -14,7 +14,6 @@ import {
   CAR_LENGTH,
   CAR_WIDTH,
   ENTITY_RADIUS,
-  KEVLAR_POINTS,
   RADIO_BACKUP_COUNT,
   RADIO_CALL_LINE,
   RADIO_CAR_BACKUP_COUNT,
@@ -50,7 +49,7 @@ import {
 } from '../../shared/vancurve.js';
 import type { Wall } from '../../shared/types.js';
 import { resolveCircleBox, type OrientedBox } from './geometry.js';
-import { newInventory } from './inventory.js';
+import { addKevlarVest, newInventory } from './inventory.js';
 import {
   buildingIndexAt,
   findSpawnNear,
@@ -1035,8 +1034,7 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
   // decoration — losing the leader is how a sweep falls apart, so he is the
   // one wearing it.
   if (state.squadSlot === 0) {
-    inv.kevlar = KEVLAR_POINTS;
-    inv.utilities.push('kevlar');
+    addKevlarVest(inv);
     world.squadLeads.add(id);
   }
   world.inventories.set(id, inv);

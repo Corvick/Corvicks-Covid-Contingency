@@ -940,9 +940,10 @@ export interface PickupState {
   x: number;
   y: number;
   /**
-   * Rounds left in a gun that was dropped rather than spawned. Absent means a
-   * full magazine — loot found in the world always is. Zero draws grey, which
-   * is how everyone else knows not to bother walking over for it.
+   * What is left of a thing that was dropped rather than spawned — rounds in a
+   * gun, hits on a Kevlar vest. Absent means full (a fresh magazine, a fresh
+   * vest); loot found in the world always is. Zero rounds draws grey, which is
+   * how everyone else knows not to bother walking over for it.
    */
   ammo?: number;
   /**
@@ -966,7 +967,12 @@ export interface InventoryState {
   /** Slots 4-9, in pickup order. */
   utilities: ItemId[];
   activeSlot: number;
-  kevlar: number;
+  /**
+   * Hits left on each Kevlar vest carried, one per `'kevlar'` in `utilities`
+   * and in the same order. `[0]` is the one being worn; the rest are spares
+   * that drop in the instant the worn one is torn off. Empty for no vest.
+   */
+  kevlarUses: number[];
   /** Riot shield charges left, 0 for none. */
   shield: number;
   /** Up in front rather than slung on the back. */

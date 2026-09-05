@@ -23,6 +23,7 @@ import type {
 } from '../../shared/types.js';
 import {
   collect,
+  addKevlarVest,
   dropHeld,
   heldItem,
   nearestPickup,
@@ -227,7 +228,10 @@ function spawnPlayer(id: string, asDog = false): void {
   world.entities.set(id, makeEntity(id, 'officer', spawn.x, spawn.y));
   world.playerIds.add(id);
   world.commands.set(id, blankCommand());
-  world.inventories.set(id, newInventory());
+  const inv = newInventory();
+  // Everybody in a player slot opens the round in a vest. See `addKevlarVest`.
+  addKevlarVest(inv);
+  world.inventories.set(id, inv);
   world.stamina.set(id, STAMINA_MAX);
   world.rallyCharges.set(id, RALLY_STARTING_CHARGES);
   world.followCharges.set(id, FOLLOW_STARTING_CHARGES);
