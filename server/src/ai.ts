@@ -5576,6 +5576,9 @@ function chargeInfectedTick(
     return false;
   };
   if (world.pendingInfections.size === 0) return give();
+  // The chamber is still venting — no point standing here winding up at a
+  // shot `fireHeld` will not let off yet.
+  if (now < (world.chargeCoolUntil.get(e.id) ?? 0)) return give();
   const slot = chargeRifleSlot(inv);
   if (slot < 0) return give();
 

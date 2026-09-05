@@ -72,7 +72,14 @@ export interface Settings {
    */
   noFog: boolean;
 
-  /** Grime on the road and the dark corners. Measured at 0.09ms and 0.36ms. */
+  /**
+   * Grime on the road and the dark corners, and the floor patterns inside
+   * buildings (`drawFloors` — boards, station tile, complex parquet). All of it
+   * is cached tiles filled once per on-screen shape (boards, station tile,
+   * complex flagstone, plus a threshold saddle at each interior doorway).
+   * Measured at 0.09ms and 0.36ms for the grime; the floors are one fill per
+   * visible footprint.
+   */
   groundDetail: boolean;
   vignette: boolean;
 

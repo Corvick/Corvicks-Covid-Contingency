@@ -73,11 +73,17 @@ search filter.
 | `weapons/garand-01-shot.wav` | GUNRif_M1 GARAND GUNSHOT_MP.wav (one shot of a burst) | MPierluissi | [460851](https://freesound.org/people/MPierluissi/sounds/460851/) |
 | `weapons/garand-02-shot.wav` | ″ | MPierluissi | [460851](https://freesound.org/people/MPierluissi/sounds/460851/) |
 | `weapons/garand-03-shot.wav` | ″ | MPierluissi | [460851](https://freesound.org/people/MPierluissi/sounds/460851/) |
+| `weapons/charge-01-windup.wav` | Sci-Fi Weapon Charging 01.wav (last ~1.5s, the build) | Tim_Verberne | [514082](https://freesound.org/people/Tim_Verberne/sounds/514082/) |
+| `weapons/charge-02-fire.wav` | Energy/magic shot (first ~1s) | Iridiuss | [519414](https://freesound.org/people/Iridiuss/sounds/519414/) |
+| `weapons/charge-03-vent.wav` | Compressed Air Pressure Release Valve Loop (Synthetic) (~1s slice) | kkenny101 | [861613](https://freesound.org/people/kkenny101/sounds/861613/) |
 
 Grouped by weapon *family*, not by which gun in the registry fires them: the
-bolt action and the charge rifle fire the same rifle round and share
-`rifle-01/02/03-shot`, exactly as `gunVoice` in `combat.ts` groups them
-server-side. The semi-auto (the M1 Garand) used to share that pool as well
+bolt action and the charge rifle fire the same rifle *round*, so `gunVoice` in
+`combat.ts` still groups them onto `voice: 'rifle'` — but the charge rifle is
+an energy weapon and does not sound like one, so `hearGunfire` catches its
+shots by `Shot.plasma` and plays `charge-02-fire` in place of the rifle crack;
+the `'rifle'` voice on the wire only ever reaches its synth fallback family.
+The semi-auto (the M1 Garand) used to share that pool as well
 and no longer does — see `garand-0N-shot.wav` below, and the note on
 `GunVoice` in `shared/types.ts`. The flamethrower has no file here at all —
 it is a continuous stream with its own established sound design (see
@@ -230,6 +236,51 @@ together as one consistent-sounding pistol, however well their levels were
 matched. Replaced outright by `rifle-01-single.mp3` rather than kept as
 extra variety.
 
+### The charge rifle
+
+Three noises rather than one, because it is an energy weapon: the chamber
+winding up (`playChargeWind`, on the rising edge of `EntityState.charging`),
+the beam discharging (`playChargeFire`, off `Shot.plasma` in `hearGunfire`),
+and the vent bleeding off heat afterward (`playChargeVent`, on the rising edge
+of `EntityState.cooling`). All three are **Creative Commons 0** on their own
+Freesound pages — copy, modify, distribute, commercial use, no attribution
+required — and written down here anyway, the same as everything above. Fetched
+(the public preview stream) on 2026-09-05.
+
+- **`charge-01-windup.wav`** — Tim_Verberne's "Sci-Fi Weapon Charging 01.wav"
+  ([514082](https://freesound.org/people/Tim_Verberne/sounds/514082/)), a
+  9.7-second "cannon preparing for a blast" whose amplitude, decoded, builds to
+  a plateau around 5-7s and then drops. A charge rifle winds up in 1.3s, so the
+  **rising ramp** into that plateau (3.35-4.85s of the source) is what was
+  kept: decoded, downmixed to mono, resampled to 22050Hz, sliced to that
+  window, 12ms fades either end, peak-normalised. The same shape of hand-trim
+  the rifle and Garand takes above needed, for the same reason — the source is
+  longer than the event.
+- **`charge-02-fire.wav`** — Iridiuss's "Energy/magic shot"
+  ([519414](https://freesound.org/people/Iridiuss/sounds/519414/)), a 2-second
+  take that is a sharp attack decaying to silence by ~0.6s. The first ~1s was
+  kept and processed the same way; the runtime's own `trimSilence` would have
+  cut the tail regardless.
+- **`charge-03-vent.wav`** — kkenny101's "Compressed Air Pressure Release Valve
+  Loop (Synthetic)"
+  ([861613](https://freesound.org/people/kkenny101/sounds/861613/)), a 16-second
+  steady loop. A ~1s slice from the middle (past any loop-point seam), same
+  mono/22050/fade/normalise treatment. A loop is uniform, so which second does
+  not matter.
+
+**What is not verified is how they sound in the mix** — they were chosen and
+trimmed by decoded amplitude envelope, not by ear (this cannot listen), so the
+levels are matched by measured RMS and the register is a judgement from the
+source descriptions and waveforms. `synthesizeChargeWind` / `…Fire` / `…Vent`
+are the fallbacks and are tuned, so a bad take is a swap of one `*_FILES`
+entry, not a broken feature.
+
+*One process note.* There is no ffmpeg on either dev machine, so the trims
+above were done with a scratch Node script: `mpg123-decoder` (WASM) to PCM, a
+linear resampler, a slice, a fade, a peak-normalise, and a hand-written WAV
+header. The script lives nowhere in the repo — it produced three files and its
+job is done — but the recipe is here if a take ever needs redoing.
+
 Also checked and rejected: [JoseIgnacioTriay](https://freesound.org/people/JoseIgnacioTriay/)'s
 30-06 bolt-action single shot and matching bolt-cycle recording ([515203](https://freesound.org/people/JoseIgnacioTriay/sounds/515203/),
 [515202](https://freesound.org/people/JoseIgnacioTriay/sounds/515202/)) — the
@@ -246,3 +297,59 @@ than left permanently synthesised. Synthesis stays only as the brief fallback
 for whatever hasn't loaded yet (or the day a recording turns up for something
 that still has none, such as the dog's roar, which has no real-world thing to
 go and record).
+
+## Vehicles
+
+Under `vehicles/` — engines and rotors, its own folder for the same reason the
+sob lives under `human/`: not a weapon and not a voice.
+
+| File | Source title | Author | Source |
+|---|---|---|---|
+| `vehicles/heli-rotor.wav` | UH-60 Black Hawk Helicopter Hover Loop 1 | qubodup | [854493](https://freesound.org/people/qubodup/sounds/854493/) |
+
+**`vehicles/heli-rotor.wav` is the one looping recording in the game.** Every
+other sound here is a discrete event played once; a helicopter overhead is a
+bed that has to hold for as long as its shadow is on the ground, panning and
+swelling as it moves — see `syncHeliRotors` in `client/src/sound.ts`, which
+owns one looping `AudioBufferSourceNode` per aircraft and rides its gain off
+distance and the wire's arrival/departure `alpha`.
+
+Marked **Creative Commons 0** on its own Freesound page — copy, modify,
+distribute, commercial use, no attribution required — and written down here
+anyway, the same as everything above. The same uploader as the Barrett and M240
+takes. Fetched (the public preview stream) on 2026-09-05.
+
+The source is a 2.64-second mono 48kHz "gapless, seamless loop" made with
+MubLoop from a 1st Armored Division training-exercise video. **The preview is an
+mp3, and mp3 breaks a seamless loop** — the codec leaves ~1150 samples of
+priming silence at the front and padding at the end, so an `AudioBufferSourceNode`
+with `loop = true` would click every 2.6 seconds. So it is pre-trimmed offline
+into a clean loop rather than saved as-is like the shotgun and MG mp3s were:
+decoded, one channel taken, resampled to 22050Hz, ~30ms guarded off each end to
+drop the codec padding, then an **equal-power overlap-add seam** — the head of
+the clip crossfaded onto its own tail — so the last 45ms of the result *are* the
+first 45ms faded in, and it loops with no discontinuity regardless of what the
+encoder left. Peak-normalised to 0.92. Measured after: the largest
+sample-to-sample step across the loop point is **0.12, less than half the 0.27
+of the loudest transient inside the rotor itself** — inaudible — and the
+windowed RMS is flat across the whole clip (no fade, no dropout). Final: 2.535s,
+0.194 RMS.
+
+**What is not verified is how it sounds in the mix**, the same as the charge
+rifle — chosen and processed by decoded amplitude envelope, not by ear.
+`startSynthRotor` (blade-slap body amplitude-modulated at blade-pass rate, a
+chuffing noise bed, a turbine whine) is the sustained fallback while it loads,
+so a bad take is a swap of one `HELI_ROTOR_FILES` entry.
+
+*Process note, as for the charge rifle:* no ffmpeg on either dev machine, so
+the trim was a scratch Node script — `mpg123-decoder` (WASM) to PCM, a linear
+resampler, the guard cut, the overlap-add seam, a peak-normalise, a
+hand-written WAV header. The script lives nowhere in the repo; the recipe is
+here if the take ever needs redoing.
+
+Also considered: AntumDeluge's "Helicopter Loop"
+([584326](https://freesound.org/people/AntumDeluge/sounds/584326/), CC0, an
+edit of a Thomas Ryder Payne pass-over) and qubodup's older "Helicopter Loop"
+([187678](https://freesound.org/people/qubodup/sounds/187678/)). The Black Hawk
+*hover* loop was picked because most of the time a helicopter is audible in this
+game it is hovering over a drop zone, not passing over.

@@ -1,5 +1,7 @@
 import {
   CHARGE_BARS,
+  CHARGE_MS,
+  CHARGE_COOL_MS,
   BOLT_CYCLE_MS,
   GARAND_CLIP_SIZE,
   GARAND_PING_MS,
@@ -326,19 +328,29 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     kind: 'gun',
     label: 'Charge Rifle',
     short: 'CHRG',
-    color: '#c084fc',
+    color: '#38bdf8',
     // Middle tier, alongside the semi-auto. It is the only gun that can shoot
     // somebody already bitten, which is a job that has to come up often enough
     // to be worth learning — at rarity 1 most rounds never presented it.
     rarity: 5,
-    damageMin: 30,
-    damageMax: 45,
+    // A full wind-up has to *reliably* drop a normal zombie in one — at the old
+    // 30 the top bar (×`CHARGE_TOP_MUL`, 2.4) came out 72-108 against a 100hp
+    // shambler and only killed on the high rolls. 42 puts the top bar at
+    // 101-134, so a charged shot always clears 100; the lesser bars scale with
+    // it and still land short (bar 3 is 73-97) so the tiers stay meaningful.
+    damageMin: 42,
+    damageMax: 56,
     bloom: 0.02,
-    cooldownMs: 500,
-    range: 1300,
+    // The vent — `fireHeld`'s `ready()` gate. Equal to `CHARGE_COOL_MS`, which
+    // is also what the red receding bar counts down, so the two cannot drift.
+    cooldownMs: CHARGE_COOL_MS,
+    // Sniper-tier reach: an energy beam that fizzles out mid-street looks
+    // broken, so it should usually run all the way to a wall — the ground
+    // crater is the rarer open-air case.
+    range: 2200,
     ammo: 14,
     charge: true,
-    chargeMs: 1300,
+    chargeMs: CHARGE_MS,
     // One body per bar; the top bar also drives it through a wall or a door.
     pierce: CHARGE_BARS,
   },

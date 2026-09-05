@@ -57,6 +57,9 @@ import {
   SWAT_HELMET_COLOR,
   HELI_RADIUS,
   HELI_SHADOW_ALPHA,
+  HELI_WASH_RADIUS,
+  HELI_WASH_PUSH,
+  HELI_WASH_FLUTTER,
   WALL_THICKNESS,
   GUN_SLOTS,
   BLAST_RADIUS,
@@ -131,6 +134,17 @@ import {
   GRIME_GRIT,
   GRIME_CRACKS,
   GROUND_COLOR,
+  FLOOR_TILE,
+  FLOOR_HOUSE_COLOR,
+  FLOOR_HOUSE_PLANK,
+  FLOOR_STATION_COLOR,
+  FLOOR_STATION_TILE,
+  FLOOR_COMPLEX_COLOR,
+  FLOOR_COMPLEX_SLAB,
+  FLOOR_ARMOURY_COLOR,
+  FLOOR_CELL_COLOR,
+  FLOOR_SADDLE_COLOR,
+  FLOOR_SADDLE_DEPTH,
   BIRTH_ARM_TWIST,
   BIRTH_BURST_SPOKES,
   BIRTH_COLOR,
@@ -174,6 +188,13 @@ import { dogSprites, drawSprite } from './dogsprite.js';
 import { settings } from './settings.js';
 
 const TAU = Math.PI * 2;
+
+/**
+ * How long a charge-rifle energy beam stays on screen — longer than an
+ * ordinary tracer (`TRACER_LIFETIME_MS`), because a beam hangs and then fades
+ * rather than snapping off. `main.ts` culls plasma tracers on this clock.
+ */
+export const CHARGE_BEAM_MS = 220;
 
 /** Shortest signed difference from `a` to `b`. The client's own small copy. */
 function angDelta(a: number, b: number): number {
@@ -336,6 +357,348 @@ export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
   // grime is *on the road* rather than a screen overlay that slides under it.
   ctx.fillStyle = pattern;
   ctx.fillRect(0, 0, map.width, map.height);
+}
+
+/**
+ * A building has a floor, not more of the road that runs past its door.
+ *
+ * Three patterns — boards for an ordinary house, institutional tile for the
+ * police station, big stone flagstones for the corner complex — each a small
+ * tile hashed once and handed to the canvas as a pattern, the grime tile's
+ * trick and for its reason: a whole city of floors costs one fill per on-screen
+ * footprint rather than a scatter per frame. The seams are laid so the tile
+ * repeat has no visible grid — full-width course lines, and spacings that
+ * divide `FLOOR_TILE`.
+ *
+ * It fills the *whole* footprint (`building.rects`), wall to wall; `drawWalls`
+ * then draws the perimeter over the top. Under the blood, casings and bodies
+ * that lie on it, over the grime, which stops at the threshold.
+ *
+ * Two station rooms get their own floor painted over the base tile on their
+ * inset rect — the armoury is steel tread plate, the cell is speckled concrete
+ * with a drain — and every doorway gets a real threshold saddle across it: a
+ * short crowned strip of trim where the floor changes, room to room or room to
+ * street.
+ *
+ * Ground detail, so it rides `settings.groundDetail` and is gone on LOW.
+ */
+let housePattern: CanvasPattern | null = null;
+let stationPattern: CanvasPattern | null = null;
+let complexPattern: CanvasPattern | null = null;
+
+function floorTile(
+  ctx: CanvasRenderingContext2D,
+  paint: (g: CanvasRenderingContext2D) => void,
+): CanvasPattern | null {
+  const tile = document.createElement('canvas');
+  tile.width = FLOOR_TILE;
+  tile.height = FLOOR_TILE;
+  const g = tile.getContext('2d');
+  if (!g) return null;
+  paint(g);
+  return ctx.createPattern(tile, 'repeat');
+}
+
+/** Boards: tone-banded planks, a seam between each, staggered end cuts. */
+function paintHouseFloor(g: CanvasRenderingContext2D): void {
+  const rand = rng(0x51a3f00d);
+  const H = FLOOR_HOUSE_PLANK;
+  for (let y = 0; y < FLOOR_TILE; y += H) {
+    const dark = rand() < 0.55;
+    g.fillStyle = dark
+      ? `rgba(0,0,0,${(0.03 + rand() * 0.06).toFixed(3)})`
+      : `rgba(150,128,96,${(0.015 + rand() * 0.03).toFixed(3)})`;
+    g.fillRect(0, y, FLOOR_TILE, H);
+  }
+  // Full-width seams — a whole number of planks per tile, so they align across
+  // the repeat.
+  g.strokeStyle = 'rgba(0,0,0,0.3)';
+  g.lineWidth = 1;
+  for (let y = 0; y <= FLOOR_TILE; y += H) {
+    g.beginPath();
+    g.moveTo(0, y + 0.5);
+    g.lineTo(FLOOR_TILE, y + 0.5);
+    g.stroke();
+  }
+  // Butt joints, staggered row to row and wrapped so nothing seams at the edge.
+  g.strokeStyle = 'rgba(0,0,0,0.24)';
+  let row = 0;
+  for (let y = 0; y < FLOOR_TILE; y += H, row++) {
+    const at = (row % 2 ? FLOOR_TILE / 2 : 0) + rand() * 28;
+    for (const bx of [at - FLOOR_TILE, at, at + FLOOR_TILE]) {
+      g.beginPath();
+      g.moveTo(bx + 0.5, y);
+      g.lineTo(bx + 0.5, y + H);
+      g.stroke();
+    }
+  }
+}
+
+/** Institutional tile: a faint checker so it reads as tiles, and dark grout. */
+function paintStationFloor(g: CanvasRenderingContext2D): void {
+  const T = FLOOR_STATION_TILE;
+  for (let y = 0; y < FLOOR_TILE; y += T) {
+    for (let x = 0; x < FLOOR_TILE; x += T) {
+      const on = (x / T + y / T) % 2 === 0;
+      g.fillStyle = on ? 'rgba(210,224,240,0.016)' : 'rgba(0,0,0,0.05)';
+      g.fillRect(x, y, T, T);
+    }
+  }
+  g.strokeStyle = 'rgba(0,0,0,0.32)';
+  g.lineWidth = 1.4;
+  for (let p = 0; p <= FLOOR_TILE; p += T) {
+    g.beginPath();
+    g.moveTo(p + 0.5, 0);
+    g.lineTo(p + 0.5, FLOOR_TILE);
+    g.stroke();
+    g.beginPath();
+    g.moveTo(0, p + 0.5);
+    g.lineTo(FLOOR_TILE, p + 0.5);
+    g.stroke();
+  }
+}
+
+/** Flagstones: big square slabs in a running bond — grout, and a lit edge. */
+function paintComplexFloor(g: CanvasRenderingContext2D): void {
+  const S = FLOOR_COMPLEX_SLAB;
+  // Courses run the full width and align across the repeat; the vertical joint
+  // in a course shifts by half a slab, and every joint x is on a multiple of
+  // S/2, which divides FLOOR_TILE — so the shifted joints tile seamlessly too.
+  g.strokeStyle = 'rgba(0,0,0,0.34)';
+  g.lineWidth = 1.6;
+  for (let y = 0; y < FLOOR_TILE; y += S) {
+    g.beginPath();
+    g.moveTo(0, y + 0.5);
+    g.lineTo(FLOOR_TILE, y + 0.5);
+    g.stroke();
+    const shift = (y / S) % 2 ? S / 2 : 0;
+    const joints: number[] = [];
+    for (let jx = shift; jx <= FLOOR_TILE; jx += S) joints.push(jx);
+    if (shift) joints.push(0, FLOOR_TILE); // close the half-slabs at each edge
+    for (const jx of joints) {
+      g.beginPath();
+      g.moveTo(jx + 0.5, y);
+      g.lineTo(jx + 0.5, y + S);
+      g.stroke();
+    }
+  }
+  // A hair of light just above each course line, so the slabs read as slabs
+  // rather than as a flat grid.
+  g.strokeStyle = 'rgba(196,186,170,0.05)';
+  g.lineWidth = 1;
+  for (let y = 0; y <= FLOOR_TILE; y += S) {
+    g.beginPath();
+    g.moveTo(0, y - 0.5);
+    g.lineTo(FLOOR_TILE, y - 0.5);
+    g.stroke();
+  }
+}
+
+/** Armoury: steel tread plate — plate seams and alternating diagonal treads. */
+function paintArmouryFloor(g: CanvasRenderingContext2D): void {
+  g.strokeStyle = 'rgba(0,0,0,0.28)';
+  g.lineWidth = 1.4;
+  for (let p = 0; p <= FLOOR_TILE; p += 64) {
+    g.beginPath();
+    g.moveTo(p + 0.5, 0);
+    g.lineTo(p + 0.5, FLOOR_TILE);
+    g.stroke();
+    g.beginPath();
+    g.moveTo(0, p + 0.5);
+    g.lineTo(FLOOR_TILE, p + 0.5);
+    g.stroke();
+  }
+  g.lineWidth = 2;
+  g.lineCap = 'round';
+  const S = 16;
+  for (let gy = 0; gy < FLOOR_TILE; gy += S) {
+    for (let gx = 0; gx < FLOOR_TILE; gx += S) {
+      const dir = (gx / S + gy / S) % 2 === 0 ? 1 : -1;
+      const cx = gx + S / 2;
+      const cy = gy + S / 2;
+      const l = 4;
+      g.strokeStyle = 'rgba(0,0,0,0.3)';
+      g.beginPath();
+      g.moveTo(cx - l, cy - l * dir);
+      g.lineTo(cx + l, cy + l * dir);
+      g.stroke();
+      g.strokeStyle = 'rgba(200,206,216,0.05)';
+      g.beginPath();
+      g.moveTo(cx - l, cy - l * dir - 1);
+      g.lineTo(cx + l, cy + l * dir - 1);
+      g.stroke();
+    }
+  }
+  g.lineCap = 'butt';
+}
+
+/** Cell: speckled concrete, big slab joints, a few hairline cracks. */
+function paintCellFloor(g: CanvasRenderingContext2D): void {
+  const rand = rng(0x0ce11c0d);
+  for (let i = 0; i < 220; i++) {
+    const s = 0.6 + rand() * 1.4;
+    g.fillStyle = rand() < 0.5 ? 'rgba(0,0,0,0.14)' : 'rgba(190,190,196,0.04)';
+    g.fillRect(rand() * FLOOR_TILE, rand() * FLOOR_TILE, s, s);
+  }
+  g.strokeStyle = 'rgba(0,0,0,0.34)';
+  g.lineWidth = 2;
+  for (let p = 0; p <= FLOOR_TILE; p += 64) {
+    g.beginPath();
+    g.moveTo(p + 0.5, 0);
+    g.lineTo(p + 0.5, FLOOR_TILE);
+    g.stroke();
+    g.beginPath();
+    g.moveTo(0, p + 0.5);
+    g.lineTo(FLOOR_TILE, p + 0.5);
+    g.stroke();
+  }
+  g.strokeStyle = 'rgba(0,0,0,0.22)';
+  g.lineWidth = 0.8;
+  for (let i = 0; i < 3; i++) {
+    let x = rand() * FLOOR_TILE;
+    let y = rand() * FLOOR_TILE;
+    let a = rand() * TAU;
+    const pts: Array<[number, number]> = [[x, y]];
+    for (let s = 0; s < 4; s++) {
+      a += (rand() - 0.5) * 1.4;
+      x += Math.cos(a) * (10 + rand() * 20);
+      y += Math.sin(a) * (10 + rand() * 20);
+      pts.push([x, y]);
+    }
+    for (const [ox, oy] of [
+      [0, 0],
+      [-FLOOR_TILE, 0],
+      [FLOOR_TILE, 0],
+      [0, -FLOOR_TILE],
+      [0, FLOOR_TILE],
+    ]) {
+      g.beginPath();
+      g.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+      for (let p = 1; p < pts.length; p++) g.lineTo(pts[p][0] + ox, pts[p][1] + oy);
+      g.stroke();
+    }
+  }
+}
+
+let armouryPattern: CanvasPattern | null = null;
+let cellPattern: CanvasPattern | null = null;
+
+export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Viewport): void {
+  if (!settings.groundDetail) return;
+  if (!housePattern) housePattern = floorTile(ctx, paintHouseFloor);
+  if (!stationPattern) stationPattern = floorTile(ctx, paintStationFloor);
+  if (!complexPattern) complexPattern = floorTile(ctx, paintComplexFloor);
+  if (!armouryPattern) armouryPattern = floorTile(ctx, paintArmouryFloor);
+  if (!cellPattern) cellPattern = floorTile(ctx, paintCellFloor);
+  if (!housePattern || !stationPattern || !complexPattern || !armouryPattern || !cellPattern) return;
+
+  const station = map.policeStation;
+  const stationIdx = station ? station.building : -1;
+
+  for (let i = 0; i < map.buildings.length; i++) {
+    const b = map.buildings[i];
+    if (
+      b.x > view.x + view.w ||
+      b.x + b.w < view.x ||
+      b.y > view.y + view.h ||
+      b.y + b.h < view.y
+    ) {
+      continue;
+    }
+
+    let base = FLOOR_HOUSE_COLOR;
+    let pattern = housePattern;
+    if (i === map.cornerBuilding) {
+      base = FLOOR_COMPLEX_COLOR;
+      pattern = complexPattern;
+    } else if (i === stationIdx) {
+      base = FLOOR_STATION_COLOR;
+      pattern = stationPattern;
+    }
+
+    for (const r of b.rects) {
+      ctx.fillStyle = base;
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.fillStyle = pattern;
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+    }
+
+    // The armoury and the cell get their own floor over the base tile.
+    if (i === stationIdx && station) {
+      fillRoom(ctx, station.armoury, FLOOR_ARMOURY_COLOR, armouryPattern);
+      fillRoom(ctx, station.cell, FLOOR_CELL_COLOR, cellPattern);
+      // A floor drain in the middle of the cell.
+      const dx = station.cell.x + station.cell.w / 2;
+      const dy = station.cell.y + station.cell.h / 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath();
+      ctx.arc(dx, dy, 7, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120,124,132,0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(dx - 6, dy);
+      ctx.lineTo(dx + 6, dy);
+      ctx.moveTo(dx, dy - 6);
+      ctx.lineTo(dx, dy + 6);
+      ctx.stroke();
+    }
+  }
+
+  // A real threshold saddle laid across every doorway — interior, where one
+  // room's floor meets the next, and the front door, where the floor meets the
+  // street. A short strip of trim, the way a real building does it.
+  const half = FLOOR_SADDLE_DEPTH;
+  for (const d of map.doors) {
+    const span = d.halfSpan + 3;
+    const x0 = d.x - (d.horiz ? span : half);
+    const y0 = d.y - (d.horiz ? half : span);
+    const w = d.horiz ? span * 2 : half * 2;
+    const h = d.horiz ? half * 2 : span * 2;
+    if (x0 > view.x + view.w || x0 + w < view.x || y0 > view.y + view.h || y0 + h < view.y) {
+      continue;
+    }
+    ctx.fillStyle = FLOOR_SADDLE_COLOR;
+    ctx.fillRect(x0, y0, w, h);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (d.horiz) {
+      // Room-facing edges (top and bottom), then the crown down the middle.
+      ctx.moveTo(x0, y0 + 0.5);
+      ctx.lineTo(x0 + w, y0 + 0.5);
+      ctx.moveTo(x0, y0 + h - 0.5);
+      ctx.lineTo(x0 + w, y0 + h - 0.5);
+    } else {
+      ctx.moveTo(x0 + 0.5, y0);
+      ctx.lineTo(x0 + 0.5, y0 + h);
+      ctx.moveTo(x0 + w - 0.5, y0);
+      ctx.lineTo(x0 + w - 0.5, y0 + h);
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.stroke();
+    ctx.beginPath();
+    if (d.horiz) {
+      ctx.moveTo(x0, d.y + 0.5);
+      ctx.lineTo(x0 + w, d.y + 0.5);
+    } else {
+      ctx.moveTo(d.x + 0.5, y0);
+      ctx.lineTo(d.x + 0.5, y0 + h);
+    }
+    ctx.strokeStyle = 'rgba(240,228,208,0.12)';
+    ctx.stroke();
+  }
+}
+
+function fillRoom(
+  ctx: CanvasRenderingContext2D,
+  room: Wall,
+  base: string,
+  pattern: CanvasPattern,
+): void {
+  ctx.fillStyle = base;
+  ctx.fillRect(room.x, room.y, room.w, room.h);
+  ctx.fillStyle = pattern;
+  ctx.fillRect(room.x, room.y, room.w, room.h);
 }
 
 /**
@@ -907,8 +1270,22 @@ export function drawDucks(ctx: CanvasRenderingContext2D, ducks: DuckState[], vie
   }
 }
 
-/** Bushes draw over entities so anyone standing in one is partly concealed. */
-export function drawBushes(ctx: CanvasRenderingContext2D, bushes: Bush[], view: Viewport): void {
+/**
+ * Bushes draw over entities so anyone standing in one is partly concealed.
+ *
+ * `helis` and `now` drive the rotor downwash: foliage under an aircraft is
+ * shoved radially outward and shudders. It is still **one** path filled once —
+ * the wind only moves where each `arc` is centred — and when nothing is
+ * overhead (`helis` empty) the extra work is skipped entirely and this is
+ * byte-for-byte what it was.
+ */
+export function drawBushes(
+  ctx: CanvasRenderingContext2D,
+  bushes: Bush[],
+  view: Viewport,
+  helis: HelicopterState[] = [],
+  now = 0,
+): void {
   // Every visible bush goes into **one** path, filled once.
   //
   // The park is a hundred-odd overlapping circles, and drawing them separately
@@ -917,12 +1294,45 @@ export function drawBushes(ctx: CanvasRenderingContext2D, bushes: Bush[], view: 
   // what made walking through the trees stutter. One path with nonzero winding
   // fills the union exactly once, so the thicket costs about what a single
   // blob does and stops darkening where bushes overlap.
+  const windy = helis.length > 0;
   ctx.beginPath();
   let any = false;
   for (const bush of bushes) {
-    if (!visible(view, bush.x, bush.y, bush.r + 8)) continue;
-    ctx.moveTo(bush.x + bush.r, bush.y);
-    ctx.arc(bush.x, bush.y, bush.r, 0, Math.PI * 2);
+    if (!visible(view, bush.x, bush.y, bush.r + 8 + (windy ? HELI_WASH_PUSH : 0))) continue;
+
+    let cx = bush.x;
+    let cy = bush.y;
+    let r = bush.r;
+    if (windy) {
+      // The nearest aircraft close enough to stir this bush.
+      let near: HelicopterState | null = null;
+      let bestD = HELI_WASH_RADIUS;
+      for (const h of helis) {
+        const d = Math.hypot(h.x - bush.x, h.y - bush.y);
+        if (d < bestD) {
+          bestD = d;
+          near = h;
+        }
+      }
+      if (near) {
+        const h = near;
+        const s = Math.max(0, 1 - bestD / HELI_WASH_RADIUS) * h.alpha;
+        const ang = Math.atan2(bush.y - h.y, bush.x - h.x);
+        const phase = bush.x * 0.7 + bush.y * 1.3;
+        // Downwash pushes outward; the shudder rides across that push.
+        const push = s * s * HELI_WASH_PUSH;
+        const flut =
+          (Math.sin(now * 0.021 + phase) + 0.5 * Math.sin(now * 0.037 + phase * 1.7)) *
+          s *
+          HELI_WASH_FLUTTER;
+        cx += Math.cos(ang) * push - Math.sin(ang) * flut;
+        cy += Math.sin(ang) * push + Math.cos(ang) * flut;
+        r *= 1 + Math.sin(now * 0.045 + phase) * s * 0.06;
+      }
+    }
+
+    ctx.moveTo(cx + r, cy);
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
     any = true;
   }
   if (!any) return;
@@ -1301,6 +1711,115 @@ function riflePose(
   return { buttX, buttY, gripX, gripY, foreX, foreY, muzzleX, muzzleY };
 }
 
+/**
+ * The charge rifle's plasma chamber — the lit section in the middle of the
+ * gun, in the spirit of a Warhammer 40k plasma weapon. Dark and faintly lit at
+ * rest, blazing blue → cyan → white as the trigger is held, a dull red ember
+ * while it vents afterward. Drawn with the weapon (over the torso) so it reads
+ * as part of the gun rather than an effect floating beside it.
+ *
+ * `charge` is the wind-up 0..1 and `cool` the vent 1..0 — either may be 0.
+ * No per-frame randomness: the flicker is hashed off `seed` and the clock, the
+ * rule the corpse limbs and the acid churn already follow.
+ */
+function drawPlasmaChamber(
+  ctx: CanvasRenderingContext2D,
+  g: ReturnType<typeof riflePose>,
+  dirX: number,
+  dirY: number,
+  radius: number,
+  charge: number,
+  cool: number,
+  seed: number,
+  now: number,
+): void {
+  // The receiver: on the barrel between the grip and the support hand.
+  const cx = g.gripX + (g.foreX - g.gripX) * 0.52;
+  const cy = g.gripY + (g.foreY - g.gripY) * 0.52;
+  const halfLen = radius * 0.34;
+  const halfW = radius * 0.15;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(Math.atan2(dirY, dirX));
+
+  // The housing.
+  ctx.fillStyle = '#0b1220';
+  ctx.beginPath();
+  ctx.roundRect(-halfLen, -halfW, halfLen * 2, halfW * 2, halfW * 0.7);
+  ctx.fill();
+
+  const flick = 0.85 + 0.15 * Math.sin(now * 0.02 + seed * 1.7);
+  let inner: string;
+  let intensity: number;
+  if (cool > 0) {
+    inner = mix('#7f1d1d', '#fca5a5', cool * 0.55);
+    intensity = cool * 0.6 * (0.72 + 0.28 * Math.sin(now * 0.006 + seed));
+  } else {
+    // Sky-blue to pale cyan to white — kept clear of the officer's own
+    // `#3b82f6` body so the coil never blends into it.
+    inner = charge >= 0.999 ? '#e8fbff' : mix('#0ea5e9', '#a5f3fc', charge);
+    // Barely lit at rest, ramping with the wind-up.
+    intensity = (0.05 + 0.95 * Math.max(0, charge)) * flick;
+  }
+
+  ctx.globalCompositeOperation = 'lighter';
+  // The coil bar down the middle of the housing.
+  ctx.globalAlpha = Math.min(1, 0.25 + intensity * 0.7);
+  ctx.fillStyle = inner;
+  ctx.beginPath();
+  ctx.roundRect(-halfLen * 0.78, -halfW * 0.5, halfLen * 1.56, halfW, halfW * 0.5);
+  ctx.fill();
+  // A glow around the coil — an ellipse along the barrel rather than a disc,
+  // so it reads as a lit *section* of the gun and not an orb around the
+  // officer. Small: at full charge it is about two-thirds of a body radius.
+  const rx = halfLen * (1.3 + intensity * 1.6);
+  const ry = halfW * (2.4 + intensity * 3.4);
+  const bloom = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+  bloom.addColorStop(0, inner);
+  bloom.addColorStop(0.45, inner);
+  bloom.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.globalAlpha = 0.06 + intensity * 0.34;
+  ctx.fillStyle = bloom;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, rx, ry, 0, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * Steam venting off the charge rifle's muzzle while the chamber cools. A few
+ * puffs drifting back over the gun and rising; stateless, each puff's phase a
+ * pure function of its index, the clock and `seed`.
+ */
+function drawChargeVent(
+  ctx: CanvasRenderingContext2D,
+  mx: number,
+  my: number,
+  facing: number,
+  cool: number,
+  seed: number,
+  now: number,
+): void {
+  const back = facing + Math.PI;
+  const n = 5;
+  const period = 900;
+  ctx.save();
+  for (let i = 0; i < n; i++) {
+    const phase = ((now + seed * 130 + i * (period / n)) % period) / period;
+    const drift = 2 + phase * 15;
+    const px = mx + Math.cos(back) * drift + Math.sin(seed + i * 2.3) * 3 * phase;
+    const py = my + Math.sin(back) * drift - phase * 13;
+    const r = (1.5 + phase * 5) * (0.5 + cool * 0.5);
+    ctx.globalAlpha = (1 - phase) * 0.26 * cool;
+    ctx.fillStyle = '#cbd5e1';
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 export function drawEntity(
   ctx: CanvasRenderingContext2D,
   e: EntityState,
@@ -1577,6 +2096,11 @@ export function drawEntity(
     ctx.moveTo(g.buttX, g.buttY);
     ctx.lineTo(g.buttX + (g.gripX - g.buttX) * 0.42, g.buttY + (g.gripY - g.buttY) * 0.42);
     ctx.stroke();
+    // The charge rifle's plasma chamber, and the steam off it while it vents.
+    if (e.held === 'chargeRifle') {
+      drawPlasmaChamber(ctx, g, dirX, dirY, radius, e.charging ?? 0, e.cooling ?? 0, hashId(e.id), now);
+      if (e.cooling) drawChargeVent(ctx, g.muzzleX, g.muzzleY, facing, e.cooling, hashId(e.id), now);
+    }
   } else if (e.type === 'officer') {
     ctx.save();
     ctx.translate(x + dirX * radius * 1.75, y + dirY * radius * 1.75);
@@ -3592,6 +4116,158 @@ export function spawnBulletHole(x: number, y: number, angle: number, now: number
 }
 
 /**
+ * Where a charge-rifle beam met a wall. Bakes into the same layer the bullet
+ * holes use.
+ *
+ * Three reports shaped this. A filled blue burn *"portrays no depth"*; then
+ * *"get rid of the white and blue on the ground — only small lightning strips
+ * stay"* (the beam often ends at a wall's *edge*, and a filled shape spills
+ * onto whatever is beside it since nothing here knows where the wall stops);
+ * then *"the lightning can not go into the wall ... the white needs to reach
+ * each end of the wall with the purple on either side ... some white and blue
+ * the width of the beam on the wall"*. So:
+ *
+ *  - the impact throws a **white-hot streak along the wall face** in both
+ *    directions, reaching well out, with a **purple flank on each side** of it;
+ *  - the rest of the lightning arcs **only into the half facing away from the
+ *    wall** — never behind it (`angle` is the beam's direction *into* the wall,
+ *    so the safe fan is centred on `angle + PI`);
+ *  - a **white/blue mark the width of the beam** sits at the impact, elongated
+ *    along the face;
+ *  - a tight deep-violet core with a white pinpoint over the top.
+ */
+export function spawnPlasmaScorch(
+  x: number,
+  y: number,
+  angle: number,
+  level: number,
+  now: number,
+): void {
+  const sctx = ensureWallMarkLayer();
+  if (!sctx) return;
+  const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
+  const r = (5 + level * 2.4) * (0.85 + rand() * 0.4);
+  const beamW = 3 + level * 3.2;
+  const alongWall = angle + Math.PI / 2;
+  const awayFromWall = angle + Math.PI;
+  // The impact point is on the wall's *edge* as often as its face. The glowing
+  // circle and the along-wall streak are wall-only, so their centre is set a
+  // little way *into* the wall (`angle` points into it) — far enough that the
+  // circle's near edge clears the impact point and never touches the ground.
+  const inset = beamW * 0.85;
+  const cx = Math.cos(angle) * inset;
+  const cy = Math.sin(angle) * inset;
+
+  sctx.save();
+  sctx.scale(BLOOD_BAKE_SCALE, BLOOD_BAKE_SCALE);
+  sctx.translate(x, y);
+  sctx.lineCap = 'round';
+  sctx.lineJoin = 'round';
+
+  // 1. The charge earthing ALONG the wall — a bright white streak reaching each
+  //    way from the impact, a soft purple flank on each side. Only gently wavy,
+  //    not a wild bolt: *"get rid of the largest lines ... the white reaches
+  //    each side of the wall"*.
+  const streakLen = r * 2.6;
+  for (const d of [alongWall, alongWall + Math.PI]) {
+    const ddx = Math.cos(d);
+    const ddy = Math.sin(d);
+    const pdx = Math.cos(d + Math.PI / 2);
+    const pdy = Math.sin(d + Math.PI / 2);
+    const pts: Array<[number, number]> = [];
+    const segs = 5;
+    for (let s = 0; s <= segs; s++) {
+      const t = s / segs;
+      const wobble = (rand() - 0.5) * beamW * 0.45 * Math.sin(t * Math.PI); // sags in the middle only
+      pts.push([cx + ddx * streakLen * t + pdx * wobble, cy + ddy * streakLen * t + pdy * wobble]);
+    }
+    const trace = (): void => {
+      sctx.beginPath();
+      pts.forEach(([vx, vy], i) => (i === 0 ? sctx.moveTo(vx, vy) : sctx.lineTo(vx, vy)));
+    };
+    sctx.strokeStyle = 'rgba(150, 74, 240, 0.34)';
+    sctx.lineWidth = Math.max(1.6, beamW * 0.46);
+    trace();
+    sctx.stroke();
+    sctx.strokeStyle = 'rgba(150, 205, 255, 0.6)';
+    sctx.lineWidth = Math.max(1.2, beamW * 0.27);
+    trace();
+    sctx.stroke();
+    sctx.strokeStyle = 'rgba(253, 254, 255, 0.97)';
+    sctx.lineWidth = Math.max(1, beamW * 0.14);
+    trace();
+    sctx.stroke();
+  }
+
+  // 2. The lightning — a dense short spray from the impact, only into the half
+  //    facing away from the wall. Kept short: the longest is `r * 1.8`.
+  const n = 13 + level * 2;
+  for (let i = 0; i < n; i++) {
+    const a = awayFromWall + (i / (n - 1) - 0.5) * 2.6 + (rand() - 0.5) * 0.45;
+    const len = r * (0.7 + rand() * 1.1);
+    const segs = 3 + Math.floor(rand() * 3);
+    const roll = rand();
+    sctx.strokeStyle =
+      roll < 0.5
+        ? 'rgba(224, 242, 255, 0.85)'
+        : roll < 0.8
+          ? 'rgba(147, 197, 253, 0.78)'
+          : 'rgba(196, 141, 253, 0.72)';
+    sctx.lineWidth = Math.max(0.3, r * 0.05);
+    sctx.beginPath();
+    let px = cx;
+    let py = cy;
+    sctx.moveTo(cx, cy);
+    for (let s = 1; s <= segs; s++) {
+      const t = s / segs;
+      const d = len * t;
+      const j = (rand() - 0.5) * len * 0.28 * t;
+      px = cx + Math.cos(a) * d + Math.cos(a + Math.PI / 2) * j;
+      py = cy + Math.sin(a) * d + Math.sin(a + Math.PI / 2) * j;
+      sctx.lineTo(px, py);
+      if (s === segs - 1 && rand() < 0.4) {
+        const fa = a + (rand() < 0.5 ? -1 : 1) * (0.5 + rand() * 0.7);
+        sctx.lineTo(px + Math.cos(fa) * len * 0.3, py + Math.sin(fa) * len * 0.3);
+        sctx.moveTo(px, py);
+      }
+    }
+    sctx.stroke();
+  }
+
+  // 3. The beam's own hit — white and blue, the width of the beam, elongated
+  //    along the face — set into the wall so it never crosses to the ground.
+  sctx.save();
+  sctx.translate(cx, cy);
+  sctx.rotate(alongWall);
+  const hit = sctx.createRadialGradient(0, 0, 0, 0, 0, beamW * 0.8);
+  hit.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+  hit.addColorStop(0.4, 'rgba(125, 211, 255, 0.7)');
+  hit.addColorStop(1, 'rgba(56, 189, 248, 0)');
+  sctx.fillStyle = hit;
+  sctx.beginPath();
+  sctx.ellipse(0, 0, beamW * 0.9, beamW * 0.45, 0, 0, TAU);
+  sctx.fill();
+  sctx.restore();
+
+  // 4. A deep violet core with a white-hot pinpoint, over the top — also inset.
+  const core = sctx.createRadialGradient(cx, cy, 0, cx, cy, beamW * 0.5);
+  core.addColorStop(0, 'rgba(182, 134, 255, 0.95)');
+  core.addColorStop(0.5, 'rgba(101, 33, 197, 0.72)');
+  core.addColorStop(1, 'rgba(40, 20, 70, 0)');
+  sctx.fillStyle = core;
+  sctx.beginPath();
+  sctx.arc(cx, cy, beamW * 0.5, 0, TAU);
+  sctx.fill();
+  sctx.fillStyle = 'rgba(255, 250, 255, 0.98)';
+  sctx.beginPath();
+  sctx.arc(cx, cy, Math.max(0.8, beamW * 0.12), 0, TAU);
+  sctx.fill();
+
+  sctx.restore();
+  wallMarkDirty = true;
+}
+
+/**
  * The marks, blitted for the sub-rect on screen — called right after the
  * walls themselves, so they land on the wall's surface rather than under it.
  */
@@ -3606,6 +4282,125 @@ export function drawBulletHoles(ctx: CanvasRenderingContext2D, view: Viewport): 
   const smooth = ctx.imageSmoothingEnabled;
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(wallMarkLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
+  ctx.imageSmoothingEnabled = smooth;
+}
+
+// -------------------------------------------------------------- plasma craters
+
+/**
+ * Where a *full-charge* charge-rifle beam ran out in the open instead of
+ * meeting a wall — a blueish crater burned into the road. Its own layer,
+ * separate from the bullet-hole one, because a crater sits on the *ground*
+ * (under the walls and everything standing on it) where a scorch sits on the
+ * wall. Baked in at once, like the bullet holes; nothing wet about scorched
+ * tarmac. Sized off the live world, so built lazily and cleared on a new city
+ * by `clearBlood`.
+ */
+let groundScorchLayer: HTMLCanvasElement | null = null;
+let groundScorchCtx: CanvasRenderingContext2D | null = null;
+let groundScorchDirty = false;
+
+function ensureGroundScorchLayer(): CanvasRenderingContext2D | null {
+  const w = Math.max(1, Math.round(WORLD_WIDTH * BLOOD_BAKE_SCALE));
+  const h = Math.max(1, Math.round(WORLD_HEIGHT * BLOOD_BAKE_SCALE));
+  if (!groundScorchLayer || groundScorchLayer.width !== w || groundScorchLayer.height !== h) {
+    groundScorchLayer = document.createElement('canvas');
+    groundScorchLayer.width = w;
+    groundScorchLayer.height = h;
+    groundScorchCtx = groundScorchLayer.getContext('2d');
+    groundScorchDirty = false;
+  }
+  return groundScorchCtx;
+}
+
+function clearGroundScorchLayer(): void {
+  if (groundScorchLayer && groundScorchCtx) {
+    groundScorchCtx.clearRect(0, 0, groundScorchLayer.width, groundScorchLayer.height);
+  }
+  groundScorchDirty = false;
+}
+
+export function spawnPlasmaCrater(x: number, y: number, level: number, now: number): void {
+  const sctx = ensureGroundScorchLayer();
+  if (!sctx) return;
+  const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
+  const r = 20 + level * 3.5 + rand() * 7;
+  sctx.save();
+  sctx.scale(BLOOD_BAKE_SCALE, BLOOD_BAKE_SCALE);
+  sctx.translate(x, y);
+  sctx.rotate(rand() * TAU);
+
+  // The bright blue lives on the wall now — a beam that ran out over open
+  // ground vaporised the road, so this is a dark burn with a dim violet ember,
+  // no lit rim.
+  const glow = sctx.createRadialGradient(0, 0, 0, 0, 0, r * 1.3);
+  glow.addColorStop(0, 'rgba(76, 29, 149, 0.22)');
+  glow.addColorStop(0.6, 'rgba(30, 41, 84, 0.12)');
+  glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  sctx.fillStyle = glow;
+  sctx.beginPath();
+  sctx.arc(0, 0, r * 1.3, 0, TAU);
+  sctx.fill();
+
+  sctx.fillStyle = 'rgba(7, 13, 24, 0.62)';
+  sctx.beginPath();
+  sctx.ellipse(0, 0, r * 0.95, r * 0.8, 0, 0, TAU);
+  sctx.fill();
+  sctx.fillStyle = 'rgba(3, 6, 14, 0.82)';
+  sctx.beginPath();
+  sctx.ellipse(0, 0, r * 0.5, r * 0.4, 0, 0, TAU);
+  sctx.fill();
+  const ember = sctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.55);
+  ember.addColorStop(0, 'rgba(124, 58, 237, 0.4)');
+  ember.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  sctx.fillStyle = ember;
+  sctx.beginPath();
+  sctx.arc(0, 0, r * 0.55, 0, TAU);
+  sctx.fill();
+
+  // Dark fractures radiating out.
+  sctx.strokeStyle = 'rgba(30, 41, 84, 0.5)';
+  sctx.lineWidth = 0.6;
+  const cracks = 5 + Math.floor(rand() * 3);
+  for (let i = 0; i < cracks; i++) {
+    const a = (i / cracks) * TAU + (rand() - 0.5) * 0.4;
+    sctx.beginPath();
+    sctx.moveTo(Math.cos(a) * r * 0.4, Math.sin(a) * r * 0.36);
+    for (let s = 1; s <= 3; s++) {
+      const d = r * (0.4 + (0.85 * s) / 3);
+      sctx.lineTo(
+        Math.cos(a) * d + (rand() - 0.5) * r * 0.2,
+        Math.sin(a) * d + (rand() - 0.5) * r * 0.2,
+      );
+    }
+    sctx.stroke();
+  }
+
+  // Ejecta flecks.
+  sctx.fillStyle = 'rgba(8, 16, 30, 0.5)';
+  for (let i = 0; i < 10; i++) {
+    const a = rand() * TAU;
+    const d = r * (0.9 + rand() * 0.6);
+    sctx.beginPath();
+    sctx.arc(Math.cos(a) * d, Math.sin(a) * d, 0.5 + rand() * 1.2, 0, TAU);
+    sctx.fill();
+  }
+  sctx.restore();
+  groundScorchDirty = true;
+}
+
+/** Blitted with the ground marks, under the walls — see `spawnPlasmaCrater`. */
+export function drawGroundScorch(ctx: CanvasRenderingContext2D, view: Viewport): void {
+  if (!groundScorchDirty || !groundScorchLayer) return;
+  const s = BLOOD_BAKE_SCALE;
+  const sx = Math.max(0, Math.floor(view.x * s));
+  const sy = Math.max(0, Math.floor(view.y * s));
+  const sw = Math.min(groundScorchLayer.width - sx, Math.ceil(view.w * s) + 2);
+  const sh = Math.min(groundScorchLayer.height - sy, Math.ceil(view.h * s) + 2);
+  if (sw <= 0 || sh <= 0) return;
+  const smooth = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(groundScorchLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
   ctx.imageSmoothingEnabled = smooth;
 }
 
@@ -4046,6 +4841,7 @@ export function clearBlood(): void {
   casings.length = 0;
   clearStainLayer();
   clearWallMarkLayer();
+  clearGroundScorchLayer();
 }
 
 /**
@@ -4646,6 +5442,12 @@ export interface Tracer {
   born: number;
   /** Flame only: which shooter's stream this pull belongs to. */
   who?: string;
+  /** Charge-rifle beam: the bar level 1..`CHARGE_BARS`. Drawn as an energy
+   *  beam rather than a bullet line, thicker with the level. */
+  plasma?: number;
+  /** Entry-wall point when a full-charge beam pierced a wall — see `Shot`. */
+  thruX?: number;
+  thruY?: number;
 }
 
 /**
@@ -4886,6 +5688,112 @@ function drawFlameStream(ctx: CanvasRenderingContext2D, group: Tracer[], now: nu
   }
 }
 
+/**
+ * A charge-rifle round, drawn as an energy beam rather than a bullet line: a
+ * dim blue outer bloom, a cyan body and a white core, thicker with the bar
+ * level, with electric forks off it and a bright flash where it terminated.
+ * Additive, and it holds bright before falling away over `CHARGE_BEAM_MS`.
+ */
+export function drawPlasmaBeam(ctx: CanvasRenderingContext2D, t: Tracer, now: number): void {
+  const level = t.plasma ?? 1;
+  const elapsed = now - t.born;
+  if (elapsed >= CHARGE_BEAM_MS) return;
+  const life = elapsed / CHARGE_BEAM_MS;
+  const fade = life < 0.35 ? 1 : 1 - (life - 0.35) / 0.65;
+
+  const ang = Math.atan2(t.y2 - t.y1, t.x2 - t.x1);
+  const seed = Math.abs((t.x1 * 13 + t.y1 * 7) | 0) % 997;
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+
+  // The top bar is a heavier shot, not just a longer one — it reads a step
+  // wider than the ramp to bar 3 would put it.
+  const top = level >= CHARGE_BARS;
+  const w = 2 + level * 1.4 + (top ? 3 : 0);
+  for (const [mul, colour, alpha] of [
+    [4.5, '#1d4ed8', 0.16],
+    [2.0, '#22d3ee', 0.4],
+    [0.5, '#ecfeff', 0.95],
+  ] as Array<[number, string, number]>) {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = Math.max(1, w * mul);
+    ctx.globalAlpha = alpha * fade;
+    ctx.beginPath();
+    ctx.moveTo(t.x1, t.y1);
+    ctx.lineTo(t.x2, t.y2);
+    ctx.stroke();
+  }
+
+  // Electric forks off the line — hashed off the shot so they hold still
+  // rather than reshuffling every frame.
+  const forks = 2 + level;
+  ctx.strokeStyle = '#a5f3fc';
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.5 * fade;
+  for (let i = 0; i < forks; i++) {
+    const u = ((seed + i * 131) % 100) / 100;
+    const bx = t.x1 + (t.x2 - t.x1) * u;
+    const by = t.y1 + (t.y2 - t.y1) * u;
+    const branch = ang + (i % 2 ? 1 : -1) * (0.7 + ((seed + i) % 5) * 0.1);
+    const bl = 6 + ((seed + i * 7) % 10);
+    ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.lineTo(bx + Math.cos(branch) * bl, by + Math.sin(branch) * bl);
+    ctx.stroke();
+  }
+
+  // The flash where it stopped — white core, a violet middle to tie it to the
+  // wall scar's purple heart, cyan falloff.
+  const flash = (5 + level * 3 + (top ? 5 : 0)) * Math.max(0.2, fade);
+  const grad = ctx.createRadialGradient(t.x2, t.y2, 0, t.x2, t.y2, flash);
+  grad.addColorStop(0, '#f5f3ff');
+  grad.addColorStop(0.35, '#a78bfa');
+  grad.addColorStop(0.7, '#22d3ee');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.globalAlpha = fade;
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(t.x2, t.y2, flash, 0, TAU);
+  ctx.fill();
+
+  // Lightning arcing off the impact — short jagged bolts that recrackle a
+  // couple of times across the beam's life rather than reshuffling per frame.
+  const strikes = 3 + level;
+  const crackle = Math.floor(elapsed / 55);
+  for (let i = 0; i < strikes; i++) {
+    const h = (seed + i * 71 + crackle * 251) % 65521;
+    const a = ang + Math.PI + (((h % 100) / 100 - 0.5) * 3.4);
+    const reach = (6 + level * 3) * (0.55 + ((h >> 3) % 100) / 100);
+    ctx.strokeStyle = i % 2 ? '#c4b5fd' : '#e0f2ff';
+    ctx.lineWidth = Math.max(0.6, 0.7 + level * 0.15);
+    ctx.globalAlpha = 0.85 * fade;
+    ctx.beginPath();
+    ctx.moveTo(t.x2, t.y2);
+    const segs = 3 + (h % 3);
+    let px = t.x2;
+    let py = t.y2;
+    for (let s = 1; s <= segs; s++) {
+      const tt = s / segs;
+      const along = reach * tt;
+      const jit = (1 - tt * 0.5) * reach * 0.55;
+      px = t.x2 + Math.cos(a) * along + (((h >> (s * 2)) % 100) / 100 - 0.5) * jit;
+      py = t.y2 + Math.sin(a) * along + (((h >> (s * 2 + 1)) % 100) / 100 - 0.5) * jit;
+      ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = 0.7 * fade;
+  ctx.fillStyle = '#bae6fd';
+  ctx.beginPath();
+  ctx.arc(t.x1, t.y1, 2 + level, 0, TAU);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 export function drawTracers(
   ctx: CanvasRenderingContext2D,
   tracers: Tracer[],
@@ -4920,6 +5828,10 @@ export function drawTracers(
 
   for (const tracer of tracers) {
     if (tracer.kind === 'flame') continue; // gathered into streams above
+    if (tracer.plasma) {
+      drawPlasmaBeam(ctx, tracer, now);
+      continue;
+    }
     const age = (now - tracer.born) / lifetime;
     if (age >= 1) continue;
 
@@ -6239,6 +7151,156 @@ export function drawHelicopters(
   }
 }
 
+/** How long one gust puff lives — kicked up, drifting, then gone. */
+const ROTOR_GUST_LIFE_MS = 1500;
+/** Gust puffs per aircraft — few and staggered, so each is seen to come and go. */
+const ROTOR_GUSTS = 6;
+
+/** `frac(sin(...))` — a stable 0-1 value per (puff index, aircraft seed). */
+function gustHash(j: number, seed: number, salt: number): number {
+  const v = Math.sin(j * 12.9898 + seed * 78.233 + salt * 3.71) * 43758.5453;
+  return v - Math.floor(v);
+}
+
+/**
+ * A short position history per aircraft, so the puffs can be **left on the
+ * ground where the rotor was** rather than carried along with the moving
+ * shadow. `vx`/`vy` are px/ms, smoothed over samples ≥50ms apart (a raw
+ * frame-to-frame delta is mostly zero — the wire only moves the aircraft at
+ * snapshot rate). Pruned to whatever is on the wire this frame.
+ */
+interface RotorTrail {
+  x: number;
+  y: number;
+  t: number;
+  vx: number;
+  vy: number;
+}
+const rotorTrails = new Map<string, RotorTrail>();
+
+/** Harness gate — drops the haze fill so `helirig.ts` can measure the puffs
+ *  alone (they are faint by design and do not threshold cleanly against it). */
+let rotorWashHazeOff = false;
+export function setRotorWashHazeOff(v: boolean): void {
+  rotorWashHazeOff = v;
+}
+/** Harness gate — force a puff count. `N` evenly-staggered puffs sum to a
+ *  near-constant, so the per-puff fade only shows cleanly with one. -1 = off. */
+let rotorGustCountOverride = -1;
+export function setRotorGustCount(n: number): void {
+  rotorGustCountOverride = n;
+}
+
+/**
+ * The rotor downwash on the ground under an aircraft — a faint dust haze that
+ * tracks the disc, and gust puffs that do **not**: each is planted where the
+ * rotor was when it kicked up, and stays there while it drifts a little, fades
+ * in, and fades out. Drawn *before* the shadow, scaled by `alpha` so the whole
+ * thing arrives and leaves with the aircraft.
+ *
+ * It went **rings → radiating spokes → drifting puffs → puffs left on the
+ * ground**: a ring read as a shockwave, fixed spokes as a star, and *"they
+ * need to go outward and fade in and out … smaller, more transparent, different
+ * sizes, and not follow the helicopter as it's moving."* So a puff's anchor is
+ * `heli_now − velocity · age`, which for straight-line travel is exactly where
+ * the aircraft was `age` ago — the puff sits at a fixed world point and the
+ * shadow flies on past it, leaving a wake.
+ *
+ * Each puff's *life* is still stateless — `((now / LIFE) + hash) mod 1`, the
+ * acid-churn shape — and its size, arc count and local offset are all hashed
+ * off its index. The only state is the velocity estimate above. Everything
+ * stays inside `HELI_WASH_RADIUS` of the anchor, where the bush stir stops too.
+ */
+export function drawRotorWash(
+  ctx: CanvasRenderingContext2D,
+  helis: HelicopterState[],
+  now: number,
+): void {
+  for (const id of rotorTrails.keys()) {
+    if (!helis.some((h) => h.id === id)) rotorTrails.delete(id);
+  }
+
+  for (const h of helis) {
+    if (h.alpha <= 0.02) continue;
+    const a = h.alpha;
+    const seed = (hashId(h.id) % 1000) / 1000;
+    const R = HELI_WASH_RADIUS;
+
+    // ---- velocity of this aircraft, in px/ms
+    const trail = rotorTrails.get(h.id);
+    let vx = trail?.vx ?? 0;
+    let vy = trail?.vy ?? 0;
+    if (!trail) {
+      rotorTrails.set(h.id, { x: h.x, y: h.y, t: now, vx: 0, vy: 0 });
+    } else if (now - trail.t >= 50) {
+      const dt = now - trail.t;
+      if (dt < 600) {
+        vx = trail.vx * 0.7 + ((h.x - trail.x) / dt) * 0.3;
+        vy = trail.vy * 0.7 + ((h.y - trail.y) / dt) * 0.3;
+      }
+      rotorTrails.set(h.id, { x: h.x, y: h.y, t: now, vx, vy });
+    }
+
+    // ---- the haze, which does track the disc (it is the air being churned now)
+    if (!rotorWashHazeOff) {
+      const haze = ctx.createRadialGradient(h.x, h.y, R * 0.12, h.x, h.y, R);
+      haze.addColorStop(0, `rgba(156, 146, 124, ${0.1 * a})`);
+      haze.addColorStop(0.55, `rgba(150, 140, 118, ${0.05 * a})`);
+      haze.addColorStop(1, 'rgba(150, 140, 118, 0)');
+      ctx.fillStyle = haze;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ---- the puffs, each pinned to a fixed world point
+    ctx.lineCap = 'round';
+    const nGusts = rotorGustCountOverride >= 0 ? rotorGustCountOverride : ROTOR_GUSTS;
+    for (let j = 0; j < nGusts; j++) {
+      const phase = ((now / ROTOR_GUST_LIFE_MS + seed * 3.3 + j / nGusts) % 1 + 1) % 1;
+      const fade = Math.sin(phase * Math.PI); // in over the first half, out over the second
+      if (fade <= 0.04) continue;
+      const age = phase * ROTOR_GUST_LIFE_MS;
+
+      // Where the rotor was when this puff kicked up.
+      const bx = h.x - vx * age;
+      const by = h.y - vy * age;
+
+      // Which part of the disc it came off — a fixed bearing and distance per
+      // puff — and a small outward drift as it lives.
+      const offAng = gustHash(j, seed, 1) * Math.PI * 2;
+      const off = R * (0.08 + gustHash(j, seed, 2) * 0.5 + phase * 0.16);
+      const cx = bx + Math.cos(offAng) * off;
+      const cy = by + Math.sin(offAng) * off;
+
+      const tx = Math.cos(offAng); // outward from the birth point
+      const ty = Math.sin(offAng);
+      const nx = -ty;
+      const ny = tx;
+      // Smaller than before, and a different size each — some barely there.
+      const sizeMul = 0.5 + gustHash(j, seed, 3) * 0.95;
+      const span = R * 0.055 * sizeMul;
+      const bow = span * 0.7;
+      const nArcs = 2 + (gustHash(j, seed, 4) > 0.55 ? 1 : 0);
+
+      for (let k = 0; k < nArcs; k++) {
+        const back = (k - (nArcs - 1) / 2) * span; // spaced a full width apart — they read as separate arcs
+        const ox = cx + tx * back;
+        const oy = cy + ty * back;
+        const w = span * (0.85 + k * 0.14);
+        // Faint — one arc peaks near 0.1, and they barely overlap now.
+        const op = 0.1 * a * fade * (1 - Math.abs(k - (nArcs - 1) / 2) * 0.25);
+        ctx.strokeStyle = `rgba(202, 194, 172, ${op})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(ox - nx * w, oy - ny * w);
+        ctx.quadraticCurveTo(ox + tx * bow * 2, oy + ty * bow * 2, ox + nx * w, oy + ny * w);
+        ctx.stroke();
+      }
+    }
+  }
+}
+
 /** Loot crates on the floor, drawn in world space. */
 /**
  * A deployed pocket gunner: the sandbags, and the gun on its mount. Drawn
@@ -6861,7 +7923,7 @@ export function drawChargeBars(
     if (fill > 0) {
       // The last box is the one that punches through a wall, so it lights up
       // differently — it is a different kind of shot, not just a bigger one.
-      ctx.fillStyle = i === CHARGE_BARS - 1 && fill >= 1 ? '#f0abfc' : '#c084fc';
+      ctx.fillStyle = i === CHARGE_BARS - 1 && fill >= 1 ? '#e0f2ff' : '#38bdf8';
       ctx.fillRect(sx, top, seg * fill, h);
     }
     // A full box reads as armed; a partial one as still filling.
@@ -6870,7 +7932,7 @@ export function drawChargeBars(
     ctx.strokeRect(sx + 0.5, top + 0.5, seg - 1, h - 1);
   }
 
-  ctx.fillStyle = level === 0 ? '#94a3b8' : level >= CHARGE_BARS ? '#f0abfc' : '#c084fc';
+  ctx.fillStyle = level === 0 ? '#94a3b8' : level >= CHARGE_BARS ? '#e0f2ff' : '#38bdf8';
   ctx.font = '9px ui-monospace, Consolas, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -6879,6 +7941,50 @@ export function drawChargeBars(
     x,
     top + h + 3,
   );
+  ctx.restore();
+}
+
+/**
+ * The vent. After a charge shot the same four-box frame fills red and drains
+ * back to the start — the gun will not wind up until it is empty. One
+ * continuous bar rather than four steps: it is a single quantity coming down,
+ * not something you fire in stages. `cool` is 1 right after the shot, 0 when
+ * ready.
+ */
+export function drawChargeCooldown(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  cool: number,
+): void {
+  const w = 58;
+  const h = 6;
+  const gap = 2;
+  const top = y + 34;
+  const seg = (w - gap * (CHARGE_BARS - 1)) / CHARGE_BARS;
+  const left = Math.max(0, Math.min(1, cool));
+
+  ctx.save();
+  for (let i = 0; i < CHARGE_BARS; i++) {
+    const sx = x - w / 2 + i * (seg + gap);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(sx, top, seg, h);
+    // How much of this box the receding bar still covers.
+    const boxFrac = Math.max(0, Math.min(1, (left - i / CHARGE_BARS) * CHARGE_BARS));
+    if (boxFrac > 0) {
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(sx, top, seg * boxFrac, h);
+    }
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(sx + 0.5, top + 0.5, seg - 1, h - 1);
+  }
+
+  ctx.fillStyle = '#f87171';
+  ctx.font = '9px ui-monospace, Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('COOLING', x, top + h + 3);
   ctx.restore();
 }
 

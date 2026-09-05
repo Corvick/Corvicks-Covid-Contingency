@@ -33,6 +33,7 @@ import {
   BARRICADE_HALF_WIDTH,
   BARRICADE_HALF_DEPTH,
   SANDBAG_ROTATE_STEP,
+  CHARGE_BARS,
 } from '../../shared/constants.js';
 import { acidLobes, inAcidLobes } from '../../shared/acidshape.js';
 import type {
@@ -83,6 +84,10 @@ import {
   playShotgunBlast,
   playMachineGunShot,
   playHeavyMachineGunShot,
+  playChargeWind,
+  playChargeFire,
+  playChargeVent,
+  syncHeliRotors,
   occlusion,
   stopAllSounds,
   type Spatial,
@@ -94,13 +99,16 @@ import {
   drawReticle,
   drawAimGauge,
   drawChargeBars,
+  drawChargeCooldown,
   doorSlab,
   drawDoorPrompt,
   drawDoors,
   drawEntity,
   ENTITY_DETAIL_SCALE,
   drawGrenades,
+  drawRotorWash,
   drawGround,
+  drawFloors,
   drawParkingBays,
   drawHandLinks,
   drawHelicopters,
@@ -133,6 +141,10 @@ import {
   spawnCasing,
   drawBulletHoles,
   spawnBulletHole,
+  spawnPlasmaScorch,
+  spawnPlasmaCrater,
+  drawGroundScorch,
+  CHARGE_BEAM_MS,
   spawnBlood,
   spawnCorpse,
   spawnBurst,
@@ -617,10 +629,18 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
     if (started && !paused) {
       hearRoars(msg.entities);
       hearZombies(msg.entities, performance.now());
+      hearChargeRifle(msg.entities, performance.now());
       // `?? []` for the same cross-build reason `buildSites` gets it below —
       // a server that predates this field simply sends nothing to hear.
       hearSobs(msg.sobs ?? [], performance.now());
       hearGunfire(msg.shots, performance.now());
+      hearHelicopters(msg.helicopters);
+    } else {
+      // The rotor is the one sound that loops, so it is the one that has to be
+      // told the round has stopped rather than simply not being re-scheduled.
+      // (Pausing and quitting also close the audio context outright, which
+      // covers the rest; this handles the gap before that.)
+      syncHeliRotors([]);
     }
     spectating = msg.spectating;
     survivors = msg.survivors;
@@ -709,6 +729,21 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
       for (const shot of msg.shots) {
         tracers.push({ ...shot, born: now });
         const travel = Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1);
+        // A charge-rifle beam scorches walls and craters the ground rather
+        // than throwing blood or brass — it is an energy weapon and it
+        // cauterises. The beam itself (a plasma tracer) is the hit feedback.
+        if (shot.plasma) {
+          if (shot.wall) {
+            spawnPlasmaScorch(shot.x2, shot.y2, travel, shot.plasma, now);
+            if (shot.thruX !== undefined && shot.thruY !== undefined) {
+              spawnPlasmaScorch(shot.thruX, shot.thruY, travel, shot.plasma, now);
+            }
+          } else if (shot.plasma >= CHARGE_BARS) {
+            // Full charge, ran out in the open — a blueish crater on the road.
+            spawnPlasmaCrater(shot.x2, shot.y2, shot.plasma, now);
+          }
+          continue;
+        }
         // A round that found a body, and where it stopped. Nothing about blood
         // is on the wire — `hit` and the endpoint are already here for the
         // tracer, so the splatter is derived from what is being drawn anyway.
@@ -1381,6 +1416,18 @@ const ENTITY_FIELDS = [
   // for the whole twenty seconds. Exactly the shape of the three above.
   'morph',
   'morphing',
+  // The gun in an officer's hands. Missing here since the shouldered-rifle
+  // drawing went in, and it only ever bit the one body that is *always*
+  // tracked before it changes weapon: your own officer, who spawns holding a
+  // pistol and then picks something up. Left out, the player draws a pistol
+  // whatever they carry — and the charge rifle's chamber, gated on
+  // `e.held === 'chargeRifle'`, never appears on the one officer looking at it.
+  'held',
+  // The charge rifle's plasma chamber. An officer holding one has been on
+  // screen a long while by the time he winds up — same shape as the four
+  // above — so left out, the glow would arrive once and then stick.
+  'charging',
+  'cooling',
 ] as const satisfies ReadonlyArray<keyof EntityState>;
 
 function copyInto(into: EntityState, from: EntityState): void {
@@ -1413,6 +1460,12 @@ const ROAR_EARSHOT = 1400;
  * returns silence outright rather than a number close to it, so a caller never
  * has to ask twice. `panBoost` sharpens the left/right image for callers that
  * want to read as more directional than the default — see `ZOMBIE_PAN_BOOST`.
+ *
+ * `airborne` is for the one source that is not on the ground: a helicopter.
+ * No wall between you and a point on the map dulls an aircraft over it, so the
+ * occlusion term is skipped; and a rotor's low thud carries much further than a
+ * voice, so the distance curve is gentler (squared, not cubed) — it should be
+ * heard approaching, not appear all at once overhead.
  */
 /**
  * How far past the edge of the actual screen a sound keeps fading before it's
@@ -1424,7 +1477,13 @@ const ROAR_EARSHOT = 1400;
  */
 const SCREEN_EAR_FADE = 260;
 
-function spatialFor(x: number, y: number, range: number, panBoost = 1): Spatial {
+function spatialFor(
+  x: number,
+  y: number,
+  range: number,
+  panBoost = 1,
+  airborne = false,
+): Spatial {
   const me = self();
   const ear = me ?? { x: spectateX, y: spectateY };
   const dx = x - ear.x;
@@ -1436,8 +1495,10 @@ function spatialFor(x: number, y: number, range: number, panBoost = 1): Spatial 
   // meant to read as "somewhere out there", with only the last stretch close
   // to the source actually loud. A flatter curve (this was 1.4) kept mid-
   // distance zombies far too present — audible at something close to their
-  // point-blank volume from most of the way across the hearing range.
-  const distFalloff = Math.pow(Math.max(0, 1 - dist / range), 3);
+  // point-blank volume from most of the way across the hearing range. An
+  // aircraft is the exception — its low beat genuinely carries — so it gets a
+  // gentler square.
+  const distFalloff = Math.pow(Math.max(0, 1 - dist / range), airborne ? 2 : 3);
 
   // Pulled all the way back as a spectator, the whole mix goes quiet — a wide
   // shot of the city is not somewhere a street should sound like you're
@@ -1470,7 +1531,7 @@ function spatialFor(x: number, y: number, range: number, panBoost = 1): Spatial 
   const panRange = Math.max(1, (range * 0.4) / panBoost);
   const pan = Math.max(-1, Math.min(1, dx / panRange));
 
-  const hits = map ? occlusion(ear.x, ear.y, x, y, map.walls) : 0;
+  const hits = airborne || !map ? 0 : occlusion(ear.x, ear.y, x, y, map.walls);
   const muffle = Math.min(1, hits / 2.5);
   // A wall does not just dull a sound, it takes some of it away too.
   const gain = distFalloff * zoomMul * screenMul * (1 - muffle * 0.6);
@@ -1746,6 +1807,14 @@ const BOLT_CYCLE_HEARING_RANGE = 800;
 const GARAND_CYCLE_HEARING_RANGE = 800;
 
 /**
+ * The charge rifle's three noises. The discharge carries like a gunshot; the
+ * wind-up and the vent are quieter mechanical sounds and don't travel as far.
+ */
+const CHARGE_FIRE_HEARING_RANGE = 2100;
+const CHARGE_WIND_HEARING_RANGE = 1200;
+const CHARGE_VENT_HEARING_RANGE = 1000;
+
+/**
  * A round going off, for every ordinary bullet in earshot — every weapon, and
  * every shooter, not just you or just the pistol. Deliberately no "my own gun
  * is always full volume" exception the way the dog's own roar gets one: a
@@ -1757,6 +1826,13 @@ const GARAND_CYCLE_HEARING_RANGE = 800;
  */
 function hearGunfire(shots: Shot[], now: number): void {
   for (const shot of shots) {
+    // A charge-rifle beam — an energy discharge, not a rifle crack, though it
+    // shares `voice: 'rifle'` for the synth fallback family.
+    if (shot.plasma) {
+      const s = spatialFor(shot.x1, shot.y1, CHARGE_FIRE_HEARING_RANGE);
+      if (s.gain > 0.01 && takeVoiceBudget(now)) playChargeFire(s);
+      continue;
+    }
     if (shot.kind !== undefined || !shot.voice) continue;
     const spatial = spatialFor(shot.x1, shot.y1, GUN_VOICE_RANGE[shot.voice]);
     if (spatial.gain > 0.01 && takeVoiceBudget(now)) GUN_VOICE_PLAY[shot.voice](spatial);
@@ -1776,6 +1852,70 @@ function hearGunfire(shots: Shot[], now: number): void {
       if (cycleSpatial.gain > 0.01 && takeVoiceBudget(now)) playGarandCycle(cycleSpatial);
     }
   }
+}
+
+/** Ids whose charge rifle was winding up / venting last snapshot, for
+ *  edge-detecting the wind-up whine and the vent hiss. */
+let windingRifles = new Set<string>();
+let ventingRifles = new Set<string>();
+
+/**
+ * The charge rifle winding up and venting, for any officer holding one — a bot
+ * lining up a shot or another player nearby, not just you. Fired on the rising
+ * edge of the wire flags so a held wind-up plays the whine once, not per tick.
+ * The discharge in between rides on the `Shot` itself, in `hearGunfire`.
+ */
+function hearChargeRifle(incoming: EntityState[], now: number): void {
+  const windingNow = new Set<string>();
+  const ventingNow = new Set<string>();
+  for (const e of incoming) {
+    if (e.type !== 'officer' || e.held !== 'chargeRifle') continue;
+    if (e.charging) {
+      windingNow.add(e.id);
+      if (!windingRifles.has(e.id)) {
+        const s = spatialFor(e.x, e.y, CHARGE_WIND_HEARING_RANGE);
+        if (s.gain > 0.01 && takeVoiceBudget(now)) playChargeWind(s);
+      }
+    }
+    if (e.cooling) {
+      ventingNow.add(e.id);
+      if (!ventingRifles.has(e.id)) {
+        const s = spatialFor(e.x, e.y, CHARGE_VENT_HEARING_RANGE);
+        if (s.gain > 0.01 && takeVoiceBudget(now)) playChargeVent(s);
+      }
+    }
+  }
+  windingRifles = windingNow;
+  ventingRifles = ventingNow;
+}
+
+/**
+ * How far a rotor carries. Wide — you should hear one coming — but the gentle
+ * `airborne` falloff and the offscreen fade mean most of that range is a faint
+ * beat, not a roar.
+ */
+const HELI_ROTOR_EARSHOT = 2600;
+
+/**
+ * Keep the looping rotor voices (one per aircraft, owned by `sound.ts`) in step
+ * with what is on the wire. Not edge-detected like the roars and the charge
+ * rifle: a helicopter is a bed that pans and swells for as long as its shadow
+ * is on the ground, so this runs every snapshot and hands `syncHeliRotors` the
+ * live gain and pan for each. The `alpha` on the wire — up as it arrives, down
+ * as it leaves — is folded straight into the gain, which is the whole of
+ * "louder coming in, quieter going out" on top of the plain distance falloff.
+ */
+function hearHelicopters(helis: HelicopterState[]): void {
+  if (helis.length === 0) {
+    syncHeliRotors([]);
+    return;
+  }
+  syncHeliRotors(
+    helis.map((h) => {
+      const s = spatialFor(h.x, h.y, HELI_ROTOR_EARSHOT, 1, true);
+      return { id: h.id, gain: s.gain * h.alpha, pan: s.pan };
+    }),
+  );
 }
 
 function syncTracked(incoming: EntityState[], now: number): void {
@@ -2773,12 +2913,18 @@ function render() {
     // Under everything else: it is ground, and the bushes stand on it.
     drawPark(ctx, map.park, view);
     drawPond(ctx, map.pond, view);
+    // A building has a floor rather than more road. Over the grime, under the
+    // blood, casings and bodies that lie on it.
+    drawFloors(ctx, map, view);
     // Paint on the road, so it goes under the cars standing on it.
     drawParkingBays(ctx, map.policeStation, view);
     // On the road, under the walls and everyone standing on it. `drawBlood`
     // also blits the shared permanent-stain layer, so it comes before anything
     // that reads from it.
     drawBlood(ctx, view, now);
+    // Where a full-charge beam cratered the road. On the ground with the blood,
+    // under the walls — a scorch on a wall is a different layer (`drawBulletHoles`).
+    drawGroundScorch(ctx, view);
     // Where a strike came down and caught nobody. On the ground with the blood,
     // and for the same reason: it is a mark, not an effect.
     drawLashScars(ctx, view, now);
@@ -2916,9 +3062,12 @@ function render() {
   }
   mark('entities');
 
-  // Napalm lingers, so it can't be culled on the round tracer's clock.
+  // Napalm lingers, so it can't be culled on the round tracer's clock; a
+  // plasma beam hangs a little longer than a bullet line and then fades.
   tracers = tracers.filter(
-    (t) => now - t.born < (t.kind === 'flame' ? FLAME_TRACER_MS : TRACER_LIFETIME_MS),
+    (t) =>
+      now - t.born <
+      (t.kind === 'flame' ? FLAME_TRACER_MS : t.plasma ? CHARGE_BEAM_MS : TRACER_LIFETIME_MS),
   );
   drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
   // Over the bodies: it is coming off them.
@@ -2933,7 +3082,9 @@ function render() {
   // drawing them would be two bits of code to keep in step.
   drawLashes(ctx, lashes, view);
   drawDucks(ctx, ducks, view);
-  if (map) drawBushes(ctx, map.bushes, view);
+  // The helicopters go through so the foliage under one thrashes in the
+  // downwash — see the note on `drawBushes`.
+  if (map) drawBushes(ctx, map.bushes, view, helicopters, now);
 
   // Air support sits above the foliage: smoke, then the grenade, then the
   // aircraft itself over everything on the ground.
@@ -2947,7 +3098,11 @@ function render() {
   drawTentacleDebris(ctx, tentacles, view, now);
   drawBlasts(ctx, blasts, view);
   drawGrenades(ctx, grenades);
-  if (helicopters.length > 0) drawHelicopters(ctx, helicopters, now);
+  if (helicopters.length > 0) {
+    // The downwash on the ground first, then the shadow on top of it.
+    drawRotorWash(ctx, helicopters, now);
+    drawHelicopters(ctx, helicopters, now);
+  }
 
   // The wheel sits over your character, so hold bubbles back until Q is
   // released rather than drawing them underneath it.
@@ -3133,6 +3288,10 @@ function render() {
       );
     } else if (inventory && inventory.chargeProgress >= 0) {
       drawChargeBars(ctx, input.mouseX, input.mouseY, inventory.chargeProgress);
+    } else if (inventory && inventory.coolProgress >= 0) {
+      // The vent: the same frame, filled red and receding, gun locked until
+      // it hits the start.
+      drawChargeCooldown(ctx, input.mouseX, input.mouseY, inventory.coolProgress);
     }
   }
 

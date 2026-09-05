@@ -72,7 +72,7 @@ import type { World } from './world.js';
  * doing exactly what it is documented to do.
  */
 export const STATION_RADIO_ID = 'loot-armoury-radio';
-import { chargeProgress, deployProgress } from './combat.js';
+import { chargeProgress, coolProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';
 import { callBackup, placeCityCar, placePoliceCars, spotBeside } from './backup.js';
@@ -1178,6 +1178,7 @@ export function toWireInventory(
     deployProgress: deployProgress(world, id, inv, now),
     deployWanted: world.deployWanted.has(id),
     chargeProgress: chargeProgress(world, id, inv, now),
+    coolProgress: coolProgress(world, id, inv, now),
     trackBearing: trackBearing(world, inv, x, y),
     beacon: beaconWire(world, inv),
     // Only the cure gun tells you about yourself. Without one in hand the

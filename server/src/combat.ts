@@ -41,6 +41,7 @@ import {
   CHARGE_BARS,
   CHARGE_BASE_MUL,
   CHARGE_TOP_MUL,
+  CHARGE_COOL_MS,
   UNDEPLOY_MS,
   GRAPPLED_COOLDOWN_MUL,
 } from '../../shared/constants.js';
@@ -300,10 +301,15 @@ export function fire(
   // rather than a door — a door's own drawing runs after the wall pass, so a
   // mark baked for it would be painted straight over. See `Shot.wall`.
   let stoppedByWall = false;
+  // Where a full-charge beam pierced a wall on its way through, so the client
+  // can scorch the entry face too. A skipped *door* is left alone — it has its
+  // own damaged/broken drawing, and a mark baked for one is painted over.
+  let pierceT = -1;
   let skip = throughWall ? 1 : 0;
   for (const blocker of blockers) {
     if (blocker.door >= 0) damageDoor(world, blocker.door, DOOR_BULLET_DAMAGE);
     if (skip > 0) {
+      if (blocker.door === -1) pierceT = blocker.t;
       skip--;
       continue;
     }
@@ -370,6 +376,15 @@ export function fire(
     ...(voice ? { voice } : {}),
     ...(def?.id === 'boltRifle' ? { bolt: true } : {}),
     ...(clipEject ? { clipEject: true } : {}),
+    // An energy beam, and how wound up it was. Drives the client's beam,
+    // discharge sound, scorch/crater, and suppresses the brass casing.
+    ...(def?.charge ? { plasma: pierce } : {}),
+    ...(def?.charge && pierceT >= 0
+      ? {
+          thruX: Math.round(muzzleX + (endX - muzzleX) * pierceT),
+          thruY: Math.round(muzzleY + (endY - muzzleY) * pierceT),
+        }
+      : {}),
   });
 
   alertZombies(world, shooter.id, shooter.x, shooter.y, now);
@@ -915,6 +930,11 @@ export function fireHeld(
       const angle = gap === 0 ? aim : shared;
       fire(world, shooter, angle, gap === 0 ? bloom : 0, now, def, pierce, damageMul, throughWall, offset, clipEject);
     }
+    // The chamber vents before it will wind up again. `cooldownMs` already
+    // equals `CHARGE_COOL_MS` so `ready()` agrees; this map is what the red
+    // bar and the wind-up gate read, kept apart from `lastShotAt` so a pistol
+    // shot cannot light it on a charge rifle collected afterward.
+    if (def.charge) world.chargeCoolUntil.set(id, now + CHARGE_COOL_MS);
   }
   return true;
 }
@@ -957,6 +977,18 @@ export function chargeProgress(world: World, id: string, inv: Inventory, now: nu
   const since = world.chargeSince.get(id);
   if (since === undefined) return -1;
   return clamp01((now - since) / (ITEMS[held].chargeMs ?? 1200));
+}
+
+/**
+ * 1 down to 0 while the charge rifle vents after a shot, -1 when cool or not in
+ * hand. The red HUD bar counts this down, and the gun will not wind up again
+ * until it hits 0 — see the gate in `processShooting`.
+ */
+export function coolProgress(world: World, id: string, inv: Inventory, now: number): number {
+  const held = heldItem(inv);
+  if (!held || !ITEMS[held]?.charge) return -1;
+  const until = world.chargeCoolUntil.get(id) ?? 0;
+  return until > now ? clamp01((until - now) / CHARGE_COOL_MS) : -1;
 }
 
 /**
@@ -1185,6 +1217,12 @@ export function processShooting(world: World, now: number, frozen: Set<string>):
 
     // A charge weapon fires on release, not on press — holding winds it up.
     if (def?.charge) {
+      // Locked out while the chamber vents: no wind-up, and so no charge bar
+      // — only the red one, receding.
+      if (now < (world.chargeCoolUntil.get(id) ?? 0)) {
+        world.chargeSince.delete(id);
+        continue;
+      }
       if (command.shooting) {
         if (!world.chargeSince.has(id)) world.chargeSince.set(id, now);
         continue;

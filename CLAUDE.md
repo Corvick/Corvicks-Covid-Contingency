@@ -7595,6 +7595,42 @@ the dog, and all three are built the cheap way on purpose.
   It is kept at *very* low contrast, and not for taste: at any strength where
   you can make out an individual blotch you can also make out where the tile
   repeats, and the city turns into a grid of identical stains.
+- **A building has a floor, and it is the same tile trick.** `drawFloors` fills
+  each `building.rects` footprint (wall to wall — `drawWalls` covers the
+  perimeter after) with a repeating pattern: **boards** for an ordinary house,
+  **institutional tile** for the police station, **big stone flagstones in a
+  running bond** for the corner complex, chosen by `i === map.cornerBuilding` /
+  `i === map.policeStation.building`. Three small tiles hashed once at first use
+  and handed to the canvas as patterns, so it is one fill per on-screen
+  footprint — the grime's cost model, not a per-frame scatter. Seams line up
+  across the repeat by construction: full-width course lines, and every tile
+  spacing divides `FLOOR_TILE` (128). **The complex was a 45° parquet lattice
+  first and it read as scratches** — the flagstone replaced it, a plain slab
+  grid being the safe read at this zoom. The base colours are barely off
+  `GROUND_COLOR` for the same reason the grime is faint — any louder and the
+  repeat reads as a grid. It sits after `drawPond` and before `drawBlood`, so
+  blood, casings and bodies lie on the floor and the grime stops at the
+  threshold. **Ground detail, so it rides `settings.groundDetail` and is gone on
+  LOW** — which is what "for low graphics settings don't include this" asked
+  for, and needed no new row. Not measured on screen: rAF is throttled to
+  nothing in a non-compositing browser pane, so this is a playtest like
+  `DOG_CAMERA_ZOOM` and the resolution row.
+  - **Two station rooms get their own floor over the base tile**, painted on the
+    room's own inset rect (`PoliceStation.armoury` / `.cell`, already on the
+    wire): the armoury is **steel tread plate**, the cell is **speckled concrete
+    with a drain** drawn at its centre (a one-off, like the parking bays —
+    derived from the room rect, not a pattern). The base station tile still
+    fills the footprint underneath, so the lobby and office keep it.
+  - **Every doorway gets a real threshold saddle across it** (`FLOOR_SADDLE_*`)
+    — a short strip of trim laid in the opening, the way the floor changes in a
+    real building, drawn crowned (a highlight down the middle, a shadow on each
+    room-facing edge) so it reads as a board you step over. `d.horiz` decides
+    the axis; a shut door covers its own saddle, an open one reveals it.
+    **This replaced a soft dark gradient band, which "looked pretty bad"** — the
+    ask was for "an actual division you find in real life", a door saddle. Both
+    interior doors (floor to floor) and front doors (floor to street), so an
+    emptied house reads as a threshold rather than a hole. A `fillRect` and
+    three strokes per *visible* door — a dozen or two on screen, negligible.
 - **Blood is derived, not sent.** `Shot.hit` already says a round found a body
   and `x2,y2` is exactly where it stopped, so the wire carries nothing new. A
   hit throws droplets along the round's line for half a second and leaves marks
@@ -9725,6 +9761,103 @@ step off your own, then drops whatever crosses it for a full minute — the stun
 is enormous because a mine is a one-shot you had to carry, place and walk away
 from.
 
+### The helicopter comes in on any bearing, and you hear it
+
+The aircraft a smoke grenade or a beacon calls in is only ever seen as a
+shadow. Asked for: *"allow the helicopter (more so its shadow) … to come in
+from random orientations. make sure it still travels in a straight line
+though. also give it a royalty free sound effect and some wind effects
+(blowing trees and wind effects on ground). when its leaving and arriving it
+should get louder and quieter. but make sure its not too loud."*
+
+- **The bearing is unconstrained; the flight is still one straight line.**
+  `edgePointFor` — nearest map edge, one of four axis-aligned headings — is
+  gone. `straightRunThrough` rolls a random bearing and puts the entry and
+  exit `HELI_APPROACH_RUN` (2400) each side of the target *along that line*, so
+  entry → hover → exit is still colinear and it still flies *through* rather
+  than turning around. Nothing reads `outbreakSide`: a helicopter is in the air
+  and has no horde to drive through.
+- **A fixed run, not "to the edge".** The old entry was as far as the nearest
+  edge — ~10s in from a central drop, barely one from an edge drop. A fixed
+  `HELI_APPROACH_RUN` keeps every approach ~9.6s (`/ HELI_SPEED`) whatever the
+  bearing. Corner-to-corner across the map would otherwise be 25s. When a
+  bearing points the entry further inland than the map edge, the shadow just
+  fades in over open ground far from the action — the `alpha` materialise ramp
+  covers it, and it was never on anybody's screen anyway (`spatialFor`'s
+  offscreen fade, and the shadow is 50%-grey and 205px of soft edge).
+- **`HelicopterState.id` is on the wire now**, for one reason: the client owns
+  one looping rotor voice per aircraft and has to know which is which across
+  snapshots. `Helicopter` already had the id; nothing draws with it — the
+  shadow is still placed by `x, y` alone.
+- **The rotor is the one looping recording in the game.** Every other sound is
+  a discrete event; a helicopter overhead is a bed. `syncHeliRotors` in
+  `sound.ts` owns a `Map<id, HeliVoice>` — a looping source → lowpass → panner
+  → gain per aircraft — started when an id appears, `setTargetAtTime`'d toward
+  the new gain/pan every snapshot, faded and stopped when the id drops off.
+  Called from `hearHelicopters` inside the `started && !paused` block, and with
+  `[]` in the `else` so a rotor never drones over a frozen or quit round (the
+  context close on pause/quit covers the rest, and `stopAllSounds` clears the
+  map). `startSynthRotor` (blade-slap AM, a chuff bed, a turbine whine) is the
+  sustained fallback while the file loads.
+- **A real CC0 recording** — a UH-60 hover loop, qubodup, see `CREDITS.md`.
+  **Pre-trimmed to a seamless loop offline**, because the preview is an mp3 and
+  mp3 priming/padding clicks every loop: decoded, resampled to 22050, and an
+  equal-power overlap-add seam so the tail *is* the head faded in. `load` grew
+  a `trim` flag for it — `trimSilence` makes a hard cut with no fade, which on
+  a loop is the click it exists to avoid.
+- **Louder arriving, quieter leaving is `alpha` × distance, and nothing new.**
+  The wire's `alpha` already ramps up over `HELI_MATERIALIZE_MS` and down over
+  `HELI_DEPART_FADE_MS`; `hearHelicopters` folds it straight into the gain on
+  top of `spatialFor`'s falloff. **`spatialFor` gained an `airborne` flag** —
+  no wall between you and a point dulls an aircraft over it (occlusion skipped),
+  and a rotor's low beat carries, so the distance curve is a square not a cube.
+  `HELI_ROTOR_CEILING` is 0.32 — below every gunshot, near the roar. It is a
+  sustained sound; it should be *present in* the mix, not *be* it.
+- **The wind is `drawRotorWash` and a branch in `drawBushes`.** The wash — a
+  faint dust haze plus `ROTOR_GUSTS` (8) gust puffs, each a little cluster of
+  curved strokes (the comic wind-gust mark) that appears at the disc edge, is
+  carried outward, and fades in over the first half of its `ROTOR_GUST_LIFE_MS`
+  and out over the second (`sin(phase·π)`) — is drawn on the ground *before* the
+  shadow, scaled by `alpha`, stateless (a puff's whole life is `(now/LIFE +
+  hash) mod 1`, the acid-churn shape). It went **rings → radiating spokes →
+  drifting puffs**: a ring read as a shockwave, fixed spokes as a star, and the
+  ask landed on *"white lines … they need to go outward and fade in and out."*
+  `drawBushes` takes `helis` + `now` and, for a bush within
+  `HELI_WASH_RADIUS` (1.55× the disc), shoves its drawn circle radially outward
+  (`HELI_WASH_PUSH`) with a fast cross shudder (`HELI_WASH_FLUTTER`) — **still
+  one union path, the wind only moves where each `arc` is centred**, and with
+  nothing overhead the block is skipped and it is byte-for-byte what it was.
+  Everything the wash draws is kept inside `HELI_WASH_RADIUS`, which is where
+  the bush stir stops too.
+
+`server/helicheck.ts` is the harness — headless, no socket, no port.
+`setHeliAxisAligned` is the gate and it is kept. Measured, 600-1200 drops:
+
+| | OLD | NEW |
+|---|---|---|
+| distinct bearings | **4** | 1200 |
+| approaches that are axis-aligned | **100%** | 16% (uniform ~15%) |
+| octants the bearing lands in | 4/8 | **8/8** |
+| entry, target, exit colinear | — | worst 2e-16 off the line |
+| flies through (not a U-turn) | — | 600/600 |
+| each leg `HELI_APPROACH_RUN` | — | worst 0.00px off |
+| the flight still completes | — | inbound→hover→leave→gone, 16.0s, soldier down |
+
+`client/src/helirig.ts` (open `/helirig.html`) covers the drawing off the
+canvas: the wash centred **0.7px** off the aircraft, its ink scaling linearly
+with `alpha` (full → ~46% at 0.5 → 0 at 0.02), **0** ink past
+`HELI_WASH_RADIUS`; the gusts fade in and out (a fixed box out at 0.55R sees a
+puff drift through it and vanish — swing **1.0** — while the disc as a whole is
+never bare of gust strokes); a bush under the aircraft displaced **12.3px**
+where one outside the radius moves **0**; and an empty `helis` list painting
+byte-for-byte identically to an aircraft parked off the map.
+
+**What is not measured is how it sounds** — the recording was chosen and
+looped by amplitude envelope, not by ear (this cannot listen), and the wash is
+tuned on a flat grey rather than the real ground. Same standard as the charge
+rifle and `DOG_CAMERA_ZOOM`: the mechanics and the pixels are measured, the
+feel is the playtest.
+
 ### The survivor beacon is a handset, not a mast
 
 It is the one utility that is never consumed and never placed where you are
@@ -9904,15 +10037,147 @@ test and the effect now read `!== 'zombie'`; only an actual zombie needs
 **The charge rifle is the one gun that can shoot the infected.** Every other
 round passes through the living. At any wind-up it will drop somebody already
 bitten (`world.pendingInfections`), and healthy bystanders are still ignored,
-so it is a decision rather than a hazard. Its top bar hits properly hard now —
+so it is a decision rather than a hazard. Its top bar hits properly hard —
 `CHARGE_TOP_MUL`, where the fourth bar used to be exactly the paper damage, so
-a full wind-up bought only the pierce. Measured per bar: 15 / 40 / 65 / 90, and
-one full-charge round kills an infected civilian.
+a full wind-up bought only the pierce. Damage went **30-45 → 42-56** so a full
+charge *reliably* one-shots a 100hp shambler (the top bar lands 101-134,
+against 72-108 before, which only killed on the high rolls). Measured per bar:
+17-22 / 45-60 / 73-97 / 101-134 — bar 3 still deliberately falls short of a
+one-shot, so the tiers keep meaning something. `server/chargecheck.ts` proves
+200/200 full-charge kills and 0/200 for bar 3.
 
 It sits at **rarity 5** rather than 1, alongside the semi-auto. Its one unique
 job has to come up often enough to be worth learning, and at rarity 1 most
 rounds never presented it. A bot carrying one can also *see* who is infected —
 see **A charge rifle is how a bot sees the infected** under Bot officers.
+
+#### And it is an energy weapon now, not a rifle that winds up
+
+Asked for: a plasma chamber in the middle of the gun that glows as it charges,
+an energy beam for the round, a blue plasma scorch where it meets a wall and a
+blueish ground crater where it does not, charge / discharge / vent sounds,
+smoke off the gun while it cools, and a HUD bar that turns **red and recedes to
+the start** with the gun locked until it does.
+
+- **Two balance moves come with it.** `range` 1300 → **2200** (sniper-tier), so
+  an energy beam that would otherwise fizzle mid-street usually reaches a wall —
+  the crater is the rarer open-air case. And the 500ms cooldown becomes
+  **`CHARGE_COOL_MS` (2200ms)**, the vent: a charged shot is a commitment now,
+  not a cadence. `chargeRifle.cooldownMs` *is* `CHARGE_COOL_MS`, so `fireHeld`'s
+  own `ready()` gate and the red bar cannot drift.
+- **`world.chargeCoolUntil` is the vent, and it is its own map** rather than
+  `lastShotAt`. A pistol shot must not be able to light the vent bar on a charge
+  rifle picked up straight after — the two are unrelated events on the same
+  slot. Set in `fireHeld` when a charge shot fires; read by the wind-up gate in
+  `processShooting` (no `chargeSince`, so no charge bar, while it stands), by
+  `chargeInfectedTick` so a bot does not stand winding up at a shot it cannot
+  let off, by `coolProgress` (self HUD) and by `toWire` (`EntityState.cooling`,
+  the world-visible ember + smoke). Cleared in `resetWorld` and on disconnect.
+- **`Shot.plasma` is the bar level (1..`CHARGE_BARS`) and it is the whole
+  signal.** Present ⇒ the client draws an energy beam rather than a bullet line,
+  plays `charge-02-fire` rather than the rifle crack (`gunVoice` still returns
+  `'rifle'` for the synth-fallback family, and `hearGunfire` catches
+  `shot.plasma` ahead of the voice logic), scorches or craters the terminus,
+  and throws **no brass casing** — it cauterises. `Shot.thruX/thruY` is the
+  *entry* wall point, sent only when a full-charge round pierced a wall, so the
+  client can scorch both faces. Body hits deliberately spawn no blood — an
+  energy round and the positions of the four bodies it pierced are not both on
+  the wire, and a beam that stops in nobody is the common case anyway.
+- **`EntityState.charging` / `cooling` are quantised 0..1 on the wire, for any
+  officer** — a bot lining up on an infected civilian, or another player nearby,
+  is a telegraph. Both are in `ENTITY_FIELDS`; an officer holding one has been
+  on screen a long while by the time he winds up, so left out, the glow would
+  arrive once and stick — the fifth and sixth flags that list has caught in
+  exactly that shape.
+- **`held` was the seventh, and it was a pre-existing bug the chamber exposed.**
+  Reported as *"the new weapon model is not on the player officer"* — the gun
+  drew as a pistol and the chamber (gated on `e.held === 'chargeRifle'`) never
+  appeared. `held` has been on `EntityState` since the shouldered-rifle drawing
+  and was **never in `ENTITY_FIELDS`**, so `copyInto` never updated it after
+  first sight. It only ever bit the one officer who is *always* tracked before
+  changing weapon — your own, who spawns holding a pistol and then picks
+  something up — so the player has been seeing a pistol whatever they carry.
+  Adding it fixes the charge rifle model *and* every other self-held long gun.
+- **The chamber is drawn with the weapon in `drawEntity`, not as an effect
+  beside it** — `drawPlasmaChamber`, in the shouldered-rifle block, gated on
+  `e.held === 'chargeRifle'`. A short housing on the barrel with an additive
+  coil that ramps sky-blue → cyan → white with `charging`, a dull red ember
+  fading with `1 - cooling`, and an **ellipse** glow along the barrel rather
+  than a disc — a disc reads as an orb around the officer, and the first cut
+  was exactly that. Colours kept clear of the officer's own `#3b82f6` body so
+  the coil never blends into it. No per-frame randomness: the flicker is hashed
+  off `e.id`.
+- **`drawChargeVent` is the smoke** — a handful of stateless puffs off the
+  muzzle while `e.cooling`, density scaling with it, drawn in the entity pass
+  (under fog, like the body).
+- **`drawPlasmaBeam` is the beam** — additive, three stacked strokes (dim blue
+  bloom, cyan body, white core) widening with the level, electric forks hashed
+  off the shot, and an endpoint flash. The **top bar reads a step wider** than
+  the ramp to bar 3 would put it (`+3` on the width, `+5` on the flash) — a
+  full charge is a heavier shot, not just a longer one. `CHARGE_BEAM_MS` (220)
+  is longer than a bullet tracer: a beam hangs, then fades. `main.ts` culls
+  plasma tracers on that clock.
+- **Two baked decal layers.** The wall scorch reuses `wallMarkLayer` (blitted
+  on top of walls by `drawBulletHoles`); the ground crater is a **new layer**,
+  `groundScorchLayer`, blitted with the ground marks *under* the walls right
+  after `drawBlood`. `spawnPlasmaCrater` only fires for `plasma === CHARGE_BARS
+  && !wall`. Both persist for the round and clear with `clearBlood`. The crater
+  is a **dark vaporised patch** with only a dim violet ember — no lit rim, no
+  blue.
+- **The wall scorch went through five passes, all of them the same lesson:
+  nothing here knows where the wall stops.** The beam frequently ends at a
+  wall's **edge**, so a filled shape spills onto whatever is beside it, and
+  there is no wall geometry passed in to clip against. *"Too circular"* →
+  *"only lightning strips"* → *"lightning can't go into the wall, white must
+  reach each side, purple on either side"* → *"get rid of the largest lines,
+  the circle must NOT touch the ground — wall only"*. `angle` is the beam's
+  direction *into* the wall, and everything keys off it:
+  - the **glowing circle is set `beamW·0.85` *into* the wall** (`cx, cy`
+    along `angle`), so its near edge clears the impact point and it never
+    reaches onto the ground. It carries the white/blue beam-width radial and
+    the deep-violet core with its white pinpoint;
+  - a **bright white streak runs along the wall face** (`angle ± PI/2`, both
+    ways) from that inset centre, `r·2.6` each way — gently sagging in the
+    middle, not a wild bolt — with a purple flank on each side and a blue mid;
+  - the lightning is a **short dense spray** (13-21 bolts), longest `r·1.8`,
+    only into the half facing away from the wall (`angle + PI ± 1.3`) — never
+    into or behind it.
+  `client/chargerig.ts` draws it against a fake wall and asserts: the circle
+  sits on the wall side and essentially none of it on the open side, the white
+  reaches both ways, and nothing is a long line.
+- **The beam's endpoint flash carries a violet middle** (`#f5f3ff` → `#a78bfa`
+  → `#22d3ee`), tying it to the scar's core, and crackles its own short
+  lightning that re-hashes every 55ms so it reads as live arcing rather than a
+  frozen fork.
+- **The red bar is `drawChargeCooldown`** — the same four-box frame filled red
+  as one continuous quantity receding to the left, `COOLING`, off
+  `InventoryState.coolProgress`. It draws in place of `drawChargeBars` while the
+  vent stands, and the server refuses to wind up meanwhile, so the two readouts
+  are never both on screen.
+- **The three sounds are Freesound CC0 recordings** (`charge-01-windup` /
+  `-02-fire` / `-03-vent`), trimmed and level-matched the way CREDITS.md
+  records — with `synthesizeChargeWind` / `…Fire` / `…Vent` as the tuned
+  fallbacks. The wind-up and the vent fire on the **rising edge** of the wire
+  flags in `hearChargeRifle`, so a held wind-up plays the whine once, not per
+  tick; the discharge rides the `Shot`.
+
+`server/chargecheck.ts` is the headless harness — 25 checks: the plasma level
+on the wire, the scorch condition, the pierce point, the crater condition, no
+casing, a full charge dropping a 100hp shambler 200/200 (and bar 3 doing so
+0/200), the vent locking the gun, and `coolProgress` / `EntityState.cooling`
+decaying from 1 back to nothing across `CHARGE_COOL_MS`. `client/chargerig.ts`
+(+ `/chargerig.html`, `setInterval`-driven, `getImageData`) measures the
+drawing: the chamber's added luminance rising monotonically with `charging`,
+the ember fading as it cools, the beam blue-dominant and thickening per level
+(bar 4 a clear step wider), the wall scorch's glowing circle on the wall side
+and not the open side, its white streak reaching both ways, no long lines, the
+ground crater a *dark* mark rather than a bright one, and the HUD bar receding.
+
+**What is not verified is how it plays** — rAF is throttled to nothing in a
+non-compositing browser pane, so nobody has charged and fired one in a real
+round from here, and the three sounds were chosen and trimmed by decoded
+amplitude envelope rather than by ear (this cannot listen). The mechanics and
+the pixels are measured; the feel is the playtest.
 
 **"Go to the beacon" has no range on it at all.** It went through two wrong
 answers first, and both are worth not repeating: gated on a mast existing

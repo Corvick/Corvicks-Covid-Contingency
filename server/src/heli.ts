@@ -4,6 +4,7 @@ import {
   SMOKE_DURATION_MS,
   SMOKE_RADIUS,
   HELI_SPEED,
+  HELI_APPROACH_RUN,
   HELI_HOVER_MS,
   HELI_MATERIALIZE_MS,
   HELI_DEPART_FADE_MS,
@@ -167,14 +168,45 @@ function moveGrenade(world: World, g: Grenade, dt: number): void {
   g.y = clamp(g.y + g.vy * dt, 4, WORLD_HEIGHT - 4);
 }
 
-/** Pick the nearest map edge and return an off-screen point on it. */
-function edgePointFor(x: number, y: number): { x: number; y: number } {
-  const dists = [y, WORLD_WIDTH - x, WORLD_HEIGHT - y, x];
-  const side = dists.indexOf(Math.min(...dists));
-  if (side === 0) return { x, y: -260 };
-  if (side === 1) return { x: WORLD_WIDTH + 260, y };
-  if (side === 2) return { x, y: WORLD_HEIGHT + 260 };
-  return { x: -260, y };
+let axisAligned = false;
+/** Harness gate — restores the pre-change "in from the nearest edge" bearing. */
+export function setHeliAxisAligned(v: boolean): void {
+  axisAligned = v;
+}
+
+/**
+ * A straight line through `(x, y)` on a random bearing: where it comes in from,
+ * where it leaves to, and the heading it holds the whole way.
+ *
+ * It used to come in perpendicular to the nearest map edge — always axis-aligned,
+ * always the shortest way onto the map — so every drop looked the same from
+ * above. The bearing is unconstrained now; the flight is still a single straight
+ * line, entry → hover → exit all on it, and it still flies *through* rather than
+ * turning around. The run each side of the target is a fixed `HELI_APPROACH_RUN`
+ * rather than "to the map edge", so the approach takes about the same time from
+ * anywhere. Nothing here reads `outbreakSide`: a helicopter is in the air and
+ * has no horde to drive through.
+ */
+function straightRunThrough(x: number, y: number): {
+  entry: { x: number; y: number };
+  exit: { x: number; y: number };
+  bearing: number;
+} {
+  let bearing = Math.random() * Math.PI * 2;
+  if (axisAligned) {
+    // The old behaviour, for the harness: perpendicular in from the nearest
+    // edge — top→down, right→left, bottom→up, left→right. `helicheck.ts`
+    // measures the fix against this.
+    const dists = [y, WORLD_WIDTH - x, WORLD_HEIGHT - y, x];
+    bearing = [Math.PI / 2, Math.PI, -Math.PI / 2, 0][dists.indexOf(Math.min(...dists))];
+  }
+  const dx = Math.cos(bearing);
+  const dy = Math.sin(bearing);
+  return {
+    entry: { x: x - dx * HELI_APPROACH_RUN, y: y - dy * HELI_APPROACH_RUN },
+    exit: { x: x + dx * HELI_APPROACH_RUN, y: y + dy * HELI_APPROACH_RUN },
+    bearing,
+  };
 }
 
 /**
@@ -189,15 +221,7 @@ function flyTo(
   carries: number,
   beaconFor?: { x: number; y: number },
 ): void {
-  const entry = edgePointFor(x, y);
-
-  // It flies through rather than turning around: the exit continues along the
-  // same bearing it arrived on, out the far side of the map.
-  const dx = x - entry.x;
-  const dy = y - entry.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const run = WORLD_WIDTH + WORLD_HEIGHT;
-  const exit = { x: x + (dx / len) * run, y: y + (dy / len) * run };
+  const { entry, exit, bearing } = straightRunThrough(x, y);
   world.helicopters.set(nextId('heli'), {
     id: nextId('h'),
     x: entry.x,
@@ -206,7 +230,7 @@ function flyTo(
     targetY: y,
     exitX: exit.x,
     exitY: exit.y,
-    facing: Math.atan2(y - entry.y, x - entry.x),
+    facing: bearing,
     phase: 'inbound',
     spawnedAt: now,
     hoverUntil: 0,
@@ -451,6 +475,7 @@ export function helicoptersToWire(world: World, now: number): HelicopterState[] 
     const arriving = Math.min(1, (now - h.spawnedAt) / HELI_MATERIALIZE_MS);
 
     out.push({
+      id: h.id,
       x: Math.round(h.x),
       y: Math.round(h.y),
       facing: Math.round(h.facing * 100) / 100,

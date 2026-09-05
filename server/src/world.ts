@@ -104,6 +104,8 @@ import {
   OUTBREAK_KEEP_OUT_COLS,
   OUTBREAK_KEEP_OUT_ROWS,
   ZOMBIE_POST_GRAPPLE_SLOW,
+  CHARGE_MS,
+  CHARGE_COOL_MS,
 } from '../../shared/constants.js';
 import { SpatialGrid } from './spatial.js';
 import {
@@ -776,6 +778,15 @@ export interface World {
   aimHeading: Map<string, number>;
   /** Charge rifle: id -> when the trigger went down, while winding up. */
   chargeSince: Map<string, number>;
+  /**
+   * Charge rifle: id -> when the vent finishes and the gun will wind up again.
+   * Set when a charge shot fires; read by the wind-up gate in `processShooting`,
+   * by `chargeInfectedTick`, and by the client's red bar (`coolProgress` /
+   * `EntityState.cooling`). Its own map rather than piggy-backing `lastShotAt`
+   * so a pistol shot cannot light the vent bar on a charge rifle picked up
+   * afterward.
+   */
+  chargeCoolUntil: Map<string, number>;
   /** Sprint reserve for player officers. */
   stamina: Map<string, number>;
   /** Players who ran the bar dry and haven't recovered enough to sprint again. */
@@ -2271,6 +2282,7 @@ export function createWorld(): World {
     bashUntil: new Map(),
     aimHeading: new Map(),
     chargeSince: new Map(),
+    chargeCoolUntil: new Map(),
     stamina: new Map(),
     exhausted: new Set(),
     shots: [],
@@ -2477,6 +2489,7 @@ export function resetWorld(world: World): void {
   world.nextRadioScan = 0;
   world.aimHeading.clear();
   world.chargeSince.clear();
+  world.chargeCoolUntil.clear();
   world.shots.length = 0;
   world.deaths.length = 0;
   world.sobs.length = 0;
@@ -3836,6 +3849,22 @@ export function toWire(
   if (worn && e.type === 'officer') {
     const inHand = heldItem(worn);
     if (inHand && inHand !== 'pistol') state.held = inHand;
+    // The plasma chamber: glowing while it winds up, a dull ember venting
+    // afterward. Sent for any officer holding one — a bot or another player
+    // charging a shot nearby is a telegraph — not just the driver. The
+    // arithmetic is inlined rather than importing `chargeProgress` from
+    // `combat.ts`, which would close an import cycle with this file.
+    if (inHand === 'chargeRifle') {
+      const since = world.chargeSince.get(e.id);
+      if (since !== undefined) {
+        const c = clamp((now - since) / CHARGE_MS, 0, 1);
+        if (c > 0) state.charging = Math.round(c * 100) / 100;
+      }
+      const until = world.chargeCoolUntil.get(e.id) ?? 0;
+      if (until > now) {
+        state.cooling = Math.round(clamp((until - now) / CHARGE_COOL_MS, 0, 1) * 100) / 100;
+      }
+    }
   }
   if (world.stunned.has(e.id)) state.stunned = true;
   const bashing = world.bashUntil.get(e.id);

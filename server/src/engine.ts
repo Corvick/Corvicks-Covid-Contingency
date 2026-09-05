@@ -943,6 +943,7 @@ export function disconnect(id: string): void {
     world.grappleCounts.delete(id);
     world.speedBoosts.delete(id);
     world.lastShotAt.delete(id);
+    world.chargeCoolUntil.delete(id);
     connections.delete(id);
     console.log(`[server] player ${id} disconnected (${connections.size} playing)`);
     }

@@ -66,6 +66,10 @@ export function stopAllSounds(): void {
   if (!ctx) return;
   void ctx.close();
   ctx = null;
+  // The looping rotor voices are the one sound that outlives a single call, so
+  // they are the one thing `ctx.close()` above does not clean up on its own —
+  // their handles would sit in the map pointing at a dead context.
+  heliVoices.clear();
 }
 
 function noiseBuffer(ac: AudioContext): AudioBuffer {
@@ -242,6 +246,9 @@ const SOB_FILES = ['hiding-sob.mp3'];
  * on the voice, since `voice` can't tell the three rifles apart.
  */
 const WEAPON_SFX_BASE = `${import.meta.env.BASE_URL}sfx/weapons/`;
+/** Engines and rotors — see `HELI_ROTOR_FILES`. Its own folder rather than
+ *  `weapons/`, the same reason the sob lives under `human/`. */
+const VEHICLE_SFX_BASE = `${import.meta.env.BASE_URL}sfx/vehicles/`;
 /**
  * `rifle-01-single.mp3` — a rifle round on its own — read as a perfectly
  * good pistol shot, so it is the pistol's sound now. The pistol's three
@@ -323,6 +330,28 @@ const SNIPER_FILES = ['sniper-01-fps.mp3', 'sniper-02-barrett.mp3'];
 const SHOTGUN_FILES = ['shotgun-01-blast.mp3'];
 const MG_FILES = ['mg-01-single.mp3', 'mg-02-single.mp3'];
 const HEAVY_MG_FILES = ['heavymg-01-m240.mp3', 'heavymg-02-dshk.mp3'];
+/**
+ * The charge rifle is an energy weapon, so its three noises are sci-fi rather
+ * than gunfire: the chamber winding up, the beam discharging, and the vent
+ * bleeding off heat afterward. Recorded like everything else (see CREDITS.md);
+ * `synthesizeCharge…` further down stands in while they load or if a file
+ * never arrives.
+ */
+const CHARGE_WIND_FILES = ['charge-01-windup.wav'];
+const CHARGE_FIRE_FILES = ['charge-02-fire.wav'];
+const CHARGE_VENT_FILES = ['charge-03-vent.wav'];
+
+/**
+ * The helicopter's rotor, under its own `sfx/vehicles/` — not a weapon and not
+ * a voice. **The one looping recording in the game**: every other sound here is
+ * a discrete event played once, where an aircraft overhead is a bed that has to
+ * hold for as long as the shadow is on the ground, panning and swelling as it
+ * moves. So it is not played through `playVoice` at all — see `syncHeliRotors`,
+ * which owns one looping source per aircraft and rides its gain off distance.
+ * A real CC0 recording (a UH-60 hover loop; see `CREDITS.md`), pre-trimmed to a
+ * seamless loop offline, with `synthesizeRotor` standing in while it loads.
+ */
+const HELI_ROTOR_FILES = ['heli-rotor.wav'];
 
 /**
  * A decoded clip plus the correction that loudness-matches it to the rest of
@@ -352,6 +381,10 @@ const sniperVoices: VoiceClip[] = [];
 const shotgunVoices: VoiceClip[] = [];
 const mgVoices: VoiceClip[] = [];
 const heavyMgVoices: VoiceClip[] = [];
+const chargeWindVoices: VoiceClip[] = [];
+const chargeFireVoices: VoiceClip[] = [];
+const chargeVentVoices: VoiceClip[] = [];
+const heliRotorVoices: VoiceClip[] = [];
 let voicesRequested = false;
 
 /**
@@ -481,6 +514,15 @@ const SNIPER_TARGET_RMS = 0.155;
 const SHOTGUN_TARGET_RMS = 0.074;
 const MG_TARGET_RMS = 0.335;
 const HEAVY_MG_TARGET_RMS = 0.18;
+// Single-file pools — each target is that file's own measured RMS (of the
+// mono/22050 trimmed WAV), so `normalizedGain` is a no-op today and the right
+// anchor the day a second take joins it. See CREDITS.md.
+const CHARGE_WIND_TARGET_RMS = 0.192;
+const CHARGE_FIRE_TARGET_RMS = 0.155;
+const CHARGE_VENT_TARGET_RMS = 0.15;
+// A single-file pool — the target is the loop's own measured RMS (of the
+// mono/22050 trimmed WAV), so `normalizedGain` is a no-op today.
+const HELI_ROTOR_TARGET_RMS = 0.194;
 
 /**
  * Loudness-match a decoded clip against `targetRms`, the level its pool's
@@ -525,13 +567,25 @@ function normalizedGain(buffer: AudioBuffer, targetRms: number): number {
 function loadRecordedVoices(ac: AudioContext): void {
   if (voicesRequested) return;
   voicesRequested = true;
-  const load = (base: string, file: string, into: VoiceClip[], targetRms: number) => {
+  const load = (
+    base: string,
+    file: string,
+    into: VoiceClip[],
+    targetRms: number,
+    /**
+     * Cut the dead air off the ends before measuring or playing — right for
+     * every discrete event, and wrong for the one looping clip: `trimSilence`
+     * makes a hard cut with no fade, and on a seamless loop that is a click
+     * every time it wraps. The rotor loop is pre-trimmed offline instead.
+     */
+    trim = true,
+  ) => {
     fetch(base + file)
       .then((r) => r.arrayBuffer())
       .then((data) => ac.decodeAudioData(data))
       .then((buffer) => {
-        const trimmed = trimSilence(ac, buffer);
-        into.push({ buffer: trimmed, gain: normalizedGain(trimmed, targetRms) });
+        const clip = trim ? trimSilence(ac, buffer) : buffer;
+        into.push({ buffer: clip, gain: normalizedGain(clip, targetRms) });
       })
       .catch(() => {
         // Offline, blocked, or a bad file — the synthesised fallback carries
@@ -554,6 +608,11 @@ function loadRecordedVoices(ac: AudioContext): void {
   for (const file of SHOTGUN_FILES) load(WEAPON_SFX_BASE, file, shotgunVoices, SHOTGUN_TARGET_RMS);
   for (const file of MG_FILES) load(WEAPON_SFX_BASE, file, mgVoices, MG_TARGET_RMS);
   for (const file of HEAVY_MG_FILES) load(WEAPON_SFX_BASE, file, heavyMgVoices, HEAVY_MG_TARGET_RMS);
+  for (const file of CHARGE_WIND_FILES) load(WEAPON_SFX_BASE, file, chargeWindVoices, CHARGE_WIND_TARGET_RMS);
+  for (const file of CHARGE_FIRE_FILES) load(WEAPON_SFX_BASE, file, chargeFireVoices, CHARGE_FIRE_TARGET_RMS);
+  for (const file of CHARGE_VENT_FILES) load(WEAPON_SFX_BASE, file, chargeVentVoices, CHARGE_VENT_TARGET_RMS);
+  for (const file of HELI_ROTOR_FILES)
+    load(VEHICLE_SFX_BASE, file, heliRotorVoices, HELI_ROTOR_TARGET_RMS, false);
 }
 
 /**
@@ -1114,4 +1173,396 @@ export function playHeavyMachineGunShot(spatial: Spatial): void {
   if (spatial.gain <= 0.01) return;
   if (playVoice(ac, heavyMgVoices, spatial, 0.3 + Math.random() * 0.4, 0.55)) return;
   synthesizeGunshot(spatial, { crackHz: 1900, thumpFrom: 110, thumpTo: 35, ceiling: 0.55 });
+}
+
+// ---------------------------------------------------------------- charge rifle
+
+/**
+ * The charge rifle winding up — a rising energy whine as the chamber fills.
+ * Recorded first (see `CHARGE_WIND_FILES`); `synthesizeChargeWind` stands in
+ * while it loads. Fired on the rising edge of `EntityState.charging` in
+ * `main.ts`, so a held wind-up plays it once, not per tick.
+ */
+export function playChargeWind(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, chargeWindVoices, spatial, 0.35 + Math.random() * 0.3, 0.5)) return;
+  synthesizeChargeWind(spatial);
+}
+
+/**
+ * The beam discharging — the shot itself. Recorded first
+ * (`CHARGE_FIRE_FILES`), synthesised while it loads. Played off `Shot.plasma`
+ * in `hearGunfire`, in place of the rifle crack.
+ */
+export function playChargeFire(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, chargeFireVoices, spatial, 0.35 + Math.random() * 0.3, 0.7)) return;
+  synthesizeChargeFire(spatial);
+}
+
+/**
+ * The chamber venting afterward — a pressure release as the red bar recedes.
+ * Recorded first (`CHARGE_VENT_FILES`), synthesised while it loads. Fired on
+ * the rising edge of `EntityState.cooling`.
+ */
+export function playChargeVent(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, chargeVentVoices, spatial, 0.35 + Math.random() * 0.3, 0.45)) return;
+  synthesizeChargeVent(spatial);
+}
+
+/**
+ * Synthesised wind-up: two detuned saws sweeping up through an opening
+ * low-pass, with a high shimmer over the top and the whole thing swelling in.
+ * Kept as the fallback the same way `synthesizeGunshot` is — a note that is a
+ * little too clean is still a sound, where silence for the length of a fetch
+ * is worse.
+ */
+function synthesizeChargeWind(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+
+  const now = ac.currentTime;
+  const length = 1.2;
+  const end = now + length;
+  const bus = spatialOutput(ac, spatial);
+
+  const out = ac.createGain();
+  out.gain.setValueAtTime(0.0001, now);
+  out.gain.exponentialRampToValueAtTime(0.5, end - 0.05);
+  out.gain.linearRampToValueAtTime(0.0001, end);
+  out.connect(bus);
+
+  const lp = ac.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(320, now);
+  lp.frequency.exponentialRampToValueAtTime(4200, end);
+  lp.Q.value = 6;
+  lp.connect(out);
+
+  for (const [base, detune, level] of [
+    [110, 0, 1],
+    [113, 11, 0.7],
+  ] as Array<[number, number, number]>) {
+    const osc = ac.createOscillator();
+    const g = ac.createGain();
+    osc.type = 'sawtooth';
+    osc.detune.value = detune;
+    osc.frequency.setValueAtTime(base, now);
+    osc.frequency.exponentialRampToValueAtTime(base * 6, end);
+    g.gain.value = level;
+    osc.connect(g).connect(lp);
+    osc.start(now);
+    osc.stop(end);
+  }
+
+  // A high sparkle riding on top, so it reads as energy rather than an engine.
+  const shimmer = ac.createOscillator();
+  const shimmerGain = ac.createGain();
+  shimmer.type = 'triangle';
+  shimmer.frequency.setValueAtTime(1800, now);
+  shimmer.frequency.exponentialRampToValueAtTime(5200, end);
+  shimmerGain.gain.setValueAtTime(0.0001, now);
+  shimmerGain.gain.exponentialRampToValueAtTime(0.12, end - 0.1);
+  shimmerGain.gain.linearRampToValueAtTime(0.0001, end);
+  shimmer.connect(shimmerGain).connect(out);
+  shimmer.start(now);
+  shimmer.stop(end);
+}
+
+/**
+ * Synthesised discharge: a fast downward pitch sweep with a bright noise burst
+ * on the front of it and a short sub thump under — an energy crack with weight,
+ * not a laser blip.
+ */
+function synthesizeChargeFire(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+
+  const now = ac.currentTime;
+  const bus = spatialOutput(ac, spatial);
+
+  // The zap: a steep downward glide.
+  const zap = ac.createOscillator();
+  const zapGain = ac.createGain();
+  zap.type = 'sawtooth';
+  zap.frequency.setValueAtTime(1400, now);
+  zap.frequency.exponentialRampToValueAtTime(90, now + 0.16);
+  const zapLp = ac.createBiquadFilter();
+  zapLp.type = 'lowpass';
+  zapLp.frequency.setValueAtTime(5200, now);
+  zapLp.frequency.exponentialRampToValueAtTime(500, now + 0.18);
+  zapGain.gain.setValueAtTime(0.6, now);
+  zapGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+  zap.connect(zapLp).connect(zapGain).connect(bus);
+  zap.start(now);
+  zap.stop(now + 0.26);
+
+  // The crack on the front, gone almost at once.
+  const crack = ac.createBufferSource();
+  crack.buffer = noiseBuffer(ac);
+  const crackBand = ac.createBiquadFilter();
+  crackBand.type = 'bandpass';
+  crackBand.frequency.value = 2600;
+  crackBand.Q.value = 0.6;
+  const crackGain = ac.createGain();
+  crackGain.gain.setValueAtTime(0.5, now);
+  crackGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+  crack.connect(crackBand).connect(crackGain).connect(bus);
+  crack.start(now);
+  crack.stop(now + 0.08);
+
+  // The sub under it.
+  const sub = ac.createOscillator();
+  const subGain = ac.createGain();
+  sub.type = 'sine';
+  sub.frequency.setValueAtTime(120, now);
+  sub.frequency.exponentialRampToValueAtTime(45, now + 0.12);
+  subGain.gain.setValueAtTime(0.5, now);
+  subGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+  sub.connect(subGain).connect(bus);
+  sub.start(now);
+  sub.stop(now + 0.18);
+}
+
+/**
+ * Synthesised vent: band-passed noise with a fast attack and a long-ish decay,
+ * the filter sweeping down as it dies — steam bleeding out of a hot chamber.
+ */
+function synthesizeChargeVent(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+
+  const now = ac.currentTime;
+  const end = now + 0.9;
+  const bus = spatialOutput(ac, spatial);
+
+  const hiss = ac.createBufferSource();
+  hiss.buffer = noiseBuffer(ac);
+  const band = ac.createBiquadFilter();
+  band.type = 'bandpass';
+  band.frequency.setValueAtTime(3600, now);
+  band.frequency.exponentialRampToValueAtTime(700, end);
+  band.Q.value = 0.8;
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.linearRampToValueAtTime(0.32, now + 0.03);
+  g.gain.exponentialRampToValueAtTime(0.0001, end);
+  hiss.connect(band).connect(g).connect(bus);
+  hiss.start(now);
+  hiss.stop(end);
+}
+
+// ------------------------------------------------------------ helicopter rotor
+
+/**
+ * The loudest the rotor is ever allowed to get, at its closest pass. It is a
+ * sustained bed rather than a transient, so it sits below every gunshot
+ * (0.45-0.75) and near the dog's roar (0.24) — an aircraft overhead should be
+ * *present in* the mix, not *be* the mix. The rest of "louder coming in,
+ * quieter leaving" is carried by the caller: the distance falloff in
+ * `spatialFor` and the wire's own `alpha`, which ramps up as it arrives and
+ * down as it departs, are multiplied into the gain before it gets here.
+ */
+const HELI_ROTOR_CEILING = 0.32;
+
+/**
+ * One aircraft's rotor: a looping source (recorded, or synthesised while the
+ * recording loads) feeding a lowpass, a panner and a gain, with the gain and
+ * pan re-aimed every snapshot as the shadow moves. `syncHeliRotors` owns the
+ * lifecycle; nothing else touches these.
+ */
+interface HeliVoice {
+  gain: GainNode;
+  panner: StereoPannerNode | null;
+  clipGain: number;
+  sources: AudioScheduledSourceNode[];
+  stopped: boolean;
+}
+
+/**
+ * Keyed by `HelicopterState.id`. Declared here rather than at the top of the
+ * file because it belongs to this section — `stopAllSounds` reaches back for it
+ * only at call time, long after the module has finished evaluating, so the
+ * forward reference is safe.
+ */
+const heliVoices = new Map<string, HeliVoice>();
+
+/**
+ * A rotor built from oscillators, for the second or two before the recording
+ * has decoded (or the rest of the round if it never does — a helicopter flight
+ * is short, and this is the same bargain every gunshot fallback makes). Blade
+ * slap is a low body amplitude-modulated hard at blade-pass rate; a bed of
+ * lowpassed noise chuffs on the same beat; two quiet tones are the turbine.
+ * Returns everything that has to be stopped on teardown.
+ */
+function startSynthRotor(ac: AudioContext, dest: AudioNode): AudioScheduledSourceNode[] {
+  const now = ac.currentTime;
+  const out: AudioScheduledSourceNode[] = [];
+
+  // The blade-pass beat — a sawtooth LFO, so each slap is an asymmetric pulse
+  // rather than a smooth swell.
+  const lfo = ac.createOscillator();
+  lfo.type = 'sawtooth';
+  lfo.frequency.value = 11.5;
+  const lfoDepth = ac.createGain();
+  lfoDepth.gain.value = 0.42;
+  lfo.connect(lfoDepth);
+  lfo.start(now);
+  out.push(lfo);
+
+  // The body of the slap.
+  const body = ac.createOscillator();
+  body.type = 'sawtooth';
+  body.frequency.value = 46;
+  const bodyLp = ac.createBiquadFilter();
+  bodyLp.type = 'lowpass';
+  bodyLp.frequency.value = 300;
+  const slap = ac.createGain();
+  slap.gain.value = 0.5;
+  lfoDepth.connect(slap.gain);
+  body.connect(bodyLp).connect(slap).connect(dest);
+  body.start(now);
+  out.push(body);
+
+  // Rotor wash — steady lowpassed noise, chuffing on the blade beat.
+  const wash = ac.createBufferSource();
+  wash.buffer = noiseBuffer(ac);
+  wash.loop = true;
+  const washLp = ac.createBiquadFilter();
+  washLp.type = 'lowpass';
+  washLp.frequency.value = 850;
+  const chuff = ac.createGain();
+  chuff.gain.value = 0.6;
+  lfoDepth.connect(chuff.gain);
+  const washGain = ac.createGain();
+  washGain.gain.value = 0.16;
+  wash.connect(washLp).connect(chuff).connect(washGain).connect(dest);
+  wash.start(now);
+  out.push(wash);
+
+  // Turbine whine, well under everything else.
+  for (const [freq, level] of [
+    [440, 0.05],
+    [880, 0.028],
+  ] as Array<[number, number]>) {
+    const t = ac.createOscillator();
+    t.type = 'triangle';
+    t.frequency.value = freq;
+    const g = ac.createGain();
+    g.gain.value = level;
+    t.connect(g).connect(dest);
+    t.start(now);
+    out.push(t);
+  }
+
+  return out;
+}
+
+function makeHeliVoice(ac: AudioContext): HeliVoice {
+  const gain = ac.createGain();
+  gain.gain.value = 0.0001;
+  gain.connect(ac.destination);
+
+  let panner: StereoPannerNode | null = null;
+  let head: AudioNode = gain;
+  if (typeof ac.createStereoPanner === 'function') {
+    panner = ac.createStereoPanner();
+    panner.connect(gain);
+    head = panner;
+  }
+
+  // A gentle lowpass — a rotor has very little top end, and this is also where
+  // any wall muffle would land if the caller ever passes some.
+  const lp = ac.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 7000;
+  lp.Q.value = 0.5;
+  lp.connect(head);
+
+  const clip = heliRotorVoices[0];
+  let clipGain = 1;
+  const sources: AudioScheduledSourceNode[] = [];
+  if (clip) {
+    const src = ac.createBufferSource();
+    src.buffer = clip.buffer;
+    src.loop = true;
+    // A hair of per-aircraft detune, so two rotors in the air at once do not
+    // phase-lock into one thicker one.
+    src.playbackRate.value = 0.96 + Math.random() * 0.08;
+    src.connect(lp);
+    src.start();
+    sources.push(src);
+    clipGain = clip.gain;
+  } else {
+    sources.push(...startSynthRotor(ac, lp));
+  }
+
+  return { gain, panner, clipGain, sources, stopped: false };
+}
+
+function stopHeliVoice(ac: AudioContext, v: HeliVoice): void {
+  if (v.stopped) return;
+  v.stopped = true;
+  const t = ac.currentTime;
+  v.gain.gain.cancelScheduledValues(t);
+  v.gain.gain.setTargetAtTime(0.0001, t, 0.12);
+  for (const s of v.sources) {
+    try {
+      s.stop(t + 0.6);
+    } catch {
+      /* a source that never started, or a context already gone */
+    }
+  }
+}
+
+/**
+ * Bring the set of looping rotors in line with the aircraft currently on the
+ * wire: start one for an id that has just appeared, re-aim gain and pan for one
+ * that is still up, fade and stop one that has dropped off. Called every
+ * snapshot from `main.ts`'s `hearHelicopters` — and with an empty list the
+ * moment a round stops, so a rotor never drones on over a frozen or quit game.
+ *
+ * `gain` and `pan` are already spatialised by the caller (`spatialFor` with the
+ * aircraft flag), including the wire's arrival/departure `alpha`.
+ */
+export function syncHeliRotors(live: Array<{ id: string; gain: number; pan: number }>): void {
+  // Do not spin up a context just to tell it there are no helicopters.
+  if (live.length === 0 && heliVoices.size === 0) return;
+  const ac = audio();
+  if (!ac) {
+    heliVoices.clear();
+    return;
+  }
+
+  const present = new Set(live.map((h) => h.id));
+  for (const [id, v] of heliVoices) {
+    if (present.has(id)) continue;
+    stopHeliVoice(ac, v);
+    heliVoices.delete(id);
+  }
+
+  const t = ac.currentTime;
+  for (const h of live) {
+    let v = heliVoices.get(h.id);
+    if (!v) {
+      v = makeHeliVoice(ac);
+      heliVoices.set(h.id, v);
+    }
+    const g = Math.max(0, Math.min(1, h.gain)) * HELI_ROTOR_CEILING * v.clipGain;
+    // `setTargetAtTime` rather than a ramp: snapshots arrive 20-30 times a
+    // second and an exponential glide toward each new value needs no schedule
+    // cancelled and never steps.
+    v.gain.gain.setTargetAtTime(Math.max(0.0001, g), t, 0.06);
+    if (v.panner) v.panner.pan.setTargetAtTime(Math.max(-1, Math.min(1, h.pan)), t, 0.08);
+  }
 }

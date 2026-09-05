@@ -147,6 +147,19 @@ export interface EntityState {
    * entities rather than anything on the four hundred.
    */
   held?: ItemId;
+  /**
+   * Charge rifle winding up, 0 to 1, quantised to 0.01. Drives the plasma
+   * chamber glow — sent for any officer (a bot lining up a shot on an infected
+   * civilian, another player charging one nearby), not just the holder, so it
+   * reads as a telegraph. Omitted at 0. `held` says which gun it is.
+   */
+  charging?: number;
+  /**
+   * Charge rifle venting after a shot, 1 down to 0 across `CHARGE_COOL_MS`,
+   * quantised. Drives the dull ember in the chamber and the smoke off the
+   * muzzle. Omitted once cool.
+   */
+  cooling?: number;
 }
 
 export interface Wall {
@@ -693,6 +706,13 @@ export interface LashState {
 
 /** Only ever seen as a shadow passing over the ground. */
 export interface HelicopterState {
+  /**
+   * Stable across snapshots, so the client can own one looping rotor sound per
+   * aircraft — created when an id first appears, panned and levelled as it
+   * moves, faded and stopped when it drops off the wire. Nothing draws with it;
+   * the shadow is placed by `x, y` alone.
+   */
+  id: string;
   x: number;
   y: number;
   facing: number;
@@ -753,6 +773,22 @@ export interface Shot {
    * `GARAND_CLIP_SIZE` and `playGarandCycle`.
    */
   clipEject?: boolean;
+  /**
+   * A charge-rifle beam, and how wound up it was: the bar level, `1` to
+   * `CHARGE_BARS`. Present means the client draws an energy beam rather than a
+   * bullet line, plays the discharge sound rather than the rifle crack, leaves
+   * a blue plasma scorch where it met a wall (and a ground crater at full
+   * charge when it met nothing), and throws no brass casing.
+   */
+  plasma?: number;
+  /**
+   * Where a full-charge beam punched *into* a wall on its way through it —
+   * `x2,y2` is where it came out the far side or finally stopped. Only sent
+   * for a `plasma >= CHARGE_BARS` round that actually pierced a wall, so the
+   * client can scorch both faces.
+   */
+  thruX?: number;
+  thruY?: number;
 }
 
 export interface InputState {
@@ -1005,6 +1041,13 @@ export interface InventoryState {
   deployWanted: boolean;
   /** Charge rifle wind-up: -1 when not charging, else 0-1. */
   chargeProgress: number;
+  /**
+   * Charge rifle venting: -1 when cool or not held, else 1 down to 0 across
+   * `CHARGE_COOL_MS`. Drives the red bar receding back to the start, during
+   * which the gun will not wind up. Self only — the world-visible half is
+   * `EntityState.cooling`.
+   */
+  coolProgress: number;
   /** Bearing to the nearest zombie while the tracker is out, else null. */
   trackBearing: number | null;
   /**

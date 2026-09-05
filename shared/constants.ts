@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.30.0';
+export const GAME_VERSION = '0.32.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2353,6 +2353,21 @@ export const CHARGE_BARS = 4;
  */
 export const CHARGE_BASE_MUL = 0.4;
 export const CHARGE_TOP_MUL = 2.4;
+/**
+ * How long the trigger has to be held for a full wind-up. Was inline on
+ * `chargeRifle.chargeMs`; named here because the wire-side `EntityState.charging`
+ * ramp is derived from it in `toWire` without importing `combat.ts`.
+ */
+export const CHARGE_MS = 1300;
+/**
+ * The vent. After a charge shot the plasma chamber has to bleed off heat before
+ * it will wind up again — the red bar receding under the cursor, and the gun
+ * dead until it reaches the start. Much longer than the old 500ms `cooldownMs`
+ * it replaces: a charged shot is a commitment now, not a cadence. It is also
+ * `chargeRifle.cooldownMs`, so `fireHeld`'s own `ready()` gate agrees with the
+ * bar without a second number to keep in step.
+ */
+export const CHARGE_COOL_MS = 2200;
 /** How long a grey officer keeps running after being grabbed. */
 export const OFFICER_FLEE_MS = 20000;
 
@@ -3476,6 +3491,16 @@ export const SMOKE_DURATION_MS = 9000;
 export const SMOKE_RADIUS = 72;
 
 export const HELI_SPEED = 250;
+/**
+ * How far off the target the aircraft spawns, back along its (random) approach
+ * bearing — and how far past the target its exit point sits. It used to enter
+ * just outside the *nearest* map edge, so a central drop was a ~10s approach
+ * and an edge drop barely one; a fixed run keeps every approach around
+ * `HELI_APPROACH_RUN / HELI_SPEED` seconds whatever the bearing. Usually this
+ * lands off the map; when a bearing points it further inland the shadow simply
+ * fades in over open ground far from the action, which the `alpha` ramp covers.
+ */
+export const HELI_APPROACH_RUN = 2400;
 export const HELI_HOVER_MS = 4000;
 export const HELI_MATERIALIZE_MS = 1700;
 /** Time it takes to fade away completely once it starts its exit run. */
@@ -3486,6 +3511,18 @@ export const HELI_SOLDIERS = 4;
 export const HELI_DROP_INTERVAL_MS = 520;
 /** How dark the shadow lies on the ground at full strength. */
 export const HELI_SHADOW_ALPHA = 0.5;
+
+/**
+ * Rotor downwash on the ground — dust blown outward and foliage thrashing under
+ * the aircraft. Purely a drawing (client), the same as `HELI_SHADOW_ALPHA`.
+ * `HELI_WASH_RADIUS` is where the effect has faded to nothing, measured from
+ * the shadow's centre; `HELI_WASH_PUSH` is how far a bush right under the disc
+ * is shoved radially outward at full strength, and `HELI_WASH_FLUTTER` the
+ * amplitude of the fast cross-wise shudder laid on top of that push.
+ */
+export const HELI_WASH_RADIUS = HELI_RADIUS * 1.55;
+export const HELI_WASH_PUSH = 11;
+export const HELI_WASH_FLUTTER = 6;
 
 /** Dropped troops shoot far better than the beat officers. */
 export const SOLDIER_BLOOM_RAD = 0.07;
@@ -4490,6 +4527,55 @@ export const GROUND_COLOR = '#1b1d20';
 export const GRIME_BLOTCHES = 26;
 export const GRIME_GRIT = 260;
 export const GRIME_CRACKS = 7;
+
+// ---------------------------------------------------------------- floor patterns
+/**
+ * A house has a floor, not a stretch of the same filthy road that runs past
+ * its door. `drawFloors` fills each building's footprint with a repeating
+ * pattern — plain boards for an ordinary house, institutional tile for the
+ * police station, big stone flagstones for the corner complex — so the three
+ * kinds of building read as different *places* from above rather than three
+ * identically dark boxes.
+ *
+ * Built the grime tile's way and for the grime tile's reason: one small tile
+ * hashed once and handed to the canvas as a pattern, so a whole city of floors
+ * costs one fill per on-screen footprint rather than a scatter per frame, and
+ * the seams line up across the tile repeat by construction (every spacing
+ * divides `FLOOR_TILE`). It is ground detail, so it rides `settings.groundDetail`
+ * and is gone on LOW.
+ *
+ * The base colours are only just off `GROUND_COLOR` — low contrast for the same
+ * reason the grime is: any louder and the tile repeat reads as a grid.
+ */
+export const FLOOR_TILE = 128;
+/** Ordinary house: warm boards. */
+export const FLOOR_HOUSE_COLOR = '#241f19';
+export const FLOOR_HOUSE_PLANK = 16;
+/** Police station: cool institutional tile. */
+export const FLOOR_STATION_COLOR = '#20242a';
+export const FLOOR_STATION_TILE = 32;
+/** Corner complex: big stone flagstones laid in a running bond. */
+export const FLOOR_COMPLEX_COLOR = '#241f1a';
+/** Slab size — a divisor of `FLOOR_TILE`, so the course grid tiles seamlessly. */
+export const FLOOR_COMPLEX_SLAB = 64;
+/**
+ * Two rooms of the station get their own floor over the base tile: the armoury
+ * is steel tread plate, the cell is bare speckled concrete with a drain. Filled
+ * over the station footprint on the room's own inset rect (`PoliceStation.armoury`
+ * / `.cell`), so they read as different rooms from above.
+ */
+export const FLOOR_ARMOURY_COLOR = '#22262c';
+export const FLOOR_CELL_COLOR = '#1b1d21';
+/**
+ * An interior doorway gets a real threshold saddle — a short strip of trim laid
+ * across the opening, the way one room's floor meets the next in a real
+ * building — rather than a soft dark smudge. Drawn crowned (a highlight down the
+ * middle, a shadow line on each room-facing edge) so it reads as a raised board
+ * you step over. A shut door covers its own saddle; an open one reveals it.
+ */
+export const FLOOR_SADDLE_COLOR = '#37302a';
+/** Half the saddle's depth across the wall, in px, each side of the opening. */
+export const FLOOR_SADDLE_DEPTH = 6;
 
 /**
  * A round finding a body leaves a mark on the ground that stays. Nothing about
