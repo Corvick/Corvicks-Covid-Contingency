@@ -2146,6 +2146,14 @@ export const BUSH_MIN_FIT_RADIUS = HUMAN_RADIUS + 7;
 export const BUSH_OCCUPANT_SPACING = HUMAN_RADIUS * 1.9;
 /** Cover choice is re-evaluated on this cadence, not every tick. */
 export const BUSH_SCAN_INTERVAL_MS = 500;
+/**
+ * How rarely someone hiding in a bush lets out a sob — sound only, no visual
+ * tell, and deliberately far sparser than a zombie's own groan
+ * (`ZOMBIE_GROAN_MIN_MS`/`MAX`): an occasional, eerie hint that somebody is
+ * nearby and out of sight, not a soundtrack for every bush in the city.
+ */
+export const SOB_MIN_MS = 14000;
+export const SOB_MAX_MS = 34000;
 
 /**
  * Some people don't think — they just bolt the other way, which indoors
@@ -4486,6 +4494,49 @@ export const CORPSE_SLIDE_PX = 18;
 export const CORPSE_SLIDE_MS = 320;
 export const CORPSE_GREY_MS = 1100;
 export const CORPSE_COLOR = '#6b6b6b';
+
+/**
+ * A spent case popping out of the ejection port. Entirely client-side —
+ * derived from a `Shot` the same way blood is, nothing about it is on the
+ * wire — with a fake height for the hop: gravity pulls it down, it loses most
+ * of its bounce and some of its speed at each of 1-3 landings, and then it
+ * rests. Drawn with a shadow under it and a lift over it while it's still in
+ * the air, the same trick the flamethrower's stream and a lash's thrown chips
+ * use, because on a top-down map height only reads if something on the ground
+ * stays put underneath it.
+ *
+ * Once it stops moving it spends `CASING_DULL_MS` losing its shine — a bright
+ * brass fleck going dull — and is then baked into the same shared
+ * permanent-stain layer the blood and the corpses share and dropped from the
+ * live list: permanent for the round, the same shape `BLOOD_DECAL_MS` uses.
+ */
+export const CASING_GRAVITY = 900;
+/** Horizontal speed kept through a bounce — most of a hop's distance is
+ *  spent by the second one. */
+export const CASING_BOUNCE_FRICTION = 0.55;
+/** Vertical speed kept through a bounce. */
+export const CASING_BOUNCE_RESTITUTION = 0.42;
+export const CASING_EJECT_SPEED_MIN = 70;
+export const CASING_EJECT_SPEED_MAX = 190;
+export const CASING_LAUNCH_VZ_MIN = 90;
+export const CASING_LAUNCH_VZ_MAX = 190;
+export const CASING_DULL_MS = 16000;
+/** Backstop on the still-shiny set, the same shape as `BLOOD_DECAL_MAX`. */
+export const CASING_LIVE_MAX = 220;
+export const CASING_COLOR = '#c9a24a';
+export const CASING_DULL_COLOR = '#726038';
+
+/**
+ * A bullet punching into a wall rather than a body — see `Shot.wall`. A small
+ * permanent mark, baked straight in the moment it arrives: there's no live,
+ * wet phase to a hole in plaster the way there is to blood. Its own offscreen
+ * layer (`wallMarkLayer` in `render.ts`), blitted right after the walls
+ * themselves, because the mark has to sit *on* the wall's own fresh pixels
+ * rather than under them the way the ground-level stain layer would put it.
+ */
+export const BULLET_HOLE_COLOR = '#17181a';
+export const BULLET_HOLE_RADIUS_MIN = 1.3;
+export const BULLET_HOLE_RADIUS_MAX = 2.5;
 
 /**
  * How dark the corners of the screen get. Under the HUD and over the fog, so

@@ -52,6 +52,7 @@ import {
   MATERIALIZE_MS,
   BOUNDARY_THICKNESS,
   BUSH_HIDER_CHANCE,
+  SOB_MAX_MS,
   SHELTER_SEEK_CHANCE,
   SHELTER_FAR_CHANCE,
   SHELTER_LARGE_CHANCE,
@@ -265,6 +266,9 @@ export interface AiState {
   bushX: number | null;
   bushY: number | null;
   nextBushScanAt: number;
+  /** Earliest this hider may sob again — see `sobTick` in `ai.ts`. Sparse and
+   *  staggered so a city full of bushes doesn't turn into a chorus. */
+  nextSobAt: number;
   /** Committed indoor refuge while fleeing, and the building it sits in. */
   shelterX: number | null;
   shelterY: number | null;
@@ -775,6 +779,13 @@ export interface World {
    * nothing else is sent. Dogs are not in here (they keep `corpses`).
    */
   deaths: Array<{ id: string; x: number; y: number; a: number }>;
+  /**
+   * A sob from somebody genuinely hiding in a bush — cleared right after the
+   * snapshot goes out, exactly like `shots`. Sound only: no id, no entity, and
+   * unfogged like `zaps` and the corpses, since it is a handful of points a
+   * round and the whole point is that it can be *heard* without being seen.
+   */
+  sobs: Array<{ x: number; y: number }>;
   entityGrid: SpatialGrid<Entity>;
   /**
    * Just the zombies, rebuilt beside `entityGrid`.
@@ -1420,6 +1431,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     bushX: null,
     bushY: null,
     nextBushScanAt: 0,
+    nextSobAt: now + Math.random() * SOB_MAX_MS,
     shelterX: null,
     shelterY: null,
     shelterBuilding: -1,
@@ -2254,6 +2266,7 @@ export function createWorld(): World {
     exhausted: new Set(),
     shots: [],
     deaths: [],
+    sobs: [],
     entityGrid: new SpatialGrid<Entity>(ENTITY_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     zombieGrid: new SpatialGrid<Entity>(ENTITY_CELL, WORLD_WIDTH, WORLD_HEIGHT),
     wallGrid: new SpatialGrid<Wall>(STATIC_CELL, WORLD_WIDTH, WORLD_HEIGHT),
@@ -2456,6 +2469,7 @@ export function resetWorld(world: World): void {
   world.chargeSince.clear();
   world.shots.length = 0;
   world.deaths.length = 0;
+  world.sobs.length = 0;
   world.spectators.clear();
   world.gameOver = false;
   world.victory = false;

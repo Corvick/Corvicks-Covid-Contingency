@@ -92,6 +92,8 @@ import {
   BUSH_MIN_FIT_RADIUS,
   BUSH_OCCUPANT_SPACING,
   BUSH_SCAN_INTERVAL_MS,
+  SOB_MIN_MS,
+  SOB_MAX_MS,
   COUPLE_FOLLOW_DIST,
   HAND_HOLD_DIST,
   HAND_CATCHUP_MULTIPLIER,
@@ -4135,7 +4137,23 @@ function otherWayThrough(
 
 // ---------------------------------------------------------------- humans
 
+/**
+ * The occasional sob from somebody genuinely hiding in a bush — sound only,
+ * no visual tell, and far sparser than a zombie's own groan: this is meant to
+ * be an eerie, occasional hint that somebody is nearby and out of sight, not
+ * a soundtrack for every bush in the city. Fires regardless of *why* they're
+ * in there — fleeing to it or long since settled — because the ask is "while
+ * they are hiding", not "while they are running".
+ */
+function sobTick(world: World, e: Entity, state: AiState, now: number): void {
+  if (now < state.nextSobAt) return;
+  state.nextSobAt = now + SOB_MIN_MS + Math.random() * (SOB_MAX_MS - SOB_MIN_MS);
+  world.sobs.push({ x: e.x, y: e.y });
+}
+
 function updateHuman(world: World, e: Entity, state: AiState, now: number, dt: number): void {
+  if (state.bushHider && isInBush(world, e.x, e.y)) sobTick(world, e, state, now);
+
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
     senseThreats(world, e, state, now, HUMAN_SIGHT_RADIUS);

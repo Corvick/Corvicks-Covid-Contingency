@@ -1452,6 +1452,10 @@ function tick(): void {
     corpses: world.corpses,
     towers: world.towers,
     zaps: world.zaps,
+    // Sound only — no id, no entity. Unfogged like the zaps beside it: a
+    // handful a round, and the whole point is that it carries past whatever
+    // is hiding the person making it.
+    sobs: world.sobs,
       fires: firesToWire(world, now),
       helicopters: airHelis,
       spectating,
@@ -1468,6 +1472,7 @@ function tick(): void {
   }
   world.shots.length = 0;
   world.deaths.length = 0;
+  world.sobs.length = 0;
   mark('serialise+send');
 
   const elapsed = performance.now() - started;

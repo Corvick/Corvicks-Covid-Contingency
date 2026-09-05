@@ -146,6 +146,20 @@ import {
   CORPSE_SLIDE_MS,
   CORPSE_GREY_MS,
   CORPSE_COLOR,
+  CASING_GRAVITY,
+  CASING_BOUNCE_FRICTION,
+  CASING_BOUNCE_RESTITUTION,
+  CASING_EJECT_SPEED_MIN,
+  CASING_EJECT_SPEED_MAX,
+  CASING_LAUNCH_VZ_MIN,
+  CASING_LAUNCH_VZ_MAX,
+  CASING_DULL_MS,
+  CASING_LIVE_MAX,
+  CASING_COLOR,
+  CASING_DULL_COLOR,
+  BULLET_HOLE_COLOR,
+  BULLET_HOLE_RADIUS_MIN,
+  BULLET_HOLE_RADIUS_MAX,
   DOG_BIRTH_TWIST_FROM,
   DOG_FADE_FROM,
   DOG_RESPAWN_FADE_MS,
@@ -3326,6 +3340,283 @@ export function spawnBlood(
   }
 }
 
+// ---------------------------------------------------------------- casings
+
+/**
+ * A spent case's whole hop, precomputed at the moment it's ejected rather
+ * than stepped frame by frame — everything else derived from age in this
+ * file works this way (a corpse's slide, a lash chip's arc), and a bounce
+ * sequence is no different: gravity and the two multipliers below are fixed,
+ * so the whole flight is knowable in advance. `hops` holds one entry per
+ * landing (1 to 3 of them, decided at ejection); after the last one it simply
+ * rests at `restX, restY` forever.
+ */
+interface CasingHop {
+  /** Seconds after ejection this hop begins. */
+  t0: number;
+  x0: number;
+  y0: number;
+  vx: number;
+  vy: number;
+  /** Launch speed for this hop's own little parabola. */
+  vz0: number;
+  /** How long this hop lasts, in seconds. */
+  dur: number;
+}
+interface Casing {
+  hops: CasingHop[];
+  restX: number;
+  restY: number;
+  /** Seconds after ejection it comes to rest — the sum of the hops' durations. */
+  restAt: number;
+  angle: number;
+  spin: number;
+  born: number;
+  light: boolean;
+}
+const casings: Casing[] = [];
+
+/**
+ * A round leaving the ejection port: out to one side of the barrel and a
+ * little behind it, tumbling, with 1 to 3 short hops before it settles.
+ * `angle` is the round's own travel direction rather than the gun's facing —
+ * the two are close enough that the difference never reads, and it's what
+ * every caller already has to hand from a `Shot`.
+ */
+export function spawnCasing(x: number, y: number, angle: number, now: number, light: boolean): void {
+  const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
+
+  // Out of the right side of the gun and a little back, not straight out —
+  // an ejection port throws a case up and across, not forward down the barrel.
+  const eject = angle - Math.PI / 2 + (rand() - 0.5) * 0.9;
+  const speedMul = light ? 0.75 : 1;
+  const speed =
+    (CASING_EJECT_SPEED_MIN + rand() * (CASING_EJECT_SPEED_MAX - CASING_EJECT_SPEED_MIN)) * speedMul;
+  let vx = Math.cos(eject) * speed;
+  let vy = Math.sin(eject) * speed;
+  let vz = (CASING_LAUNCH_VZ_MIN + rand() * (CASING_LAUNCH_VZ_MAX - CASING_LAUNCH_VZ_MIN)) * speedMul;
+
+  const bounces = 1 + Math.floor(rand() * 3); // 1, 2 or 3
+  const hops: CasingHop[] = [];
+  let cx = x;
+  let cy = y;
+  let t = 0;
+  for (let i = 0; i < bounces; i++) {
+    const dur = (2 * vz) / CASING_GRAVITY;
+    hops.push({ t0: t, x0: cx, y0: cy, vx, vy, vz0: vz, dur });
+    cx += vx * dur;
+    cy += vy * dur;
+    t += dur;
+    vx *= CASING_BOUNCE_FRICTION;
+    vy *= CASING_BOUNCE_FRICTION;
+    vz *= CASING_BOUNCE_RESTITUTION;
+  }
+
+  casings.push({
+    hops,
+    restX: cx,
+    restY: cy,
+    restAt: t,
+    angle: rand() * TAU,
+    spin: (rand() - 0.5) * 20,
+    born: now,
+    light,
+  });
+
+  if (casings.length > CASING_LIVE_MAX) {
+    // Bake the overflow at whatever shine it's at rather than lose it — the
+    // same rule the blood's own overflow follows.
+    const overflow = casings.length - CASING_LIVE_MAX;
+    const sctx = ensureStainLayer();
+    if (sctx) {
+      for (let i = 0; i < overflow; i++) {
+        const c = casings[i];
+        const dullT = Math.max(0, Math.min(1, (now - (c.born + c.restAt * 1000)) / CASING_DULL_MS));
+        bakeInto(sctx, (g) => drawCasingShape(g, c.restX, c.restY, c.angle, c.light, dullT));
+      }
+    }
+    casings.splice(0, overflow);
+  }
+}
+
+/** Where a casing is, and how high off the ground, this many seconds after it was ejected. */
+function casingPoseAt(
+  c: Casing,
+  ageSec: number,
+): { x: number; y: number; z: number; resting: boolean } {
+  if (ageSec >= c.restAt) return { x: c.restX, y: c.restY, z: 0, resting: true };
+  for (const h of c.hops) {
+    if (ageSec < h.t0 + h.dur) {
+      const lt = ageSec - h.t0;
+      return {
+        x: h.x0 + h.vx * lt,
+        y: h.y0 + h.vy * lt,
+        z: h.vz0 * lt - 0.5 * CASING_GRAVITY * lt * lt,
+        resting: false,
+      };
+    }
+  }
+  return { x: c.restX, y: c.restY, z: 0, resting: true };
+}
+
+/** The case itself — a small brass sliver, tumbling while it's airborne. */
+function drawCasingShape(
+  g: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  angle: number,
+  light: boolean,
+  dullT: number,
+): void {
+  const len = light ? 3.2 : 4.6;
+  const w = light ? 1.2 : 1.6;
+  g.save();
+  g.translate(x, y);
+  g.rotate(angle);
+  g.fillStyle = mix(CASING_COLOR, CASING_DULL_COLOR, dullT);
+  g.beginPath();
+  g.roundRect(-len / 2, -w / 2, len, w, w / 2);
+  g.fill();
+  if (dullT < 1) {
+    // A fresh case still catches the light; a dulled one doesn't.
+    g.globalAlpha = 0.6 * (1 - dullT);
+    g.fillStyle = '#fff3c4';
+    g.fillRect(-len / 2 + 0.5, -w / 4, len - 1, Math.max(0.6, w / 5));
+    g.globalAlpha = 1;
+  }
+  g.restore();
+}
+
+/**
+ * Live casings: airborne ones tumbling with a shadow under them, and settled
+ * ones sitting flat and slowly dulling — the same wet-to-dry shape a blood
+ * mark uses, except there's nothing wet about brass. Once one has fully
+ * dulled it is baked into `stainLayer`, alongside the dried blood and the
+ * settled corpses, and dropped from the live list.
+ */
+export function drawCasings(ctx: CanvasRenderingContext2D, view: Viewport, now: number): void {
+  if (casings.length === 0) return;
+  let write = 0;
+  for (let i = 0; i < casings.length; i++) {
+    const c = casings[i];
+    const ageSec = (now - c.born) / 1000;
+    const pose = casingPoseAt(c, ageSec);
+
+    if (pose.resting) {
+      const restMs = now - (c.born + c.restAt * 1000);
+      if (restMs >= CASING_DULL_MS) {
+        const sctx = ensureStainLayer();
+        if (sctx) bakeInto(sctx, (g) => drawCasingShape(g, c.restX, c.restY, c.angle, c.light, 1));
+        continue;
+      }
+    }
+
+    casings[write++] = c;
+    if (!visible(view, pose.x, pose.y, 6)) continue;
+
+    if (!pose.resting) {
+      // Shadow on the ground, case lifted above it — the same trick a lash's
+      // thrown chips use, and for the same reason: on a top-down map, height
+      // only reads if something stays put underneath it.
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(pose.x, pose.y, 1.6, 0.9, 0, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      drawCasingShape(ctx, pose.x, pose.y - pose.z, c.angle + c.spin * ageSec, c.light, 0);
+    } else {
+      const dullT = Math.min(1, (now - (c.born + c.restAt * 1000)) / CASING_DULL_MS);
+      drawCasingShape(ctx, pose.x, pose.y, c.angle, c.light, dullT);
+    }
+  }
+  casings.length = write;
+}
+
+// ---------------------------------------------------------------- bullet holes
+
+/**
+ * Where a round punched into a wall rather than a body — see `Shot.wall`.
+ * Baked straight in the moment it lands, with no live phase at all: there's
+ * nothing wet about a chip out of plaster, unlike blood. Its own layer,
+ * separate from `stainLayer`, because it has to sit *on* the wall's own
+ * pixels rather than under them — `drawWalls` runs fresh every frame, and a
+ * mark baked into the ground layer would be drawn over by the very wall it
+ * belongs to.
+ */
+let wallMarkLayer: HTMLCanvasElement | null = null;
+let wallMarkCtx: CanvasRenderingContext2D | null = null;
+let wallMarkDirty = false;
+
+function ensureWallMarkLayer(): CanvasRenderingContext2D | null {
+  const w = Math.max(1, Math.round(WORLD_WIDTH * BLOOD_BAKE_SCALE));
+  const h = Math.max(1, Math.round(WORLD_HEIGHT * BLOOD_BAKE_SCALE));
+  if (!wallMarkLayer || wallMarkLayer.width !== w || wallMarkLayer.height !== h) {
+    wallMarkLayer = document.createElement('canvas');
+    wallMarkLayer.width = w;
+    wallMarkLayer.height = h;
+    wallMarkCtx = wallMarkLayer.getContext('2d');
+    wallMarkDirty = false;
+  }
+  return wallMarkCtx;
+}
+
+function clearWallMarkLayer(): void {
+  if (wallMarkLayer && wallMarkCtx) {
+    wallMarkCtx.clearRect(0, 0, wallMarkLayer.width, wallMarkLayer.height);
+  }
+  wallMarkDirty = false;
+}
+
+/** A bullet punching into a wall: a small dark chip, angled off the round's own line. */
+export function spawnBulletHole(x: number, y: number, angle: number, now: number): void {
+  const sctx = ensureWallMarkLayer();
+  if (!sctx) return;
+  const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
+  sctx.save();
+  sctx.scale(BLOOD_BAKE_SCALE, BLOOD_BAKE_SCALE);
+  sctx.translate(x, y);
+  sctx.rotate(angle + (rand() - 0.5) * 0.6);
+  const r = BULLET_HOLE_RADIUS_MIN + rand() * (BULLET_HOLE_RADIUS_MAX - BULLET_HOLE_RADIUS_MIN);
+  sctx.fillStyle = BULLET_HOLE_COLOR;
+  sctx.beginPath();
+  sctx.ellipse(0, 0, r, r * 0.8, 0, 0, TAU);
+  sctx.fill();
+  // A couple of hairline cracks radiating out, so it reads as broken plaster
+  // rather than a painted dot.
+  sctx.strokeStyle = BULLET_HOLE_COLOR;
+  sctx.lineWidth = 0.35;
+  const cracks = 2 + Math.floor(rand() * 2);
+  for (let i = 0; i < cracks; i++) {
+    const a = rand() * TAU;
+    const len = r * (1.6 + rand() * 1.2);
+    sctx.beginPath();
+    sctx.moveTo(Math.cos(a) * r * 0.6, Math.sin(a) * r * 0.6);
+    sctx.lineTo(Math.cos(a) * len, Math.sin(a) * len);
+    sctx.stroke();
+  }
+  sctx.restore();
+  wallMarkDirty = true;
+}
+
+/**
+ * The marks, blitted for the sub-rect on screen — called right after the
+ * walls themselves, so they land on the wall's surface rather than under it.
+ */
+export function drawBulletHoles(ctx: CanvasRenderingContext2D, view: Viewport): void {
+  if (!wallMarkDirty || !wallMarkLayer) return;
+  const s = BLOOD_BAKE_SCALE;
+  const sx = Math.max(0, Math.floor(view.x * s));
+  const sy = Math.max(0, Math.floor(view.y * s));
+  const sw = Math.min(wallMarkLayer.width - sx, Math.ceil(view.w * s) + 2);
+  const sh = Math.min(wallMarkLayer.height - sy, Math.ceil(view.h * s) + 2);
+  if (sw <= 0 || sh <= 0) return;
+  const smooth = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(wallMarkLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
+  ctx.imageSmoothingEnabled = smooth;
+}
+
 // ---------------------------------------------------------------- corpses
 /**
  * A shot zombie, thrown a short way along the round and then greyed. After it
@@ -3750,12 +4041,19 @@ export function spawnBurst(x: number, y: number, now: number): void {
   }
 }
 
-/** A new city has none of the old one's blood, corpses or baked stains on it. */
+/**
+ * A new city has none of the old one's blood, corpses, casings, bullet holes
+ * or baked stains on it. Casings and holes are the same trap the coordinates
+ * already fell into once: a mark means nothing on ground that no longer
+ * exists, and `wallMarkLayer` is sized off the *old* map until this runs.
+ */
 export function clearBlood(): void {
   bloodDecals.length = 0;
   bloodDrops.length = 0;
   zombieCorpses.length = 0;
+  casings.length = 0;
   clearStainLayer();
+  clearWallMarkLayer();
 }
 
 /**

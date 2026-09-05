@@ -1,4 +1,4 @@
-import type { Wall } from '../../shared/types.js';
+import type { Wall, GunVoice } from '../../shared/types.js';
 import {
   GUN_DAMAGE_MIN,
   GUN_DAMAGE_MAX,
@@ -196,6 +196,38 @@ function aimFor(world: World, id: string, command: { aim: number }): number {
 }
 
 /**
+ * Which recorded gunshot a round should play as — see `Shot.voice` and the
+ * pools in `sound.ts`. By weapon *family*: the bolt action, the semi-auto and
+ * the charge rifle all fire the same rifle round and share a voice, same as
+ * `light` groups the pistol and its two-handed sibling. A grey officer firing
+ * with no `def` at all is pistol-grade, exactly as `light` already treats it.
+ */
+function gunVoice(def: ItemDef | undefined): GunVoice | undefined {
+  switch (def?.id) {
+    case undefined:
+    case 'pistol':
+    case 'dualPistols':
+      return 'pistol';
+    case 'boltRifle':
+    case 'semiAutoRifle':
+    case 'chargeRifle':
+      return 'rifle';
+    case 'sniper':
+      return 'sniper';
+    case 'shotgun':
+      return 'shotgun';
+    case 'machineGun':
+      return 'mg';
+    case 'heavyMg':
+      return 'heavyMg';
+    default:
+      // The flamethrower (a continuous stream, not a report) and anything
+      // else with no gunshot voice of its own.
+      return undefined;
+  }
+}
+
+/**
  * Hitscan along the muzzle line: nearest zombie, but only if no wall first.
  * `pierce` lets one round carry through several bodies, and `damageMul` is how
  * far a charge weapon wound up before letting go.
@@ -254,6 +286,10 @@ export function fire(
   // A fully wound charge round goes through exactly one of them and stops at
   // the next. Everything else stops at the first.
   let wallT = 1;
+  // Whether the blocker that actually stopped the round (if any) was a wall
+  // rather than a door — a door's own drawing runs after the wall pass, so a
+  // mark baked for it would be painted straight over. See `Shot.wall`.
+  let stoppedByWall = false;
   let skip = throughWall ? 1 : 0;
   for (const blocker of blockers) {
     if (blocker.door >= 0) damageDoor(world, blocker.door, DOOR_BULLET_DAMAGE);
@@ -262,6 +298,7 @@ export function fire(
       continue;
     }
     wallT = blocker.t;
+    stoppedByWall = blocker.door === -1;
     break;
   }
 
@@ -306,6 +343,12 @@ export function fire(
   // shotgun pellet is low per hit and still tears. A grey officer firing with
   // no `def` is pistol-grade and counts as light.
   const light = !def || def.id === 'pistol' || def.id === 'dualPistols';
+  // The round's final resting point is against a wall only when nothing
+  // living stopped it first — a piercing round that spends itself on a body
+  // and never reaches the wall behind it leaves no hole, same as an ordinary
+  // one that stops in somebody's chest.
+  const hitWall = stoppedByWall && (struck.length === 0 || pierce > 1);
+  const voice = gunVoice(def);
   world.shots.push({
     x1: Math.round(muzzleX),
     y1: Math.round(muzzleY),
@@ -313,6 +356,8 @@ export function fire(
     y2: Math.round(muzzleY + (endY - muzzleY) * stopT),
     hit: struck.length > 0,
     ...(light ? { light: true } : {}),
+    ...(hitWall ? { wall: true } : {}),
+    ...(voice ? { voice } : {}),
   });
 
   alertZombies(world, shooter.id, shooter.x, shooter.y, now);

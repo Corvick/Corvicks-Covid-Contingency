@@ -63,6 +63,8 @@ import type {
   CorpseState,
   DogHud,
   Wall,
+  Shot,
+  GunVoice,
 } from '../../shared/types.js';
 import { connect, takeNetStats, pingStats } from './net.js';
 import { trackInput, spectatorPan } from './input.js';
@@ -71,6 +73,13 @@ import {
   playZombieGroan,
   playZombieAttack,
   playZombieHit,
+  playHidingSob,
+  playPistolShot,
+  playRifleShot,
+  playSniperShot,
+  playShotgunBlast,
+  playMachineGunShot,
+  playHeavyMachineGunShot,
   occlusion,
   stopAllSounds,
   type Spatial,
@@ -117,6 +126,10 @@ import {
   drawBlood,
   drawBloodSpray,
   drawZombieCorpses,
+  drawCasings,
+  spawnCasing,
+  drawBulletHoles,
+  spawnBulletHole,
   spawnBlood,
   spawnCorpse,
   spawnBurst,
@@ -601,6 +614,10 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
     if (started && !paused) {
       hearRoars(msg.entities);
       hearZombies(msg.entities, performance.now());
+      // `?? []` for the same cross-build reason `buildSites` gets it below —
+      // a server that predates this field simply sends nothing to hear.
+      hearSobs(msg.sobs ?? [], performance.now());
+      hearGunfire(msg.shots, performance.now());
     }
     spectating = msg.spectating;
     survivors = msg.survivors;
@@ -688,19 +705,23 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
       const now = performance.now();
       for (const shot of msg.shots) {
         tracers.push({ ...shot, born: now });
+        const travel = Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1);
         // A round that found a body, and where it stopped. Nothing about blood
         // is on the wire — `hit` and the endpoint are already here for the
         // tracer, so the splatter is derived from what is being drawn anyway.
         // A cure and a flame both "hit" and neither draws any. `light` marks a
         // pistol round, which leaves a smaller, sparser stain.
         if (shot.hit && shot.kind === undefined) {
-          spawnBlood(
-            shot.x2,
-            shot.y2,
-            Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1),
-            now,
-            shot.light === true,
-          );
+          spawnBlood(shot.x2, shot.y2, travel, now, shot.light === true);
+        } else if (shot.wall && shot.kind === undefined) {
+          // Stopped by a wall rather than a body — see `Shot.wall`.
+          spawnBulletHole(shot.x2, shot.y2, travel, now);
+        }
+        // A case leaves the ejection port on every ordinary round fired,
+        // whether or not it found anything — that part is the muzzle's
+        // business, not the round's.
+        if (shot.kind === undefined) {
+          spawnCasing(shot.x1, shot.y1, travel, now, shot.light === true);
         }
       }
     }
@@ -1389,6 +1410,16 @@ const ROAR_EARSHOT = 1400;
  * returns silence outright rather than a number close to it, so a caller never
  * has to ask twice.
  */
+/**
+ * How far past the edge of the actual screen a sound keeps fading before it's
+ * gone — see the `screenMul` note inside `spatialFor`. Small on purpose: this
+ * is what makes an offscreen zombie read as "barely heard" rather than merely
+ * "a bit quieter", which raw distance alone never achieved — the hearing
+ * ranges below are all comfortably wider than a screen, so plenty of what's
+ * in earshot by distance is nowhere near what's in view.
+ */
+const SCREEN_EAR_FADE = 260;
+
 function spatialFor(x: number, y: number, range: number): Spatial {
   const me = self();
   const ear = me ?? { x: spectateX, y: spectateY };
@@ -1409,8 +1440,22 @@ function spatialFor(x: number, y: number, range: number): Spatial {
   // standing in it. A player's own camera never drops this low (`cameraZoom`
   // is always >= 1), so `zoomMul` is 1 through ordinary play and this line
   // does nothing until somebody actually zooms out to watch.
-  const { scale } = cameraFor(me);
+  const { view, scale } = cameraFor(me);
   const zoomMul = Math.pow(Math.max(0, Math.min(1, scale)), 1.6);
+
+  // This is top-down: what is not actually on screen should barely be heard,
+  // whatever a raw hearing radius says. `view` is the camera's own visible
+  // rectangle in world pixels, so "offscreen" is read straight off what is
+  // actually drawn rather than guessed at with a second radius. `offX`/`offY`
+  // are 0 anywhere inside it and grow past whichever edge was crossed;
+  // squared so the first short stretch past the edge is still mostly present
+  // — a body one step off the side of the screen has not really left — and it
+  // falls away hard after that. A spectator's `view` covers most or all of
+  // the map, so this does nothing to them beyond the ordinary `zoomMul` above.
+  const offX = Math.max(0, view.x - x, x - (view.x + view.w));
+  const offY = Math.max(0, view.y - y, y - (view.y + view.h));
+  const offscreen = Math.hypot(offX, offY);
+  const screenMul = Math.pow(Math.max(0, 1 - offscreen / SCREEN_EAR_FADE), 2);
 
   // Reaches hard left/right well inside the hearing range (this was 0.7),
   // because the point of panning is to say which way to look — a sound stayed
@@ -1422,7 +1467,7 @@ function spatialFor(x: number, y: number, range: number): Spatial {
   const hits = map ? occlusion(ear.x, ear.y, x, y, map.walls) : 0;
   const muffle = Math.min(1, hits / 2.5);
   // A wall does not just dull a sound, it takes some of it away too.
-  const gain = distFalloff * zoomMul * (1 - muffle * 0.6);
+  const gain = distFalloff * zoomMul * screenMul * (1 - muffle * 0.6);
 
   return { gain, pan, muffle };
 }
@@ -1625,6 +1670,70 @@ function hearZombies(incoming: EntityState[], now: number): void {
     for (const id of zombieVoices.keys()) {
       if (!attackingNow.has(id) && !tracked.has(id)) zombieVoices.delete(id);
     }
+  }
+}
+
+/**
+ * How far a hidden sob carries. Short, and deliberately shorter than either
+ * zombie hearing range — this is meant to be a close, half-heard thing you
+ * only catch near the bush it's coming from, not a citywide tell.
+ */
+const SOB_HEARING_RANGE = 480;
+
+/**
+ * Any sobs that arrived this snapshot. There's no id to track from one tick
+ * to the next — the server already decides how sparingly any one hider may
+ * sob (`sobTick` in `ai.ts`) — so this is nothing but "for each one,
+ * spatialise and play".
+ */
+function hearSobs(incoming: Array<{ x: number; y: number }>, now: number): void {
+  for (const s of incoming) {
+    const spatial = spatialFor(s.x, s.y, SOB_HEARING_RANGE);
+    if (spatial.gain > 0.02 && takeVoiceBudget(now)) playHidingSob(spatial);
+  }
+}
+
+/**
+ * How far each weapon's report carries — all of them further than either
+ * zombie range, since this is meant to be the loudest, sharpest thing in the
+ * mix, not ambience. Heavier weapons carry further, the sniper furthest of
+ * all: it is meant to be heard as a single, distant, unmistakable crack from
+ * well outside the fight it just started.
+ */
+const GUN_VOICE_RANGE: Record<GunVoice, number> = {
+  pistol: 1900,
+  rifle: 2400,
+  sniper: 3000,
+  shotgun: 2000,
+  mg: 2100,
+  heavyMg: 2500,
+};
+
+/** Which `sound.ts` voice plays for which `Shot.voice`. */
+const GUN_VOICE_PLAY: Record<GunVoice, (spatial: Spatial) => void> = {
+  pistol: playPistolShot,
+  rifle: playRifleShot,
+  sniper: playSniperShot,
+  shotgun: playShotgunBlast,
+  mg: playMachineGunShot,
+  heavyMg: playHeavyMachineGunShot,
+};
+
+/**
+ * A round going off, for every ordinary bullet in earshot — every weapon, and
+ * every shooter, not just you or just the pistol. Deliberately no "my own gun
+ * is always full volume" exception the way the dog's own roar gets one: a
+ * gunshot is not a warning tell, it is just a sound, and it carries (or
+ * doesn't) exactly as far as its distance, the screen and any wall between
+ * says it does — the same `spatialFor` every other positional sound answers
+ * to. Spatialised from the muzzle (`x1, y1`), which is where the bang
+ * actually comes from, not wherever the round ends up.
+ */
+function hearGunfire(shots: Shot[], now: number): void {
+  for (const shot of shots) {
+    if (shot.kind !== undefined || !shot.voice) continue;
+    const spatial = spatialFor(shot.x1, shot.y1, GUN_VOICE_RANGE[shot.voice]);
+    if (spatial.gain > 0.01 && takeVoiceBudget(now)) GUN_VOICE_PLAY[shot.voice](spatial);
   }
 }
 
@@ -2641,10 +2750,15 @@ function render() {
      * top of them would hide the very thing it is warning about.
      */
     drawLashWarnings(ctx, lashes, view, now);
+    // Spent cases: on the ground with the blood, for the same reason.
+    drawCasings(ctx, view, now);
     // Bodies lie on the blood and under everyone still on their feet.
     drawZombieCorpses(ctx, view, now);
     drawCorpses(ctx, corpses, view, now);
     drawWalls(ctx, map.walls, view);
+    // Bullet holes sit *on* the wall's own fresh pixels, so this has to come
+    // after `drawWalls` rather than beside the other ground marks above.
+    drawBulletHoles(ctx, view);
     drawWindows(ctx, map.windows, brokenWindows, view);
     drawDoors(ctx, map.doors, doorStates, view);
     // Under the entities, so the officer stands on his own emplacement rather

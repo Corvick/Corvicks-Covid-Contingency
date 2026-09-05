@@ -4,12 +4,13 @@ import { DOG_ROAR_MS } from '../../shared/constants.js';
 /**
  * The game's noises, all of them.
  *
- * **Mostly recorded, with synthesis as the fallback while a recording is still
- * loading (or in case it never does).** The dog's roar and the zombies' bark
- * are still built from oscillators — see `synthesizeZombieGroan` and
- * `synthesizeZombieAttack` further down — but a raw sawtooth voice is a hard
- * way to sound like a throat, so the zombies' everyday groan and bite are now
- * a handful of short, freely-licensed recordings under `client/public/sfx/`
+ * **Recorded wherever a recording exists, with synthesis as the fallback
+ * while one is still loading (or in case it never does) — and going forward,
+ * every new sound this game gets should be acquired the same way.** The
+ * dog's roar is still built from oscillators, because nothing about a zombie
+ * master's animal exists to go and record; everything that has a real-world
+ * counterpart — the zombies' everyday groan and bite, somebody sobbing, a
+ * gunshot — is a short, freely-licensed recording under `client/public/sfx/`
  * (see `CREDITS.md` there) instead. Everything downstream of a sound existing
  * — `spatialOutput`, distance, pan, muffle — has no idea which of the two made
  * it: both a recording and an oscillator are just an `AudioNode` by the time
@@ -42,8 +43,9 @@ function audio(): AudioContext | null {
   // Kicked off the moment there is a context to decode into, rather than on
   // the first groan — a round's first zombie is usually still several
   // seconds off by the time a player has so much as clicked PLAY, which is
-  // normally enough for eleven small files to be ready before anything asks.
-  loadZombieVoices(ctx);
+  // normally enough for a couple of dozen small files to be ready before
+  // anything asks.
+  loadRecordedVoices(ctx);
   return ctx;
 }
 
@@ -190,7 +192,6 @@ const GROAN_FILES = [
   'groan-03-demon-breathing.mp3',
   'groan-04-breath.mp3',
   'groan-05-gasp.mp3',
-  'groan-06-sobbing.mp3',
   'groan-07-calm-growl.mp3',
   'groan-08-male-growl.mp3',
   'groan-09-monster-grunt.mp3',
@@ -200,7 +201,6 @@ const ATTACK_FILES = [
   'attack-01-grunt.mp3',
   'attack-02-roar.mp3',
   'attack-04-growl.mp3',
-  'attack-05-hurt.mp3',
   'attack-06-screech.mp3',
   'attack-07-scream.mp3',
   'attack-08-creature-roar.mp3',
@@ -218,6 +218,35 @@ const ATTACK_FILES = [
 const HIT_FILES = ['hit-01-pain.mp3'];
 
 /**
+ * Not a zombie noise at all — a person's, and it lives under its own
+ * `sfx/human/` rather than beside the zombie recordings for that reason. See
+ * `playHidingSob`.
+ */
+const HUMAN_SFX_BASE = `${import.meta.env.BASE_URL}sfx/human/`;
+const SOB_FILES = ['hiding-sob.mp3'];
+
+/**
+ * Gunfire, likewise not a zombie noise — under its own `sfx/weapons/`. One
+ * pool per `GunVoice` (see `shared/types.ts`), so `hearGunfire` in `main.ts`
+ * only ever has to know the category a `Shot` says it is, never a specific
+ * file. Every one of these is a real recording rather than anything built
+ * from oscillators — see the note on `synthesizeGunshot`, its fallback,
+ * further down — sourced free of charge and free of any attribution
+ * requirement (Freesound.org, all Creative Commons 0; see `CREDITS.md`).
+ *
+ * Grouped by weapon *family*, not by `ItemId`: the bolt action, the
+ * semi-auto and the charge rifle all fire the same rifle round and share
+ * `RIFLE_FILES`, exactly as `gunVoice` groups them server-side.
+ */
+const WEAPON_SFX_BASE = `${import.meta.env.BASE_URL}sfx/weapons/`;
+const PISTOL_FILES = ['pistol-01-makarov.mp3', 'pistol-02-snappy.mp3', 'pistol-03-indoor.mp3'];
+const RIFLE_FILES = ['rifle-01-single.mp3'];
+const SNIPER_FILES = ['sniper-01-shot.mp3', 'sniper-02-barrett.mp3'];
+const SHOTGUN_FILES = ['shotgun-01-blast.mp3'];
+const MG_FILES = ['mg-01-single.mp3', 'mg-02-single.mp3'];
+const HEAVY_MG_FILES = ['heavymg-01-m240.mp3', 'heavymg-02-dshk.mp3'];
+
+/**
  * Decoded and ready to play. Filled in as each file arrives rather than all
  * at once, so the first one to finish decoding is already usable while the
  * rest are still in flight.
@@ -225,31 +254,47 @@ const HIT_FILES = ['hit-01-pain.mp3'];
 const groanVoices: AudioBuffer[] = [];
 const attackVoices: AudioBuffer[] = [];
 const hitVoices: AudioBuffer[] = [];
+const sobVoices: AudioBuffer[] = [];
+const pistolVoices: AudioBuffer[] = [];
+const rifleVoices: AudioBuffer[] = [];
+const sniperVoices: AudioBuffer[] = [];
+const shotgunVoices: AudioBuffer[] = [];
+const mgVoices: AudioBuffer[] = [];
+const heavyMgVoices: AudioBuffer[] = [];
 let voicesRequested = false;
 
 /**
  * Fetch and decode every recorded voice, once. Fire-and-forget: nothing here
  * is awaited by a caller, because a groan asked for before this has finished
  * falls back to the synthesised one rather than a round pausing on a network
- * request for a sound effect.
+ * request for a sound effect. Named for what it does now rather than what it
+ * first did — this has not been zombie-only since the sob joined it.
  */
-function loadZombieVoices(ac: AudioContext): void {
+function loadRecordedVoices(ac: AudioContext): void {
   if (voicesRequested) return;
   voicesRequested = true;
-  const load = (file: string, into: AudioBuffer[]) => {
-    fetch(SFX_BASE + file)
+  const load = (base: string, file: string, into: AudioBuffer[]) => {
+    fetch(base + file)
       .then((r) => r.arrayBuffer())
       .then((data) => ac.decodeAudioData(data))
       .then((buffer) => into.push(buffer))
       .catch(() => {
         // Offline, blocked, or a bad file — the synthesised fallback carries
         // this one voice for the rest of the round rather than the whole
-        // thing failing over one missing recording.
+        // thing failing over one missing recording. `playHidingSob` has no
+        // such fallback (see the note there), so this one just stays silent.
       });
   };
-  for (const file of GROAN_FILES) load(file, groanVoices);
-  for (const file of ATTACK_FILES) load(file, attackVoices);
-  for (const file of HIT_FILES) load(file, hitVoices);
+  for (const file of GROAN_FILES) load(SFX_BASE, file, groanVoices);
+  for (const file of ATTACK_FILES) load(SFX_BASE, file, attackVoices);
+  for (const file of HIT_FILES) load(SFX_BASE, file, hitVoices);
+  for (const file of SOB_FILES) load(HUMAN_SFX_BASE, file, sobVoices);
+  for (const file of PISTOL_FILES) load(WEAPON_SFX_BASE, file, pistolVoices);
+  for (const file of RIFLE_FILES) load(WEAPON_SFX_BASE, file, rifleVoices);
+  for (const file of SNIPER_FILES) load(WEAPON_SFX_BASE, file, sniperVoices);
+  for (const file of SHOTGUN_FILES) load(WEAPON_SFX_BASE, file, shotgunVoices);
+  for (const file of MG_FILES) load(WEAPON_SFX_BASE, file, mgVoices);
+  for (const file of HEAVY_MG_FILES) load(WEAPON_SFX_BASE, file, heavyMgVoices);
 }
 
 /**
@@ -585,4 +630,159 @@ export function playZombieHit(spatial: Spatial, voice: number): void {
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
   playVoice(ac, hitVoices, spatial, voice, 0.4);
+}
+
+/**
+ * Somebody sobbing, alone, hidden in a bush — the server rolls how sparingly
+ * this fires (see `sobTick` in `ai.ts`); this end just plays whatever it's
+ * handed. Not a zombie noise, so it draws from `sobVoices` rather than any of
+ * the pools above, and there's no per-id `voice` to hash a pitch from — there
+ * is no id on the wire for it at all, deliberately, since a sob carries no
+ * more than a position.
+ *
+ * No synthesised fallback, for the same reason `playZombieHit` has none: a
+ * handful going unheard while the one small file is still loading is not
+ * worth a voice built out of oscillators for something this rare.
+ */
+export function playHidingSob(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.012) return;
+  playVoice(ac, sobVoices, spatial, 0.3 + Math.random() * 0.3, 0.35);
+}
+
+/**
+ * The fallback shape for a gunshot with no recording ready yet — see the
+ * module doc comment, and `PISTOL_FILES` etc. above. Built the same way
+ * `synthesizeZombieAttack`'s bark is: a gunshot is a transient, not a note,
+ * so this is three short layers with nothing that could be called a pitch.
+ * `crackHz` and the thump's range move down, and `ceiling` moves up, for a
+ * heavier weapon — which is the whole of what tells a pistol from a sniper
+ * rifle apart with nothing but oscillators to do it.
+ */
+interface GunshotProfile {
+  crackHz: number;
+  thumpFrom: number;
+  thumpTo: number;
+  ceiling: number;
+}
+
+function synthesizeGunshot(spatial: Spatial, profile: GunshotProfile): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+
+  const now = ac.currentTime;
+  const bus = spatialOutput(ac, spatial);
+
+  // The crack: broadband noise, gone almost as soon as it starts. This is
+  // what a gunshot actually is to the ear — a transient, not a tone.
+  const crack = ac.createBufferSource();
+  crack.buffer = noiseBuffer(ac);
+  const crackFilter = ac.createBiquadFilter();
+  crackFilter.type = 'bandpass';
+  crackFilter.frequency.value = profile.crackHz + Math.random() * 300;
+  crackFilter.Q.value = 0.7;
+  const crackGain = ac.createGain();
+  crackGain.gain.setValueAtTime(profile.ceiling, now);
+  crackGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.032);
+  crack.connect(crackFilter).connect(crackGain).connect(bus);
+  crack.start(now);
+  crack.stop(now + 0.05);
+
+  // The thump: the mechanical weight under the crack — brief, and it falls
+  // fast, or it starts sounding like a note rather than a shot.
+  const thump = ac.createOscillator();
+  thump.type = 'triangle';
+  thump.frequency.setValueAtTime(profile.thumpFrom, now);
+  thump.frequency.exponentialRampToValueAtTime(profile.thumpTo, now + 0.06);
+  const thumpGain = ac.createGain();
+  thumpGain.gain.setValueAtTime(profile.ceiling * 0.72, now);
+  thumpGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+  thump.connect(thumpGain).connect(bus);
+  thump.start(now);
+  thump.stop(now + 0.08);
+
+  // The tail: the report carrying off down the street, quieter and slower to
+  // die than the crack that made it. Scaled off the same `crackHz` rather
+  // than a figure of its own, so a heavier weapon's tail drops with its crack.
+  const tail = ac.createBufferSource();
+  tail.buffer = noiseBuffer(ac);
+  const tailFilter = ac.createBiquadFilter();
+  tailFilter.type = 'bandpass';
+  tailFilter.frequency.setValueAtTime(profile.crackHz * 0.42, now);
+  tailFilter.frequency.exponentialRampToValueAtTime(profile.crackHz * 0.15, now + 0.2);
+  tailFilter.Q.value = 0.8;
+  const tailGain = ac.createGain();
+  tailGain.gain.setValueAtTime(profile.ceiling * 0.4, now + 0.01);
+  tailGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+  tail.connect(tailFilter).connect(tailGain).connect(bus);
+  tail.start(now);
+  tail.stop(now + 0.24);
+}
+
+/**
+ * A pistol round going off. Recorded first — see `PISTOL_FILES` — and only
+ * reaches for `synthesizeGunshot` while those are still loading (or in the
+ * unlikely case they never do).
+ */
+export function playPistolShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, pistolVoices, spatial, 0.3 + Math.random() * 0.4, 0.55)) return;
+  synthesizeGunshot(spatial, { crackHz: 2600, thumpFrom: 160, thumpTo: 55, ceiling: 0.55 });
+}
+
+/**
+ * A rifle round — the bolt action, the semi-auto and the charge rifle alike.
+ * They fire the same round out of the same class of weapon, so one voice
+ * covers all three; see `gunVoice` server-side.
+ */
+export function playRifleShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, rifleVoices, spatial, 0.3 + Math.random() * 0.4, 0.68)) return;
+  synthesizeGunshot(spatial, { crackHz: 2100, thumpFrom: 130, thumpTo: 40, ceiling: 0.68 });
+}
+
+/** A sniper round — the heaviest, loudest single crack in the game. */
+export function playSniperShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, sniperVoices, spatial, 0.3 + Math.random() * 0.4, 0.75)) return;
+  synthesizeGunshot(spatial, { crackHz: 1800, thumpFrom: 100, thumpTo: 30, ceiling: 0.75 });
+}
+
+/** A shotgun blast — broad and boomy rather than sharp. */
+export function playShotgunBlast(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, shotgunVoices, spatial, 0.3 + Math.random() * 0.4, 0.7)) return;
+  synthesizeGunshot(spatial, { crackHz: 1400, thumpFrom: 90, thumpTo: 35, ceiling: 0.7 });
+}
+
+/**
+ * One round out of the (light) machine gun. Quieter per shot than the others
+ * on purpose — this is the one voice that fires several times a second, and
+ * a burst of them at full ceiling would drown out everything else in the mix.
+ */
+export function playMachineGunShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, mgVoices, spatial, 0.3 + Math.random() * 0.4, 0.45)) return;
+  synthesizeGunshot(spatial, { crackHz: 2400, thumpFrom: 150, thumpTo: 50, ceiling: 0.45 });
+}
+
+/** One round out of the heavy machine gun — deeper and a little louder than the light one. */
+export function playHeavyMachineGunShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, heavyMgVoices, spatial, 0.3 + Math.random() * 0.4, 0.55)) return;
+  synthesizeGunshot(spatial, { crackHz: 1900, thumpFrom: 110, thumpTo: 35, ceiling: 0.55 });
 }

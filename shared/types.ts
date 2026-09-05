@@ -520,6 +520,15 @@ export interface MapData {
 /** A shotgun blast is several tracers from one trigger pull. */
 export type ShotKind = 'bullet' | 'cure' | 'flame';
 
+/**
+ * Which recorded gunshot a round's report should play as — see the pools in
+ * `sound.ts`. One per weapon *family* rather than one per `ItemId`: the bolt
+ * action, the semi-auto and the charge rifle all fire the same rifle round
+ * and share a voice, where the pistol, the shotgun, the two machine guns and
+ * the sniper are each their own thing to the ear.
+ */
+export type GunVoice = 'pistol' | 'rifle' | 'shotgun' | 'mg' | 'heavyMg' | 'sniper';
+
 /** A patch of ground alight. `life` is 1 when fresh and 0 as it dies. */
 export interface FireState {
   x: number;
@@ -705,6 +714,20 @@ export interface Shot {
    * machine-gun round are low *per hit* and still tear.
    */
   light?: boolean;
+  /**
+   * Stopped by a wall rather than by a body — never by a door, whose own
+   * drawing runs after the wall pass and would paint straight over a mark
+   * left for it. Absent means the round hit somebody, or simply ran out of
+   * range in the open. The client bakes a bullet hole at `x2,y2` for it.
+   */
+  wall?: boolean;
+  /**
+   * Which gunshot recording this round's report should play as. Absent for
+   * the flamethrower (its own continuous stream has no discrete report) and
+   * for anything that isn't `fire`'s ordinary hitscan at all — a cure beam
+   * and a flame tongue are never bullets, whatever `kind` says about them.
+   */
+  voice?: GunVoice;
 }
 
 export interface InputState {
@@ -1196,6 +1219,12 @@ export type ServerMessage =
       corpses: CorpseState[];
       towers: BeaconState[];
       zaps: Array<{ x: number; y: number; at: number }>;
+      /**
+       * A sob from someone genuinely hiding in a bush, for one tick — sound
+       * only, exactly like `zaps`. No id, no entity data: the client just
+       * spatialises it and plays `groan-06-sobbing.mp3` through it.
+       */
+      sobs: Array<{ x: number; y: number }>;
       /** Ground still burning. */
       fires: FireState[];
       helicopters: HelicopterState[];
