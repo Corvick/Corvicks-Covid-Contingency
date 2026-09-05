@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.27.1';
+export const GAME_VERSION = '0.28.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2804,6 +2804,33 @@ export const GUN_COOLDOWN_MS = 1000;
  * top is a tick and a bit of slack, not a guess.
  */
 export const BOLT_CYCLE_MS = 1387;
+/**
+ * The M1 Garand's en-bloc clip. Eight in the real rifle; ten here, generous
+ * to the player. `semiAutoRifle.clipSize` in `items.ts` is built from this,
+ * and it is the one thing that turns a plain ammo count into a weapon that
+ * forces a reload: every this-many-th round fired empties the clip, and it
+ * ejects itself with nothing chambered until a fresh one goes in.
+ */
+export const GARAND_CLIP_SIZE = 10;
+/**
+ * How long the ping recording runs — the longer of the two takes under
+ * `weapons/garand-0N-ping.wav` (see `client/public/sfx/CREDITS.md`), plus a
+ * tick of slack. The reload sound is scheduled to start exactly this far
+ * after the ping on the audio clock, the same way `playBoltCycle` rides
+ * alongside a bolt-action shot, so the two are heard as one continuous cycle
+ * — clip out, then clip in — rather than the client guessing when the ping
+ * has finished ringing.
+ */
+export const GARAND_PING_MS = 760;
+/**
+ * How long the reload recording itself runs —
+ * `weapons/garand-03-reload.mp3`, a single clean take (see CREDITS.md).
+ * `semiAutoRifle.reloadMs` in `items.ts` is `GARAND_PING_MS + GARAND_RELOAD_MS`
+ * plus a little margin: the cooldown *is* "the ping and the reload have to be
+ * heard out before the rifle can fire again", the same reasoning
+ * `boltRifle.cooldownMs` already rests on for its own cycling sound.
+ */
+export const GARAND_RELOAD_MS = 1570;
 /**
  * TESTING: player officers drop a zombie in a single hit. Turned off now that
  * the pistol does real damage — flip back to true to restore test-kill mode.

@@ -1,5 +1,5 @@
 import type { Wall } from '../../shared/types.js';
-import { DOG_ROAR_MS } from '../../shared/constants.js';
+import { DOG_ROAR_MS, GARAND_PING_MS } from '../../shared/constants.js';
 
 /**
  * The game's noises, all of them.
@@ -258,8 +258,32 @@ const PISTOL_FILES = ['rifle-01-single.mp3'];
  * on its own never was. `rifle-01-single.mp3` moved to the pistol rather
  * than joining this pool as a fourth take, so the two weapons stay
  * distinguishable from each other.
+ *
+ * **Two of the three are hand-trimmed, and that trim is load-bearing.** The
+ * raw takes are single close-mic'd shots, but the recordist's mic kept
+ * rolling afterward, and two of them caught the bolt being worked for a
+ * follow-up shot several seconds later — a second, unrelated mechanical
+ * transient sitting well inside the plain silence-trim's threshold. That is
+ * inaudible at `boltRifle`'s own cadence when it's just the two of them
+ * spaced far enough apart, but reported as *"plays its sound for too long
+ * like it's cycling twice"* — the file's own baked-in bolt-work landing on
+ * top of, or shortly after, this game's own dedicated `playBoltCycle` sound.
+ * `rifle-01-shot.wav` and `rifle-03-shot.wav` are cut to the one clean crack
+ * (plus its own close echo — a real decay characteristic, not an artifact)
+ * and stop well short of the second event; `rifle-02-shot.mp3` never had one
+ * and is untouched. See CREDITS.md.
  */
-const RIFLE_FILES = ['rifle-01-shot.mp3', 'rifle-02-shot.mp3', 'rifle-03-shot.mp3'];
+const RIFLE_FILES = ['rifle-01-shot.wav', 'rifle-02-shot.mp3', 'rifle-03-shot.wav'];
+/**
+ * The M1 Garand's own report — three takes, each hand-trimmed to a single
+ * clean ~225ms crack out of a real burst of rapid semi-auto fire (see
+ * CREDITS.md). It used to share `RIFLE_FILES` with the bolt action, and that
+ * was the bug: those recordings run several seconds with the report's own
+ * natural tail, which is inaudible at a bolt-action's cadence and was
+ * plainly audible — "still cycling" — at this gun's much faster one. A short
+ * take is the fix, not a synthesised fallback.
+ */
+const GARAND_SHOT_FILES = ['garand-01-shot.wav', 'garand-02-shot.wav', 'garand-03-shot.wav'];
 /**
  * The bolt being worked after a bolt-action shot — one throw of it, trimmed
  * out of a 14-second demonstration recording that cycled the action twenty
@@ -269,6 +293,20 @@ const RIFLE_FILES = ['rifle-01-shot.mp3', 'rifle-02-shot.mp3', 'rifle-03-shot.mp
  * bolt-cycling recording found under a licence this project will use.
  */
 const BOLT_CYCLE_FILES = ['rifle-04-bolt-cycle.wav'];
+/**
+ * The M1 Garand's en-bloc clip ejecting — the ping. Two takes of the real
+ * thing, each hand-trimmed down to the one clean event (see CREDITS.md): the
+ * source recordings are field takes with a second, unrelated transient
+ * several seconds later — the clip landing, or a second demonstration — which
+ * a plain silence-trim would have swept in as part of "the ping".
+ */
+const GARAND_PING_FILES = ['garand-01-ping.wav', 'garand-02-ping.wav'];
+/**
+ * The clatter of a fresh clip going in and the bolt slamming forward,
+ * straight after the ping. A single clean take rather than a pool — see
+ * `BOLT_CYCLE_FILES` just above for the same shape of pool.
+ */
+const GARAND_RELOAD_FILES = ['garand-03-reload.mp3'];
 const SNIPER_FILES = ['sniper-01-shot.mp3', 'sniper-02-barrett.mp3'];
 const SHOTGUN_FILES = ['shotgun-01-blast.mp3'];
 const MG_FILES = ['mg-01-single.mp3', 'mg-02-single.mp3'];
@@ -294,7 +332,10 @@ const hitVoices: VoiceClip[] = [];
 const sobVoices: VoiceClip[] = [];
 const pistolVoices: VoiceClip[] = [];
 const rifleVoices: VoiceClip[] = [];
+const garandShotVoices: VoiceClip[] = [];
 const boltCycleVoices: VoiceClip[] = [];
+const garandPingVoices: VoiceClip[] = [];
+const garandReloadVoices: VoiceClip[] = [];
 const sniperVoices: VoiceClip[] = [];
 const shotgunVoices: VoiceClip[] = [];
 const mgVoices: VoiceClip[] = [];
@@ -406,11 +447,22 @@ const SOB_TARGET_RMS = 0.039;
 // A single-file pool, so the target is that file's own measured RMS — the
 // single-file case above.
 const PISTOL_TARGET_RMS = 0.068;
-// The three Sauer 404 takes measured within 2dB of each other unprompted —
-// genuinely one rifle, one session — so this is close to the middle of all
-// three rather than a rescue for any of them.
-const RIFLE_TARGET_RMS = 0.052;
+// Measured *after* the hand-trim above, not before: cutting the two takes'
+// baked-in second event also cuts the quiet tail that used to drag their
+// average down, so the three read louder and further apart now — 0.0677,
+// 0.0544 and 0.1068 — than the pre-trim figure this constant used to carry.
+// Still the middle of what the (now-correctly-isolated) three actually do.
+const RIFLE_TARGET_RMS = 0.076;
+// The three takes measured 0.1766, 0.1751 and 0.1765 unprompted — one rifle,
+// one burst, essentially identical levels.
+const GARAND_SHOT_TARGET_RMS = 0.176;
 const BOLT_CYCLE_TARGET_RMS = 0.144;
+// The two ping takes measured 0.0569 and 0.0582 RMS after the same hand-trim
+// that produced the files themselves — close enough that this is the middle
+// of both rather than a rescue for either.
+const GARAND_PING_TARGET_RMS = 0.058;
+// A single-file pool, so the target is that file's own measured RMS.
+const GARAND_RELOAD_TARGET_RMS = 0.028;
 const SNIPER_TARGET_RMS = 0.12;
 const SHOTGUN_TARGET_RMS = 0.074;
 const MG_TARGET_RMS = 0.335;
@@ -480,7 +532,10 @@ function loadRecordedVoices(ac: AudioContext): void {
   for (const file of SOB_FILES) load(HUMAN_SFX_BASE, file, sobVoices, SOB_TARGET_RMS);
   for (const file of PISTOL_FILES) load(WEAPON_SFX_BASE, file, pistolVoices, PISTOL_TARGET_RMS);
   for (const file of RIFLE_FILES) load(WEAPON_SFX_BASE, file, rifleVoices, RIFLE_TARGET_RMS);
+  for (const file of GARAND_SHOT_FILES) load(WEAPON_SFX_BASE, file, garandShotVoices, GARAND_SHOT_TARGET_RMS);
   for (const file of BOLT_CYCLE_FILES) load(WEAPON_SFX_BASE, file, boltCycleVoices, BOLT_CYCLE_TARGET_RMS);
+  for (const file of GARAND_PING_FILES) load(WEAPON_SFX_BASE, file, garandPingVoices, GARAND_PING_TARGET_RMS);
+  for (const file of GARAND_RELOAD_FILES) load(WEAPON_SFX_BASE, file, garandReloadVoices, GARAND_RELOAD_TARGET_RMS);
   for (const file of SNIPER_FILES) load(WEAPON_SFX_BASE, file, sniperVoices, SNIPER_TARGET_RMS);
   for (const file of SHOTGUN_FILES) load(WEAPON_SFX_BASE, file, shotgunVoices, SHOTGUN_TARGET_RMS);
   for (const file of MG_FILES) load(WEAPON_SFX_BASE, file, mgVoices, MG_TARGET_RMS);
@@ -519,6 +574,15 @@ function playVoice(
   spatial: Spatial,
   voice: number,
   ceiling: number,
+  /**
+   * Start this far into the future rather than immediately, on the audio
+   * clock rather than `setTimeout` — see `playGarandCycle`, the one caller
+   * that needs it. Scheduled this way, closing the context (leaving a round,
+   * quitting to the menu) silences a sound still waiting to start along with
+   * everything already playing, instead of a stray timer firing it later into
+   * whatever comes next.
+   */
+  delaySec = 0,
 ): boolean {
   if (pool.length === 0) return false;
   const entry = pool[Math.floor(Math.random() * pool.length)];
@@ -526,7 +590,7 @@ function playVoice(
   source.buffer = entry.buffer;
   source.playbackRate.value = 0.88 + voice * 0.22 + (Math.random() * 0.16 - 0.08);
   source.connect(spatialOutput(ac, { ...spatial, gain: spatial.gain * ceiling * entry.gain }));
-  source.start();
+  source.start(ac.currentTime + delaySec);
   return true;
 }
 
@@ -942,6 +1006,21 @@ export function playRifleShot(spatial: Spatial): void {
 }
 
 /**
+ * The M1 Garand's own report — see `GARAND_SHOT_FILES`. Its own voice rather
+ * than `playRifleShot`, and the fallback profile is the same one that used to
+ * stand in for this gun before it had a family of its own — moving to a
+ * dedicated voice changes which recording plays, not what a mid-load gunshot
+ * sounds like.
+ */
+export function playGarandShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, garandShotVoices, spatial, 0.3 + Math.random() * 0.4, 0.68)) return;
+  synthesizeGunshot(spatial, { crackHz: 2100, thumpFrom: 130, thumpTo: 40, ceiling: 0.68 });
+}
+
+/**
  * The bolt being worked, right after a bolt-action shot — see `Shot.bolt` and
  * `hearGunfire` in `main.ts`, which fires this alongside `playRifleShot`
  * rather than instead of it: the crack and the cycling are two different
@@ -958,6 +1037,29 @@ export function playBoltCycle(spatial: Spatial): void {
   if (!ac) return;
   if (spatial.gain <= 0.01) return;
   playVoice(ac, boltCycleVoices, spatial, 0.3 + Math.random() * 0.4, 0.42);
+}
+
+/**
+ * The M1 Garand's en-bloc clip: the ping, then the clatter of a fresh one
+ * going in — see `Shot.clipEject` and `hearGunfire` in `main.ts`, which fires
+ * this alongside `playRifleShot` exactly as `playBoltCycle` rides alongside a
+ * bolt-action shot. Both sounds are queued in this one call rather than the
+ * reload waiting on a second wire event: the reload is scheduled
+ * `GARAND_PING_MS` after the ping on the audio clock, which is what lets the
+ * two play as one continuous cycle without the client guessing when the ping
+ * has finished ringing.
+ *
+ * No synthesised fallback, for the same reason `playBoltCycle` has none: the
+ * server-side lockout holds whether or not this actually makes a sound, so a
+ * recording still decoding in the first instant of a round costs a silent
+ * cycle rather than a broken one.
+ */
+export function playGarandCycle(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  playVoice(ac, garandPingVoices, spatial, 0.3 + Math.random() * 0.4, 0.55);
+  playVoice(ac, garandReloadVoices, spatial, 0.3 + Math.random() * 0.4, 0.5, GARAND_PING_MS / 1000);
 }
 
 /** A sniper round — the heaviest, loudest single crack in the game. */

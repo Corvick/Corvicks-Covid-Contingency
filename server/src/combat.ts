@@ -197,10 +197,17 @@ function aimFor(world: World, id: string, command: { aim: number }): number {
 
 /**
  * Which recorded gunshot a round should play as — see `Shot.voice` and the
- * pools in `sound.ts`. By weapon *family*: the bolt action, the semi-auto and
- * the charge rifle all fire the same rifle round and share a voice, same as
- * `light` groups the pistol and its two-handed sibling. A grey officer firing
- * with no `def` at all is pistol-grade, exactly as `light` already treats it.
+ * pools in `sound.ts`. By weapon *family*: the bolt action and the charge
+ * rifle fire the same rifle round and share a voice, same as `light` groups
+ * the pistol and its two-handed sibling. A grey officer firing with no `def`
+ * at all is pistol-grade, exactly as `light` already treats it.
+ *
+ * The Garand is its own voice rather than joining the bolt/charge `'rifle'`
+ * pool — see the note on `GunVoice` in `shared/types.ts`. Sharing worked fine
+ * for the bolt action and the charge rifle, both of which fire far slower
+ * than the recordings' own several-second tails; the Garand's own cadence
+ * does not, and the tail of one shot was audibly still ringing when the next
+ * one cracked.
  */
 function gunVoice(def: ItemDef | undefined): GunVoice | undefined {
   switch (def?.id) {
@@ -209,9 +216,10 @@ function gunVoice(def: ItemDef | undefined): GunVoice | undefined {
     case 'dualPistols':
       return 'pistol';
     case 'boltRifle':
-    case 'semiAutoRifle':
     case 'chargeRifle':
       return 'rifle';
+    case 'semiAutoRifle':
+      return 'garand';
     case 'sniper':
       return 'sniper';
     case 'shotgun':
@@ -249,6 +257,8 @@ export function fire(
    * two guns instead of one shot drawn twice.
    */
   offset = 0,
+  /** This round just emptied an en-bloc clip — see `Shot.clipEject`. */
+  clipEject = false,
 ): void {
   const angle = aim + (Math.random() * 2 - 1) * bloom;
   const range = def?.range ?? GUN_RANGE;
@@ -359,6 +369,7 @@ export function fire(
     ...(hitWall ? { wall: true } : {}),
     ...(voice ? { voice } : {}),
     ...(def?.id === 'boltRifle' ? { bolt: true } : {}),
+    ...(clipEject ? { clipEject: true } : {}),
   });
 
   alertZombies(world, shooter.id, shooter.x, shooter.y, now);
@@ -812,6 +823,10 @@ export function fireHeld(
 
   const def = ITEMS[held];
   if (!ready(def.cooldownMs ?? GUN_COOLDOWN_MS)) return false;
+  // The en-bloc clip: a Garand that just emptied one is locked out until the
+  // ping and the reload have both been heard, whatever the ordinary cooldown
+  // says. Every other gun never sets this, so the check is free for them.
+  if (now < (world.reloadReadyAt.get(id) ?? 0)) return false;
 
   // The launcher lobs a shell at wherever you're pointing rather than tracing
   // a line, so it reuses the grenade's flight and detonates there.
@@ -826,6 +841,10 @@ export function fireHeld(
     throwGrenade(world, shooter.x, shooter.y, spot.x, spot.y, now, 'frag');
     return true;
   }
+
+  // Whether this pull is the one that empties an en-bloc clip — set below,
+  // read at the bottom of the function where the round is actually fired.
+  let clipEject = false;
 
   // A gun in a utility slot has no magazine to draw on — its doses count down
   // on the bag, the way grenades and mines do, and the slot clears itself when
@@ -844,6 +863,17 @@ export function fireHeld(
     if (slot) {
       if (slot.ammo <= 0) return false;
       slot.ammo--;
+      // The en-bloc clip empties on a multiple of its own size, whatever that
+      // ammo count started at — a dropped gun picked up mid-clip, or a box
+      // topping one up, both stay aligned to it, since a box adds `def.ammo`
+      // and that is itself a whole number of clips. The ping plays either
+      // way (the clip ejects itself whether or not there is another one to
+      // load), but the lockout — and so the reload sound — only fires when
+      // there is actually a fresh clip to go in.
+      if (def.clipSize && slot.ammo % def.clipSize === 0) {
+        clipEject = true;
+        if (slot.ammo > 0) world.reloadReadyAt.set(id, now + (def.reloadMs ?? 0));
+      }
     }
   }
   world.lastShotAt.set(id, now);
@@ -883,7 +913,7 @@ export function fireHeld(
     for (let i = 0; i < pellets; i++) {
       const offset = gap === 0 ? 0 : (i - (pellets - 1) / 2) * gap;
       const angle = gap === 0 ? aim : shared;
-      fire(world, shooter, angle, gap === 0 ? bloom : 0, now, def, pierce, damageMul, throughWall, offset);
+      fire(world, shooter, angle, gap === 0 ? bloom : 0, now, def, pierce, damageMul, throughWall, offset, clipEject);
     }
   }
   return true;

@@ -56,9 +56,9 @@ search filter.
 | File | Source title | Author | Source |
 |---|---|---|---|
 | `weapons/rifle-01-single.mp3` | Rifle gunshot, one shot | felix.blume | [710084](https://freesound.org/people/felix.blume/sounds/710084/) |
-| `weapons/rifle-01-shot.mp3` | Sauer 404 close shot.wav | moosegravy | [431834](https://freesound.org/people/moosegravy/sounds/431834/) |
+| `weapons/rifle-01-shot.wav` | Sauer 404 close shot.wav (hand-trimmed) | moosegravy | [431834](https://freesound.org/people/moosegravy/sounds/431834/) |
 | `weapons/rifle-02-shot.mp3` | Sauer 404 close shot 2.wav | moosegravy | [431832](https://freesound.org/people/moosegravy/sounds/431832/) |
-| `weapons/rifle-03-shot.mp3` | Sauer 404 close shot 3.wav | moosegravy | [431831](https://freesound.org/people/moosegravy/sounds/431831/) |
+| `weapons/rifle-03-shot.wav` | Sauer 404 close shot 3.wav (hand-trimmed) | moosegravy | [431831](https://freesound.org/people/moosegravy/sounds/431831/) |
 | `weapons/rifle-04-bolt-cycle.wav` | Mosin Nagant Bolt Action Cycle | Zott820 | [370345](https://freesound.org/people/Zott820/sounds/370345/) |
 | `weapons/sniper-01-shot.mp3` | Sniper Shot | LeMudCrab | [163460](https://freesound.org/people/LeMudCrab/sounds/163460/) |
 | `weapons/sniper-02-barrett.mp3` | Barrett M82A1 Sniper Shot from Wooden Platform Hanging from Metal Chains 6 | qubodup | [855597](https://freesound.org/people/qubodup/sounds/855597/) |
@@ -67,25 +67,54 @@ search filter.
 | `weapons/mg-02-single.mp3` | Machine Gun 002 - single shot.ogg | pgi | [212607](https://freesound.org/people/pgi/sounds/212607/) |
 | `weapons/heavymg-01-m240.mp3` | M240 Machine Gun Single Shot | qubodup | [854641](https://freesound.org/people/qubodup/sounds/854641/) |
 | `weapons/heavymg-02-dshk.mp3` | dshk_01.wav (single empty shot of a DShK) | greatmganga | [122103](https://freesound.org/people/greatmganga/sounds/122103/) |
+| `weapons/garand-01-ping.wav` | GUNMech_M1 GARAND CLIP EJECT_MP.wav | MPierluissi | [460848](https://freesound.org/people/MPierluissi/sounds/460848/) |
+| `weapons/garand-02-ping.wav` | GUNMech_M1 GARAND CLIP EJECT 2_MP.wav | MPierluissi | [460847](https://freesound.org/people/MPierluissi/sounds/460847/) |
+| `weapons/garand-03-reload.mp3` | GUNRif_M1 GARAND RELOAD_MP.wav | MPierluissi | [460855](https://freesound.org/people/MPierluissi/sounds/460855/) |
+| `weapons/garand-01-shot.wav` | GUNRif_M1 GARAND GUNSHOT_MP.wav (one shot of a burst) | MPierluissi | [460851](https://freesound.org/people/MPierluissi/sounds/460851/) |
+| `weapons/garand-02-shot.wav` | ″ | MPierluissi | [460851](https://freesound.org/people/MPierluissi/sounds/460851/) |
+| `weapons/garand-03-shot.wav` | ″ | MPierluissi | [460851](https://freesound.org/people/MPierluissi/sounds/460851/) |
 
 Grouped by weapon *family*, not by which gun in the registry fires them: the
-bolt action, the semi-auto and the charge rifle all fire the same rifle round
-and share `rifle-01/02/03-shot`, exactly as `gunVoice` in `combat.ts` groups
-them server-side. The flamethrower has no file here at all — it is a
-continuous stream with its own established sound design (see `sprayFlame`),
-not a discrete report, and the cure gun's beam isn't a gunshot either.
+bolt action and the charge rifle fire the same rifle round and share
+`rifle-01/02/03-shot`, exactly as `gunVoice` in `combat.ts` groups them
+server-side. The semi-auto (the M1 Garand) used to share that pool as well
+and no longer does — see `garand-0N-shot.wav` below, and the note on
+`GunVoice` in `shared/types.ts`. The flamethrower has no file here at all —
+it is a continuous stream with its own established sound design (see
+`sprayFlame`), not a discrete report, and the cure gun's beam isn't a gunshot
+either.
 
 `weapons/rifle-01-single.mp3` plays for the pistol alone now — it reads as a
 perfectly good handgun crack on its own, and it stopped being the rifle
 family's own sound the moment the family got three consistent takes of a
 real rifle to use instead (below).
 
-The three `rifle-0N-shot.mp3` files are a real **Sauer 404** — a bolt-action
+The three `rifle-0N-shot` files are a real **Sauer 404** — a bolt-action
 hunting rifle — recorded close-up at 48kHz/24-bit stereo by one uploader in
 one sitting: all three measured within 2dB of each other unprompted, which
 none of the dropped pistol takes below ever did. A fourth take from the same
 session, four rapid shots with a second shooter's shotgun audible 75 yards
 off, was left out for the extra noise.
+
+**Two of the three needed hand-trimming, and it took a second report to find
+it.** `rifle-01-shot` and `rifle-03-shot` each hold a real single crack — but
+the recordist's mic kept rolling afterward, and both takes go on to catch the
+bolt being worked for a follow-up shot: a second, separate mechanical
+transient roughly two to four seconds later, well inside the plain
+silence-trim's 2%-of-peak threshold and so never removed by it. Reported as
+*"the bolt action rifle still sometimes plays its sound for too long like
+it's cycling twice"* — "sometimes" because the pool draws one of three files
+at random and `rifle-02-shot.mp3` never had the problem, so it read as
+intermittent. Measured off each file's own envelope: `rifle-01-shot`'s second
+event peaks at 2.46s and 2.68s (the main crack is at 0.54s), `rifle-03-shot`'s
+at 4.98s and 7.18s (the crack is at 1.28s) — both separated from the real
+shot by a genuine silent gap rather than a continuous decay, which is what
+tells a second event apart from a natural echo. Both were re-fetched and
+re-trimmed by hand: one clean crack plus its own close echo (a real decay
+characteristic inside ~500ms of the peak, kept rather than cut), stopping
+well short of the second event — 1.71s and 1.04s respectively, downmixed to
+mono and resampled to 22050Hz exactly as `rifle-04-bolt-cycle.wav` was.
+`rifle-02-shot.mp3` never had a second event and was left exactly as fetched.
 
 `weapons/rifle-04-bolt-cycle.wav` is the sound of working the bolt
 afterward — see `Shot.bolt` in `shared/types.ts` and `BOLT_CYCLE_MS` in
@@ -102,6 +131,74 @@ that cycles the action about twenty times over, and one clean repetition
 was extracted, downmixed to mono and resampled to 22050Hz — plenty for a
 short mechanical sound, and a quarter the size of keeping it at the
 original's 48kHz stereo.
+
+`weapons/garand-01-ping.wav` and `garand-02-ping.wav` are the semi-auto
+rifle's own cycling sound — the M1 Garand's en-bloc clip ejecting, the
+"ping" — for `Shot.clipEject` and `GARAND_CLIP_SIZE` in
+`shared/constants.ts`: every tenth round fired empties the clip and it
+throws itself clear before a fresh one goes in. Both are real M1 Garand
+field recordings from [MPierluissi's pack of them](https://freesound.org/people/MPierluissi/packs/26022/),
+each individually marked CC0 and fetched (the public preview stream, same as
+the rest of this section) on 2026-09-05, and both needed the same hand-trim
+as the bolt-cycle file above and for a related reason: each source take runs
+5-8 seconds and holds *two* loud transients — the ping itself, then a second
+one several seconds later (the ejected clip landing, going by the gap) —
+where a plain silence-trim would have swept the second one in as part of
+"the ping". One clean event (the first) was extracted from each, downmixed
+to mono and resampled to 22050Hz exactly as `rifle-04-bolt-cycle.wav` was,
+and the two measured within a couple of percent of each other's loudness
+unprompted. A third take in the same pack ("CLIP EJECT 3",
+[460846](https://freesound.org/people/MPierluissi/sounds/460846/)) was left
+out — two is enough variety for a pool this short-lived.
+
+`weapons/garand-03-reload.mp3` is the clip going in and the bolt closing
+afterward, played `GARAND_PING_MS` after the ping on the audio clock (see
+`playGarandCycle` in `client/src/sound.ts`) so the two are heard as one
+continuous cycle. Unlike the pings, it needed no manual editing: the
+runtime's own silence-trim already isolates one clean ~1.6s take, start to
+finish, with nothing extraneous either side. Two further takes in the same
+pack were checked and dropped: "RELOAD 2" ([460854](https://freesound.org/people/MPierluissi/sounds/460854/))
+holds two separate loud events three seconds apart, in the same shape as the
+ping takes above, and neither reads as "loading a fresh clip" on its own the
+way the kept take does; a fourth candidate, a duplicate of "CLIP EJECT 3",
+was never pulled at all. A single-file pool here is the same call
+`rifle-04-bolt-cycle.wav` already makes for the bolt's own cycling sound.
+
+**`weapons/garand-0N-shot.wav` is the rifle's own report, and it replaced a
+real bug.** The semi-auto rifle used to share `RIFLE_FILES` (the Sauer 404
+takes above) with the bolt action and the charge rifle — reasonable when it
+was named for its rate of fire and not its recoil, since all three fire the
+same rifle round. It stopped being reasonable the moment it became an M1
+Garand: those recordings ran 2.5-6 seconds each at the time, tail included
+(since hand-trimmed shorter still — see above — for an unrelated fault of
+their own), which is inaudible at a bolt-action's cadence and was plainly
+audible — reported as *"you can hear it cycling every time you shoot and it
+overlaps"* — at a semi-auto's `cooldownMs` of 470. The tail of one shot was
+still ringing when the next one cracked.
+
+The fix is real M1 Garand gunfire rather than a shorter loop of the same
+Sauer 404 file, from
+[GUNRif_M1 GARAND GUNSHOT_MP.wav](https://freesound.org/people/MPierluissi/sounds/460851/)
+in the same CC0 pack as the ping and the reload — a 5-second field recording
+of **eight rapid semi-auto shots**, not one. Measured off its own envelope:
+peaks roughly 600-700ms apart, each decaying to silence in well under 250ms —
+a much tighter, drier report than the Sauer 404's, and comfortably clear of
+this gun's cooldown with room to spare even at the slowest pitch jitter
+`playVoice` ever rolls. Three of the eight (the 1st, 4th and 7th, for
+spacing) were extracted the same way as the pings — downmixed to mono,
+resampled to 22050Hz — and measured within a couple of percent of each
+other's loudness (0.1766, 0.1751, 0.1765 RMS), which is what real repeated
+shots from one gun in one take should do. The other five were left alone:
+three takes is the same variety `RIFLE_FILES` and `SNIPER_FILES` settle for,
+and there was no reason to prefer any particular five over the three kept.
+
+**Finding the actual shot boundaries needed a coarser envelope than the
+pings did.** A raw per-sample scan for "the first sample under 2% of this
+shot's peak" breaks the instant the waveform completes one oscillation
+cycle — which happens within a couple of samples of the peak, giving a
+"clean" shot of about 40ms that is actually just the first wave crest. The
+same 5ms-window peak envelope the pings' onset/offset search already uses
+smooths over that without blurring the real ~200ms decay.
 
 Dropped: `weapons/pistol-01-makarov.mp3` ("Makarov Shoot.wav" by coolabc,
 [569174](https://freesound.org/people/coolabc/sounds/569174/)),

@@ -738,6 +738,13 @@ export interface World {
   speedBoosts: Map<string, number>;
   lastShotAt: Map<string, number>;
   /**
+   * The M1 Garand's forced reload: id -> when it may fire again. Set only when
+   * a clip empties (see `ItemDef.clipSize`), and read alongside the ordinary
+   * cooldown in `fireHeld` — every other gun never touches this map, so it
+   * defaults to "always ready" for them.
+   */
+  reloadReadyAt: Map<string, number>;
+  /**
    * Heavy MG bipod: id -> when planting began. Present means deploying or
    * deployed; DEPLOY_MS after that timestamp it is actually steady.
    */
@@ -2253,6 +2260,7 @@ export function createWorld(): World {
     grappleCounts: new Map(),
     speedBoosts: new Map(),
     lastShotAt: new Map(),
+    reloadReadyAt: new Map(),
     deployStart: new Map(),
     stowing: new Map(),
     rightHeld: new Map(),
@@ -2449,6 +2457,7 @@ export function resetWorld(world: World): void {
   world.grappleCounts.clear();
   world.speedBoosts.clear();
   world.lastShotAt.clear();
+  world.reloadReadyAt.clear();
   world.deployStart.clear();
   world.stowing.clear();
   world.rightHeld.clear();

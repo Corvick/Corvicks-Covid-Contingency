@@ -76,7 +76,9 @@ import {
   playHidingSob,
   playPistolShot,
   playRifleShot,
+  playGarandShot,
   playBoltCycle,
+  playGarandCycle,
   playSniperShot,
   playShotgunBlast,
   playMachineGunShot,
@@ -1716,6 +1718,7 @@ function hearSobs(incoming: Array<{ x: number; y: number }>, now: number): void 
 const GUN_VOICE_RANGE: Record<GunVoice, number> = {
   pistol: 1900,
   rifle: 2400,
+  garand: 2400,
   sniper: 3000,
   shotgun: 2000,
   mg: 2100,
@@ -1726,6 +1729,7 @@ const GUN_VOICE_RANGE: Record<GunVoice, number> = {
 const GUN_VOICE_PLAY: Record<GunVoice, (spatial: Spatial) => void> = {
   pistol: playPistolShot,
   rifle: playRifleShot,
+  garand: playGarandShot,
   sniper: playSniperShot,
   shotgun: playShotgunBlast,
   mg: playMachineGunShot,
@@ -1738,6 +1742,8 @@ const GUN_VOICE_PLAY: Record<GunVoice, (spatial: Spatial) => void> = {
  * that comes with it.
  */
 const BOLT_CYCLE_HEARING_RANGE = 800;
+/** The Garand's ping carries about as far as the bolt's own working does. */
+const GARAND_CYCLE_HEARING_RANGE = 800;
 
 /**
  * A round going off, for every ordinary bullet in earshot — every weapon, and
@@ -1761,6 +1767,13 @@ function hearGunfire(shots: Shot[], now: number): void {
     if (shot.bolt) {
       const cycleSpatial = spatialFor(shot.x1, shot.y1, BOLT_CYCLE_HEARING_RANGE);
       if (cycleSpatial.gain > 0.01 && takeVoiceBudget(now)) playBoltCycle(cycleSpatial);
+    }
+    // The Garand's en-bloc clip: the ping, then the reload queued right along
+    // with it — see `Shot.clipEject` and `playGarandCycle`. Same shape as the
+    // bolt above, its own budget slot so a dense burst can't drop it.
+    if (shot.clipEject) {
+      const cycleSpatial = spatialFor(shot.x1, shot.y1, GARAND_CYCLE_HEARING_RANGE);
+      if (cycleSpatial.gain > 0.01 && takeVoiceBudget(now)) playGarandCycle(cycleSpatial);
     }
   }
 }

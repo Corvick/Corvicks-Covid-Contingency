@@ -1,4 +1,10 @@
-import { CHARGE_BARS, BOLT_CYCLE_MS } from './constants.js';
+import {
+  CHARGE_BARS,
+  BOLT_CYCLE_MS,
+  GARAND_CLIP_SIZE,
+  GARAND_PING_MS,
+  GARAND_RELOAD_MS,
+} from './constants.js';
 
 export type ItemId =
   | 'pistol'
@@ -116,6 +122,20 @@ export interface ItemDef {
    * — the launcher's damage lives in its blast, not in `damageMin`.
    */
   botWorth?: number;
+  /**
+   * Rounds before this weapon forces a reload — the M1 Garand's en-bloc clip.
+   * Absent means it never does: running dry is simply running dry, the way
+   * every other gun in the city already works. `ammo` is expected to be a
+   * multiple of this, so the gun always comes in — and a box always tops it
+   * back up — as a whole number of clips.
+   */
+  clipSize?: number;
+  /**
+   * How long firing is locked out once `clipSize` empties the clip: the ping,
+   * then the clatter of a fresh one going in, both heard out before the
+   * trigger works again. Meaningless without `clipSize`.
+   */
+  reloadMs?: number;
 }
 
 export const ITEMS: Record<ItemId, ItemDef> = {
@@ -222,8 +242,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     id: 'semiAutoRifle',
     grip: 'rifle',
     kind: 'gun',
-    label: 'Semi-Automatic Rifle',
-    short: 'SEMI',
+    label: 'M1 Garand',
+    short: 'GRND',
     color: '#d97757',
     // The middle tier: not one of the three the city is full of, and not one of
     // the ones you might go a whole round without seeing either.
@@ -237,9 +257,16 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     bloom: 0.04,
     cooldownMs: 470,
     range: 820,
+    // A multiple of the clip size below, so the gun always comes in — and an
+    // ammo box always tops it back up — as a whole number of clips: 3 today.
     ammo: 30,
     slowMs: 450,
     slowMul: 0.55,
+    // The en-bloc clip: every tenth round empties it, and it ejects itself
+    // with the iconic ping, then the clatter of a fresh one going in — see
+    // `GARAND_CLIP_SIZE` and `client/src/sound.ts`'s `playGarandCycle`.
+    clipSize: GARAND_CLIP_SIZE,
+    reloadMs: GARAND_PING_MS + GARAND_RELOAD_MS + 60,
   },
   sniper: {
     id: 'sniper',

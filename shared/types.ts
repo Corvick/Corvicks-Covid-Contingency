@@ -523,11 +523,20 @@ export type ShotKind = 'bullet' | 'cure' | 'flame';
 /**
  * Which recorded gunshot a round's report should play as — see the pools in
  * `sound.ts`. One per weapon *family* rather than one per `ItemId`: the bolt
- * action, the semi-auto and the charge rifle all fire the same rifle round
- * and share a voice, where the pistol, the shotgun, the two machine guns and
- * the sniper are each their own thing to the ear.
+ * action and the charge rifle fire the same rifle round and share a voice,
+ * where the pistol, the shotgun, the two machine guns, the sniper and the
+ * M1 Garand are each their own thing to the ear.
+ *
+ * **The Garand is deliberately not `'rifle'`.** It used to share that pool
+ * with the bolt action, whose recordings are close-up "shot" takes several
+ * seconds long — the tail is a natural part of a single slow bolt-action
+ * report and was never a problem at that weapon's own cadence, but the
+ * Garand's fires several times a second and the tail of one shot ran
+ * straight into the crack of the next, audibly overlapping. See
+ * `GARAND_SHOT_FILES` in `sound.ts`, three takes hand-trimmed to a single
+ * ~225ms report each — well clear of `semiAutoRifle.cooldownMs`.
  */
-export type GunVoice = 'pistol' | 'rifle' | 'shotgun' | 'mg' | 'heavyMg' | 'sniper';
+export type GunVoice = 'pistol' | 'rifle' | 'shotgun' | 'mg' | 'heavyMg' | 'sniper' | 'garand';
 
 /** A patch of ground alight. `life` is 1 when fresh and 0 as it dies. */
 export interface FireState {
@@ -736,6 +745,14 @@ export interface Shot {
    * flag rather than on the voice.
    */
   bolt?: boolean;
+  /**
+   * The M1 Garand's en-bloc clip ejecting — the ping, and the reload that
+   * follows it. `voice` alone can't say this either: only every `clipSize`th
+   * round of a Garand triggers it, so most of that rifle's own shots carry
+   * `voice: 'rifle'` with this absent, same as any other rifle round. See
+   * `GARAND_CLIP_SIZE` and `playGarandCycle`.
+   */
+  clipEject?: boolean;
 }
 
 export interface InputState {
