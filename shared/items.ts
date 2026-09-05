@@ -1,4 +1,4 @@
-import { CHARGE_BARS } from './constants.js';
+import { CHARGE_BARS, BOLT_CYCLE_MS } from './constants.js';
 
 export type ItemId =
   | 'pistol'
@@ -208,7 +208,10 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     damageMin: 38,
     damageMax: 58,
     bloom: 0.012,
-    cooldownMs: 1150, // a shade slower than a pistol: you have to work the bolt
+    // At least as long as the bolt-cycle sound itself (see `BOLT_CYCLE_MS`),
+    // plus a tick and a bit of slack, or a fast trigger finger fires the next
+    // round while the last one is still audibly working the bolt.
+    cooldownMs: BOLT_CYCLE_MS + 60,
     range: 900,
     ammo: 24,
     // A heavy round puts them down harder and for longer than a pistol does.

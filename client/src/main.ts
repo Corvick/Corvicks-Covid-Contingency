@@ -76,6 +76,7 @@ import {
   playHidingSob,
   playPistolShot,
   playRifleShot,
+  playBoltCycle,
   playSniperShot,
   playShotgunBlast,
   playMachineGunShot,
@@ -1408,7 +1409,8 @@ const ROAR_EARSHOT = 1400;
  * the dog's roar both answer "where is this, and how clear a line does it have
  * to me" the same way. `range` is where it falls to nothing; past that this
  * returns silence outright rather than a number close to it, so a caller never
- * has to ask twice.
+ * has to ask twice. `panBoost` sharpens the left/right image for callers that
+ * want to read as more directional than the default — see `ZOMBIE_PAN_BOOST`.
  */
 /**
  * How far past the edge of the actual screen a sound keeps fading before it's
@@ -1420,7 +1422,7 @@ const ROAR_EARSHOT = 1400;
  */
 const SCREEN_EAR_FADE = 260;
 
-function spatialFor(x: number, y: number, range: number): Spatial {
+function spatialFor(x: number, y: number, range: number, panBoost = 1): Spatial {
   const me = self();
   const ear = me ?? { x: spectateX, y: spectateY };
   const dx = x - ear.x;
@@ -1460,8 +1462,10 @@ function spatialFor(x: number, y: number, range: number): Spatial {
   // Reaches hard left/right well inside the hearing range (this was 0.7),
   // because the point of panning is to say which way to look — a sound stayed
   // reads as coming from dead centre, out of both speakers alike, unless it
-  // is a long way to one side, which is the opposite of "clear".
-  const panRange = Math.max(1, range * 0.4);
+  // is a long way to one side, which is the opposite of "clear". `panBoost`
+  // shrinks that range further still, for a caller that wants a sound to read
+  // as coming from a direction sooner rather than from everywhere at once.
+  const panRange = Math.max(1, (range * 0.4) / panBoost);
   const pan = Math.max(-1, Math.min(1, dx / panRange));
 
   const hits = map ? occlusion(ear.x, ear.y, x, y, map.walls) : 0;
@@ -1531,6 +1535,15 @@ function hashId(id: string): number {
  * across the whole one.
  */
 const ZOMBIE_HEARING_RANGE = 1050;
+/**
+ * How much harder a zombie's voice pans than the default — see `panBoost` on
+ * `spatialFor`. A moaning crowd is the loudest, most constant thing in the
+ * mix once an outbreak has taken hold, and at the ordinary pan strength most
+ * of them read as coming from everywhere at once rather than from a
+ * particular street; sharpening the image is what actually says "over
+ * there" instead of just "nearby".
+ */
+const ZOMBIE_PAN_BOOST = 1.8;
 /**
  * Wide on purpose, and wider than they first were — see the note on
  * `ZOMBIE_VOICE_BUDGET`. A zombie groaning every four to eleven seconds reads
@@ -1630,7 +1643,7 @@ function hearZombies(incoming: EntityState[], now: number): void {
     if (e.health < v.lastHealth && e.health > 0 && now >= v.nextHitSoundAt) {
       v.nextHitSoundAt = now + ZOMBIE_HIT_SOUND_COOLDOWN_MS;
       if (Math.random() < ZOMBIE_HIT_SOUND_CHANCE) {
-        const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE);
+        const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE, ZOMBIE_PAN_BOOST);
         if (spatial.gain > 0.012 && takeVoiceBudget(now)) playZombieHit(spatial, v.voice);
       }
     }
@@ -1647,14 +1660,14 @@ function hearZombies(incoming: EntityState[], now: number): void {
       // regaining its grip would never groan at all.
       v.nextGroanAt = Math.max(v.nextGroanAt, now + ZOMBIE_GROAN_MIN_MS);
       if (!attackingZombies.has(e.id)) {
-        const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE);
+        const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE, ZOMBIE_PAN_BOOST);
         if (spatial.gain > 0.012 && takeVoiceBudget(now)) playZombieAttack(spatial, v.voice);
       }
       continue;
     }
 
     if (now >= v.nextGroanAt) {
-      const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE);
+      const spatial = spatialFor(e.x, e.y, ZOMBIE_HEARING_RANGE, ZOMBIE_PAN_BOOST);
       if (spatial.gain > 0.015 && takeVoiceBudget(now)) playZombieGroan(spatial, v.voice);
       v.nextGroanAt =
         now + ZOMBIE_GROAN_MIN_MS + Math.random() * (ZOMBIE_GROAN_MAX_MS - ZOMBIE_GROAN_MIN_MS);
@@ -1720,6 +1733,13 @@ const GUN_VOICE_PLAY: Record<GunVoice, (spatial: Spatial) => void> = {
 };
 
 /**
+ * How far the bolt-cycle sound carries — much shorter than any gun's own
+ * range, because a mechanism clack is nowhere near as loud as the report
+ * that comes with it.
+ */
+const BOLT_CYCLE_HEARING_RANGE = 800;
+
+/**
  * A round going off, for every ordinary bullet in earshot — every weapon, and
  * every shooter, not just you or just the pistol. Deliberately no "my own gun
  * is always full volume" exception the way the dog's own roar gets one: a
@@ -1734,6 +1754,14 @@ function hearGunfire(shots: Shot[], now: number): void {
     if (shot.kind !== undefined || !shot.voice) continue;
     const spatial = spatialFor(shot.x1, shot.y1, GUN_VOICE_RANGE[shot.voice]);
     if (spatial.gain > 0.01 && takeVoiceBudget(now)) GUN_VOICE_PLAY[shot.voice](spatial);
+    // The bolt being worked, right alongside the crack rather than after a
+    // pause — see `Shot.bolt` and `playBoltCycle`. Its own budget slot, so a
+    // dense burst of unrelated sounds can drop the mechanism clack without
+    // ever dropping the shot that matters more.
+    if (shot.bolt) {
+      const cycleSpatial = spatialFor(shot.x1, shot.y1, BOLT_CYCLE_HEARING_RANGE);
+      if (cycleSpatial.gain > 0.01 && takeVoiceBudget(now)) playBoltCycle(cycleSpatial);
+    }
   }
 }
 

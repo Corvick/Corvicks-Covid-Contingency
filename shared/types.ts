@@ -728,6 +728,14 @@ export interface Shot {
    * and a flame tongue are never bullets, whatever `kind` says about them.
    */
   voice?: GunVoice;
+  /**
+   * Fired from a bolt-action rifle specifically. `voice` alone can't say
+   * this — the bolt action, the semi-auto and the charge rifle all share
+   * `'rifle'`, since they fire the same round — but only the bolt action has
+   * a bolt to work afterward, so the client plays the cycling sound on this
+   * flag rather than on the voice.
+   */
+  bolt?: boolean;
 }
 
 export interface InputState {

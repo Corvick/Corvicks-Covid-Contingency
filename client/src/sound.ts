@@ -236,32 +236,218 @@ const SOB_FILES = ['hiding-sob.mp3'];
  *
  * Grouped by weapon *family*, not by `ItemId`: the bolt action, the
  * semi-auto and the charge rifle all fire the same rifle round and share
- * `RIFLE_FILES`, exactly as `gunVoice` groups them server-side.
+ * `RIFLE_FILES`, exactly as `gunVoice` groups them server-side. The bolt
+ * action alone also gets a cycling sound afterward — see `BOLT_CYCLE_FILES`
+ * and `playBoltCycle`, further down — which rides on `Shot.bolt` rather than
+ * on the voice, since `voice` can't tell the three rifles apart.
  */
 const WEAPON_SFX_BASE = `${import.meta.env.BASE_URL}sfx/weapons/`;
-const PISTOL_FILES = ['pistol-01-makarov.mp3', 'pistol-02-snappy.mp3', 'pistol-03-indoor.mp3'];
-const RIFLE_FILES = ['rifle-01-single.mp3'];
+/**
+ * `rifle-01-single.mp3` — a rifle round on its own — read as a perfectly
+ * good pistol shot, so it is the pistol's sound now. The pistol's three
+ * original takes (`pistol-01-makarov`, `pistol-02-snappy`, `pistol-03-indoor`)
+ * were three unrelated recordings from three different uploaders and never
+ * sat together as one consistent voice — see the note under `normalizedGain`
+ * for how far apart they measured even after loudness and silence were both
+ * corrected — so they were dropped outright rather than kept alongside it.
+ */
+const PISTOL_FILES = ['rifle-01-single.mp3'];
+/**
+ * Three takes of one real rifle — a Sauer 404, a bolt-action hunting rifle —
+ * recorded close-up by one uploader in one session, which `rifle-01-single`
+ * on its own never was. `rifle-01-single.mp3` moved to the pistol rather
+ * than joining this pool as a fourth take, so the two weapons stay
+ * distinguishable from each other.
+ */
+const RIFLE_FILES = ['rifle-01-shot.mp3', 'rifle-02-shot.mp3', 'rifle-03-shot.mp3'];
+/**
+ * The bolt being worked after a bolt-action shot — one throw of it, trimmed
+ * out of a 14-second demonstration recording that cycled the action twenty
+ * times over (see `CREDITS.md`). A different specific rifle (a Mosin Nagant)
+ * from the shots above, but its own uploader describes it as generic enough
+ * for any bolt action, and it was the only clean, dedicated, real
+ * bolt-cycling recording found under a licence this project will use.
+ */
+const BOLT_CYCLE_FILES = ['rifle-04-bolt-cycle.wav'];
 const SNIPER_FILES = ['sniper-01-shot.mp3', 'sniper-02-barrett.mp3'];
 const SHOTGUN_FILES = ['shotgun-01-blast.mp3'];
 const MG_FILES = ['mg-01-single.mp3', 'mg-02-single.mp3'];
 const HEAVY_MG_FILES = ['heavymg-01-m240.mp3', 'heavymg-02-dshk.mp3'];
 
 /**
+ * A decoded clip plus the correction that loudness-matches it to the rest of
+ * its own pool — see `normalizedGain`.
+ */
+interface VoiceClip {
+  buffer: AudioBuffer;
+  gain: number;
+}
+
+/**
  * Decoded and ready to play. Filled in as each file arrives rather than all
  * at once, so the first one to finish decoding is already usable while the
  * rest are still in flight.
  */
-const groanVoices: AudioBuffer[] = [];
-const attackVoices: AudioBuffer[] = [];
-const hitVoices: AudioBuffer[] = [];
-const sobVoices: AudioBuffer[] = [];
-const pistolVoices: AudioBuffer[] = [];
-const rifleVoices: AudioBuffer[] = [];
-const sniperVoices: AudioBuffer[] = [];
-const shotgunVoices: AudioBuffer[] = [];
-const mgVoices: AudioBuffer[] = [];
-const heavyMgVoices: AudioBuffer[] = [];
+const groanVoices: VoiceClip[] = [];
+const attackVoices: VoiceClip[] = [];
+const hitVoices: VoiceClip[] = [];
+const sobVoices: VoiceClip[] = [];
+const pistolVoices: VoiceClip[] = [];
+const rifleVoices: VoiceClip[] = [];
+const boltCycleVoices: VoiceClip[] = [];
+const sniperVoices: VoiceClip[] = [];
+const shotgunVoices: VoiceClip[] = [];
+const mgVoices: VoiceClip[] = [];
+const heavyMgVoices: VoiceClip[] = [];
 let voicesRequested = false;
+
+/**
+ * How quiet a sample has to be, relative to a clip's own peak, to count as
+ * dead air rather than part of the sound. Several of these recordings carry
+ * a surprising amount of it: `pistol-03-indoor.mp3` sits silent for the first
+ * 1.25 seconds of a 3-second file, and `rifle-01-single.mp3` — the one sound
+ * behind the bolt action, the semi-auto and the charge rifle — for the first
+ * 834ms of a 4.26-second one. Untrimmed, that is 1.25s or 834ms of nothing
+ * between the trigger and the bang, and it is exactly the kind of thing that
+ * makes one recording in a pool feel wrong next to its neighbours: it isn't
+ * that it sounds different, it's that it *starts* late.
+ */
+const TRIM_THRESHOLD = 0.02;
+/** A little room either side of where the threshold is actually crossed, so
+ *  a genuinely gentle attack or a short natural tail isn't clipped off at the
+ *  exact instant it dips under. */
+const TRIM_PREROLL_MS = 5;
+const TRIM_RELEASE_MS = 20;
+
+/**
+ * Cut the dead air from the front and back of a decoded clip, once, before
+ * anything measures or plays it. `ac.decodeAudioData` hands back whatever
+ * silence the original recording happened to carry — room tone before
+ * someone pulled the trigger, a mic left running after — and this game has
+ * no use for any of it: every clip in a pool should fire the instant it's
+ * asked to, not whenever its own lead-in happens to run out.
+ */
+function trimSilence(ac: AudioContext, buffer: AudioBuffer): AudioBuffer {
+  const chans: Float32Array[] = [];
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) chans.push(buffer.getChannelData(ch));
+  const n = chans[0]?.length ?? 0;
+  if (n === 0) return buffer;
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    for (const c of chans) {
+      const v = Math.abs(c[i]);
+      if (v > peak) peak = v;
+    }
+  }
+  if (peak <= 0.0001) return buffer; // silent clip; nothing to trim toward
+  const thresh = peak * TRIM_THRESHOLD;
+  let onset = 0;
+  for (let i = 0; i < n; i++) {
+    let v = 0;
+    for (const c of chans) v = Math.max(v, Math.abs(c[i]));
+    if (v >= thresh) {
+      onset = i;
+      break;
+    }
+  }
+  let offset = n - 1;
+  for (let i = n - 1; i >= 0; i--) {
+    let v = 0;
+    for (const c of chans) v = Math.max(v, Math.abs(c[i]));
+    if (v >= thresh) {
+      offset = i;
+      break;
+    }
+  }
+  const preroll = Math.round((TRIM_PREROLL_MS / 1000) * buffer.sampleRate);
+  const release = Math.round((TRIM_RELEASE_MS / 1000) * buffer.sampleRate);
+  const start = Math.max(0, onset - preroll);
+  const end = Math.min(n - 1, offset + release);
+  if (start <= 0 && end >= n - 1) return buffer; // nothing worth cutting
+  const length = end - start + 1;
+  const trimmed = ac.createBuffer(buffer.numberOfChannels, length, buffer.sampleRate);
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    // A fresh Float32Array rather than the source's own subarray view: that
+    // view is still backed by the original (possibly SharedArrayBuffer-typed)
+    // buffer, which `copyToChannel` doesn't accept.
+    trimmed.copyToChannel(new Float32Array(chans[ch].subarray(start, start + length)), ch);
+  }
+  return trimmed;
+}
+
+/**
+ * How far `normalizedGain` may push a clip's own level, either way. A hot
+ * outlier is brought most of the way down to its pool's target and a quiet
+ * one nudged up, but never past these: fully rescuing something mastered far
+ * quieter than its pool would just move which file in the pool sounds wrong,
+ * and boosting one enough to fully fix that risks surfacing its noise floor
+ * along with it.
+ */
+const NORMALIZE_MAX_BOOST = 1.6;
+const NORMALIZE_MAX_CUT = 0.3;
+
+/**
+ * The RMS each pool's clips are loudness-matched toward — measured off the
+ * *trimmed* files (decode each one, cut its dead air, read the remaining
+ * samples back), not guessed at, and chosen near the middle of what a pool's
+ * members already do so this is a trim for the rest rather than a rescue.
+ * Measuring before trimming would have been measuring the silence too: a
+ * clip that is two-thirds lead-in and trail-off reads far quieter on average
+ * than the same clip's actual report does, which is what pulled the very
+ * numbers here off target the first time they were measured. A single-file
+ * pool's constant is just that file's own measured RMS, which is what makes
+ * `normalizedGain` a no-op for it today and the right anchor the day a
+ * second file joins it.
+ */
+const GROAN_TARGET_RMS = 0.145;
+const ATTACK_TARGET_RMS = 0.125;
+const HIT_TARGET_RMS = 0.14;
+const SOB_TARGET_RMS = 0.039;
+// A single-file pool, so the target is that file's own measured RMS — the
+// single-file case above.
+const PISTOL_TARGET_RMS = 0.068;
+// The three Sauer 404 takes measured within 2dB of each other unprompted —
+// genuinely one rifle, one session — so this is close to the middle of all
+// three rather than a rescue for any of them.
+const RIFLE_TARGET_RMS = 0.052;
+const BOLT_CYCLE_TARGET_RMS = 0.144;
+const SNIPER_TARGET_RMS = 0.12;
+const SHOTGUN_TARGET_RMS = 0.074;
+const MG_TARGET_RMS = 0.335;
+const HEAVY_MG_TARGET_RMS = 0.18;
+
+/**
+ * Loudness-match a decoded clip against `targetRms`, the level its pool's
+ * other members roughly measure at, so a pool of independently mastered
+ * recordings reads as one voice with several takes rather than one very loud
+ * take among several quiet ones (the three pistol recordings measured 11dB
+ * apart in active-region RMS despite all three peaking near full scale).
+ * Peak-safe: the clip's own peak sample is never pushed past 1, so
+ * normalizing can never be what introduces clipping. Expects to be handed an
+ * already-trimmed buffer — see `trimSilence` — or a clip's own dead air
+ * would be averaged into the reading and understate how loud it really is.
+ */
+function normalizedGain(buffer: AudioBuffer, targetRms: number): number {
+  let sumSq = 0;
+  let peak = 0;
+  let n = 0;
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i];
+      sumSq += v * v;
+      const av = Math.abs(v);
+      if (av > peak) peak = av;
+      n++;
+    }
+  }
+  if (n === 0) return 1;
+  const rms = Math.sqrt(sumSq / n);
+  if (rms <= 0.0001) return 1; // near-silent; nothing sensible to normalize toward
+  const towardTarget = targetRms / rms;
+  const peakSafe = peak <= 0.0001 ? towardTarget : 1 / peak;
+  return Math.min(NORMALIZE_MAX_BOOST, Math.max(NORMALIZE_MAX_CUT, Math.min(towardTarget, peakSafe)));
+}
 
 /**
  * Fetch and decode every recorded voice, once. Fire-and-forget: nothing here
@@ -273,11 +459,14 @@ let voicesRequested = false;
 function loadRecordedVoices(ac: AudioContext): void {
   if (voicesRequested) return;
   voicesRequested = true;
-  const load = (base: string, file: string, into: AudioBuffer[]) => {
+  const load = (base: string, file: string, into: VoiceClip[], targetRms: number) => {
     fetch(base + file)
       .then((r) => r.arrayBuffer())
       .then((data) => ac.decodeAudioData(data))
-      .then((buffer) => into.push(buffer))
+      .then((buffer) => {
+        const trimmed = trimSilence(ac, buffer);
+        into.push({ buffer: trimmed, gain: normalizedGain(trimmed, targetRms) });
+      })
       .catch(() => {
         // Offline, blocked, or a bad file — the synthesised fallback carries
         // this one voice for the rest of the round rather than the whole
@@ -285,16 +474,17 @@ function loadRecordedVoices(ac: AudioContext): void {
         // such fallback (see the note there), so this one just stays silent.
       });
   };
-  for (const file of GROAN_FILES) load(SFX_BASE, file, groanVoices);
-  for (const file of ATTACK_FILES) load(SFX_BASE, file, attackVoices);
-  for (const file of HIT_FILES) load(SFX_BASE, file, hitVoices);
-  for (const file of SOB_FILES) load(HUMAN_SFX_BASE, file, sobVoices);
-  for (const file of PISTOL_FILES) load(WEAPON_SFX_BASE, file, pistolVoices);
-  for (const file of RIFLE_FILES) load(WEAPON_SFX_BASE, file, rifleVoices);
-  for (const file of SNIPER_FILES) load(WEAPON_SFX_BASE, file, sniperVoices);
-  for (const file of SHOTGUN_FILES) load(WEAPON_SFX_BASE, file, shotgunVoices);
-  for (const file of MG_FILES) load(WEAPON_SFX_BASE, file, mgVoices);
-  for (const file of HEAVY_MG_FILES) load(WEAPON_SFX_BASE, file, heavyMgVoices);
+  for (const file of GROAN_FILES) load(SFX_BASE, file, groanVoices, GROAN_TARGET_RMS);
+  for (const file of ATTACK_FILES) load(SFX_BASE, file, attackVoices, ATTACK_TARGET_RMS);
+  for (const file of HIT_FILES) load(SFX_BASE, file, hitVoices, HIT_TARGET_RMS);
+  for (const file of SOB_FILES) load(HUMAN_SFX_BASE, file, sobVoices, SOB_TARGET_RMS);
+  for (const file of PISTOL_FILES) load(WEAPON_SFX_BASE, file, pistolVoices, PISTOL_TARGET_RMS);
+  for (const file of RIFLE_FILES) load(WEAPON_SFX_BASE, file, rifleVoices, RIFLE_TARGET_RMS);
+  for (const file of BOLT_CYCLE_FILES) load(WEAPON_SFX_BASE, file, boltCycleVoices, BOLT_CYCLE_TARGET_RMS);
+  for (const file of SNIPER_FILES) load(WEAPON_SFX_BASE, file, sniperVoices, SNIPER_TARGET_RMS);
+  for (const file of SHOTGUN_FILES) load(WEAPON_SFX_BASE, file, shotgunVoices, SHOTGUN_TARGET_RMS);
+  for (const file of MG_FILES) load(WEAPON_SFX_BASE, file, mgVoices, MG_TARGET_RMS);
+  for (const file of HEAVY_MG_FILES) load(WEAPON_SFX_BASE, file, heavyMgVoices, HEAVY_MG_TARGET_RMS);
 }
 
 /**
@@ -318,20 +508,24 @@ function loadRecordedVoices(ac: AudioContext): void {
  * mastered clip peaks near full scale, so playing it straight into
  * `spatial.gain` at 1 is the loudest sound this engine can make. Scaling it
  * down here is what keeps a close zombie unpleasant rather than deafening.
+ *
+ * `entry.gain` rides on top of it — see `normalizedGain` — so `ceiling` still
+ * sets how loud the *category* is allowed to get, and the per-clip term only
+ * ever pulls one recording in line with its own pool.
  */
 function playVoice(
   ac: AudioContext,
-  pool: AudioBuffer[],
+  pool: VoiceClip[],
   spatial: Spatial,
   voice: number,
   ceiling: number,
 ): boolean {
   if (pool.length === 0) return false;
-  const buffer = pool[Math.floor(Math.random() * pool.length)];
+  const entry = pool[Math.floor(Math.random() * pool.length)];
   const source = ac.createBufferSource();
-  source.buffer = buffer;
+  source.buffer = entry.buffer;
   source.playbackRate.value = 0.88 + voice * 0.22 + (Math.random() * 0.16 - 0.08);
-  source.connect(spatialOutput(ac, { ...spatial, gain: spatial.gain * ceiling }));
+  source.connect(spatialOutput(ac, { ...spatial, gain: spatial.gain * ceiling * entry.gain }));
   source.start();
   return true;
 }
@@ -447,7 +641,7 @@ export function playZombieGroan(spatial: Spatial, voice: number): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
-  if (playVoice(ac, groanVoices, spatial, voice, 0.42)) return;
+  if (playVoice(ac, groanVoices, spatial, voice, 0.32)) return;
   synthesizeZombieGroan(spatial, voice);
 }
 
@@ -475,8 +669,8 @@ function synthesizeZombieGroan(spatial: Spatial, voice: number): void {
   const bus = spatialOutput(ac, spatial);
   const out = ac.createGain();
   out.gain.setValueAtTime(0, now);
-  out.gain.linearRampToValueAtTime(0.42, now + 0.18 + Math.random() * 0.12);
-  out.gain.setValueAtTime(0.42, end - 0.3);
+  out.gain.linearRampToValueAtTime(0.32, now + 0.18 + Math.random() * 0.12);
+  out.gain.setValueAtTime(0.32, end - 0.3);
   out.gain.exponentialRampToValueAtTime(0.0001, end);
   out.connect(bus);
 
@@ -546,7 +740,7 @@ export function playZombieAttack(spatial: Spatial, voice: number): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
-  if (playVoice(ac, attackVoices, spatial, voice, 0.55)) return;
+  if (playVoice(ac, attackVoices, spatial, voice, 0.42)) return;
   synthesizeZombieAttack(spatial, voice);
 }
 
@@ -569,7 +763,7 @@ function synthesizeZombieAttack(spatial: Spatial, voice: number): void {
   const out = ac.createGain();
   out.gain.setValueAtTime(0, now);
   // No arrival to speak of — it is already happening on the first sample.
-  out.gain.linearRampToValueAtTime(0.55, now + 0.02);
+  out.gain.linearRampToValueAtTime(0.42, now + 0.02);
   out.gain.exponentialRampToValueAtTime(0.0001, end);
   out.connect(bus);
 
@@ -629,7 +823,7 @@ export function playZombieHit(spatial: Spatial, voice: number): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
-  playVoice(ac, hitVoices, spatial, voice, 0.4);
+  playVoice(ac, hitVoices, spatial, voice, 0.3);
 }
 
 /**
@@ -745,6 +939,25 @@ export function playRifleShot(spatial: Spatial): void {
   if (spatial.gain <= 0.01) return;
   if (playVoice(ac, rifleVoices, spatial, 0.3 + Math.random() * 0.4, 0.68)) return;
   synthesizeGunshot(spatial, { crackHz: 2100, thumpFrom: 130, thumpTo: 40, ceiling: 0.68 });
+}
+
+/**
+ * The bolt being worked, right after a bolt-action shot — see `Shot.bolt` and
+ * `hearGunfire` in `main.ts`, which fires this alongside `playRifleShot`
+ * rather than instead of it: the crack and the cycling are two different
+ * things happening one after the other, not two takes on the same event.
+ *
+ * No synthesised fallback, unlike the other gunshots. `BOLT_CYCLE_MS` (in
+ * `shared/constants.ts`) is what `boltRifle.cooldownMs` is built from, so the
+ * *gate* on firing again holds whether or not this actually makes a sound —
+ * a recording still decoding in the first instant of a round costs a silent
+ * cycle, never a broken one.
+ */
+export function playBoltCycle(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  playVoice(ac, boltCycleVoices, spatial, 0.3 + Math.random() * 0.4, 0.42);
 }
 
 /** A sniper round — the heaviest, loudest single crack in the game. */

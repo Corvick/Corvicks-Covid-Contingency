@@ -358,6 +358,7 @@ export function fire(
     ...(light ? { light: true } : {}),
     ...(hitWall ? { wall: true } : {}),
     ...(voice ? { voice } : {}),
+    ...(def?.id === 'boltRifle' ? { bolt: true } : {}),
   });
 
   alertZombies(world, shooter.id, shooter.x, shooter.y, now);

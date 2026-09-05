@@ -2794,6 +2794,17 @@ export const GUN_BLOOM_RAD = 0.06; // ~±3.5 degrees of spread
 export const GUN_RANGE = 720;
 export const GUN_COOLDOWN_MS = 1000;
 /**
+ * How long the bolt-cycle recording runs — `weapons/rifle-04-bolt-cycle.wav`,
+ * one throw of the bolt trimmed out of a longer demonstration take (see
+ * `client/public/sfx/CREDITS.md`). `boltRifle.cooldownMs` in `items.ts` is
+ * derived from this rather than set independently: the cooldown *is* "you
+ * have to work the bolt before you can fire again", so it has to be at least
+ * as long as the sound of doing that, or a fast trigger finger fires a second
+ * round while the first bolt-throw is still audibly mid-cycle. The margin on
+ * top is a tick and a bit of slack, not a guess.
+ */
+export const BOLT_CYCLE_MS = 1387;
+/**
  * TESTING: player officers drop a zombie in a single hit. Turned off now that
  * the pistol does real damage — flip back to true to restore test-kill mode.
  */
