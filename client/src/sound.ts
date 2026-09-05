@@ -307,7 +307,19 @@ const GARAND_PING_FILES = ['garand-01-ping.wav', 'garand-02-ping.wav'];
  * `BOLT_CYCLE_FILES` just above for the same shape of pool.
  */
 const GARAND_RELOAD_FILES = ['garand-03-reload.mp3'];
-const SNIPER_FILES = ['sniper-01-shot.mp3', 'sniper-02-barrett.mp3'];
+/**
+ * `sniper-01-shot.mp3` (a generic "Sniper Shot" take) used to sit here and
+ * measured **thinner than the pistol** — 33% of its energy below 600Hz
+ * against the pistol's 44%, and 18% above 3kHz against the pistol's 3% —
+ * which is exactly backwards for the heaviest gun in the game. Reported as
+ * *"the sniper is sometimes... not the sniper sound"*: the pool draws one of
+ * two files at random, and half the time this one came up sounding lighter
+ * than a sidearm. `sniper-01-fps.mp3` replaces it — 57% bass, comparable to
+ * the bolt action's own reference take — leaving `sniper-02-barrett.mp3`
+ * (96% bass, a real .50 cal Barrett) as the other half of the pool. See
+ * CREDITS.md.
+ */
+const SNIPER_FILES = ['sniper-01-fps.mp3', 'sniper-02-barrett.mp3'];
 const SHOTGUN_FILES = ['shotgun-01-blast.mp3'];
 const MG_FILES = ['mg-01-single.mp3', 'mg-02-single.mp3'];
 const HEAVY_MG_FILES = ['heavymg-01-m240.mp3', 'heavymg-02-dshk.mp3'];
@@ -463,7 +475,9 @@ const BOLT_CYCLE_TARGET_RMS = 0.144;
 const GARAND_PING_TARGET_RMS = 0.058;
 // A single-file pool, so the target is that file's own measured RMS.
 const GARAND_RELOAD_TARGET_RMS = 0.028;
-const SNIPER_TARGET_RMS = 0.12;
+// The two takes measured 0.2041 and 0.1065 RMS after trim — the middle of
+// the two now that the thin one has been swapped out (see `SNIPER_FILES`).
+const SNIPER_TARGET_RMS = 0.155;
 const SHOTGUN_TARGET_RMS = 0.074;
 const MG_TARGET_RMS = 0.335;
 const HEAVY_MG_TARGET_RMS = 0.18;

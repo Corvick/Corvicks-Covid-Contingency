@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.28.0';
+export const GAME_VERSION = '0.29.0';
 
 // ---------------------------------------------------------------- world
 /**

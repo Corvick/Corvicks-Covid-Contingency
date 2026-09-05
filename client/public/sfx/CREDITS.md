@@ -60,7 +60,7 @@ search filter.
 | `weapons/rifle-02-shot.mp3` | Sauer 404 close shot 2.wav | moosegravy | [431832](https://freesound.org/people/moosegravy/sounds/431832/) |
 | `weapons/rifle-03-shot.wav` | Sauer 404 close shot 3.wav (hand-trimmed) | moosegravy | [431831](https://freesound.org/people/moosegravy/sounds/431831/) |
 | `weapons/rifle-04-bolt-cycle.wav` | Mosin Nagant Bolt Action Cycle | Zott820 | [370345](https://freesound.org/people/Zott820/sounds/370345/) |
-| `weapons/sniper-01-shot.mp3` | Sniper Shot | LeMudCrab | [163460](https://freesound.org/people/LeMudCrab/sounds/163460/) |
+| `weapons/sniper-01-fps.mp3` | FPS Sniper Shot | qubodup | [816114](https://freesound.org/people/qubodup/sounds/816114/) |
 | `weapons/sniper-02-barrett.mp3` | Barrett M82A1 Sniper Shot from Wooden Platform Hanging from Metal Chains 6 | qubodup | [855597](https://freesound.org/people/qubodup/sounds/855597/) |
 | `weapons/shotgun-01-blast.mp3` | shotgun shoot | MrGungus | [773873](https://freesound.org/people/MrGungus/sounds/773873/) |
 | `weapons/mg-01-single.mp3` | Machine Gun 001 - single shot.ogg | pgi | [212601](https://freesound.org/people/pgi/sounds/212601/) |
@@ -115,6 +115,25 @@ characteristic inside ~500ms of the peak, kept rather than cut), stopping
 well short of the second event — 1.71s and 1.04s respectively, downmixed to
 mono and resampled to 22050Hz exactly as `rifle-04-bolt-cycle.wav` was.
 `rifle-02-shot.mp3` never had a second event and was left exactly as fetched.
+
+**`weapons/sniper-01-fps.mp3` replaced a take that was quietly the wrong
+weapon's sound.** The old `sniper-01-shot.mp3` ("Sniper Shot" by LeMudCrab,
+[163460](https://freesound.org/people/LeMudCrab/sounds/163460/)) is gone —
+reported as *"the sniper is sometimes... what I believe is the pistol sound
+or something that is not the sniper sound"*, and a DFT over a window
+centred on each file's peak confirmed it rather than merely matching the
+description: **33.1% of its energy sits below 600Hz, against the pistol's
+own 44.2%, with 17.8% above 3kHz against the pistol's 2.9%** — measurably
+thinner and brighter than the sidearm it was being mistaken for, on the
+heaviest gun in the game. `sniper-02-barrett.mp3` measured 96.8% bass on the
+same test, which is what a .50 cal actually sounds like and why only the
+other half of the pool was ever in question. Its replacement,
+**FPS Sniper Shot** by qubodup — the same uploader as the Barrett take —
+measured 56.6% bass and 21.6% treble: comfortably heavier than the pistol
+and in the same range as `rifle-02-shot.mp3`'s own reference take (54.2%
+bass), rather than lighter than it. Described by its own uploader as built
+for a game (a replacement for Assault Cube's `sniper.ogg`), which is exactly
+the register this needed rather than a mark against it.
 
 `weapons/rifle-04-bolt-cycle.wav` is the sound of working the bolt
 afterward — see `Shot.bolt` in `shared/types.ts` and `BOLT_CYCLE_MS` in

@@ -225,8 +225,13 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     color: '#d6b27c',
     // The common one. Turns up in houses more often than anything else.
     rarity: 12,
-    damageMin: 38,
-    damageMax: 58,
+    // Sized against a normal zombie's 100hp (`ZOMBIE_MAX_HEALTH`), not
+    // picked by eye: the low end is exactly half of it, so two worst-case
+    // rounds always finish the job even if the first was a dud, and the top
+    // end is set so a fresh roll one-shots exactly 75% of the time —
+    // (249-99)/(249-49) = 150/200 — rather than "usually" or "often".
+    damageMin: 50,
+    damageMax: 249,
     bloom: 0.012,
     // At least as long as the bolt-cycle sound itself (see `BOLT_CYCLE_MS`),
     // plus a tick and a bit of slack, or a fast trigger finger fires the next
@@ -284,6 +289,9 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     ammo: 8,
     scope: true,
     headshot: true,
+    // A round this heavy shouldn't stop dead in the first body: it carries
+    // through to whatever is standing behind it too.
+    pierce: 2,
     slowMs: 1100,
     slowMul: 0.3,
   },
