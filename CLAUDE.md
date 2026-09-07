@@ -8536,7 +8536,10 @@ should buy.
   read as a sudden onset rather than a gradual one.
 - **The frame profiler splits the gap**, not the render loop: `spike` on the
   HUD is the gap between frames, and the expensive thing need not be in
-  rendering at all. It prints render / net / elsewhere on a frame over 45ms.
+  rendering at all. It prints render / net / elsewhere on a frame over
+  `SLOW_FRAME_MS` (28 — below a 30fps frame; it was 45, which never fired on a
+  client sitting at 45fps, exactly the case worth a breakdown), rate-limited to
+  one a second so a bad patch cannot flood the console.
 - **The client copies snapshots into the objects it already holds** rather than
   keeping the parsed ones, so they die young instead of being promoted. Add a
   field to `EntityState` and you must add it to `ENTITY_FIELDS` — two flags
@@ -8548,6 +8551,119 @@ should buy.
   up, standing on its own corpse. Nothing errors; the field simply stops at the
   first frame, so the symptom is always "this state change never happens to
   something that has been on screen a while".
+
+### `else` on the HUD is a residual, and a slipped frame inflates it
+
+Reported as frame loss on a 3070 Ti while spectating a late round, and the
+first thing to get right is how to read the number that looks damning:
+
+```
+gap 30.1 = render 5.2 + net 0.5 + else 24.3    tick 3.67 / 33.3   fogpoly 0.00
+```
+
+**That is not 24.3ms of work.** `lastFrameAt = now` is set at the *rAF callback
+start* and `gap = now - lastFrameAt`, so `else = gap - render - net` is a
+residual and **the idle wait for the next vsync is inside it**. Miss one vsync
+at 60Hz and the gap becomes 33.3ms; render and net are unchanged; `else`
+becomes ~24ms *by arithmetic*, most of it the browser doing nothing. The
+number is inflated by the very drop it is meant to diagnose.
+
+So the honest reading of a frame like that is **"a few milliseconds over 16.7,
+now landing on every second vsync"** — not "eighteen milliseconds unaccounted
+for". It is the same cliff already written down under the endgame stall (*cost
+ramps smoothly; dropped frames do not*) and under the 77%-utilisation trace.
+The practical consequence is that clawing back 3-5ms can restore 60fps
+outright, so small savings are worth more here than the residual suggests.
+
+**The card is irrelevant.** Everything below is Skia fill-rate and texture
+traffic on one thread; none of it is shader work.
+
+#### What a late round adds that an early one does not
+
+`stainLayer` (dried blood and settled corpses), `wallMarkLayer` (bullet holes)
+and `groundScorchLayer` (plasma craters) are each `WORLD * BLOOD_BAKE_SCALE`
+— 2500x1850, ~4.6MP, ~18MB at a full city. **Every one of the three blits is
+gated on a dirty flag that is false for the first minute of a round and true
+for the rest of it**: the first dried mark, the first round into a wall and the
+first crater turn them on and nothing turns them off. And each draws "just the
+sub-rect on screen", which for a player is a few hundred pixels of the layer
+and for a spectator framing the whole city is **the entire layer, three times**.
+
+That is the shape of the report exactly — only at this stage, only zoomed out —
+and it is the one figure that reproduces: `client/layerbench.html` reads
+**~0.1ms clean against 3.4-6.7ms dirty** for a spectator across five runs,
+always the dominant effect. A player pays a smaller version of the same step.
+
+**Quote it as a range and never a single run.** None of it shows up in `render`
+on the HUD, because `drawImage` returns immediately and the resample happens
+after rAF returns — it is `elsewhere`, which is also why `map 4.9` on the HUD
+reconstructs as `paintbench`'s scene (0.71) plus these three (2.69) plus
+pickups (1.43) and not as anything one function is doing.
+
+#### A quarter-resolution mip was built for it and thrown away
+
+The obvious fix: keep a smaller copy of each layer and blit *that* when the
+camera would reduce the full one, so the same draw becomes a mild upscale off a
+quarter of the bytes. It was built, measured, and reverted, and both halves of
+why are worth keeping.
+
+- **It measured 0.33ms against a 0.99ms noise floor.** Not a result. See the
+  control below — without one, this looked like a win.
+- **And it visibly broke the picture**, reported as decals flickering and
+  jumping when zoomed out. The bug is one line: use of the mip was gated on
+  `mip.version === version`, where the version bumps on **every bake** — which
+  under sustained fire is every frame — while the rebuild is throttled. So the
+  condition held only on the frame after a rebuild, and the blit **alternated
+  between the mip (quarter-res, smoothing on) and the full layer (half-res,
+  smoothing off) at frame rate**. Two resolutions and two sampling modes, so
+  every decal's centroid landed a pixel or two differently frame to frame.
+  Tolerating staleness is the entire point of a refresh throttle; gating *use*
+  on being current defeats it and costs the picture.
+
+**Do not rebuild it without an instrument that can resolve a 2ms change.** If
+the three blits ever do need to become cheaper, the likelier lever is doing
+**two** of them — `groundScorchLayer` and `stainLayer` are both under-walls
+ground marks and could share one surface with no visual change at all — and
+that is untested.
+
+What *is* actionable today needs none of this resolved: **RESOLUTION 0.75** in
+options scales the whole paint budget, and you are only just over.
+
+#### `client/layerbench.html` is the rig, and its control is the point
+
+Headless of the game — no socket, no port — and it drives the real `spawn*` /
+`draw*` entry points rather than a replica, so what it measures is the shipping
+path. `setLayerBlitSmoothing` is the gate and it is kept.
+
+**Read the CONTROL row before quoting anything else it prints.** It runs one
+case twice under different labels, so what it reports is the machine's noise
+floor, and each row then labels itself `<- real` or `<- inside the noise`
+against twice that. On a good run the floor is 0.45ms; on a bad one 2.84ms.
+
+*Three things about it were the rig lying rather than the code failing, and all
+three made a nonsense of a figure that looked perfectly plausible:*
+
+- **State carried between cases.** A case that bakes every frame leaves ~1000
+  extra decals and a fuller layer behind it, so every case after it measured
+  what the cases above it happened to leave. The same code read "baking is
+  free, -0.44ms" on one ordering and "+5.58ms" on another. Every sample resets
+  the world *and the seed* now.
+- **A fixed case order penalises whichever case runs last** — GC accumulated
+  over the round lands on it — which for a control whose whole job is to read
+  the same as the row above it is fatal. Measured that way the control came out
+  **2.84ms dearer than the identical case it duplicates**. The order rotates
+  each round.
+- **The median carries a share of one-sided interference.** Spreads here run to
+  170ms on cases whose true cost does not move, so the statistic is the
+  **cheapest whole sample** of many — and the cheapest *whole* one, not the
+  floor of `issue` and `paint` separately, which would come from two different
+  frames and need not add up to anything that ever happened.
+
+**And even with all three fixed, only the dirty-flag step reproduces across
+runs.** Over five runs the saving from turning smoothing off read 1.91, 0.14,
+0.23, -1.36 and 2.41ms — the sign flips — and bake-while-blitting did the same.
+A within-run control is necessary and not sufficient; a figure that has not
+been seen twice is not a figure.
 
 ## Key decisions worth not re-litigating
 
@@ -10564,6 +10680,13 @@ in the city was told to walk past it by name. Nothing else read the mark.
   still* beside a wall as "grinding into" it, and one picked a "clear lane"
   from the nav grid, which cheerfully contains shut doors. When a check fails,
   suspect the check first — twice now it has been the test, not the code.
+- **A timing rig needs a control that runs the same code twice**, and it is
+  cheap: one case duplicated under a second label. Whatever the two differ by
+  is what that machine cannot resolve, and nothing smaller than it is a result.
+  `client/layerbench.html` has one because a "fix" measured 0.33ms against a
+  floor of 0.99 and read as a win without it. **Necessary and not sufficient** —
+  a figure that clears the within-run floor can still flip sign between runs, so
+  a result has to be seen twice. See **`else` on the HUD is a residual**.
 - **Never compare tick cost across two separate `npx tsx` invocations.** This
   box is noisy enough that the *same code* measured 1.97ms and 4.37ms on two
   runs minutes apart, which read exactly like a change having doubled the cost.

@@ -4321,6 +4321,24 @@ export function spawnPlasmaScorch(
 }
 
 /**
+ * Measurement gate: whether the three whole-world baked layers — `stainLayer`,
+ * `wallMarkLayer` and `groundScorchLayer` — are blitted with smoothing on.
+ *
+ * All three are `WORLD * BLOOD_BAKE_SCALE`, so at a 5000x3700 city each is a
+ * 2500x1850 (~4.6MP) surface. A player camera asks for a small sub-rect of one;
+ * a spectator framing the whole city asks for *all* of it, three times — and
+ * `drawImage` returns immediately, so the resample lands in the frame gap as
+ * `elsewhere`, where profiling the render loop cannot see it.
+ * `client/src/paintbench.ts` drives this to say what it actually costs. Kept
+ * rather than deleted with the measurement: the control is the whole value of
+ * the run.
+ */
+let layerBlitSmoothing = true;
+export function setLayerBlitSmoothing(v: boolean): void {
+  layerBlitSmoothing = v;
+}
+
+/**
  * The marks, blitted for the sub-rect on screen — called right after the
  * walls themselves, so they land on the wall's surface rather than under it.
  */
@@ -4333,7 +4351,7 @@ export function drawBulletHoles(ctx: CanvasRenderingContext2D, view: Viewport): 
   const sh = Math.min(wallMarkLayer.height - sy, Math.ceil(view.h * s) + 2);
   if (sw <= 0 || sh <= 0) return;
   const smooth = ctx.imageSmoothingEnabled;
-  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingEnabled = layerBlitSmoothing;
   ctx.drawImage(wallMarkLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
   ctx.imageSmoothingEnabled = smooth;
 }
@@ -4452,7 +4470,7 @@ export function drawGroundScorch(ctx: CanvasRenderingContext2D, view: Viewport):
   const sh = Math.min(groundScorchLayer.height - sy, Math.ceil(view.h * s) + 2);
   if (sw <= 0 || sh <= 0) return;
   const smooth = ctx.imageSmoothingEnabled;
-  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingEnabled = layerBlitSmoothing;
   ctx.drawImage(groundScorchLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
   ctx.imageSmoothingEnabled = smooth;
 }
@@ -4939,7 +4957,7 @@ export function drawBlood(ctx: CanvasRenderingContext2D, view: Viewport, now: nu
     const sh = Math.min(stainLayer.height - sy, Math.ceil(view.h * s) + 2);
     if (sw > 0 && sh > 0) {
       const smooth = ctx.imageSmoothingEnabled;
-      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingEnabled = layerBlitSmoothing;
       ctx.drawImage(stainLayer, sx, sy, sw, sh, sx / s, sy / s, sw / s, sh / s);
       ctx.imageSmoothingEnabled = smooth;
     }
