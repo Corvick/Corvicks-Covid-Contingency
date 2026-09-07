@@ -202,10 +202,42 @@ them back to their own AI. Selected officers wear a green ring.
   whole board.
 - **`AiState.commandX`/`commandY`**, and the branch that reads them sits in
   `updateNpcOfficer` **below the fight and above escort/guard/patrol**: a
-  commanded officer still defends itself and engages what it passes — an
-  attack-move, for free — but the order overrides everything calmer. On arrival
-  (`COMMAND_ARRIVE_DIST`) it holds and scans the street like a guard. Sticky:
-  no expiry, an order holds until replaced.
+  commanded officer still defends itself and engages what it passes — but the
+  order overrides everything calmer.
+  - **The order supersedes the kiting only while it is being carried out.**
+    Reported twice: first that a commanded officer should obey a move until it
+    is complete rather than backing off it; then that an officer which had
+    *arrived* was standing still and taking hits instead of giving ground.
+    `carryingOrder` (a move still en route, or any build errand) suppresses both
+    the retreat in the fight branch and the `fleeUntil` shaken-flight, so the
+    officer walks *to* the objective and shoots what it passes rather than off
+    it. A fresh order given mid-kite takes over on the next tick.
+  - **It is a proper strafe, not an opportunistic shot.** While `carryingOrder`
+    the fight branch aims the gun on `e.facing` alone and leaves `state.heading`
+    to the move/build branch, which is passed `keepFacing` — so the body walks
+    the route with the gun tracking the threat. Left to itself the officer turns
+    bodily and gives ground, exactly as before. The shot is still suppressed
+    while shaken (`now >= state.fleeUntil` on the fire gate), even under orders —
+    being grabbed takes the shot away; the order only supersedes the movement.
+  - **Arrival ends the order.** At `COMMAND_ARRIVE_DIST` the command branch
+    clears `commandX`/`commandY` and hands over to a `guardX`/`guardY` post at
+    the ordered spot (`COMMAND_HOLD_RADIUS`, 60 — wider than the arrival test so
+    a nudged cluster or an officer coming back off a kite is not forever a pace
+    outside its own post, tighter than the van/beacon posts because a spectator
+    picked an exact spot). From there the guard branch holds it and the fight
+    branch, no longer suppressed, gives ground to a zombie and comes back — the
+    officer is now a posted guard, identical to a van driver or a station
+    officer. The old stationary hold-and-scan sat right in the command branch
+    and is gone; the guard branch's own scan replaced it.
+  - **`AiState.commandPost`** marks a guard post that a spectator's order set
+    (a move arriving, or a wall going up) rather than the city (`world.ts`
+    posting a van driver, a station officer, a beacon guard). It is the one
+    thing `R` / `command{release}` may strip off the guard fields; a city post
+    is left alone. Cleared when a fresh move or build order is issued, so `R`
+    mid-walk frees the officer cleanly.
+  - **`H` (stop) posts directly** rather than routing a zero-length move —
+    `guardX` at the officer's feet, `commandPost` set — so a held officer also
+    kites a zombie and returns.
 - **A move order keeps the group's shape rather than piling it on one pixel.**
   Handed the identical destination, five officers walk at the same point and
   collision shoves them into a blob — which is the SC2 clustering nobody wants.
@@ -313,23 +345,32 @@ the next tick fell through to escort/guard/patrol. So the officer strolled
 away from the thing he had just put up — which is the last body you want
 anywhere else.
 
-- **Finishing hands over to the move order’s own arrival behaviour.**
-  `commandX`/`commandY` are set to where he is standing, and the branch
-  immediately below already knows what to do with an officer who has arrived:
-  hold, and scan the street. No new state and no new branch.
-- **It overwrites any stale move order underneath**, deliberately. A build
-  supersedes a move on the way in — that is what the branch order is for —
-  and resuming a walk given before the wall existed is not "finished
+- **Finishing hands over to a `commandPost` guard post on the wall.**
+  `guardX`/`guardY` are set to where he is standing (`COMMAND_HOLD_RADIUS`),
+  `commandPost` is set, and the guard branch immediately below holds him there
+  — while the fight branch above, no longer suppressed once `buildX` is null,
+  gives ground to a zombie and comes back like any posted officer. The same
+  handover an arrived move order makes, and the same one the beacon carrier
+  makes when its mast goes up. *(This was `commandX`/`commandY` at his feet at
+  first — a sticky move order — which held the spot but also suppressed the
+  kiting there. Reported as arrived officers standing still under fire; a guard
+  post is the version that gives ground.)*
+- **It does not restore any stale move order underneath**, deliberately. A
+  build supersedes a move on the way in — that is what the branch order is for
+  — and resuming a walk given before the wall existed is not "finished
   building".
-- **`R` still hands him back to his own AI** and a fresh order still replaces
-  it, so it is a post rather than a lock.
+- **`R` still hands him back to his own AI** — and because the post is
+  `commandPost`, `R` clears `guardX`/`guardY` too rather than leaving him
+  guarding the wall forever. A fresh order still replaces it. It is a post
+  rather than a lock.
 - Giving up on a spot (`BARRICADE_GIVE_UP_MS`) is untouched: that is not
   finishing, and a man who could not reach the place has no reason to stand
   where he gave up.
 
 Measured in `rtscheck.ts`, over 20s after the last wall goes up — because
 "did not move" is a claim about the rest of the round rather than the next
-second: **worst drift 0.0px**, and all three end under a stand-here order.
+second: **worst drift 0.0px**, and all three end holding a `commandPost` guard
+post on the wall.
 #### And a command card to build with
 
 Selecting grey officers raises an SC2-shaped card bottom-right —
@@ -403,8 +444,10 @@ three rows, mostly empty: a **shovel** bottom-left opens a build page whose
   walks it off on a blind breakout heading — the trap this file records for
   anything that walks. `headingToward` already routes around walls with A*.
   Measured: a commanded officer closes ~36px/s on an open target and reaches
-  within `COMMAND_ARRIVE_DIST`, then holds dead steady; a target clicked inside
-  geometry, it gets as close as it can and holds there.
+  within `COMMAND_ARRIVE_DIST`, then hands over to a guard post and holds within
+  `COMMAND_HOLD_RADIUS` (giving ground to a zombie and coming back — see
+  **`AiState.commandX`/`commandY`** above); a target clicked inside geometry, it
+  gets as close as it can and holds there.
 - **Grey means grey.** `type: 'officer'` with an `AiState` and not in
   `world.bots` / `world.soldiers` / `world.swat` — the ambient garrison plus
   the grey radio-dispatched crews. The client's predicate is the wire flags:

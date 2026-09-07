@@ -501,16 +501,31 @@ export interface AiState {
   guardY: number | null;
   guardRadius: number;
   /**
-   * A spectator's RTS move-order: go here, then hold and watch the street.
+   * A spectator's RTS move-order: walk here.
    *
    * Sits above escort/guard/patrol in `updateNpcOfficer` but below the fight,
    * so a commanded officer still defends itself and engages what it passes —
-   * an attack-move for free. Only ever set for grey AI officers, and only from
-   * a spectating socket; sticky until a new order replaces it. `null` means no
-   * order.
+   * an attack-move for free — and while it is set the automatic kiting is
+   * suppressed so the officer walks *to* the spot rather than off it. Only ever
+   * set for grey AI officers, and only from a spectating socket. `null` means
+   * no pending move.
+   *
+   * **Cleared on arrival**, which hands over to `guardX`/`guardY` below with
+   * `commandPost` set: the order is complete, and from then on the officer
+   * holds the spot but resumes the automatic give-ground-and-return when a
+   * zombie comes at it. Reported as arrived officers standing still and taking
+   * hits instead of kiting.
    */
   commandX: number | null;
   commandY: number | null;
+  /**
+   * This officer's `guardX`/`guardY` post was set by a spectator's order
+   * completing (a move arriving, or a wall going up) rather than by the city
+   * (a van driver, a station officer, a beacon guard). It is the one thing
+   * `R` / `command{release}` may clear off the guard fields — a city post is
+   * left alone.
+   */
+  commandPost: boolean;
   /**
    * A sandbag wall this officer has been sent to build, and which way it lies.
    *
@@ -1541,6 +1556,7 @@ export function newAiState(now: number, x: number, y: number): AiState {
     guardRadius: VAN_GUARD_RADIUS,
     commandX: null,
     commandY: null,
+    commandPost: false,
     buildX: null,
     buildY: null,
     buildAngle: 0,

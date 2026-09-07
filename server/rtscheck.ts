@@ -506,8 +506,9 @@ function sandbagSuite(): void {
    * Reported as grey officers wandering off the moment the sandbags were
    * stacked: with the build cleared and nothing else standing, the next tick
    * fell through to escort/guard/patrol and they strolled away from the thing
-   * they had just put up. Finishing hands over to the move order's own arrival
-   * behaviour instead — hold where you are and scan the street.
+   * they had just put up. Finishing hands over to a `commandPost` guard post on
+   * the wall instead — the guard branch holds it there, and the fight branch
+   * above gives ground to a zombie and comes back, like any posted officer.
    *
    * Measured over a good deal longer than the walk took, because "did not move"
    * is a claim about the rest of the round rather than about the next second.
@@ -532,8 +533,11 @@ function sandbagSuite(): void {
       `worst drift ${worst.toFixed(1)}px over 20s`,
     );
     check(
-      ids.every((id) => world.ai.get(id)?.commandX !== null),
-      'because finishing leaves him under a stand-here order',
+      ids.every((id) => {
+        const st = world.ai.get(id);
+        return st?.commandPost === true && st.guardX !== null && st.commandX === null;
+      }),
+      'because finishing hands him a commandPost guard post on the wall',
     );
   }
 

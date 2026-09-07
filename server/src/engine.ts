@@ -43,6 +43,7 @@ import {
   DOG_SIGHT_RADIUS,
   ENTITY_RADIUS,
   COMMAND_FORMATION_SPREAD,
+  COMMAND_HOLD_RADIUS,
   OFFICER_SPACING_PAD,
   PATH_NODE_BUDGET_PER_TICK,
   STAMINA_MAX,
@@ -513,17 +514,33 @@ function commandOfficers(
       st.buildX = null;
       st.buildY = null;
       st.buildAt = 0;
+      // A guard post this officer only holds because a spectator's order
+      // finished there — a move arriving or a wall going up — is part of the
+      // order and comes off with it. A city post (a van driver, a station
+      // officer) is left alone.
+      if (st.commandPost) {
+        st.guardX = null;
+        st.guardY = null;
+        st.commandPost = false;
+      }
     }
     return;
   }
 
   if (msg.stop) {
+    // Hold where you stand: post them here directly rather than routing a
+    // zero-length move. From this post they kite a zombie and come back, like
+    // any guard — see `updateNpcOfficer`.
     for (const { e, st } of units) {
-      st.commandX = e.x;
-      st.commandY = e.y;
+      st.commandX = null;
+      st.commandY = null;
       st.buildX = null;
       st.buildY = null;
       st.buildAt = 0;
+      st.guardX = e.x;
+      st.guardY = e.y;
+      st.guardRadius = COMMAND_HOLD_RADIUS;
+      st.commandPost = true;
     }
     return;
   }
@@ -562,6 +579,15 @@ function commandOfficers(
     best.st.buildAngle = msg.angle ?? 0;
     best.st.buildAt = 0;
     best.st.buildSetOutAt = 0;
+    // Off any completed-order post: he is on an errand now, and the wall's own
+    // post is set when it goes up. `R` mid-walk then frees him cleanly.
+    best.st.commandX = null;
+    best.st.commandY = null;
+    if (best.st.commandPost) {
+      best.st.guardX = null;
+      best.st.guardY = null;
+      best.st.commandPost = false;
+    }
     console.log(`[server] ${best.e.id} sent to build a wall at ${spot.x | 0},${spot.y | 0}`);
     return;
   }
@@ -652,6 +678,13 @@ function commandOfficers(
     st.buildX = null;
     st.buildY = null;
     st.buildAt = 0;
+    // Off any completed-order post — he is walking again, and a new post is set
+    // when he arrives. A city post stays put.
+    if (st.commandPost) {
+      st.guardX = null;
+      st.guardY = null;
+      st.commandPost = false;
+    }
   }
 }
 

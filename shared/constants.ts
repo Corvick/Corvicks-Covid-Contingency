@@ -3216,10 +3216,20 @@ export const RALLY_ROOM_GIVE_UP_MS = 40000;
 export const INDOOR_ROUTE_DOOR_REACH = 40;
 /**
  * How near a spectator's move-order counts as arrived — at which point the
- * officer holds and scans the street rather than pressing on. Same figure as
- * the wander/guard arrival tests around it.
+ * move is complete and the officer hands over to the guard branch, holding the
+ * spot but kiting a threat like any other posted officer. Same figure as the
+ * wander/guard arrival tests around it.
  */
 export const COMMAND_ARRIVE_DIST = 26;
+/**
+ * How far a commanded officer may drift from the spot it was sent to before it
+ * walks back — its `guardRadius` once the move completes. Wider than
+ * `COMMAND_ARRIVE_DIST` so a cluster of arrived officers nudging each other
+ * apart, or one that gave ground to a zombie and is coming back, is not forever
+ * a pace outside its own post. Tighter than the van/beacon posts because a
+ * spectator picked an exact spot.
+ */
+export const COMMAND_HOLD_RADIUS = 60;
 /**
  * How wide a commanded group is allowed to arrive, **per square root of its
  * size** — so the cluster grows with the number of bodies in it rather than

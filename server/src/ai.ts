@@ -78,6 +78,7 @@ import {
   RALLY_ROOM_GIVE_UP_MS,
   INDOOR_ROUTE_DOOR_REACH,
   COMMAND_ARRIVE_DIST,
+  COMMAND_HOLD_RADIUS,
   BARRICADE_BUILD_MS,
   BARRICADE_BUILD_REACH,
   BARRICADE_GIVE_UP_MS,
@@ -4917,8 +4918,32 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
 
   const threat = state.targetId ? world.entities.get(state.targetId) : undefined;
 
-  // Shaken after being grabbed: no shooting, just get clear.
-  if (now < state.fleeUntil) {
+  /*
+   * **A spectator's order supersedes the kiting — while it is being carried
+   * out.**
+   *
+   * A grey officer left to itself backs off a zombie with the gun up (the
+   * retreat in the fight branch) and, once grabbed, spends `fleeUntil` running
+   * clear. Both are the automatic behaviour an *idle* officer keeps. An officer
+   * still walking to a move-order, or anywhere in a build errand, carries that
+   * out instead: it defends itself — the gun tracks the threat, the shield
+   * still shoves — but it walks to the objective rather than off it, and a
+   * fresh order given mid-kite takes over at once.
+   *
+   * **This stops the moment the move completes.** `commandX` is cleared on
+   * arrival (the branch below hands over to a guard post), so an officer that
+   * has arrived and is holding the spot is *not* `carryingOrder` and kites a
+   * fresh threat like any posted officer, coming back to the spot when it is
+   * clear. Reported as arrived officers standing still and taking hits.
+   */
+  const carryingOrder =
+    state.commandX !== null || (state.buildX !== null && state.buildY !== null);
+  const engaging = threat !== undefined && threat.type === 'zombie';
+
+  // Shaken after being grabbed: no shooting, just get clear — unless still
+  // carrying an order, in which case the flight is exactly the thing being
+  // superseded and the fight branch below handles facing and the shield shove.
+  if (now < state.fleeUntil && !carryingOrder) {
     if (threat && threat.type === 'zombie') {
       state.threatX = threat.x;
       state.threatY = threat.y;
@@ -4941,11 +4966,31 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     const aim = Math.atan2(dy, dx);
     // Quick, but not instantaneous — snapping the barrel around made them look
     // mechanical, and made the flicking between targets far more obvious.
-    state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
-    e.facing = state.heading;
+    //
+    // While an order is being carried out the gun tracks the threat on
+    // `e.facing` alone and leaves `state.heading` to the move/build branch
+    // below, so the officer strafes toward the objective and shoots what it
+    // passes rather than turning bodily to face it and backing off. Left to
+    // itself — including once a move has completed and it is holding the spot —
+    // it turns bodily and gives ground, as before.
+    let aimHeading: number;
+    if (carryingOrder) {
+      e.facing = turnToward(e.facing, aim, NPC_OFFICER_TURN_RATE * dt);
+      aimHeading = e.facing;
+    } else {
+      state.heading = turnToward(state.heading, aim, NPC_OFFICER_TURN_RATE * dt);
+      e.facing = state.heading;
+      aimHeading = state.heading;
+    }
 
     // Don't fire until roughly on target, or they shoot at where they were.
-    if (now >= state.nextShotAt && Math.abs(angleDelta(state.heading, aim)) < 0.22) {
+    // Still silent while shaken, even under orders — being grabbed takes the
+    // shot away; the order only supersedes the movement.
+    if (
+      now >= state.nextShotAt &&
+      now >= state.fleeUntil &&
+      Math.abs(angleDelta(aimHeading, aim)) < 0.22
+    ) {
       state.nextShotAt = now + interval;
       // A dispatched crew spends rounds out of a real magazine. The slot is
       // left in the bag once it is empty — `officerGrade` reads the count and
@@ -4976,7 +5021,7 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
       fire(
         world,
         e,
-        state.heading,
+        aimHeading,
         onTheDog ? 0 : bloom,
         now,
         gun,
@@ -5002,7 +5047,12 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
     // officer who never finished lining up, almost never passed the firing
     // test, and simply backed away: a grey officer that appeared to be fleeing
     // instead of holding ground and shooting.
-    if (dist < NPC_OFFICER_RETREAT_DIST) {
+    //
+    // Only when left to its own devices — which now includes an officer that
+    // has *arrived* at a move-order and is holding the spot. A commanded
+    // officer still walking to the order does not back off the objective; the
+    // kiting is exactly what an order-in-progress supersedes.
+    if (!carryingOrder && dist < NPC_OFFICER_RETREAT_DIST) {
       const backward = Math.atan2(-dy, -dx);
       const speed = speedAt(world, e.x, e.y, HUMAN_WALK_SPEED, e.type);
       const stepX = Math.cos(backward) * speed * dt;
@@ -5017,7 +5067,12 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         e.y += stepY;
       }
     }
-    return;
+
+    // Left to itself (or holding a completed post) this tick is spent: the
+    // officer has fought and given ground and there is nothing else it wants.
+    // Still carrying an order, the fight is only half the tick — the gun has
+    // fired, now fall through and walk.
+    if (!carryingOrder) return;
   }
 
   /*
@@ -5081,7 +5136,10 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         e,
         headingToward(world, e, state, state.buildX, state.buildY, now),
       );
-      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+      // `engaging` keeps `e.facing` on the zombie the fight branch aimed at, so
+      // the officer walks to the spot with the gun still tracking rather than
+      // turning to face where its feet are going.
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now, engaging);
       // Knocked off the spot mid-job: the stacking starts again rather than
       // banking what was done, the same rule the beacon's mast follows.
       state.buildAt = 0;
@@ -5105,23 +5163,38 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
      * stacked. With the build cleared and nothing else standing, the next tick
      * fell through to escort/guard/patrol and they strolled away from the thing
      * they had just put up — which is exactly the wrong body to have anywhere
-     * else. So finishing hands over to the move order's own arrival behaviour:
-     * hold where you are and scan the street, until a spectator says otherwise.
+     * else. So finishing hands over to a guard post on the wall: the guard
+     * branch below holds it there, and the fight branch above gives ground to a
+     * zombie and comes back, like any posted officer.
      *
-     * It also overwrites any stale move order underneath. A build supersedes a
-     * move on the way in — the branch above this one is the whole reason —
-     * and resuming a walk that was given before the wall existed is not
+     * `commandPost` so `R` can still hand him back. It also clears any stale
+     * move order underneath by not restoring one — a build supersedes a move on
+     * the way in, and resuming a walk given before the wall existed is not
      * "finished building".
      */
-    state.commandX = e.x;
-    state.commandY = e.y;
+    state.commandX = null;
+    state.commandY = null;
+    state.guardX = e.x;
+    state.guardY = e.y;
+    state.guardRadius = COMMAND_HOLD_RADIUS;
+    state.commandPost = true;
     return;
   }
 
-  // A spectator has ordered this officer somewhere. Above escort/guard/patrol
-  // so the order wins over whatever it was doing, and below the fight above so
-  // it still shoots what it passes — an attack-move, for free. Sticky: it holds
-  // and scans the street on arrival until a new order replaces it.
+  // A spectator has ordered this officer to walk somewhere. Above
+  // escort/guard/patrol so the order wins over whatever it was doing, and below
+  // the fight above so it still shoots what it passes — an attack-move, for
+  // free, and one that supersedes the kiting: the fight branch has fired but
+  // not retreated, so the officer strafes toward the order with the gun on the
+  // threat rather than backing off the spot. A fresh order mid-kite takes over
+  // now.
+  //
+  // **Arrival ends the order.** `commandX` is cleared and the spot becomes a
+  // `guardX`/`guardY` post (`commandPost` so `R` can still clear it) — from
+  // there the guard branch below holds the spot, and the fight branch above,
+  // no longer suppressed, gives ground to a zombie and comes back like any
+  // posted officer. The stationary hold used to sit right here and read as an
+  // officer standing still under fire.
   //
   // Built like the guard branch below, deliberately *not* like the beacon
   // carrier: `unstickTick` wants 38px/s to call a body un-stuck and a walking
@@ -5136,16 +5209,16 @@ function updateNpcOfficer(world: World, e: Entity, state: AiState, now: number, 
         e,
         headingToward(world, e, state, state.commandX, state.commandY, now),
       );
-      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now);
+      // `engaging` keeps `e.facing` on the zombie the fight branch aimed at.
+      step(world, e, state, desired, HUMAN_WALK_SPEED * 1.15, HUMAN_TURN_RATE, dt, now, engaging);
       return;
     }
-    if (now >= state.nextLookAt) {
-      state.nextLookAt =
-        now + RALLY_LOOK_MIN_MS + Math.random() * (RALLY_LOOK_MAX_MS - RALLY_LOOK_MIN_MS);
-      state.lookHeading = Math.random() * Math.PI * 2;
-    }
-    state.heading = turnToward(state.heading, state.lookHeading, RALLY_LOOK_TURN_RATE * dt);
-    e.facing = state.heading;
+    state.guardX = state.commandX;
+    state.guardY = state.commandY;
+    state.guardRadius = COMMAND_HOLD_RADIUS;
+    state.commandPost = true;
+    state.commandX = null;
+    state.commandY = null;
     return;
   }
 
