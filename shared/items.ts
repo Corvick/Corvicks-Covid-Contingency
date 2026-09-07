@@ -1,5 +1,6 @@
 import {
-  CHARGE_BARS,
+  CHARGE_BEAM_RADIUS,
+  CHARGE_TOP_PIERCE,
   CHARGE_MS,
   CHARGE_COOL_MS,
   BOLT_CYCLE_MS,
@@ -11,7 +12,7 @@ import {
 export type ItemId =
   | 'pistol'
   | 'dualPistols'
-  | 'machineGun'
+  | 'smg'
   | 'shotgun'
   | 'boltRifle'
   | 'semiAutoRifle'
@@ -114,6 +115,13 @@ export interface ItemDef {
   /** Bodies one round passes through. At full charge, all of them. */
   pierce?: number;
   /**
+   * How far off the line a body is still caught, on top of its own radius —
+   * the round is a beam with width rather than the infinitely thin line every
+   * other gun fires. Scaled by the wind-up on a charge weapon, so the hitbox
+   * is the beam that is actually drawn.
+   */
+  beamRadius?: number;
+  /**
    * How close a bot wants to be before it opens up, when that is nearer than
    * the weapon's outright reach. A shotgun carries 340 but only bites at half
    * that, so a bot firing at maximum range is a bot wasting shells.
@@ -175,13 +183,19 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     pellets: 2,
     parallel: 9,
   },
-  machineGun: {
-    id: 'machineGun',
+  smg: {
+    id: 'smg',
     kind: 'gun',
-    label: 'Machine Gun',
-    short: 'MG',
+    label: 'SMG',
+    short: 'SMG',
     color: '#fbbf24',
-    // Common now: an MG in most streets, but a weaker one.
+    // **A submachine gun, not a machine gun, and the split is deliberate.**
+    // What a blue officer finds in a street is a 9mm SMG; the belt-fed machine
+    // gun is what the pocket gunner sits behind (see `emplacement.ts`) and what
+    // `heavyMg` is. Nothing about how it *behaves* moved with the rename — the
+    // numbers below are the ones it has always had. What changed is what it is
+    // and what it sounds like: see `SMG_FILES` in `client/src/sound.ts`.
+    // Common: one in most streets, but a weak one.
     rarity: 11,
     // Nerfed hard. It was doing bolt-action work at ten times the rate; what
     // it is for is pinning a crowd, not killing one, so the damage came out
@@ -351,8 +365,13 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     ammo: 14,
     charge: true,
     chargeMs: CHARGE_MS,
-    // One body per bar; the top bar also drives it through a wall or a door.
-    pierce: CHARGE_BARS,
+    // One body at the first bar and a dozen at the top — see
+    // `CHARGE_TOP_PIERCE`; the top bar also drives it through a wall or a
+    // door. `fireHeld` works the ramp out from the bar level and never reads
+    // this, which is here so the registry states what the gun does.
+    pierce: CHARGE_TOP_PIERCE,
+    // The beam has width, and the width is the wind-up.
+    beamRadius: CHARGE_BEAM_RADIUS,
   },
   flamethrower: {
     id: 'flamethrower',

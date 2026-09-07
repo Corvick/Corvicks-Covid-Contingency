@@ -141,10 +141,16 @@ interface Result {
   beamBlueByLevel: number[];
   beamThickens: boolean;
   beamIsBlue: boolean;
-  wallScorchCircleOnWall: number;
-  wallScorchCircleOffWall: number;
-  wallScorchWhiteEachSide: [number, number];
-  wallScorchLongLines: number;
+  wallBarBlue: number; // the bold blue bar along the wall face
+  wallBarSpan: number; // how far that bar runs along the wall, end to end
+  wallCoreWhite: number; // the white core
+  wallCorePurple: number; // the purple ring around it
+  wallOffWall: number; // solid bar/core ink outside the wall rect — must be ~0
+  wallBoltInto: number; // cyan lightning past the bar, into the wall
+  wallBoltOut: number; // cyan lightning past the bar, open side
+  wallCoreStraightDy: number; // the core's vertical reach, shot square
+  wallCoreAngledDy: number; // …shot at -1.0 — must be taller (the core tilted)
+  wallAngledCoreShifts: boolean;
   craterDarkMark: number;
   craterBrightBlue: number;
   cooldownRedByCool: number[];
@@ -163,10 +169,16 @@ function run(): void {
     beamBlueByLevel: [],
     beamThickens: false,
     beamIsBlue: false,
-    wallScorchCircleOnWall: 0,
-    wallScorchCircleOffWall: 0,
-    wallScorchWhiteEachSide: [0, 0],
-    wallScorchLongLines: 0,
+    wallBarBlue: 0,
+    wallBarSpan: 0,
+    wallCoreWhite: 0,
+    wallCorePurple: 0,
+    wallOffWall: 0,
+    wallBoltInto: 0,
+    wallBoltOut: 0,
+    wallCoreStraightDy: 0,
+    wallCoreAngledDy: 0,
+    wallAngledCoreShifts: false,
     craterDarkMark: 0,
     craterBrightBlue: 0,
     cooldownRedByCool: [],
@@ -229,48 +241,99 @@ function run(): void {
       result.beamWidthByLevel.every((v, i) => i === 0 || v >= result.beamWidthByLevel[i - 1]);
     result.beamIsBlue = result.beamBlueByLevel.every((b, i) => b >= result.beamWidthByLevel[i] * 0.9);
 
-    // --- the wall scorch. Beam travels +x, so the wall is on the +x side and
-    //     the open/ground side is -x; "along the wall" is ±y. The glowing
-    //     circle must sit +x of the impact line (on the wall), not -x. The
-    //     white streak must reach both ±y. And nothing may be a long line.
-    clear();
-    clearBlood();
-    spawnPlasmaScorch(150, 150, 0, 4, 1);
-    drawBulletHoles(ctx, VIEW);
+    // --- the wall scorch, against a real wall it must clip itself to. The wall
+    //     is a thin vertical slab whose LEFT face is at x=200; the beam travels
+    //     +x into it. The bar runs ±y on the face, the core sits in the wall,
+    //     cyan lightning arcs off both faces (±x) — and *nothing solid* renders
+    //     outside the slab (dx 0..14), which is the whole of "it colours the
+    //     wall".
     {
-      const bx = 60;
-      const by = 60;
-      const w = 180;
-      const dat = ctx.getImageData(bx, by, w, w).data;
-      let onWall = 0; // dense bright ink +x of the impact, near — the circle
-      let offWall = 0; // dense bright ink -x of the impact, near — must be ~0
-      let whiteUp = 0;
-      let whiteDown = 0;
-      let longLines = 0;
+      const WALL = { x: 200, y: 60, w: 14, h: 180 };
+      clear();
+      clearBlood();
+      spawnPlasmaScorch(200, 150, 0, 4, 1, [WALL]);
+      drawBulletHoles(ctx, VIEW);
+      const bx = 120;
+      const by = 50;
+      const w = 220;
+      const dat = ctx.getImageData(bx, by, w, 200).data;
+      let barBlue = 0;
+      let barSpan = 0;
+      let coreWhite = 0;
+      let corePurple = 0;
+      let offWall = 0;
+      let boltInto = 0;
+      let boltOut = 0;
       for (let i = 0; i < dat.length; i += 4) {
         const p = i / 4;
-        const dx = (p % w) - 90;
-        const dy = Math.floor(p / w) - 90;
-        const dist = Math.hypot(dx, dy);
-        const sum = dat[i] + dat[i + 1] + dat[i + 2];
-        const dense = sum > 260; // a fill, not a thin bolt line
-        // The along-wall streak: white core over a blue middle.
-        const brightWhite = dat[i] > 150 && dat[i + 1] > 175 && dat[i + 2] > 205;
-        if (dense && dist >= 3 && dist <= 18) {
-          if (dx > 2) onWall++;
-          else if (dx < -2) offWall++;
+        const dx = (p % w) + bx - 200; // relative to the impact / face at x=200
+        const dy = Math.floor(p / w) + by - 150;
+        const r = dat[i];
+        const g = dat[i + 1];
+        const b = dat[i + 2];
+        // purple is the core ring's alone (cyan has |r-b| ~150); bar-blue is the
+        // bar body's alone (cyan has g high); cyan is the lightning's alone.
+        const purple = r > 90 && b > 110 && r > g + 22 && b > g + 22 && Math.abs(r - b) < 100;
+        const barBlueBody = b > 110 && g < 95 && r < 85;
+        const white = r > 140 && g > 120 && b > 150;
+        const cyan = b > 70 && g > 55 && b >= r && g >= r;
+        // solid mark OUTSIDE the slab (with the 1px clip pad) — must be ~0.
+        // Only purple/bar-blue count: densely stacked cyan lightning reads as
+        // "white" and legitimately arcs out past the slab.
+        if ((purple || barBlueBody) && (dx < -3 || dx > 20)) offWall++;
+        if (barBlueBody && dx >= -1 && dx <= 18) {
+          barBlue++;
+          barSpan = Math.max(barSpan, Math.abs(dy));
         }
-        // The streak runs ±y from the inset centre (dx ~ +13), reaching out.
-        if (brightWhite && Math.abs(dy) >= 15 && Math.abs(dy) <= 44 && dx > -4 && dx < 30) {
-          if (dy < 0) whiteUp++;
-          else whiteDown++;
+        if ((white || purple) && dx >= -1 && dx <= 18 && Math.abs(dy) < 18) {
+          if (white) coreWhite++;
+          else corePurple++;
         }
-        if (sum > 150 && dist > 58) longLines++;
+        if (cyan && Math.abs(dy) < 34) {
+          if (dx > 17 && dx < 46) boltInto++;
+          else if (dx < -6 && dx > -46) boltOut++;
+        }
       }
-      result.wallScorchCircleOnWall = onWall;
-      result.wallScorchCircleOffWall = offWall;
-      result.wallScorchWhiteEachSide = [whiteUp, whiteDown];
-      result.wallScorchLongLines = longLines;
+      result.wallBarBlue = barBlue;
+      result.wallBarSpan = barSpan * 2;
+      result.wallCoreWhite = coreWhite;
+      result.wallCorePurple = corePurple;
+      result.wallOffWall = offWall;
+      result.wallBoltInto = boltInto;
+      result.wallBoltOut = boltOut;
+    }
+
+    // --- an angled shot tilts the core. Same left-face wall; fire square and
+    //     at -1.0 rad, and the purple ring's vertical reach must grow because
+    //     its long axis followed the beam.
+    {
+      const WALL = { x: 200, y: 60, w: 60, h: 160 };
+      const purpleMaxDy = (ang: number): number => {
+        clear();
+        clearBlood();
+        spawnPlasmaScorch(200, 150, ang, 4, 1, [WALL]);
+        drawBulletHoles(ctx, VIEW);
+        const bx = 190;
+        const by = 100;
+        const w = 100;
+        const dat = ctx.getImageData(bx, by, w, 100).data;
+        let mx = 0;
+        for (let i = 0; i < dat.length; i += 4) {
+          const p = i / 4;
+          const dy = Math.floor(p / w) + by - 150;
+          const r = dat[i];
+          const g = dat[i + 1];
+          const b = dat[i + 2];
+          if (r > 90 && b > 110 && r > g + 22 && b > g + 22 && Math.abs(r - b) < 100) {
+            mx = Math.max(mx, Math.abs(dy));
+          }
+        }
+        return mx;
+      };
+      result.wallCoreStraightDy = purpleMaxDy(0);
+      result.wallCoreAngledDy = purpleMaxDy(-1);
+      result.wallAngledCoreShifts =
+        result.wallCoreStraightDy > 2 && result.wallCoreAngledDy > result.wallCoreStraightDy + 1.5;
     }
 
     // --- the ground crater: a dark burn now, the bright blue moved to the wall.
@@ -300,14 +363,18 @@ function run(): void {
       result.emberFades &&
       result.beamThickens &&
       result.beamIsBlue &&
-      // The circle sits on the wall side, essentially none of it on the open side.
-      result.wallScorchCircleOnWall > 40 &&
-      result.wallScorchCircleOffWall < result.wallScorchCircleOnWall * 0.15 &&
-      // The white streak reaches both ways along the wall.
-      result.wallScorchWhiteEachSide[0] > 10 &&
-      result.wallScorchWhiteEachSide[1] > 10 &&
-      // No long lines.
-      result.wallScorchLongLines < 15 &&
+      // a blue bar along the wall (clipped to a thin slab, so a modest count)
+      result.wallBarBlue > 150 &&
+      // a white core ringed in purple
+      result.wallCoreWhite > 3 &&
+      result.wallCorePurple > 8 &&
+      // NOTHING solid renders off the wall — the whole point
+      result.wallOffWall < 25 &&
+      // cyan lightning arcs off both faces of the wall
+      result.wallBoltInto > 4 &&
+      result.wallBoltOut > 4 &&
+      // an angled shot tilts the core
+      result.wallAngledCoreShifts &&
       result.craterDarkMark > 200 &&
       result.craterBrightBlue < result.craterDarkMark * 0.25 &&
       result.cooldownRecedes;
@@ -342,22 +409,28 @@ function run(): void {
     const y = 390 + lvl * 24;
     drawPlasmaBeam(ctx, { x1: 60, y1: y, x2: 640, y2: y, hit: true, born: 0, plasma: lvl }, 40);
   }
-  // One clean angle-0 scorch, with a fake wall drawn to its right so the
-  // "beam went in from the left / lightning must not cross into the wall" is
-  // visible, then magnified.
+  // A straight-in scorch against a wall on its right, and an angled one into
+  // the SAME wall (so the diagonal core, clipped to the wall, shows), each
+  // magnified 2.7x. The scorch is handed the wall and clips itself to it.
+  const dW1 = { x: 705, y: 300, w: 16, h: 150 };
+  const dW2 = { x: 705, y: 470, w: 90, h: 150 };
   ctx.fillStyle = '#242832';
-  ctx.fillRect(720, 300, 200, 220);
-  spawnPlasmaScorch(720, 410, 0, 4, 1);
-  spawnPlasmaCrater(900, 560, 4, 3);
+  ctx.fillRect(dW1.x, dW1.y, dW1.w, dW1.h);
+  ctx.fillRect(dW2.x, dW2.y, dW2.w, dW2.h);
+  spawnPlasmaScorch(705, 375, 0, 4, 1, [dW1]);
+  spawnPlasmaScorch(705, 545, -0.85, 4, 2, [dW2]);
+  spawnPlasmaCrater(970, 560, 4, 3);
   drawGroundScorch(ctx, VIEW);
   drawBulletHoles(ctx, VIEW);
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(canvas, 640, 320, 190, 190, 970, 340, 260, 260);
+  ctx.drawImage(canvas, 625, 300, 170, 170, 950, 300, 250, 250);
+  ctx.drawImage(canvas, 625, 470, 170, 170, 950, 570, 250, 250);
   ctx.strokeStyle = '#334';
-  ctx.strokeRect(970, 340, 260, 260);
-  // Redraw the wall edge in the magnified view for reference.
-  ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  ctx.fillText('scorch (angle 0 → beam hit the wall on the RIGHT), then 2.7x', 640, 315);
+  ctx.strokeRect(950, 300, 250, 250);
+  ctx.strokeRect(950, 570, 250, 250);
+  ctx.fillStyle = '#8aa';
+  ctx.fillText('scorch straight-in — wall on the RIGHT — 2.7x', 950, 294);
+  ctx.fillText('scorch angled ~49° into the same wall — 2.7x', 950, 564);
   ctx.fillStyle = '#8aa';
   ctx.fillText('scorch / crater; cooldown bar 1.0 / 0.5 / 0.15', 40, 700);
   drawChargeCooldown(ctx, 200, 710, 1);

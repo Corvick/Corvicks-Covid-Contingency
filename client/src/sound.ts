@@ -328,8 +328,39 @@ const GARAND_RELOAD_FILES = ['garand-03-reload.mp3'];
  */
 const SNIPER_FILES = ['sniper-01-fps.mp3', 'sniper-02-barrett.mp3'];
 const SHOTGUN_FILES = ['shotgun-01-blast.mp3'];
+/**
+ * The officer's own automatic weapon, and it is an SMG rather than a machine
+ * gun — see `ITEMS.smg`. One round out of a real **Heckler & Koch MP5A3**
+ * firing blanks down a street, hand-trimmed out of a twenty-round burst (see
+ * CREDITS.md): the last round of it, which is the only one in the take with
+ * its own tail rather than the next round's crack landing on top of it.
+ *
+ * A single-file pool, the same call `SHOTGUN_FILES` and the charge rifle's
+ * three already make. It is not for want of takes — the burst holds twenty —
+ * but every other round is cut off 88ms later by the next one, so a pool of
+ * them would be one clip with a natural decay and several chopped flat, which
+ * is exactly the inconsistency the dropped pistol takes were dropped for.
+ * `playVoice`'s own pitch jitter is what keeps it from repeating identically.
+ *
+ * **Its 324ms tail overlapping itself is the point, not a fault.** The gun
+ * fires every 110ms, so about three are in the air at once — which is what a
+ * burst of automatic fire sounds like, and is exactly what `MG_FILES` (1.0s
+ * each) has always done. It is the *semi*-auto that cannot afford a tail; see
+ * `GARAND_SHOT_FILES` above.
+ */
+const SMG_FILES = ['smg-01-mp5.wav'];
+/**
+ * The belt-fed machine gun: the `heavyMg` a player can carry, and the pocket
+ * gunner's mounted gun, which share the one `'mg'` voice.
+ *
+ * **There was a second, heavier pool here and it has been pulled** — a real
+ * M240 and a DShK, on `heavyMg` alone. Taken out for now rather than
+ * re-levelled, and `heavyMg` plays these two takes in their place, so the
+ * emplacement's own sound is byte-for-byte the one it has always had. The
+ * files are gone from `weapons/` and their row is still in CREDITS.md, which
+ * is where to start if they are ever wanted back.
+ */
 const MG_FILES = ['mg-01-single.mp3', 'mg-02-single.mp3'];
-const HEAVY_MG_FILES = ['heavymg-01-m240.mp3', 'heavymg-02-dshk.mp3'];
 /**
  * The charge rifle is an energy weapon, so its three noises are sci-fi rather
  * than gunfire: the chamber winding up, the beam discharging, and the vent
@@ -379,8 +410,8 @@ const garandPingVoices: VoiceClip[] = [];
 const garandReloadVoices: VoiceClip[] = [];
 const sniperVoices: VoiceClip[] = [];
 const shotgunVoices: VoiceClip[] = [];
+const smgVoices: VoiceClip[] = [];
 const mgVoices: VoiceClip[] = [];
-const heavyMgVoices: VoiceClip[] = [];
 const chargeWindVoices: VoiceClip[] = [];
 const chargeFireVoices: VoiceClip[] = [];
 const chargeVentVoices: VoiceClip[] = [];
@@ -512,8 +543,10 @@ const GARAND_RELOAD_TARGET_RMS = 0.028;
 // the two now that the thin one has been swapped out (see `SNIPER_FILES`).
 const SNIPER_TARGET_RMS = 0.155;
 const SHOTGUN_TARGET_RMS = 0.074;
+// A single-file pool, so the target is that file's own measured RMS (of the
+// mono/22050 trimmed WAV) — the single-file case above.
+const SMG_TARGET_RMS = 0.099;
 const MG_TARGET_RMS = 0.335;
-const HEAVY_MG_TARGET_RMS = 0.18;
 // Single-file pools — each target is that file's own measured RMS (of the
 // mono/22050 trimmed WAV), so `normalizedGain` is a no-op today and the right
 // anchor the day a second take joins it. See CREDITS.md.
@@ -606,8 +639,8 @@ function loadRecordedVoices(ac: AudioContext): void {
   for (const file of GARAND_RELOAD_FILES) load(WEAPON_SFX_BASE, file, garandReloadVoices, GARAND_RELOAD_TARGET_RMS);
   for (const file of SNIPER_FILES) load(WEAPON_SFX_BASE, file, sniperVoices, SNIPER_TARGET_RMS);
   for (const file of SHOTGUN_FILES) load(WEAPON_SFX_BASE, file, shotgunVoices, SHOTGUN_TARGET_RMS);
+  for (const file of SMG_FILES) load(WEAPON_SFX_BASE, file, smgVoices, SMG_TARGET_RMS);
   for (const file of MG_FILES) load(WEAPON_SFX_BASE, file, mgVoices, MG_TARGET_RMS);
-  for (const file of HEAVY_MG_FILES) load(WEAPON_SFX_BASE, file, heavyMgVoices, HEAVY_MG_TARGET_RMS);
   for (const file of CHARGE_WIND_FILES) load(WEAPON_SFX_BASE, file, chargeWindVoices, CHARGE_WIND_TARGET_RMS);
   for (const file of CHARGE_FIRE_FILES) load(WEAPON_SFX_BASE, file, chargeFireVoices, CHARGE_FIRE_TARGET_RMS);
   for (const file of CHARGE_VENT_FILES) load(WEAPON_SFX_BASE, file, chargeVentVoices, CHARGE_VENT_TARGET_RMS);
@@ -666,6 +699,64 @@ function playVoice(
   source.start(ac.currentTime + delaySec);
   return true;
 }
+
+/**
+ * How loud each of the noisiest categories is allowed to get, at point blank.
+ *
+ * These are the ones that were reported as too loud, and they are pulled out
+ * of their play functions because the reason they are the numbers they are is
+ * a comparison *between* pools rather than anything about one of them.
+ *
+ * **The ceiling on its own says nothing about how loud a pool is**, which is
+ * what hid this. What a clip actually comes out at is its own trimmed RMS,
+ * times whatever `normalizedGain` does to it, times the ceiling — so a hot
+ * recording is loud behind a modest-looking ceiling. The MG takes measure
+ * **0.23-0.29 RMS after trimming where the rifle's measure 0.054-0.076**, and
+ * `normalizedGain` cannot pull them down (it is peak-safe, and they peak near
+ * full scale), so at 0.45 against the rifle's 0.68 the machine gun was coming
+ * out **twice as loud as the loudest rifle in the game, nine times a second**.
+ *
+ * Measured end to end — each file decoded, trimmed exactly as `trimSilence`
+ * trims it, run through `normalizedGain` against its own pool target, and
+ * multiplied by the ceiling — across every file in every pool:
+ *
+ * | | before | after |
+ * |---|---|---|
+ * | pistol | 0.0374 | — |
+ * | rifle | 0.0433-0.0517 | — |
+ * | shotgun | 0.0518 | — |
+ * | sniper | 0.1049-0.1162 | — |
+ * | M1 Garand | 0.1197 | — |
+ * | **machine gun** | **0.0977-0.1214** | **0.0478-0.0593** |
+ * | **SMG** | (new) | **0.0396** |
+ * | **zombie groan** (9 takes) | 0.0231-0.0464 | **0.0137-0.0275** |
+ * | **zombie bark** (10 takes) | 0.0413-0.0525 | **0.0246-0.0313** |
+ * | **zombie hit** | 0.0420 | **0.0252** |
+ *
+ * The machine gun now lands a little above a rifle, which is what the heaviest
+ * report in the game should do, and it is the *cadence* that made the old
+ * figure intolerable rather than the figure itself — the sniper and the Garand
+ * are louder still and nobody has complained, because they fire once a second
+ * and this fires nine times. The SMG sits between the pistol and the rifle,
+ * which is what a 9mm out of a short barrel is.
+ *
+ * The three zombie voices come down **together**, by 40% (-4.4dB), rather than
+ * one at a time: they are one crowd, their balance against each other was
+ * never the complaint, and there are several hundred of them against a handful
+ * of guns.
+ *
+ * The synthesised fallbacks take the same two gun ceilings, so a round fired
+ * in the second before the recordings finish decoding is not louder than the
+ * one after it. The zombie fallbacks have hand-set oscillator gains of their
+ * own and are deliberately left alone: they are on screen for a second at the
+ * start of a round, and re-levelling three synth voices nobody normally hears
+ * is work spent where it cannot be heard.
+ */
+const SMG_CEILING = 0.4;
+const MG_CEILING = 0.22;
+const ZOMBIE_GROAN_CEILING = 0.19;
+const ZOMBIE_ATTACK_CEILING = 0.25;
+const ZOMBIE_HIT_CEILING = 0.18;
 
 /**
  * The dog's roar: a guttural bottom end with a hiss laid over it.
@@ -778,7 +869,7 @@ export function playZombieGroan(spatial: Spatial, voice: number): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
-  if (playVoice(ac, groanVoices, spatial, voice, 0.32)) return;
+  if (playVoice(ac, groanVoices, spatial, voice, ZOMBIE_GROAN_CEILING)) return;
   synthesizeZombieGroan(spatial, voice);
 }
 
@@ -877,7 +968,7 @@ export function playZombieAttack(spatial: Spatial, voice: number): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
-  if (playVoice(ac, attackVoices, spatial, voice, 0.42)) return;
+  if (playVoice(ac, attackVoices, spatial, voice, ZOMBIE_ATTACK_CEILING)) return;
   synthesizeZombieAttack(spatial, voice);
 }
 
@@ -960,7 +1051,7 @@ export function playZombieHit(spatial: Spatial, voice: number): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.012) return;
-  playVoice(ac, hitVoices, spatial, voice, 0.3);
+  playVoice(ac, hitVoices, spatial, voice, ZOMBIE_HIT_CEILING);
 }
 
 /**
@@ -1154,25 +1245,33 @@ export function playShotgunBlast(spatial: Spatial): void {
 }
 
 /**
- * One round out of the (light) machine gun. Quieter per shot than the others
- * on purpose — this is the one voice that fires several times a second, and
- * a burst of them at full ceiling would drown out everything else in the mix.
+ * One round out of the officer's SMG. Light and quick: it is a 9mm out of a
+ * short barrel, so it sits *between* the pistol and the rifle rather than
+ * above either — and it is one of the two voices in the game that fires
+ * several times a second, so a burst of it has to stay under everything else
+ * rather than becoming the mix.
+ *
+ * See `SMG_CEILING`, which is where that arithmetic is written down.
+ */
+export function playSmgShot(spatial: Spatial): void {
+  const ac = audio();
+  if (!ac) return;
+  if (spatial.gain <= 0.01) return;
+  if (playVoice(ac, smgVoices, spatial, 0.3 + Math.random() * 0.4, SMG_CEILING)) return;
+  synthesizeGunshot(spatial, { crackHz: 2500, thumpFrom: 140, thumpTo: 48, ceiling: SMG_CEILING });
+}
+
+/**
+ * One round out of the belt-fed machine gun — the `heavyMg` in a bag and the
+ * pocket gunner's mounted gun alike. The heaviest report in the game, and it
+ * still fires several times a second, which is what `MG_CEILING` is about.
  */
 export function playMachineGunShot(spatial: Spatial): void {
   const ac = audio();
   if (!ac) return;
   if (spatial.gain <= 0.01) return;
-  if (playVoice(ac, mgVoices, spatial, 0.3 + Math.random() * 0.4, 0.45)) return;
-  synthesizeGunshot(spatial, { crackHz: 2400, thumpFrom: 150, thumpTo: 50, ceiling: 0.45 });
-}
-
-/** One round out of the heavy machine gun — deeper and a little louder than the light one. */
-export function playHeavyMachineGunShot(spatial: Spatial): void {
-  const ac = audio();
-  if (!ac) return;
-  if (spatial.gain <= 0.01) return;
-  if (playVoice(ac, heavyMgVoices, spatial, 0.3 + Math.random() * 0.4, 0.55)) return;
-  synthesizeGunshot(spatial, { crackHz: 1900, thumpFrom: 110, thumpTo: 35, ceiling: 0.55 });
+  if (playVoice(ac, mgVoices, spatial, 0.3 + Math.random() * 0.4, MG_CEILING)) return;
+  synthesizeGunshot(spatial, { crackHz: 1900, thumpFrom: 110, thumpTo: 35, ceiling: MG_CEILING });
 }
 
 // ---------------------------------------------------------------- charge rifle

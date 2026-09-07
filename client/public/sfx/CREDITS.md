@@ -63,10 +63,9 @@ search filter.
 | `weapons/sniper-01-fps.mp3` | FPS Sniper Shot | qubodup | [816114](https://freesound.org/people/qubodup/sounds/816114/) |
 | `weapons/sniper-02-barrett.mp3` | Barrett M82A1 Sniper Shot from Wooden Platform Hanging from Metal Chains 6 | qubodup | [855597](https://freesound.org/people/qubodup/sounds/855597/) |
 | `weapons/shotgun-01-blast.mp3` | shotgun shoot | MrGungus | [773873](https://freesound.org/people/MrGungus/sounds/773873/) |
+| `weapons/smg-01-mp5.wav` | MP5 submachine gun down the street.aif (one round, hand-trimmed) | Franki-01234 | [201671](https://freesound.org/people/Franki-01234/sounds/201671/) |
 | `weapons/mg-01-single.mp3` | Machine Gun 001 - single shot.ogg | pgi | [212601](https://freesound.org/people/pgi/sounds/212601/) |
 | `weapons/mg-02-single.mp3` | Machine Gun 002 - single shot.ogg | pgi | [212607](https://freesound.org/people/pgi/sounds/212607/) |
-| `weapons/heavymg-01-m240.mp3` | M240 Machine Gun Single Shot | qubodup | [854641](https://freesound.org/people/qubodup/sounds/854641/) |
-| `weapons/heavymg-02-dshk.mp3` | dshk_01.wav (single empty shot of a DShK) | greatmganga | [122103](https://freesound.org/people/greatmganga/sounds/122103/) |
 | `weapons/garand-01-ping.wav` | GUNMech_M1 GARAND CLIP EJECT_MP.wav | MPierluissi | [460848](https://freesound.org/people/MPierluissi/sounds/460848/) |
 | `weapons/garand-02-ping.wav` | GUNMech_M1 GARAND CLIP EJECT 2_MP.wav | MPierluissi | [460847](https://freesound.org/people/MPierluissi/sounds/460847/) |
 | `weapons/garand-03-reload.mp3` | GUNRif_M1 GARAND RELOAD_MP.wav | MPierluissi | [460855](https://freesound.org/people/MPierluissi/sounds/460855/) |
@@ -89,6 +88,84 @@ and no longer does — see `garand-0N-shot.wav` below, and the note on
 it is a continuous stream with its own established sound design (see
 `sprayFlame`), not a discrete report, and the cure gun's beam isn't a gunshot
 either.
+
+### The SMG, and the machine gun voice it left behind
+
+The officer's own automatic weapon is a **9mm SMG** rather than a machine gun
+(`ITEMS.smg`; it was `machineGun`, and nothing about how it *behaves* changed
+with the rename). `weapons/smg-01-mp5.wav` is its report: one round of a real
+**Heckler & Koch MP5A3**, fetched (the public preview stream) on 2026-09-05
+and marked **Creative Commons 0** on its own page like everything else here.
+
+The source is a 2.42-second field take from an indie film shoot — the
+uploader's own description names the weapon and says it is live, firing blanks,
+recorded from a distance with street echo, which is what it sounds like and
+what makes it sit right in a city. Measured off the decode it is **twenty
+rounds at 88-90ms apart** (about 670rpm), consistent in level shot to shot
+(0.73-0.97 peak, 0.16-0.25 RMS over each round's first 90ms) and in spectrum
+(~30% bass / ~65% mid).
+
+**Only the last round of the burst is usable, and that is why this is a
+single-file pool.** Every other round has the next one's crack landing on it
+88ms later, so a pool drawn from the middle of the burst would be several
+clips chopped flat and one with a real decay — the exact inconsistency the
+dropped pistol takes below were dropped for. Round 20 (onset 1.712s) has
+707ms of clear air after it, and 1.7055-2.030s of it was kept: downmixed to
+mono, resampled to 22050Hz, 4ms fade in and 60ms out, peak-normalised to 0.95,
+the same recipe as `rifle-04-bolt-cycle.wav` and the Garand takes. Measured
+after: **0.324s, one transient, 0.0986 RMS, starts and ends at zero, 38.6%
+bass / 52.4% mid / 9.0% treble** — lighter and brighter than the machine gun's
+own takes (45.9/48.6/5.5), which is what a 9mm out of a short barrel against a
+belt-fed rifle round should be. `playVoice`'s pitch jitter is what keeps one
+file from repeating identically, as it already does for the shotgun.
+
+Its 324ms tail overlaps itself about three deep at the gun's 110ms cadence.
+That is not the Garand's fault arriving again — it *is* what automatic fire
+sounds like, and `mg-0N-single.mp3` (1.0s each) has always done the same.
+
+**`weapons/heavymg-01-m240.mp3` and `heavymg-02-dshk.mp3` are gone for now**
+— qubodup's M240 ([854641](https://freesound.org/people/qubodup/sounds/854641/))
+and greatmganga's DShK ([122103](https://freesound.org/people/greatmganga/sounds/122103/)),
+both CC0, both fine recordings. Pulled at request rather than for any fault of
+their own, and the `heavyMg` item plays the two `mg-0N-single` takes in their
+place — so there is one `'mg'` voice now, covering the heavy MG a player
+carries and the pocket gunner's mounted gun alike, and the emplacement's sound
+is byte-for-byte what it always was. Their ids are above if they are ever
+wanted back.
+
+### Levels
+
+**The machine gun was measurably the loudest gun in the game and is not any
+more.** Reported as too loud along with the zombies. A pool's ceiling on its
+own says nothing about how loud it is — what a clip comes out at is its own
+trimmed RMS times `normalizedGain` times the ceiling — and measured end to
+end that way the MG takes were landing at **0.098-0.121 against the loudest
+rifle's 0.052**, nine times a second. Its ceiling is 0.22 now (0.048-0.059,
+a little above a rifle, which is what the heaviest report in the game should
+be) and the three zombie voices came down together by 40%, -4.4dB. The SMG
+sits between the pistol and the rifle at 0.040. The full before-and-after
+table, every file in every pool, lives beside the constants in
+`client/src/sound.ts` next to `playVoice`.
+
+**What is not verified is how any of that sounds in the mix** — the same
+standard as the charge rifle and the rotor. Levels are matched by measured
+RMS and the register is a judgement from waveforms and source descriptions;
+nobody has listened.
+
+Also checked and rejected for the SMG: smill.and.welson's
+"[SEMI-RAW] MP5 Shoot (5) Single" ([698869](https://freesound.org/people/smill.and.welson/sounds/698869/)),
+which is exactly the right shape — five isolated single MP5 shots — but is
+**CC-BY 4.0 rather than CC0**, and every file in this project is CC0 or the
+Mixkit blanket licence. Worth revisiting if attribution-required ever becomes
+acceptable, because it is the better recording. db465's "mp5_fire"
+([865993](https://freesound.org/people/db465/sounds/865993/)) is CC0 and is
+**physically synthesized in a DSP program rather than recorded**, which is the
+same bar craigsmith's film foley failed below. hyperix6's "Colt SMG - Firing,
+Handling" ([676588](https://freesound.org/people/hyperix6/sounds/676588/)) is
+CC0, close-mic'd and punchy (61.6% bass), with four clean isolated single
+shots — the strongest fallback if the MP5 take plays too distant — but its own
+uploader describes it as built out of "A LOT of samples", so it is sound design
+rather than one gun in one take, and it is not an MP5.
 
 `weapons/rifle-01-single.mp3` plays for the pistol alone now — it reads as a
 perfectly good handgun crack on its own, and it stopped being the rifle

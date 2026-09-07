@@ -2340,8 +2340,9 @@ export const UNDEPLOY_MS = 420;
  *
  * Below the first bar there is not enough in it to fire at all — and letting
  * go early costs nothing, so a mis-click is not a wasted round. Each bar after
- * that is one more body the round carries through, and the fourth drives it
- * through a wall or a door as well.
+ * that carries the round through several more bodies — see
+ * `CHARGE_TOP_PIERCE` — and the fourth drives it through a wall or a door as
+ * well.
  */
 export const CHARGE_BARS = 4;
 /**
@@ -2353,6 +2354,74 @@ export const CHARGE_BARS = 4;
  */
 export const CHARGE_BASE_MUL = 0.4;
 export const CHARGE_TOP_MUL = 2.4;
+/**
+ * Bodies one round carries through, at the first bar and at the last, with the
+ * bars between them interpolated exactly the way the damage above is: **1, 5,
+ * 8, 12**.
+ *
+ * It was one body per bar, which made a full wind-up a slightly better rifle
+ * shot rather than a different weapon — a street stood in a line is the thing
+ * a beam is *for*. The top figure is deliberately well past ten, because a
+ * crowd is never a neat queue: some of the twelve are spent on bodies the beam
+ * clips at its edge.
+ *
+ * **This is not `CHARGE_BARS` any more, and `Shot.plasma` carries the bar
+ * *level* rather than this.** The client reads that field as the level — the
+ * beam's width, and the gate on the ground crater — so handing it a pierce
+ * count draws a beam twelve steps wide and craters on every shot.
+ */
+export const CHARGE_BASE_PIERCE = 1;
+export const CHARGE_TOP_PIERCE = 12;
+/**
+ * How far off the line a body is still caught, on top of its own radius, at a
+ * full wind-up — scaled down with the bar level, so the hitbox is the beam
+ * that is actually drawn rather than the infinitely thin line every other gun
+ * in the city fires. 14 is `drawPlasmaBeam`'s own cyan body at the top bar
+ * (`w * 2` across, so `w` either side), and it is a zombie's whole radius
+ * again on top of its own — which is what makes a dozen bodies reachable in a
+ * crowd that is not standing in a queue.
+ */
+export const CHARGE_BEAM_RADIUS = 14;
+/**
+ * Slabs a full wind-up drives through — walls and shut doors alike — before it
+ * stops at the next one.
+ *
+ * It was exactly one, and one is not enough to get through a **corner**:
+ * `mapgen` lays walls as runs of rects, so where two runs meet, a round
+ * crossing the join meets two or three slabs within a few pixels of each
+ * other. Skipping one and stopping at the next is a beam that pierced the
+ * corner and then stopped inside it, which from the outside reads as the gun
+ * simply failing against that one bit of wall while working fine a foot
+ * either side. Four covers a corner, a wall with a doorway shut in it, and an
+ * ordinary party wall between two rooms, and it is still a count rather than
+ * a free pass: a beam does not cross a whole building.
+ */
+export const CHARGE_WALL_PIERCE = 4;
+/**
+ * How close two slabs have to be, along the round's own line, to be **one
+ * wall** rather than two.
+ *
+ * Counting rects is the wrong unit and measuring it in a real city is what
+ * said so. `mapgen` lays walls as runs of rects and a building corner stacks
+ * them: a full charge fired north from a street read slabs at **25, 25, 81,
+ * 165, 165 pixels** — four pierces spent inside one corner, and the beam dead
+ * 165px from the muzzle. That is the reported fault exactly, and raising the
+ * count would only move the arbitrariness rather than remove it: how far a
+ * beam gets would still depend on how `mapgen` happened to split a run.
+ *
+ * So a pierce is charged per *wall*: slabs within this of the first one of a
+ * group are the same obstruction and cost nothing more. Measured from the
+ * first of the group rather than chained off the last, so a run crossed at a
+ * shallow angle cannot walk the beam across a whole building a rect at a time.
+ * 24 is a little over two `WALL_THICKNESS`, which covers a corner, a door in
+ * its own frame and a double-thick counter, and is far under the gap between
+ * two rooms.
+ *
+ * **A slab inside the group is passed even when the pierces have run out** —
+ * otherwise the round stops *inside* the last wall it just went through,
+ * which is the same fault wearing a different hat.
+ */
+export const CHARGE_WALL_MERGE = 24;
 /**
  * How long the trigger has to be held for a full wind-up. Was inline on
  * `chargeRifle.chargeMs`; named here because the wire-side `EntityState.charging`
@@ -4612,6 +4681,7 @@ export const BLOOD_DECAL_MS = 40000;
  * city this is a ~18MB canvas, and less for the smaller ones.
  */
 export const BLOOD_BAKE_SCALE = 0.5;
+
 /** The wet part: droplets thrown along the round's line, gone in half a second. */
 export const BLOOD_SPRAY_MS = 520;
 export const BLOOD_SPRAY_DROPS = 9;

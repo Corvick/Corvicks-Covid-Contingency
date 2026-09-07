@@ -330,7 +330,11 @@ export function updateEmplacements(world: World, now: number, dt: number): void 
     gun.ammo--;
     // Rounds pass over the bags, so the gun shoots from its own position.
     fire(world, gunner, gun.facing, EMPLACEMENT_BLOOM, now, {
-      id: 'machineGun',
+      // `heavyMg` rather than `smg`, and it is what this gun sounds like: the
+      // id is what `gunVoice` reads, and a gun on a mount is the belt-fed
+      // family, not the officer's 9mm. The emplacement has no item of its own
+      // to name, so it borrows the nearest one that is actually a machine gun.
+      id: 'heavyMg',
       kind: 'gun',
       label: 'Emplacement',
       short: 'EMPL',

@@ -6,15 +6,18 @@
  * of all from here, where rAF is throttled to nothing while the browser pane is
  * not compositing. `getImageData` needs none of that.
  *
- *  - the rotor wash sits on the ground centred on the aircraft, and fades with
- *    `alpha` — full at 1, roughly half at 0.5, gone at 0.02;
- *  - the gust puffs *go outward and fade in and out* — a fixed box out at 0.55R
- *    sees a puff drift through it and vanish, while the disc is never bare;
- *  - nothing the wash draws crosses `HELI_WASH_RADIUS`;
+ *  - the wash sits on the ground centred on the aircraft, fades with `alpha`,
+ *    and never crosses `HELI_WASH_RADIUS`;
+ *  - the puffs are faint (brightest pixel nowhere near opaque);
+ *  - a single puff swept over its life fades in and out — nothing, peak, nothing;
+ *  - the puffs do *not* follow a moving aircraft: a hovering wash sits on the
+ *    shadow, a flying one trails its puffs well behind it;
  *  - a bush directly under an aircraft is shoved off its resting spot, and one
  *    outside `HELI_WASH_RADIUS` is not;
- *  - with nothing overhead, `drawBushes` is byte-for-byte what it was — an
- *    empty `helis` list and one far outside the wash radius paint identically.
+ *  - with nothing overhead, `drawBushes` is byte-for-byte what it was.
+ *
+ * `setRotorWashHazeOff` / `setRotorGustCount` gate the drawing down so the
+ * deliberately faint puffs can be read without the haze in the way.
  *
  * Open `/helirig.html` on the dev server. Results land on `window.rigResult`.
  */
@@ -138,7 +141,7 @@ function bushInkBox(cx: number, cy: number, pad = 60) {
 interface Result {
   wash: { alpha: number; inkSum: number; offCentrePx: number }[];
   washOutsideRadius: number;
-  puffPeakOff: number; // brightest single pixel — "more transparent" than the old ~50
+  puffPeakOff: number; // brightest single puff pixel — "more transparent" means faint
   gustFade: { probeSwing: number };
   trail: { stationaryCentreDx: number; movingCentreDx: number; leftEdgeBehindPx: number };
   bushUnder: { restVsWindyPx: number };

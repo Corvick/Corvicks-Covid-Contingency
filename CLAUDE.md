@@ -3629,19 +3629,56 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
   from halfway rather than snapping to full, and the draining gauge is the only
   thing telling the player why they still can't move.
   The **charge rifle** fires on release, not press, in **four discrete bars**.
-  One bar is one body, each bar after that is one more, and the fourth also
-  drives the round through one wall or door — `throughWall` in `fire`, which
-  skips exactly one blocker in the sorted list. Below the first bar it doesn't
-  fire at all and costs nothing, so a mis-click isn't a wasted round.
+  One bar is one body and the top bar is **twelve** (`CHARGE_TOP_PIERCE`), on
+  the same interpolation as its damage; the top bar also drives the round
+  through `CHARGE_WALL_PIERCE` (4) *walls* of wall or door — `wallPierce` in
+  `fire`, which is how many it skips in the sorted list of blockers, charging
+  one per wall rather than one per rect (`CHARGE_WALL_MERGE`). Below the
+  first bar it doesn't fire at all and costs nothing, so a mis-click isn't a
+  wasted round.
   Bots share `fireHeld` and so fire all of them, at full charge.
 - **Firing on whole bars is what lets the gauge tell the truth.** The charge
   rifle used to fire on the raw held fraction, which no four-segment readout
   can honestly show. `drawChargeBars` and the server both quantise to
   `CHARGE_BARS`, so what you see filled is exactly what you get.
-- **The heavy MG is a pinning weapon, not a killing one.** Its damage was cut
-  to 4-8 and `slowMs`/`slowMul` added, because at 110ms cadence it was doing
+- **The officer's automatic weapon is an SMG, and the pocket gunner's is not.**
+  `ITEMS.smg` (it was `machineGun`, same numbers) is a 9mm submachine gun and
+  has its own recorded voice — one round of a real MP5A3, see `SMG_FILES` in
+  `sound.ts`. The belt-fed machine gun is `heavyMg` and the pocket gunner's
+  mounted gun, and **those two share the one `'mg'` voice**: `heavyMg`'s own
+  M240 and DShK takes were pulled at request and it plays the `mg-0N-single`
+  files in their place, which is exactly what the emplacement has always
+  played. The emplacement's synthetic `ItemDef` carries `id: 'heavyMg'` for
+  that reason and no other — the id is what `gunVoice` reads.
+- **A ceiling on its own says nothing about how loud a pool is**, and that is
+  what hid the machine gun being the loudest gun in the game. What a clip comes
+  out at is its own trimmed RMS times `normalizedGain` times the ceiling — the
+  MG takes measure 0.23-0.29 RMS after trimming against the rifle's 0.054-0.076
+  and peak near full scale, so normalisation cannot pull them down. Measured
+  end to end over every file in every pool, the MG was landing at
+  **0.098-0.121 against the loudest rifle's 0.052**, nine times a second.
+  Reported as "too loud" along with the zombies.
+  - `MG_CEILING` 0.45 → **0.22** (0.048-0.059, a little above a rifle, which
+    is what the heaviest report should be), `SMG_CEILING` **0.4** (0.040,
+    between the pistol and the rifle).
+  - **It was the cadence, not the figure.** The sniper (0.105-0.116) and the
+    Garand (0.120) are louder still and nobody has complained about either:
+    they fire once a second where this fires nine times.
+  - The three zombie voices came down **together** by 40% (-4.4dB) — they are
+    one crowd of several hundred against a handful of guns, and their balance
+    against *each other* was never the complaint. Groan 0.023-0.046 →
+    0.014-0.028, bark 0.041-0.053 → 0.025-0.031, hit 0.042 → 0.025.
+  - The synthesised gun fallbacks take the same two new ceilings; the
+    synthesised *zombie* fallbacks are deliberately left alone, being a second
+    of a round's opening that nobody normally hears.
+  - The full before-and-after table sits beside those constants in `sound.ts`,
+    next to `playVoice`.
+- **The SMG is a pinning weapon, not a killing one.** Its damage was cut
+  to 4-7 and `slowMs`/`slowMul` added, because at 110ms cadence it was doing
   bolt-action work ten times faster than the bolt action. A held burst now
-  stops a charge dead without dropping much of it.
+  stops a charge dead without dropping much of it. (This bullet said "the heavy
+  MG" and always described `ITEMS.smg` — 4-7 at 110ms, where `heavyMg` is
+  10-16 at 95ms. The rename is what made the slip worth fixing.)
 - **Every gun *and every utility* is in every city, derived from the registry.**
   `GUARANTEED_ITEMS` was a hand-kept list of the rare ones, so adding a gun and
   forgetting to list it produced maps that simply didn't have it.
@@ -3678,7 +3715,7 @@ semi-auto, the sniper, the heavy MG and the charge rifle.
   cutting it would mean nothing. `GUN_DAMAGE_MIN`/`MAX`, the unnamed default a
   grey officer with no gun falls back on, is deliberately left alone: it is not
   a gun in the registry and nobody asked for ambient officers to be nerfed.
-- **The city is meant to be full of three guns.** `boltRifle`, `machineGun`
+- **The city is meant to be full of three guns.** `boltRifle`, `smg`
   and `shotgun` carry the weight (12/11/9) and every rare stays at 1, so
   raising them makes the common guns commoner rather than everything commoner.
   Between the two sit `semiAutoRifle` and `chargeRifle` at 5 — a middle tier of
@@ -9683,7 +9720,7 @@ SWAT out of a van and the soldiers off a helicopter get nothing.
 five bots each: **200/200 bots came away with something**, 0 draws came to
 nothing, 0 rarity-0 items, 0 `loot-start-` pickups left on any map, 0 city caps
 broken on the floor, and 23 of the 24 items in the table turned up. The observed
-frequencies track the table: boltRifle **14.8%** against 14.1%, machineGun 13.8%
+frequencies track the table: boltRifle **14.8%** against 14.1%, smg 13.8%
 against 12.9%, shotgun 11.2% against 10.6%, sniper **1.2%** against 1.2%,
 cureGun 1.1% against 1.2%.
 
@@ -9856,16 +9893,23 @@ should get louder and quieter. but make sure its not too loud."*
   and a rotor's low beat carries, so the distance curve is a square not a cube.
   `HELI_ROTOR_CEILING` is 0.32 — below every gunshot, near the roar. It is a
   sustained sound; it should be *present in* the mix, not *be* it.
-- **The wind is `drawRotorWash` and a branch in `drawBushes`.** The wash — a
-  faint dust haze plus `ROTOR_GUSTS` (8) gust puffs, each a little cluster of
-  curved strokes (the comic wind-gust mark) that appears at the disc edge, is
-  carried outward, and fades in over the first half of its `ROTOR_GUST_LIFE_MS`
-  and out over the second (`sin(phase·π)`) — is drawn on the ground *before* the
-  shadow, scaled by `alpha`, stateless (a puff's whole life is `(now/LIFE +
-  hash) mod 1`, the acid-churn shape). It went **rings → radiating spokes →
-  drifting puffs**: a ring read as a shockwave, fixed spokes as a star, and the
-  ask landed on *"white lines … they need to go outward and fade in and out."*
-  `drawBushes` takes `helis` + `now` and, for a bush within
+- **The wind is `drawRotorWash` and a branch in `drawBushes`.** The wash is a
+  faint dust haze that tracks the disc, plus `ROTOR_GUSTS` (6) small gust puffs
+  that do **not**: each is a little cluster of curved strokes (the comic
+  wind-gust mark), **planted where the rotor was when it kicked up** —
+  `anchor = heli_now − velocity · age`, which for straight-line travel is
+  exactly the past position, so the shadow flies on and leaves a wake. Each
+  puff fades in over the first half of its `ROTOR_GUST_LIFE_MS` and out over the
+  second (`sin(phase·π)`), drifts a little, and is a different size (hashed off
+  its index). Drawn *before* the shadow, scaled by `alpha`. It went **rings →
+  radiating spokes → drifting puffs → puffs left on the ground**: a ring read
+  as a shockwave, fixed spokes as a star, and *"smaller, more transparent,
+  different sizes, and not follow the helicopter as it's moving."* The **only**
+  state is a short per-id velocity estimate (`rotorTrails`), sampled ≥50ms apart
+  because the wire only moves the aircraft at snapshot rate; pruned each frame
+  to what is on the wire. A puff's *life* stays stateless — `(now/LIFE + hash)
+  mod 1`, the acid-churn shape. `drawBushes` takes `helis` + `now` and, for a
+  bush within
   `HELI_WASH_RADIUS` (1.55× the disc), shoves its drawn circle radially outward
   (`HELI_WASH_PUSH`) with a fast cross shudder (`HELI_WASH_FLUTTER`) — **still
   one union path, the wind only moves where each `arc` is centred**, and with
@@ -9887,13 +9931,16 @@ should get louder and quieter. but make sure its not too loud."*
 | the flight still completes | — | inbound→hover→leave→gone, 16.0s, soldier down |
 
 `client/src/helirig.ts` (open `/helirig.html`) covers the drawing off the
-canvas: the wash centred **0.7px** off the aircraft, its ink scaling linearly
-with `alpha` (full → ~46% at 0.5 → 0 at 0.02), **0** ink past
-`HELI_WASH_RADIUS`; the gusts fade in and out (a fixed box out at 0.55R sees a
-puff drift through it and vanish — swing **1.0** — while the disc as a whole is
-never bare of gust strokes); a bush under the aircraft displaced **12.3px**
-where one outside the radius moves **0**; and an empty `helis` list painting
-byte-for-byte identically to an aircraft parked off the map.
+canvas (with `setRotorWashHazeOff` / `setRotorGustCount` gates so the faint
+puffs can be read alone): the wash centred **0.7px** off the aircraft, ink
+linear with `alpha`, **0** past `HELI_WASH_RADIUS`, the brightest puff pixel a
+faint **50** (opaque is ~150+); one puff swept over its life goes **nothing →
+peak → nothing** (fade in and out); and the wake — a **stationary** wash sits
+**20px** off the aircraft while one **flying** at cruise trails its puff
+centroid **125px behind** with ink reaching **280px** back. Plus a bush under
+the aircraft displaced **12.3px** where one outside the radius moves **0**, and
+an empty `helis` list painting byte-for-byte identically to an aircraft parked
+off the map.
 
 **What is not measured is how it sounds** — the recording was chosen and
 looped by amplitude envelope, not by ear (this cannot listen), and the wash is
@@ -10121,9 +10168,10 @@ the start** with the gun locked until it does.
   plays `charge-02-fire` rather than the rifle crack (`gunVoice` still returns
   `'rifle'` for the synth-fallback family, and `hearGunfire` catches
   `shot.plasma` ahead of the voice logic), scorches or craters the terminus,
-  and throws **no brass casing** — it cauterises. `Shot.thruX/thruY` is the
-  *entry* wall point, sent only when a full-charge round pierced a wall, so the
-  client can scorch both faces. Body hits deliberately spawn no blood — an
+  and throws **no brass casing** — it cauterises. `Shot.thru` is the *entry*
+  point of every wall it went through — flat `x, y` pairs, nearest first, sent
+  only for a full-charge round that actually pierced something, so the client
+  can scar each of them. Body hits deliberately spawn no blood — an
   energy round and the positions of the four bodies it pierced are not both on
   the wire, and a beam that stops in nobody is the common case anyway.
 - **`EntityState.charging` / `cooling` are quantised 0..1 on the wire, for any
@@ -10167,27 +10215,84 @@ the start** with the gun locked until it does.
   && !wall`. Both persist for the round and clear with `clearBlood`. The crater
   is a **dark vaporised patch** with only a dim violet ember — no lit rim, no
   blue.
-- **The wall scorch went through five passes, all of them the same lesson:
-  nothing here knows where the wall stops.** The beam frequently ends at a
-  wall's **edge**, so a filled shape spills onto whatever is beside it, and
-  there is no wall geometry passed in to clip against. *"Too circular"* →
-  *"only lightning strips"* → *"lightning can't go into the wall, white must
-  reach each side, purple on either side"* → *"get rid of the largest lines,
-  the circle must NOT touch the ground — wall only"*. `angle` is the beam's
-  direction *into* the wall, and everything keys off it:
-  - the **glowing circle is set `beamW·0.85` *into* the wall** (`cx, cy`
-    along `angle`), so its near edge clears the impact point and it never
-    reaches onto the ground. It carries the white/blue beam-width radial and
-    the deep-violet core with its white pinpoint;
-  - a **bright white streak runs along the wall face** (`angle ± PI/2`, both
-    ways) from that inset centre, `r·2.6` each way — gently sagging in the
-    middle, not a wild bolt — with a purple flank on each side and a blue mid;
-  - the lightning is a **short dense spray** (13-21 bolts), longest `r·1.8`,
-    only into the half facing away from the wall (`angle + PI ± 1.3`) — never
-    into or behind it.
-  `client/chargerig.ts` draws it against a fake wall and asserts: the circle
-  sits on the wall side and essentially none of it on the open side, the white
-  reaches both ways, and nothing is a long line.
+- **The wall scorch went through seven passes, all of them the same lesson:
+  nothing here knew where the wall stops.** *"Too circular"* → *"only
+  lightning strips"* → *"lightning can't go into the wall, white must reach
+  each side"* → *"the circle must NOT touch the ground"* → I over-stripped it
+  to a faint smear → a **hand-drawn sketch**: *"its worse, try to get closer to
+  the image on the right"* → and then, on an angled shot, *"it needs to color
+  the wall, I shot at an angle and it is off the wall"*. Insetting along the
+  beam was still a guess, and a diagonal beam guessed wrong. **So it stops
+  guessing:** `spawnPlasmaScorch` takes `map.walls`, finds the wall the beam
+  stopped on (nearest AABB, `best <= 64`) and which of its four faces (nearest
+  edge → the outward normal `n`), snaps the impact onto that face, and
+  **clips the solid parts to that wall's own rect**:
+  - a **solid blue bar along the face** (`along = atan2(nx, -ny)`, perpendicular
+    to `n`), shoved a full `bandThick` into the wall so its near edge sits on
+    the face — the half that would hang over the ground is **trimmed flush** by
+    the clip. White-hot core down its length, a couple of fine end cracks.
+  - a **white ellipse ringed in magenta-purple** on the `angle` axis, pulled
+    `coreRy·0.7` into the wall — so an angled shot lands a **diagonal core**
+    (the sketch's one explicit note) and the clip trims whatever tip crosses
+    the face. *"Still in the wall"* is now literally true.
+  - **cyan branching lightning off *both* faces**, along the normal axis
+    (`±n`), fanning ±0.55, reaching `16 + level·5.5` — drawn from the face point
+    **outside the clip**, so it is the only thing that crosses onto open
+    ground, which is what the sketch shows.
+  - **without a wall list (a rig, or `map` not yet loaded) it falls back** to
+    insetting `max(bandThick, coreRy) + 2` along the beam, roughly the old
+    behaviour.
+  `client/chargerig.ts` hands it a real slab and asserts: a blue bar
+  (`wallBarBlue`), a white core (`wallCoreWhite`) ringed in purple
+  (`wallCorePurple`), **zero** purple/bar-blue ink outside the slab
+  (`wallOffWall` — densely stacked cyan reads as white, so white is not
+  counted), cyan bolts off **both** faces (`wallBoltInto` / `wallBoltOut`), and
+  the purple ring's vertical reach growing when the shot goes from square to
+  `-1.0` rad (`wallCoreAngledDy > wallCoreStraightDy` — the core tilted).
+- **And an eighth pass took it back down, because a round's worth of them is
+  not one.** Reported over a spectator frame — *"the effect from the charge gun
+  is too distracting … tone down the bright colors and amount of lightening bits
+  sticking out"* — and the frame is the argument: every mark a charge rifle has
+  ever left is still on the wall, so the thing to judge is fifty of them at once
+  rather than the one the rig magnifies. Both halves of the report, and nothing
+  else:
+  - **The lightning is a third of the bits** — `3 + level/2` bolts a face rather
+    than `7 + level` (5 against 11 at the top bar), forks at 0.18 rather than
+    0.42, three or four segments rather than four to six, and half the stroke
+    width. **At two thirds the reach** (`16 + level·5.5`, was `22 + level·9`),
+    which is the one *size* that moved: with a third of the bolts, the odds that
+    any of them clears the bar on the way into the wall drop with the count, and
+    at half the reach the into-face bolts stopped existing. Everything else — the
+    bar, the core, the fan — is exactly the size it was, because what was loud
+    was the ink and not the silhouette.
+  - **Every colour came down about half.** The bar 0.92 → 0.72 and deeper, its
+    white-hot core 0.95 → 0.48 and no longer white, the purple ring 0.96 → 0.78,
+    the centre 0.98 → 0.55 (a pale lavender now), the additive pinpoint 0.9 →
+    0.28, and the bolts 0.92/0.85 → 0.5/0.4.
+  - **The whitest ink is what actually went**, and that is the reading worth
+    keeping. Measured over one level-4 scorch in a 100x100 box on the rig:
+
+  | one full-charge scorch | OLD | NEW |
+  |---|---|---|
+  | ink pixels | 4370 | **1807** |
+  | mean luminance, of 765 | 413 | **247** |
+  | peak | **765 — blown white** | 642 |
+  | pixels over 420 | 2083 | **112** |
+  | ink spilling off the slab onto the ground | 3290 | **748** |
+
+  So it is 41% of the ink at 60% of the brightness, with **5%** of the blown-out
+  pixels — which is the starburst going and the burn staying.
+  - **The rig's classifiers came down with the palette, and had to.** They are a
+    description of the mark's colours, so `barBlueBody` went `b > 150` → `110`,
+    `white` went `r,g,b > 210` → `140/120/150` (the centre is lavender now, and
+    120 of green is what still tells it from the purple ring at 52), `cyan` went
+    `b,g > 120` → `70/55`, and the bolt windows moved in with the reach — `dx`
+    17..46 and -6..-46 rather than 22..68 and -20..-66, both still clear of every
+    solid part of the mark. All of the rig's checks pass: bar **513** (**266**
+    once the bar was narrowed below), core **84** ringed
+    in **103** of purple, **1** stray pixel off the slab, bolts **16** into the
+    face and **145** out of it, and the angled core still standing taller (7 →
+    10).
 - **The beam's endpoint flash carries a violet middle** (`#f5f3ff` → `#a78bfa`
   → `#22d3ee`), tying it to the scar's core, and crackles its own short
   lightning that re-hashes every 55ms so it reads as live arcing rather than a
@@ -10204,23 +10309,195 @@ the start** with the gun locked until it does.
   flags in `hearChargeRifle`, so a held wind-up plays the whine once, not per
   tick; the discharge rides the `Shot`.
 
-`server/chargecheck.ts` is the headless harness — 25 checks: the plasma level
+`server/chargecheck.ts` is the headless harness — 39 checks: the plasma level
 on the wire, the scorch condition, the pierce point, the crater condition, no
 casing, a full charge dropping a 100hp shambler 200/200 (and bar 3 doing so
-0/200), the vent locking the gun, and `coolProgress` / `EntityState.cooling`
-decaying from 1 back to nothing across `CHARGE_COOL_MS`. `client/chargerig.ts`
+0/200), the queue, the corner and the beam's width below, the vent locking the
+gun, and `coolProgress` / `EntityState.cooling` decaying from 1 back to
+nothing across `CHARGE_COOL_MS`. `client/chargerig.ts`
 (+ `/chargerig.html`, `setInterval`-driven, `getImageData`) measures the
 drawing: the chamber's added luminance rising monotonically with `charging`,
 the ember fading as it cools, the beam blue-dominant and thickening per level
-(bar 4 a clear step wider), the wall scorch's glowing circle on the wall side
-and not the open side, its white streak reaching both ways, no long lines, the
-ground crater a *dark* mark rather than a bright one, and the HUD bar receding.
+(bar 4 a clear step wider), the wall scorch clipped to the slab it hit — a blue
+bar and a purple-ringed pale core on the wall, **nothing** solid outside it,
+cyan lightning off both faces, and an angled shot's core standing taller than a
+square one — the ground crater a *dark* mark rather than a bright one, and the
+HUD bar receding.
+
+##### And a beam clears a street, not a queue of four
+
+Asked for as *"the charge rifle at full charge should go through at least 10
+zombies, also make the hitbox larger"*, and then *"the gun is also having
+difficulty shooting the walls when hitting a corner, can we make sure it is
+able to pierce up to 4 wall segments"*. Three numbers, and each of them was a
+place the gun behaved like a rifle rather than like a beam.
+
+- **`CHARGE_TOP_PIERCE` is 12**, ramped off `CHARGE_BASE_PIERCE` (1) with the
+  bar level exactly the way `CHARGE_BASE_MUL`/`CHARGE_TOP_MUL` ramp the damage
+  — **1, 5, 8, 12**. One body per bar made a full wind-up a slightly better
+  rifle shot rather than a different weapon, which is the same complaint
+  `CHARGE_TOP_MUL` already answered on the damage side. Well past the ten
+  asked for, because a crowd is never a neat queue: some of the twelve are
+  spent on bodies the beam clips at its edge.
+- **`Shot.plasma` had to stop being the pierce count**, and this is the half
+  that would have broken quietly. The client reads that field as the *bar
+  level* — `drawPlasmaBeam`'s width, and the gate on the ground crater
+  (`plasma >= CHARGE_BARS`) — so left as `plasma: pierce` a full charge would
+  draw a beam twelve steps wide and crater on every shot. `fire` takes the
+  level as its own argument now and the two never meet.
+- **The hitbox is the beam that is drawn** (`ItemDef.beamRadius`,
+  `CHARGE_BEAM_RADIUS` 14, scaled by the bar level). Every other gun in the
+  city fires an infinitely thin line, which is right for a bullet and wrong for
+  something with a visible width: 14 is `drawPlasmaBeam`'s own cyan body at
+  the top bar, so a body the beam plainly passes through is a body it hits. It
+  is also most of what makes twelve reachable — a queue standing in a perfect
+  line is not a thing that happens.
+- **`throughWall` became `wallPierce`, a count**, and one was never enough
+  because of how `mapgen` lays walls: a run of rects, so **at a corner two
+  runs meet and a round crossing the join meets three slabs within a few
+  pixels of each other**. Skipping one and stopping at the next is a beam that
+  pierced the corner and stopped inside it, which from the outside reads as the
+  gun failing against that one bit of wall while working perfectly a foot
+  either side. `CHARGE_WALL_PIERCE` is 4 — a corner, a wall with a shut door
+  in it, an ordinary party wall — and still a count rather than a free pass.
+- **And the count is per *wall*, not per rect** (`CHARGE_WALL_MERGE`, 24px).
+  Four rects was the first answer and measuring it in a real city is what said
+  it was the wrong unit: a full charge fired north from a street met slabs at
+  **25, 25, 81, 165 and 165px** — four pierces spent inside one building
+  corner, the beam dead 165px from the muzzle, and the reported fault
+  reproduced by the fix meant to cure it. Slabs within 24px of the first of a
+  group are the same obstruction and cost nothing more; measured from the
+  first of the group rather than chained off the last, so a run crossed at a
+  shallow angle cannot walk the beam across a whole building a rect at a time.
+  **A slab inside the group is passed even once the pierces have run out**, or
+  the round stops *inside* the wall it has just gone through.
+  - Raising the count instead would have moved the arbitrariness rather than
+    removed it: how far a beam gets would still depend on how `mapgen`
+    happened to split a run, which is exactly what made one slab fail at a
+    corner in the first place.
+- **The entry face reported is the *first* slab of each wall, not the last.**
+  `thru` is where the client scorches the way in, and with several skips into
+  one wall the last of them is where it came *out*. One entry per wall, and
+  **every** wall — see **A beam through four walls scars four walls** below,
+  which is where only reporting the first turned out to be visible.
+- **Nothing on the client changed except where the beam is drawn**, and that
+  turned out to be the whole of why the pierce read as broken. **A wall stops
+  line of sight, so everything past the first one is under the fog** — which
+  is where a full charge spends most of its round. Drawn under the fog like
+  every other tracer, the visible beam ends at the near face of the first wall
+  whether it pierced four of them or none, and the one gun in the city that
+  goes through walls is unobservable from the only place anybody fires it
+  from. It is drawn in a second pass **over** the fog now, the same shape as
+  the thermal contacts and the acid murk, and `drawTracers` takes which half
+  to draw. It reveals nothing the player did not already choose — no entity,
+  no loot, no room, only where their own round went and where it stopped,
+  which is what the scorch on the near wall already tells them.
+
+`server/chargecheck.ts` carries it, and the two new halves are driven end to
+end through `processShooting` rather than through `fire` — handing `fire` a
+pierce count by hand would measure the harness's own arithmetic instead of the
+gun's ramp:
+
+| | OLD | NEW |
+|---|---|---|
+| a queue of 14, one full charge | **4 down** | **12 down** |
+| …and the back of the queue | standing | **standing** — it is a figure, not a free pass |
+| a corner of three slabs, then four more walls | **stopped inside the corner** | **through it, stopped at the fifth wall** |
+| a body 25px off the line (its own radius is 14) | **missed** | **hit** |
+| …the same body, a bolt action round | missed | **missed** — the control, and it is the old hit test exactly |
+| …the same body, a one-bar charge | missed | missed — the width is the wind-up |
+
+**And for once the intermittent check was the code, not the rig.** The
+beam-width check failed about one run in ten, which is the shape of a harness
+reporting the city — two rig faults were found and fixed on that assumption
+(a lane swept clear at ±16px says nothing about a body staged 25px off it, and
+a shut door is not in the nav grid so a "clear" lane can have one across it)
+and **neither was the cause; it kept failing.** What it actually was:
+
+- **The broadphase box has to grow with the beam, and widening the hit test
+  alone is not enough.** `fire` builds its query rect from the segment, so a
+  shot due east has a box of **zero height** — the grid hands back only what
+  is in the cells that line crosses, and a body the beam plainly passes
+  through whose own cells sit one row over is never offered for testing at
+  all. Whether it does depends on where in a 64px cell the line happens to
+  fall, which is why it was one shot in six and looked exactly like the wider
+  hitbox not working. **Anything that widens a hitscan has this waiting for
+  it**: it is the same lesson as a parked van needing to be in the nav grid
+  *and* in `hasWallClearPath` — being in one of the two is the same as being
+  in neither.
+
+*And two things were the rig.* **The staging for "it stops at the wall behind"
+had two walls in it**, which a four-wall pierce goes straight through: five are
+needed for a round to be stopped by geometry rather than by running out of
+reach, and without that the check passes for a beam that goes through
+everything. And **`Command.aim` is the firing direction, not `aimX`/`aimY`** —
+a probe that set the aim point and left `aim: 0` fired due east however it was
+pointed, and every "north" figure it printed was the east shot's. The tell is
+two different bearings reporting byte-for-byte identical distances.
+
+**How far a full charge actually gets**, measured through `processShooting` in
+three real cities, restricted to shots taken at a wall within 200px — which is
+the reported case, standing at a corner rather than out in the open. Bloom
+zeroed, since a wandering ray is not the thing being measured:
+
+| | median reach | p10 | died inside 300px |
+|---|---|---|---|
+| one slab, as it shipped before | 350px | 203px | **34.3%** |
+| four rects | 1623px | 801px | 0.4% |
+| **four walls** | **1878px** | 812px | 0.5% |
+
+The map is not seeded, so quote the range and never a single run — the sample
+is 196-248 shots a run depending on how much city the spots drew.
 
 **What is not verified is how it plays** — rAF is throttled to nothing in a
 non-compositing browser pane, so nobody has charged and fired one in a real
 round from here, and the three sounds were chosen and trimmed by decoded
 amplitude envelope rather than by ear (this cannot listen). The mechanics and
 the pixels are measured; the feel is the playtest.
+
+##### A beam through four walls scars four walls
+
+Reported as *"im not seeing the 2nd decal for the projectile passing through
+the 2nd wall"*, and there were two faults under it — one on the wire and one
+in the drawing's gate. Both are absences rather than wrong lines.
+
+- **Only the first wall was ever reported.** `pierceT` was a single number set
+  once (`if (blocker.door === -1 && pierceT < 0)`), so a beam that went
+  through four walls named one of them and the other three were never on the
+  wire at all. It is `pierced: number[]` now, one entry `t` per wall, and
+  `Shot.thru` carries them as flat `x, y` pairs. **The merge rule reaches the
+  marks with it**: a corner is one wall, so its three slabs leave one scar
+  rather than three stacked on each other, which needed no new code — the mark
+  is recorded where `wallStart` moves.
+- **And the marks were drawn only if a wall stopped it.** The whole block sat
+  under `if (shot.wall)`, which is `stoppedByWall` — so a beam that punched
+  through a frontage and then died in the open left **nothing at all** on the
+  frontage it had just gone through, and dropped a crater on the road instead.
+  The entry scars are drawn off `shot.thru` alone now; the impact scar keeps
+  its `shot.wall` gate, because that one is a claim about where it stopped.
+- **Worth knowing before the next report of a missing decal**: a scar is baked
+  into `wallMarkLayer` and blitted **under the fog**, where the beam is drawn
+  **over** it. So a mark on the far wall of a building you cannot see into is
+  there and is 8% visible, which is the fog rather than the mark. That is
+  deliberate — a scar revealing a room you have no line of sight into would be
+  a wallhack you could shoot for.
+
+Measured in `chargecheck.ts`, which is 39 checks now: a beam through four
+walls staged 100px apart reports **4 entry points, at 400/500/600/700**, where
+it reported one; and a corner of three slabs followed by four walls reports
+**400, 700, 900, 1100** — one scar for the corner, then one per wall.
+
+##### And the bar is narrower
+
+Asked for in the same breath — *"can we make the decal less wide (the blue part
+on the wall)"*. `bandHalf` is the bar's reach each way along the wall face and
+it went `11 + level·4.5` to `7 + level·2.8`, so a full-charge scar runs
+**38px along the wall against 60** — measured on the rig as `wallBarSpan`,
+which is new and exists because a pixel *count* conflates the length with the
+thickness and only one of the two is what was reported. Nothing else about the
+mark moved: the thickness is still a full `bandThick` shoved into the wall, so
+it still scorches the wall's whole depth, and the core and the bolts are the
+size they were.
 
 **"Go to the beacon" has no range on it at all.** It went through two wrong
 answers first, and both are worth not repeating: gated on a mast existing

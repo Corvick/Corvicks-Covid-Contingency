@@ -82,8 +82,8 @@ import {
   playGarandCycle,
   playSniperShot,
   playShotgunBlast,
+  playSmgShot,
   playMachineGunShot,
-  playHeavyMachineGunShot,
   playChargeWind,
   playChargeFire,
   playChargeVent,
@@ -733,11 +733,19 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
         // than throwing blood or brass — it is an energy weapon and it
         // cauterises. The beam itself (a plasma tracer) is the hit feedback.
         if (shot.plasma) {
-          if (shot.wall) {
-            spawnPlasmaScorch(shot.x2, shot.y2, travel, shot.plasma, now);
-            if (shot.thruX !== undefined && shot.thruY !== undefined) {
-              spawnPlasmaScorch(shot.thruX, shot.thruY, travel, shot.plasma, now);
+          // Every wall it went through gets its own scar, and they are drawn
+          // whether or not a wall is what finally stopped it — a beam that
+          // punches through a frontage and dies in the open still went through
+          // the frontage. Pass the walls so each scorch can find the face it
+          // hit and clip itself to that wall; otherwise an angled shot floats
+          // off it.
+          if (shot.thru) {
+            for (let i = 0; i + 1 < shot.thru.length; i += 2) {
+              spawnPlasmaScorch(shot.thru[i], shot.thru[i + 1], travel, shot.plasma, now, map?.walls);
             }
+          }
+          if (shot.wall) {
+            spawnPlasmaScorch(shot.x2, shot.y2, travel, shot.plasma, now, map?.walls);
           } else if (shot.plasma >= CHARGE_BARS) {
             // Full charge, ran out in the open — a blueish crater on the road.
             spawnPlasmaCrater(shot.x2, shot.y2, shot.plasma, now);
@@ -1782,8 +1790,12 @@ const GUN_VOICE_RANGE: Record<GunVoice, number> = {
   garand: 2400,
   sniper: 3000,
   shotgun: 2000,
+  smg: 2000,
+  // Left where the light MG's was rather than raised to the old `heavyMg`'s
+  // 2500 now that one voice covers both: the pocket gunner is the thing most
+  // often heard on this voice, and how far it carries is a balance figure that
+  // nobody asked to move.
   mg: 2100,
-  heavyMg: 2500,
 };
 
 /** Which `sound.ts` voice plays for which `Shot.voice`. */
@@ -1793,8 +1805,8 @@ const GUN_VOICE_PLAY: Record<GunVoice, (spatial: Spatial) => void> = {
   garand: playGarandShot,
   sniper: playSniperShot,
   shotgun: playShotgunBlast,
+  smg: playSmgShot,
   mg: playMachineGunShot,
-  heavyMg: playHeavyMachineGunShot,
 };
 
 /**
@@ -3069,7 +3081,9 @@ function render() {
       now - t.born <
       (t.kind === 'flame' ? FLAME_TRACER_MS : t.plasma ? CHARGE_BEAM_MS : TRACER_LIFETIME_MS),
   );
-  drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS);
+  // Everything but the energy beam. That one is drawn again below, over the
+  // fog — see the plasma pass.
+  drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS, 'rest');
   // Over the bodies: it is coming off them.
   drawBloodSpray(ctx, now);
   // And the road thrown up by a strike that hit it, for the same reason.
@@ -3136,6 +3150,29 @@ function render() {
     ctx.scale(scale, scale);
     ctx.translate(-view.x, -view.y);
     drawThermal(ctx, thermalContacts(), view, now);
+    ctx.restore();
+  }
+
+  /**
+   * And so does the charge rifle's beam, for a related reason: **a wall stops
+   * line of sight, so everything past the first one is under the fog** — which
+   * is where a full charge spends most of its round, the top bar driving
+   * through `CHARGE_WALL_PIERCE` slabs. Drawn under the fog like every other
+   * tracer, the visible beam ends at the near face of the first wall whether
+   * it pierced four of them or none, and the feature is unobservable from the
+   * only place anybody fires it from. Reported as exactly that: *"it didn't
+   * pierce the second wall."*
+   *
+   * It reveals nothing the player did not already choose — no entity, no loot,
+   * no room, only where their own round went and where it stopped, which is
+   * the same information the scorch on the near wall already gives them. That
+   * is a much narrower hole than the thermal contacts above.
+   */
+  if (tracers.some((t) => t.plasma)) {
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.translate(-view.x, -view.y);
+    drawTracers(ctx, tracers, now, TRACER_LIFETIME_MS, 'plasma');
     ctx.restore();
   }
 

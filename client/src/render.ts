@@ -2072,6 +2072,19 @@ export function drawEntity(
   ctx.fillStyle = headColor;
   ctx.fill();
 
+  // Kevlar reads as a grey band inside the body rather than a halo around it,
+  // so it never competes with the infected ring — and now that there is no
+  // self-ring, it is also most of how you pick your own officer out of a group.
+  // Drawn on the torso before the weapon, so a shouldered rifle lies over it
+  // rather than the band cutting across the gun.
+  if (e.armour) {
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = 'rgba(214, 222, 233, 0.92)';
+    ctx.beginPath();
+    ctx.arc(x, y, radius - 2, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   if (e.type === 'officer' && shoulderedRifle(e)) {
     // The weapon itself: a long body from the butt at the shoulder out past
     // the support hand, with a thinner barrel beyond it. Drawn *after* the
@@ -2166,17 +2179,6 @@ export function drawEntity(
     ctx.beginPath();
     ctx.moveTo(backX, backY);
     ctx.lineTo(backX + Math.cos(tipA) * radius * 1.5, backY + Math.sin(tipA) * radius * 1.5);
-    ctx.stroke();
-  }
-
-  // Kevlar reads as a grey band inside the body rather than a halo around it,
-  // so it never competes with the infected ring — and now that there is no
-  // self-ring, it is also most of how you pick your own officer out of a group.
-  if (e.armour) {
-    ctx.lineWidth = 3.5;
-    ctx.strokeStyle = 'rgba(214, 222, 233, 0.92)';
-    ctx.beginPath();
-    ctx.arc(x, y, radius - 2, 0, Math.PI * 2);
     ctx.stroke();
   }
 
@@ -4119,22 +4121,25 @@ export function spawnBulletHole(x: number, y: number, angle: number, now: number
  * Where a charge-rifle beam met a wall. Bakes into the same layer the bullet
  * holes use.
  *
- * Three reports shaped this. A filled blue burn *"portrays no depth"*; then
- * *"get rid of the white and blue on the ground — only small lightning strips
- * stay"* (the beam often ends at a wall's *edge*, and a filled shape spills
- * onto whatever is beside it since nothing here knows where the wall stops);
- * then *"the lightning can not go into the wall ... the white needs to reach
- * each end of the wall with the purple on either side ... some white and blue
- * the width of the beam on the wall"*. So:
+ * The running theme is *"it is only a wall effect"* — reported yet again as an
+ * angled shot leaving the mark floating in open ground. The honest fix is to
+ * stop guessing where the wall is: it takes the wall list, finds the wall the
+ * beam stopped on and which of its four faces, snaps the impact onto that face,
+ * and **clips the solid parts to that wall's own rect**. So the sketch's shape
+ * survives — a **solid blue bar along the face**, a **white core ringed in
+ * purple** on the beam axis (diagonal for an angled shot) — but the half that
+ * would hang over the ground is trimmed flush with the face and cannot spill.
+ * The **cyan lightning** arcs off both faces and is drawn outside the clip.
+ * With no wall list (a rig) it falls back to insetting along the beam.
  *
- *  - the impact throws a **white-hot streak along the wall face** in both
- *    directions, reaching well out, with a **purple flank on each side** of it;
- *  - the rest of the lightning arcs **only into the half facing away from the
- *    wall** — never behind it (`angle` is the beam's direction *into* the wall,
- *    so the safe fan is centred on `angle + PI`);
- *  - a **white/blue mark the width of the beam** sits at the impact, elongated
- *    along the face;
- *  - a tight deep-violet core with a white pinpoint over the top.
+ * Then reported as *"too distracting"* over a spectator frame with a round's
+ * worth of them on screen at once, and both halves of that are here: the
+ * lightning is a third of the bits at two thirds the reach (5 bolts a face
+ * rather than 11, forks at 0.18 rather than 0.42), and every colour in the
+ * mark came down about half. The *shape* is untouched — bar, core, bolts off
+ * both faces — because what was loud was the ink, not the silhouette. The
+ * reach is the one size that moved, and only because a third of the bolts is
+ * a third of the chance that any of them clears the bar on the way in.
  */
 export function spawnPlasmaScorch(
   x: number,
@@ -4142,126 +4147,174 @@ export function spawnPlasmaScorch(
   angle: number,
   level: number,
   now: number,
+  walls?: readonly Wall[],
 ): void {
   const sctx = ensureWallMarkLayer();
   if (!sctx) return;
   const rand = rng((x * 2654435761 + y * 40503 + now) >>> 0);
-  const r = (5 + level * 2.4) * (0.85 + rand() * 0.4);
-  const beamW = 3 + level * 3.2;
-  const alongWall = angle + Math.PI / 2;
-  const awayFromWall = angle + Math.PI;
-  // The impact point is on the wall's *edge* as often as its face. The glowing
-  // circle and the along-wall streak are wall-only, so their centre is set a
-  // little way *into* the wall (`angle` points into it) — far enough that the
-  // circle's near edge clears the impact point and never touches the ground.
-  const inset = beamW * 0.85;
-  const cx = Math.cos(angle) * inset;
-  const cy = Math.sin(angle) * inset;
+
+  const bandHalf = 7 + level * 2.8 + rand() * 2; // blue bar reach each way along the wall
+  const bandThick = 4 + level * 1.7; // blue bar half-thickness
+  const coreRy = 4 + level * 1.7; // white/purple reach ALONG the beam
+  const coreRx = 3 + level * 1.1; // white/purple reach ACROSS the beam
+  const lightReach = 16 + level * 5.5; // how far the bolts stick out past the face
+
+  // Which wall did the beam stop on, and which face? The impact lands on an
+  // edge, so take the nearest wall and the nearest of its four faces. `n` is
+  // the outward normal (toward the shooter); `-n` points into the wall.
+  let wall: Wall | null = null;
+  let best = Infinity;
+  for (const w of walls ?? []) {
+    const dx = Math.max(w.x - x, 0, x - (w.x + w.w));
+    const dy = Math.max(w.y - y, 0, y - (w.y + w.h));
+    const d = dx * dx + dy * dy;
+    if (d < best) {
+      best = d;
+      wall = w;
+    }
+  }
+  let nx: number;
+  let ny: number;
+  let fx = x;
+  let fy = y;
+  let clip: Wall | null = null;
+  if (wall && best <= 64) {
+    const l = x - wall.x;
+    const r = wall.x + wall.w - x;
+    const t = y - wall.y;
+    const b = wall.y + wall.h - y;
+    const m = Math.min(l, r, t, b);
+    if (m === l) ((nx = -1), (ny = 0), (fx = wall.x));
+    else if (m === r) ((nx = 1), (ny = 0), (fx = wall.x + wall.w));
+    else if (m === t) ((nx = 0), (ny = -1), (fy = wall.y));
+    else ((nx = 0), (ny = 1), (fy = wall.y + wall.h));
+    // keep the impact along the face so the bar can't hang off the end
+    fx = Math.min(Math.max(fx, wall.x), wall.x + wall.w);
+    fy = Math.min(Math.max(fy, wall.y), wall.y + wall.h);
+    clip = wall;
+  } else {
+    nx = -Math.cos(angle);
+    ny = -Math.sin(angle);
+    const inset = Math.max(bandThick, coreRy) + 2;
+    fx = x - nx * inset;
+    fy = y - ny * inset;
+  }
+  const along = Math.atan2(nx, -ny); // the wall's own line, perpendicular to n
 
   sctx.save();
   sctx.scale(BLOOD_BAKE_SCALE, BLOOD_BAKE_SCALE);
-  sctx.translate(x, y);
   sctx.lineCap = 'round';
   sctx.lineJoin = 'round';
 
-  // 1. The charge earthing ALONG the wall — a bright white streak reaching each
-  //    way from the impact, a soft purple flank on each side. Only gently wavy,
-  //    not a wild bolt: *"get rid of the largest lines ... the white reaches
-  //    each side of the wall"*.
-  const streakLen = r * 2.6;
-  for (const d of [alongWall, alongWall + Math.PI]) {
-    const ddx = Math.cos(d);
-    const ddy = Math.sin(d);
-    const pdx = Math.cos(d + Math.PI / 2);
-    const pdy = Math.sin(d + Math.PI / 2);
-    const pts: Array<[number, number]> = [];
-    const segs = 5;
-    for (let s = 0; s <= segs; s++) {
-      const t = s / segs;
-      const wobble = (rand() - 0.5) * beamW * 0.45 * Math.sin(t * Math.PI); // sags in the middle only
-      pts.push([cx + ddx * streakLen * t + pdx * wobble, cy + ddy * streakLen * t + pdy * wobble]);
-    }
-    const trace = (): void => {
-      sctx.beginPath();
-      pts.forEach(([vx, vy], i) => (i === 0 ? sctx.moveTo(vx, vy) : sctx.lineTo(vx, vy)));
-    };
-    sctx.strokeStyle = 'rgba(150, 74, 240, 0.34)';
-    sctx.lineWidth = Math.max(1.6, beamW * 0.46);
-    trace();
-    sctx.stroke();
-    sctx.strokeStyle = 'rgba(150, 205, 255, 0.6)';
-    sctx.lineWidth = Math.max(1.2, beamW * 0.27);
-    trace();
-    sctx.stroke();
-    sctx.strokeStyle = 'rgba(253, 254, 255, 0.97)';
-    sctx.lineWidth = Math.max(1, beamW * 0.14);
-    trace();
-    sctx.stroke();
-  }
-
-  // 2. The lightning — a dense short spray from the impact, only into the half
-  //    facing away from the wall. Kept short: the longest is `r * 1.8`.
-  const n = 13 + level * 2;
-  for (let i = 0; i < n; i++) {
-    const a = awayFromWall + (i / (n - 1) - 0.5) * 2.6 + (rand() - 0.5) * 0.45;
-    const len = r * (0.7 + rand() * 1.1);
-    const segs = 3 + Math.floor(rand() * 3);
-    const roll = rand();
-    sctx.strokeStyle =
-      roll < 0.5
-        ? 'rgba(224, 242, 255, 0.85)'
-        : roll < 0.8
-          ? 'rgba(147, 197, 253, 0.78)'
-          : 'rgba(196, 141, 253, 0.72)';
-    sctx.lineWidth = Math.max(0.3, r * 0.05);
-    sctx.beginPath();
-    let px = cx;
-    let py = cy;
-    sctx.moveTo(cx, cy);
-    for (let s = 1; s <= segs; s++) {
-      const t = s / segs;
-      const d = len * t;
-      const j = (rand() - 0.5) * len * 0.28 * t;
-      px = cx + Math.cos(a) * d + Math.cos(a + Math.PI / 2) * j;
-      py = cy + Math.sin(a) * d + Math.sin(a + Math.PI / 2) * j;
-      sctx.lineTo(px, py);
-      if (s === segs - 1 && rand() < 0.4) {
-        const fa = a + (rand() < 0.5 ? -1 : 1) * (0.5 + rand() * 0.7);
-        sctx.lineTo(px + Math.cos(fa) * len * 0.3, py + Math.sin(fa) * len * 0.3);
-        sctx.moveTo(px, py);
-      }
-    }
-    sctx.stroke();
-  }
-
-  // 3. The beam's own hit — white and blue, the width of the beam, elongated
-  //    along the face — set into the wall so it never crosses to the ground.
+  // 1. Cyan lightning, arcing off *both* faces of the wall (the normal axis),
+  //    fanning, reaching well past the bar. Drawn from the face point with no
+  //    clip, so it can reach out over the ground and back into the wall.
   sctx.save();
-  sctx.translate(cx, cy);
-  sctx.rotate(alongWall);
-  const hit = sctx.createRadialGradient(0, 0, 0, 0, 0, beamW * 0.8);
-  hit.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-  hit.addColorStop(0.4, 'rgba(125, 211, 255, 0.7)');
-  hit.addColorStop(1, 'rgba(56, 189, 248, 0)');
-  sctx.fillStyle = hit;
-  sctx.beginPath();
-  sctx.ellipse(0, 0, beamW * 0.9, beamW * 0.45, 0, 0, TAU);
-  sctx.fill();
+  sctx.translate(fx, fy);
+  sctx.globalCompositeOperation = 'lighter';
+  for (const base of [Math.atan2(ny, nx), Math.atan2(-ny, -nx)]) {
+    const bolts = 3 + Math.floor(level / 2);
+    for (let i = 0; i < bolts; i++) {
+      const a = base + (i / (bolts - 1) - 0.5) * 1.1 + (rand() - 0.5) * 0.35;
+      const len = lightReach * (0.5 + rand() * 0.6);
+      const segs = 3 + Math.floor(rand() * 2);
+      sctx.strokeStyle = rand() < 0.55 ? 'rgba(104, 186, 226, 0.5)' : 'rgba(168, 212, 234, 0.4)';
+      sctx.lineWidth = Math.max(0.5, 0.6 + level * 0.16);
+      sctx.beginPath();
+      sctx.moveTo(0, 0);
+      let px = 0;
+      let py = 0;
+      for (let s = 1; s <= segs; s++) {
+        const t = s / segs;
+        const d = len * t;
+        const j = (rand() - 0.5) * len * 0.3;
+        px = Math.cos(a) * d + Math.cos(a + Math.PI / 2) * j;
+        py = Math.sin(a) * d + Math.sin(a + Math.PI / 2) * j;
+        sctx.lineTo(px, py);
+        if (s < segs && rand() < 0.18) {
+          const fa = a + (rand() < 0.5 ? -1 : 1) * (0.45 + rand() * 0.65);
+          const fl = len * (0.18 + rand() * 0.22);
+          sctx.lineTo(px + Math.cos(fa) * fl, py + Math.sin(fa) * fl);
+          sctx.moveTo(px, py);
+        }
+      }
+      sctx.stroke();
+    }
+  }
   sctx.restore();
 
-  // 4. A deep violet core with a white-hot pinpoint, over the top — also inset.
-  const core = sctx.createRadialGradient(cx, cy, 0, cx, cy, beamW * 0.5);
-  core.addColorStop(0, 'rgba(182, 134, 255, 0.95)');
-  core.addColorStop(0.5, 'rgba(101, 33, 197, 0.72)');
-  core.addColorStop(1, 'rgba(40, 20, 70, 0)');
-  sctx.fillStyle = core;
+  // 2 + 3. The solid bar and the core — clipped to the wall's rect, so the half
+  //        that would fall on open ground is trimmed flush with the face.
+  sctx.save();
+  if (clip) {
+    sctx.beginPath();
+    sctx.rect(clip.x - 1, clip.y - 1, clip.w + 2, clip.h + 2);
+    sctx.clip();
+  }
+
+  // 2. The solid blue bar — along the face, shoved a full thickness into the
+  //    wall so its near edge sits on the face.
+  sctx.save();
+  sctx.translate(fx - nx * bandThick, fy - ny * bandThick);
+  sctx.rotate(along);
+  sctx.fillStyle = 'rgba(58, 82, 190, 0.72)';
   sctx.beginPath();
-  sctx.arc(cx, cy, beamW * 0.5, 0, TAU);
+  sctx.roundRect(-bandHalf, -bandThick, bandHalf * 2, bandThick * 2, bandThick * 0.4);
   sctx.fill();
-  sctx.fillStyle = 'rgba(255, 250, 255, 0.98)';
+  // a white-hot core the length of it — the white that "reaches each side"
+  const hot = sctx.createLinearGradient(-bandHalf, 0, bandHalf, 0);
+  hot.addColorStop(0, 'rgba(118, 150, 202, 0.18)');
+  hot.addColorStop(0.5, 'rgba(178, 202, 238, 0.48)');
+  hot.addColorStop(1, 'rgba(118, 150, 202, 0.18)');
+  sctx.fillStyle = hot;
   sctx.beginPath();
-  sctx.arc(cx, cy, Math.max(0.8, beamW * 0.12), 0, TAU);
+  sctx.roundRect(
+    -bandHalf * 0.95,
+    -bandThick * 0.36,
+    bandHalf * 1.9,
+    bandThick * 0.72,
+    bandThick * 0.36,
+  );
   sctx.fill();
+  // a couple of fine cracks off each end, along the wall line
+  sctx.strokeStyle = 'rgba(62, 88, 180, 0.5)';
+  sctx.lineWidth = Math.max(0.5, bandThick * 0.13);
+  for (let i = 0; i < 3; i++) {
+    const side = i === 0 ? -1 : i === 1 ? 1 : rand() < 0.5 ? -1 : 1;
+    const oy = (rand() - 0.5) * bandThick * 0.9;
+    const len = bandHalf * (0.14 + rand() * 0.22);
+    const rise = (rand() - 0.5) * bandThick * 0.7;
+    sctx.beginPath();
+    sctx.moveTo(side * bandHalf * 0.9, oy);
+    sctx.lineTo(side * (bandHalf * 0.9 + len), oy + rise);
+    sctx.stroke();
+  }
+  sctx.restore();
+
+  // 3. The core — a white ellipse ringed in purple, on the beam axis so an
+  //    angled shot lands a diagonal core. Pulled mostly into the wall; the clip
+  //    trims whatever tip would cross the face.
+  sctx.save();
+  sctx.translate(fx - nx * coreRy * 0.7, fy - ny * coreRy * 0.7);
+  sctx.rotate(angle);
+  sctx.fillStyle = 'rgba(140, 62, 158, 0.78)'; // the magenta-purple ring
+  sctx.beginPath();
+  sctx.ellipse(0, 0, coreRy, coreRx, 0, 0, TAU);
+  sctx.fill();
+  sctx.fillStyle = 'rgba(214, 222, 238, 0.55)'; // the white centre
+  sctx.beginPath();
+  sctx.ellipse(0, 0, coreRy * 0.6, coreRx * 0.58, 0, 0, TAU);
+  sctx.fill();
+  sctx.save();
+  sctx.globalCompositeOperation = 'lighter'; // a hot pinpoint
+  sctx.fillStyle = 'rgba(110, 138, 166, 0.28)';
+  sctx.beginPath();
+  sctx.ellipse(0, 0, coreRy * 0.3, coreRx * 0.3, 0, 0, TAU);
+  sctx.fill();
+  sctx.restore();
+  sctx.restore();
+
+  sctx.restore(); // the wall clip
 
   sctx.restore();
   wallMarkDirty = true;
@@ -5445,9 +5498,10 @@ export interface Tracer {
   /** Charge-rifle beam: the bar level 1..`CHARGE_BARS`. Drawn as an energy
    *  beam rather than a bullet line, thicker with the level. */
   plasma?: number;
-  /** Entry-wall point when a full-charge beam pierced a wall — see `Shot`. */
-  thruX?: number;
-  thruY?: number;
+  /** Entry point of each wall a full-charge beam pierced — see `Shot.thru`.
+   *  Carried because a tracer is spread from the shot; the scars are baked
+   *  when the shot arrives, so nothing here reads it. */
+  thru?: number[];
 }
 
 /**
@@ -5799,6 +5853,13 @@ export function drawTracers(
   tracers: Tracer[],
   now: number,
   lifetime: number,
+  /**
+   * Which half to draw. An energy beam is drawn in a **second pass over the
+   * fog** — see the plasma pass in `main.ts` — so the world pass takes
+   * `'rest'` and that one takes `'plasma'`. Absent draws the lot, which is
+   * what the rigs want.
+   */
+  only?: 'plasma' | 'rest',
 ): void {
   ctx.lineCap = 'butt';
 
@@ -5810,6 +5871,7 @@ export function drawTracers(
   // the old spectator-replay case and no worse than it was.
   let streams: Map<string, Tracer[]> | null = null;
   for (const tracer of tracers) {
+    if (only === 'plasma') break;
     if (tracer.kind !== 'flame') continue;
     if (now - tracer.born >= FLAME_TRACER_MS) continue;
     streams ??= new Map();
@@ -5829,9 +5891,10 @@ export function drawTracers(
   for (const tracer of tracers) {
     if (tracer.kind === 'flame') continue; // gathered into streams above
     if (tracer.plasma) {
-      drawPlasmaBeam(ctx, tracer, now);
+      if (only !== 'rest') drawPlasmaBeam(ctx, tracer, now);
       continue;
     }
+    if (only === 'plasma') continue;
     const age = (now - tracer.born) / lifetime;
     if (age >= 1) continue;
 

@@ -537,8 +537,17 @@ export type ShotKind = 'bullet' | 'cure' | 'flame';
  * Which recorded gunshot a round's report should play as — see the pools in
  * `sound.ts`. One per weapon *family* rather than one per `ItemId`: the bolt
  * action and the charge rifle fire the same rifle round and share a voice,
- * where the pistol, the shotgun, the two machine guns, the sniper and the
+ * where the pistol, the SMG, the shotgun, the machine gun, the sniper and the
  * M1 Garand are each their own thing to the ear.
+ *
+ * **There is one `'mg'` and it is the belt-fed one.** The officer's own
+ * automatic weapon is a 9mm SMG and has its own voice; `'mg'` covers the
+ * `heavyMg` a player carries *and* the pocket gunner's mounted gun, which is
+ * the same class of weapon and, since the emplacement has no item of its own,
+ * the same `ItemId` behind the synthetic def in `emplacement.ts`. A separate
+ * `'heavyMg'` voice used to sit alongside it, playing a real M240 and a DShK;
+ * both takes have been pulled for now and the two collapsed onto one pool —
+ * see `MG_FILES` in `sound.ts`.
  *
  * **The Garand is deliberately not `'rifle'`.** It used to share that pool
  * with the bolt action, whose recordings are close-up "shot" takes several
@@ -549,7 +558,7 @@ export type ShotKind = 'bullet' | 'cure' | 'flame';
  * `GARAND_SHOT_FILES` in `sound.ts`, three takes hand-trimmed to a single
  * ~225ms report each — well clear of `semiAutoRifle.cooldownMs`.
  */
-export type GunVoice = 'pistol' | 'rifle' | 'shotgun' | 'mg' | 'heavyMg' | 'sniper' | 'garand';
+export type GunVoice = 'pistol' | 'rifle' | 'shotgun' | 'smg' | 'mg' | 'sniper' | 'garand';
 
 /** A patch of ground alight. `life` is 1 when fresh and 0 as it dies. */
 export interface FireState {
@@ -782,13 +791,15 @@ export interface Shot {
    */
   plasma?: number;
   /**
-   * Where a full-charge beam punched *into* a wall on its way through it —
-   * `x2,y2` is where it came out the far side or finally stopped. Only sent
-   * for a `plasma >= CHARGE_BARS` round that actually pierced a wall, so the
-   * client can scorch both faces.
+   * Where a full-charge beam punched *into* each wall on its way through —
+   * flat `x, y` pairs, one per wall pierced, nearest first. `x2,y2` is where
+   * it finally stopped, which is a separate mark. Only sent for a
+   * `plasma >= CHARGE_BARS` round that actually pierced something, and it is
+   * **every** wall it went through rather than only the first: a beam that
+   * crosses a street of them leaves a scar on each, which is what a round that
+   * goes through four walls is supposed to look like.
    */
-  thruX?: number;
-  thruY?: number;
+  thru?: number[];
 }
 
 export interface InputState {

@@ -41,6 +41,10 @@ import {
   CHARGE_BARS,
   CHARGE_BASE_MUL,
   CHARGE_TOP_MUL,
+  CHARGE_BASE_PIERCE,
+  CHARGE_TOP_PIERCE,
+  CHARGE_WALL_PIERCE,
+  CHARGE_WALL_MERGE,
   CHARGE_COOL_MS,
   UNDEPLOY_MS,
   GRAPPLED_COOLDOWN_MUL,
@@ -203,6 +207,12 @@ function aimFor(world: World, id: string, command: { aim: number }): number {
  * the pistol and its two-handed sibling. A grey officer firing with no `def`
  * at all is pistol-grade, exactly as `light` already treats it.
  *
+ * The SMG and the machine guns are three weapons and two voices: `smg` is the
+ * officer's own 9mm and has its own recording, where `heavyMg` and the pocket
+ * gunner's mounted gun (a synthetic def in `emplacement.ts`, carrying this
+ * same `heavyMg` id for exactly this reason) are both belt-fed and share
+ * `'mg'`.
+ *
  * The Garand is its own voice rather than joining the bolt/charge `'rifle'`
  * pool — see the note on `GunVoice` in `shared/types.ts`. Sharing worked fine
  * for the bolt action and the charge rifle, both of which fire far slower
@@ -225,10 +235,10 @@ function gunVoice(def: ItemDef | undefined): GunVoice | undefined {
       return 'sniper';
     case 'shotgun':
       return 'shotgun';
-    case 'machineGun':
-      return 'mg';
+    case 'smg':
+      return 'smg';
     case 'heavyMg':
-      return 'heavyMg';
+      return 'mg';
     default:
       // The flamethrower (a continuous stream, not a report) and anything
       // else with no gunshot voice of its own.
@@ -250,8 +260,13 @@ export function fire(
   def?: ItemDef,
   pierce = 1,
   damageMul = 1,
-  /** A round with enough behind it to carry through one wall or door. */
-  throughWall = false,
+  /**
+   * Slabs — walls and shut doors alike — this round carries through before it
+   * stops at the next one. A count rather than a flag because one is not
+   * enough to clear a *corner*, where two runs of wall rects meet within a few
+   * pixels of each other; see `CHARGE_WALL_PIERCE`.
+   */
+  wallPierce = 0,
   /**
    * Sideways offset from the body's centre line. Two pistols fire parallel a
    * hand's width apart rather than from the same muzzle, so the pair reads as
@@ -260,6 +275,15 @@ export function fire(
   offset = 0,
   /** This round just emptied an en-bloc clip — see `Shot.clipEject`. */
   clipEject = false,
+  /**
+   * How wound up a charge weapon was, 1..`CHARGE_BARS`. Deliberately a
+   * separate number from `pierce`, which is now a dozen at the top bar: the
+   * client reads `Shot.plasma` as the *level* — the beam's width, and the
+   * gate on the ground crater — so sending it a body count draws a beam
+   * twelve steps wide and craters on every shot. It is also what scales the
+   * beam's width here, so what is hit is what is drawn.
+   */
+  chargeLevel = 0,
 ): void {
   const angle = aim + (Math.random() * 2 - 1) * bloom;
   const range = def?.range ?? GUN_RANGE;
@@ -275,6 +299,24 @@ export function fire(
   const maxX = Math.max(muzzleX, endX);
   const minY = Math.min(muzzleY, endY);
   const maxY = Math.max(muzzleY, endY);
+
+  // How wound up a charge weapon was, and how wide that makes the round. Every
+  // other gun in the city fires an infinitely thin line and `beam` is 0 for
+  // them; an energy beam has a width you can see, and a body it plainly passes
+  // through has to be a body it hits.
+  const level = def?.charge ? Math.max(1, Math.min(CHARGE_BARS, chargeLevel)) : 0;
+  const beam = (def?.beamRadius ?? 0) * (def?.charge ? level / CHARGE_BARS : 1);
+  // **The broadphase box has to grow with the beam, and widening the hit test
+  // alone is not enough.** A shot due east has a box of zero height, so the
+  // grid hands back only what is in the cells that line crosses — a body the
+  // beam plainly passes through, but whose own cells happen to sit one row
+  // over, is never offered for testing at all. Whether it does depends on
+  // where in a cell the line falls, so it misses about one shot in six and
+  // reads exactly like the wider hitbox not working.
+  const bMinX = minX - beam;
+  const bMaxX = maxX + beam;
+  const bMinY = minY - beam;
+  const bMaxY = maxY + beam;
 
   // Everything solid the line meets, nearest first. Walls and shut doors both
   // stop a round; a door also wears down under fire, though chewing one open
@@ -294,23 +336,44 @@ export function fire(
   }
   blockers.sort((a, b) => a.t - b.t);
 
-  // A fully wound charge round goes through exactly one of them and stops at
-  // the next. Everything else stops at the first.
+  // A fully wound charge round drives through `wallPierce` of them and stops
+  // at the next. Everything else stops at the first.
   let wallT = 1;
   // Whether the blocker that actually stopped the round (if any) was a wall
   // rather than a door — a door's own drawing runs after the wall pass, so a
   // mark baked for it would be painted straight over. See `Shot.wall`.
   let stoppedByWall = false;
   // Where a full-charge beam pierced a wall on its way through, so the client
-  // can scorch the entry face too. A skipped *door* is left alone — it has its
-  // own damaged/broken drawing, and a mark baked for one is painted over.
-  let pierceT = -1;
-  let skip = throughWall ? 1 : 0;
+  // can scorch the entry face too — one `t` per wall, and **every** wall it
+  // went through rather than only the first, or a beam that crosses four of
+  // them marks one and leaves the rest untouched. A skipped *door* is left
+  // alone: it has its own damaged/broken drawing, and a mark baked for one is
+  // painted over.
+  const pierced: number[] = [];
+  // Whether the wall currently being pierced has had its entry recorded — the
+  // group's first *wall* rect, so a group that opens with a door still marks
+  // the wall behind it.
+  let marked = false;
+  let skip = wallPierce;
+  // Where the wall currently being pierced began, along the line. Slabs within
+  // `CHARGE_WALL_MERGE` of it are the same wall and cost no further pierce —
+  // see that constant for why a rect is the wrong thing to count.
+  let wallStart = -Infinity;
   for (const blocker of blockers) {
     if (blocker.door >= 0) damageDoor(world, blocker.door, DOOR_BULLET_DAMAGE);
-    if (skip > 0) {
-      if (blocker.door === -1) pierceT = blocker.t;
-      skip--;
+    const sameWall = (blocker.t - wallStart) * range <= CHARGE_WALL_MERGE;
+    if (sameWall || skip > 0) {
+      if (!sameWall) {
+        skip--;
+        wallStart = blocker.t;
+        marked = false;
+      }
+      // The face it went in by, once per wall — not the last rect of the
+      // group, which is where it came out.
+      if (blocker.door === -1 && !marked) {
+        pierced.push(blocker.t);
+        marked = true;
+      }
       continue;
     }
     wallT = blocker.t;
@@ -329,7 +392,7 @@ export function fire(
   // Everything the line touches, nearest first. Most rounds stop at the first
   // body; a charged shot walks the list.
   const hits: Array<{ entity: Entity; t: number }> = [];
-  const candidates = world.entityGrid.queryRect(minX, minY, maxX, maxY, new Set<Entity>());
+  const candidates = world.entityGrid.queryRect(bMinX, bMinY, bMaxX, bMaxY, new Set<Entity>());
   for (const other of candidates) {
     if (other.id === shooter.id) continue;
     // **Already dead and gone this tick.** The broadphase is a tick old, so the
@@ -344,7 +407,7 @@ export function fire(
     const infectedTarget =
       def?.charge === true && other.type !== 'zombie' && world.pendingInfections.has(other.id);
     if (other.type !== 'zombie' && !infectedTarget) continue;
-    const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius);
+    const t = segmentCircleT(muzzleX, muzzleY, endX, endY, other.x, other.y, other.radius + beam);
     if (t !== null && t < wallT) hits.push({ entity: other, t });
   }
   hits.sort((a, b) => a.t - b.t);
@@ -378,11 +441,13 @@ export function fire(
     ...(clipEject ? { clipEject: true } : {}),
     // An energy beam, and how wound up it was. Drives the client's beam,
     // discharge sound, scorch/crater, and suppresses the brass casing.
-    ...(def?.charge ? { plasma: pierce } : {}),
-    ...(def?.charge && pierceT >= 0
+    ...(def?.charge ? { plasma: level } : {}),
+    ...(def?.charge && pierced.length > 0
       ? {
-          thruX: Math.round(muzzleX + (endX - muzzleX) * pierceT),
-          thruY: Math.round(muzzleY + (endY - muzzleY) * pierceT),
+          thru: pierced.flatMap((t) => [
+            Math.round(muzzleX + (endX - muzzleX) * t),
+            Math.round(muzzleY + (endY - muzzleY) * t),
+          ]),
         }
       : {}),
   });
@@ -905,16 +970,22 @@ export function fireHeld(
     const bloom =
       def.deployable && isDeployed(world, id, now) ? (def.deployedBloom ?? 0.02) : (def.bloom ?? GUN_BLOOM_RAD);
 
-    // The charge rifle winds up in four steps. One bar is one body; each bar
-    // after that is one more, and the fourth drives the round through a wall
-    // or a door as well. `charge` arrives as a fraction so bots — which fire
-    // everything at full — land on the top bar without knowing any of this.
+    // The charge rifle winds up in four steps. Each bar carries the round
+    // through more bodies and hits harder, on the same interpolation, and the
+    // fourth drives it through a wall or a door as well. `charge` arrives as
+    // a fraction so bots — which fire everything at full — land on the top bar
+    // without knowing any of this.
     const level = def.charge ? Math.max(1, Math.min(CHARGE_BARS, Math.round(charge * CHARGE_BARS))) : 0;
-    const pierce = def.charge ? level : (def.pierce ?? 1);
+    // 1, 5, 8, 12 — see `CHARGE_TOP_PIERCE` for why the top is a dozen rather
+    // than the one-body-per-bar it used to be.
+    const pierce = def.charge
+      ? Math.round(CHARGE_BASE_PIERCE + (CHARGE_TOP_PIERCE - CHARGE_BASE_PIERCE) * ((level - 1) / (CHARGE_BARS - 1)))
+      : (def.pierce ?? 1);
     const damageMul = def.charge
       ? CHARGE_BASE_MUL + (CHARGE_TOP_MUL - CHARGE_BASE_MUL) * ((level - 1) / (CHARGE_BARS - 1))
       : 1;
-    const throughWall = def.charge === true && level >= CHARGE_BARS;
+    // The top bar drives the round through a corner's worth of geometry.
+    const wallPierce = def.charge === true && level >= CHARGE_BARS ? CHARGE_WALL_PIERCE : 0;
 
     const pellets = def.pellets ?? 1;
     // A shotgun throws its pellets in a cone from one barrel; dual pistols fire
@@ -928,7 +999,7 @@ export function fireHeld(
     for (let i = 0; i < pellets; i++) {
       const offset = gap === 0 ? 0 : (i - (pellets - 1) / 2) * gap;
       const angle = gap === 0 ? aim : shared;
-      fire(world, shooter, angle, gap === 0 ? bloom : 0, now, def, pierce, damageMul, throughWall, offset, clipEject);
+      fire(world, shooter, angle, gap === 0 ? bloom : 0, now, def, pierce, damageMul, wallPierce, offset, clipEject, level);
     }
     // The chamber vents before it will wind up again. `cooldownMs` already
     // equals `CHARGE_COOL_MS` so `ready()` agrees; this map is what the red
