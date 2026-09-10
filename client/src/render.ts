@@ -185,6 +185,7 @@ import {
 } from '../../shared/constants.js';
 import type { DogHud } from '../../shared/types.js';
 import { dogSprites, drawSprite } from './dogsprite.js';
+import { crowdSpritesOn, drawCrowdBody, drawCrowdOverlays } from './crowdsprite.js';
 import { settings } from './settings.js';
 
 const TAU = Math.PI * 2;
@@ -1832,6 +1833,12 @@ export function drawEntity(
    * below is drawn in world units on purpose and must stay that way.
    */
   scale = 1,
+  /**
+   * How much ground this body covered between the last two snapshots, 0..1.
+   * Only the baked crowd path reads it, and only to scale the shamble rate —
+   * see `drawCrowdBody`. Absent (0) means a body that shuffles on the spot.
+   */
+  moving = 0,
 ): void {
   // A dog is a zombie everywhere in the simulation and nothing like one on
   // screen: four legs, a neck, and a body drawn along its length rather than a
@@ -1911,6 +1918,37 @@ export function drawEntity(
       ctx.lineWidth = w;
       ctx.strokeStyle = e.type === 'zombie' ? ENTITY_COLOR.zombie : '#ffffff';
       ctx.stroke();
+    }
+    return;
+  }
+
+  // **The baked crowd path.** A zombie or a civilian in the common case is one
+  // `drawImage` of a pre-painted shamble frame rather than ~40 path ops, and it
+  // carries the finish — ink contour, soft form-shading, torn silhouette — that
+  // the live shapes below cannot afford. Gated, off by default.
+  //
+  // The special poses stay on the live path deliberately: grappling and
+  // door-battering have their own arm work, a dog coming out has the twist and
+  // the vibration, a fresh body fades in, and a turning one bleeds toward red.
+  // Each would have to be reproduced in the bake; none is the common case.
+  if (
+    crowdSpritesOn() &&
+    (e.type === 'zombie' || e.type === 'human') &&
+    !e.grappling &&
+    !e.breaking &&
+    !e.birthing &&
+    !e.materializing &&
+    !e.turning
+  ) {
+    drawCrowdBody(ctx, e, now, moving);
+    drawCrowdOverlays(ctx, e);
+    if (e.type === 'zombie' && e.health < ENTITY_MAX_HEALTH.zombie) {
+      const w = ENTITY_RADIUS.zombie * 2;
+      const pct = Math.max(0, e.health / ENTITY_MAX_HEALTH.zombie);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(e.x - w / 2, e.y - ENTITY_RADIUS.zombie - 9, w, 4);
+      ctx.fillStyle = '#f87171';
+      ctx.fillRect(e.x - w / 2, e.y - ENTITY_RADIUS.zombie - 9, w * pct, 4);
     }
     return;
   }

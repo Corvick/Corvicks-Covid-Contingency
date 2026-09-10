@@ -186,6 +186,8 @@ import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import { setupMenu } from './menu.js';
 import { applyRenderScale, settings } from './settings.js';
+import { setCrowdSprites, crowdSpritesOn } from './crowdsprite.js';
+import { drawNightLighting, nightLightingOn, setNightLighting, type Light } from './lighting.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { AbilityId } from '../../shared/types.js';
 
@@ -2836,6 +2838,63 @@ function reportSlowGap(gap: number, now: number, drawn: number, net: ReturnType<
   );
 }
 
+/**
+ * Every light source on screen this frame, in world coordinates — for the night
+ * pass. Cheap: it walks lists the frame already holds, and there are only ever
+ * a handful of each. A flame stream draws its own glow and is skipped here.
+ */
+function gatherLights(now: number): Light[] {
+  const out: Light[] = [];
+
+  for (const t of tracers) {
+    if (t.kind === 'flame') continue;
+    const age = now - t.born;
+    if (t.plasma) {
+      if (age < 90) {
+        out.push({ x: t.x1, y: t.y1, r: 150, intensity: 1 - age / 90, color: [150, 200, 255], core: true });
+      }
+      continue;
+    }
+    // A muzzle flash: bright, warm, brief.
+    if (age < 70) {
+      out.push({ x: t.x1, y: t.y1, r: 95, intensity: 1 - age / 70, color: [255, 224, 150], core: true });
+    }
+  }
+
+  for (const f of fires) {
+    out.push({
+      x: f.x,
+      y: f.y,
+      r: 70 + f.life * 70,
+      intensity: 0.45 + f.life * 0.5,
+      color: [255, 138, 46],
+      core: true,
+    });
+  }
+
+  for (const b of blasts) {
+    if (b.age < 280) {
+      out.push({ x: b.x, y: b.y, r: 190, intensity: 1 - b.age / 280, color: [255, 186, 96], core: true });
+    }
+  }
+
+  // The dog: a faint hot glow off it, so it reads as the thing in the dark.
+  for (const entry of tracked.values()) {
+    const s = entry.state;
+    if (s.dog && !s.dead) {
+      out.push({ x: s.x, y: s.y, r: 60, intensity: 0.45, color: [210, 70, 60] });
+    }
+  }
+
+  // Your own torch / NVG wash, so you are not standing in the pitch dark.
+  const me = self();
+  if (me && !spectating) {
+    out.push({ x: me.x, y: me.y, r: 270, intensity: 0.62, color: [150, 168, 208] });
+  }
+
+  return out;
+}
+
 function render() {
   // Nothing to draw behind the front end, and no frame timings worth keeping
   // from it either — the first real frame should not be blamed for the menu.
@@ -3008,7 +3067,14 @@ function render() {
     // Your own character never fades — it's always fully in view.
     const isSelf = s.id === selfId;
     ctx.globalAlpha = isSelf ? 1 : entry.alpha;
-    drawEntity(ctx, s, isSelf, now, simpleEntities, scale);
+    // How far it moved between the last two snapshots, normalised against a
+    // rough walk step — only the baked crowd path reads it, to pace the
+    // shamble. Free: the interpolator already holds these.
+    const moving = Math.min(
+      1,
+      Math.hypot(entry.toX - entry.fromX, entry.toY - entry.fromY) / 6,
+    );
+    drawEntity(ctx, s, isSelf, now, simpleEntities, scale, moving);
     // A spectator's RTS pick: a green ring outside the body.
     if (spectating && selectedOfficers.has(s.id)) {
       ctx.globalAlpha = 1;
@@ -3126,6 +3192,25 @@ function render() {
 
   ctx.restore();
   mark('effects');
+
+  // **The night pass**, under the fog: it darkens the *seen* world and lets the
+  // muzzle flashes, fires and your own torch carve it back. The fog on top then
+  // blacks out anything genuinely unseen, lights near it or not. Gated, off by
+  // default — it changes how readable a fight is. A spectator gets a lighter
+  // ambient (no personal light, and a board to read).
+  if (nightLightingOn()) {
+    drawNightLighting(
+      ctx,
+      view,
+      scale,
+      gatherLights(now),
+      now,
+      VIEWPORT_WIDTH,
+      VIEWPORT_HEIGHT,
+      spectating ? 'spectator' : 'player',
+    );
+    mark('night');
+  }
 
   /**
    * NO FOG is gated on `solo` *here*, at the point of use, rather than by
@@ -3476,3 +3561,18 @@ function render() {
   requestAnimationFrame(render);
 }
 render();
+
+/**
+ * **Prototype dev hooks.** Flip the baked crowd and the night pass from the
+ * console in a real round, so the new look can be judged in context without a
+ * rebuild or an options row. Both default off. Remove with the prototype, or
+ * promote to proper OPTIONS rows once their cost is measured.
+ *
+ *   __proto.crowd(true)   // baked shamble sprites instead of the live shapes
+ *   __proto.night(true)   // darkness + light pools
+ */
+(window as unknown as Record<string, unknown>).__proto = {
+  crowd: (on = true) => setCrowdSprites(on),
+  night: (on = true) => setNightLighting(on),
+  state: () => ({ crowd: crowdSpritesOn(), night: nightLightingOn() }),
+};
