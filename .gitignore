@@ -24,3 +24,8 @@ Thumbs.db
 
 # Local Claude Code settings (keep the shared ones, drop the personal ones)
 .claude/settings.local.json
+
+# Contact sheets from `npx tsx spritesheet.ts` — generated from
+# `client/src/charsprite.ts`, so the source of truth is the code and a
+# committed PNG is just a stale copy of it.
+client/spritesheets/

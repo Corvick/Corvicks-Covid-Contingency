@@ -186,6 +186,7 @@ import {
 import type { DogHud } from '../../shared/types.js';
 import { dogSprites, drawSprite } from './dogsprite.js';
 import { settings } from './settings.js';
+import { drawCharBody } from './charbake.js';
 
 const TAU = Math.PI * 2;
 
@@ -1959,6 +1960,15 @@ export function drawEntity(
   const shoulder = radius * 0.62;
   const limbColor = shade(color, -25);
 
+  /**
+   * Civilians only, for now. They are the ones there are hundreds of and so the
+   * ones the variety was built for — an officer or a zombie drawn this way is
+   * the same machinery with a different `CharKind`, but each carries drawn
+   * state the disc does not (a shouldered rifle, clawing arms, a dog coming out
+   * of it) and those want deciding one at a time rather than all at once.
+   */
+  const pixelBody = settings.pixelSprites && e.type === 'human';
+
   if (e.type === 'zombie') {
     ctx.strokeStyle = limbColor;
     ctx.lineWidth = radius * 0.5;
@@ -2046,7 +2056,7 @@ export function drawEntity(
       ctx.lineTo(gripX, gripY);
       ctx.stroke();
     }
-  } else if (e.type === 'human') {
+  } else if (e.type === 'human' && !pixelBody) {
     // Two short nubs at the shoulders — just enough to read as arms.
     ctx.strokeStyle = limbColor;
     ctx.lineWidth = radius * 0.4;
@@ -2061,16 +2071,37 @@ export function drawEntity(
     }
   }
 
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
+  if (pixelBody) {
+    /**
+     * A generated pixel-art civilian in place of the disc, the head and the arm
+     * nubs — see `charsprite.ts` for what one is and `charbake.ts` for how it
+     * reaches the frame.
+     *
+     * **The turning tell is a tint rather than a variant.** A sprite's colours
+     * are baked, so the reddening that says somebody is about to turn cannot
+     * come out of the atlas; it is washed on at draw time. That keeps the one
+     * piece of information this drawing owes the player exactly as it was, and
+     * it costs one extra canvas for the handful of bodies mid-incubation.
+     *
+     * Everything below this — the infected ring, the health bar, the flecks —
+     * is untouched and still drawn over the top. Only the *body* changed.
+     */
+    drawCharBody(
+      ctx, 'citizen', e.id, x, y, facing, radius, now,
+      e.turning ? { colour: ENTITY_COLOR.zombie, amount: e.turning } : undefined,
+    );
+  } else {
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
 
-  // Head, nudged forward so facing reads at a glance.
-  ctx.beginPath();
-  ctx.arc(x + dirX * radius * 0.28, y + dirY * radius * 0.28, radius * 0.5, 0, Math.PI * 2);
-  ctx.fillStyle = headColor;
-  ctx.fill();
+    // Head, nudged forward so facing reads at a glance.
+    ctx.beginPath();
+    ctx.arc(x + dirX * radius * 0.28, y + dirY * radius * 0.28, radius * 0.5, 0, Math.PI * 2);
+    ctx.fillStyle = headColor;
+    ctx.fill();
+  }
 
   // Kevlar reads as a grey band inside the body rather than a halo around it,
   // so it never competes with the infected ring — and now that there is no

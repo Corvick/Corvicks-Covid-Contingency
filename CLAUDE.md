@@ -8029,6 +8029,152 @@ a `redRingPx` reading beside the existing `whitePx` one. Read live off the real
 The centre pixel is the control: the fill is untouched, so what changed is
 purely the ring.
 
+### The crowd is generated, not drawn
+
+Asked for as an art direction: *"the dog in the game is too cartoony … online
+they don't have enough models as I want a very large variety of citizens and
+zombies. maybe pixel art would be a better direction"*, with *"can you just not
+generate a top down picture and manipulate that?"*
+
+**The variety is the requirement that decides the approach, and it is the one
+that rules out both alternatives.** One generated image is one character: it
+cannot be recoloured as a set, cannot be rotated, and cannot become two hundred
+consistent people. An asset pack has the same ceiling for the same reason — the
+complaint about them was never quality, it was *count*. So nothing here is
+authored per citizen; only the **ranges** each field draws from, and `look()`
+picks from them off a seed. Skin, hair, hairstyle, hat, shirt, trousers, shoes,
+build, lean, where the clothing is torn and where the blood landed are all
+independent, which is tens of thousands of bodies out of about three hundred
+lines and no assets at all.
+
+**It is also the only way the rotation can work.** A body turns freely on
+`facing`, and turning a finished pixel bitmap is what makes pixel art mush.
+`charsprite.ts` is authored in normalised [0,1] space and rasterised by testing
+pixel **centres** with no antialiasing anywhere, so the angle goes into the
+*coordinates* before rasterising and the frame at 202.5 degrees is exactly as
+crisp as the front view. The same property is what lets one definition serve
+32x32 and 64x64: sub-pixel detail drops out rather than blurring.
+
+- `client/src/charsprite.ts` — what a person looks like. No DOM and no node, so
+  the game and the sheet tool share one definition.
+- `client/src/charbake.ts` — how that reaches a frame. **One atlas per kind,
+  filled lazily**, not 768 loose canvases: a cell per (variant, angle), painted
+  on first sight and never again, with `drawImage` taking a sub-rect.
+- `client/spritesheet.ts` — `npx tsx spritesheet.ts` writes the contact sheets
+  into `client/spritesheets/` (gitignored — the code is the source of truth and
+  a committed PNG is a stale copy of it).
+
+**Only civilians, and that is a scope decision rather than a limit.** They are
+the ones there are hundreds of and so the ones the variety was built for. An
+officer or a zombie is the same machinery with a different `CharKind` — both
+are drawn and both are in the sheets — but each carries drawn state a disc does
+not (a shouldered rifle, clawing arms, a dog coming out of it), and those want
+deciding one at a time.
+
+- **`settings.pixelSprites` is the switch, and it is the one row on that screen
+  expected to be *cheaper on*.** A vector body is about forty path operations
+  and a sprite is one blit — the same trade `dogsprite.ts` already makes for the
+  dog, and the shape of the answer to the endgame stall four hundred bodies
+  produce. It is a switch because it is an art decision as much as a cost one,
+  and because putting the old drawing back beside the new one is the only honest
+  way to judge it. **Kept ON in the LOW preset** for the same reason.
+- **The turning tell is a tint, not a variant.** A sprite's colours are baked, so
+  the reddening that says somebody is about to turn cannot come out of the
+  atlas; it is washed on at draw time through `source-atop`. Measured through
+  the real `drawEntity`: clean **(78,44,36)**, half **(159,56,52)**, full
+  **(239,68,68)** — which is `ENTITY_COLOR.zombie` exactly. Everything else the
+  body owes the player — the infected ring, the health bar, the flecks — is
+  untouched and still drawn over the top. **Only the body changed.**
+- **`CHAR_SPRITE_PX` is 64 rather than 32 because of the camera.** `CAMERA_ZOOM`
+  is 2.0 and a body is about 60 world px across, so a 32px source lands on
+  screen at nearly 4x — chunky past the point of reading as a person. 64 is
+  under 2x. The 32px sprites are still correct and are what a smaller camera
+  would want.
+- **`CHAR_BOX_RADII` (4.6) is the one number worth fiddling with.** The
+  shoulders are 0.40 of the sprite box, so at 4.6 they come out about 24px
+  against the 26px disc the game drew before — near enough the same footprint,
+  with the arms, legs and head the disc never had. Tuned by eye against
+  `preview-ingame.png`, which stages the same crowd at the same places at the
+  camera's own zoom, drawn both ways.
+- **The atlas is deliberately *not* cleared on a restart**, unlike `clearBlood`,
+  the lash scars and the dog's corner map. Those hold something about the city
+  that was — a coordinate, a pose, streets that no longer exist. A variant here
+  is keyed by nothing but its own index and `look()` derives the person from
+  that alone, so variant 12 is the same person in every round the page plays.
+  Clearing it would buy back 12MB and immediately spend a quarter of a second
+  repainting identical cells.
+- **A citizen who turns keeps their id, so they keep their variant** — and since
+  `look()` re-rolls the zombie's shirt from that same seed, the clothes carry
+  over darkened. That fell out; it was not arranged.
+- **`BAKE_BUDGET` bounds the one case this game already knows stalls.** A
+  spectator framing the whole city first-sights hundreds of bodies on one frame.
+  Over budget it falls back to an angle already in hand: a body 22 degrees off
+  for one frame is much the cheaper mistake than a dropped frame, and it
+  corrects itself on the next.
+
+**Three things about the drawing were wrong before they were right, and all
+three are the same lesson — anatomy from directly above is not anatomy from the
+front.**
+
+- **A human from above is WIDE and SHALLOW** — shoulders about 45cm across
+  against a chest about 25cm deep. Authored taller than wide, every civilian
+  read as a ball with arms.
+- **A forward pose needs an elbow.** A straight line from shoulder to hand makes
+  an officer read as an arrowhead; upper arm out, forearm back in reads as a
+  person holding something. And the hands go clear **above** the crown, never
+  across it — crossing it just deletes the head.
+- **You see the crown, not the face.** The first cut left a wide skin crescent,
+  lit it, and put a *lit* bump in the middle for the nose. Between them that is
+  a forehead, a brow and a nose seen from the front, and a row of them read as
+  people lying on their backs looking at the sky — reported exactly that way.
+  The hair sits further forward now, the head's own highlight is weaker, and the
+  nose is a dark notch breaking the silhouette rather than a feature painted on
+  top of it.
+
+**A uniform drawn in one navy is a pentagon.** `COP_NAVY`, `COP_VEST` and
+`COP_TRIM` are three separated values because with one, the sleeves, the vest
+and the cap merge into a single silhouette and the officer loses his head — the
+sleeves are the *lightest* thing on him for exactly that reason.
+
+**What is measured, and what is not.** Through the real `drawEntity` on a live
+dev server: the body draws (941 ink pixels against the vector drawing's 580, 15
+distinct colours against 8), four facings give four different drawings, the
+turning ramp lands on the exact zombie red, the options row toggles and
+persists, and a real 526-entity offline round runs at 3.8ms a tick with no
+exceptions. Bake cost on this box is **0.10ms a cell at 32px and 0.32ms at 64**,
+so a full 48x16 atlas is a quarter of a second spread across a round.
+
+**What is not measured is what a frame looks like**, and that is the same
+standard `DOG_CAMERA_ZOOM` and the resolution row are held to: rAF is throttled
+to nothing while the browser pane is not compositing, so the game canvas read
+back **0 non-transparent pixels** after a round had been running for seconds.
+The mechanics and the pixels are measured; the feel is the playtest.
+
+*One thing about the tool was the tool lying rather than the code failing, and
+it is the trap this file already records for `server/` harnesses.*
+`client/spritesheet.ts` sits at `client/` root, so `npx tsc --noEmit` does not
+cover it — and the client has no node types of its own, so the check has to
+borrow the server's. Run the first time, it found a **duplicate key in the font
+table** that `tsx` had been stripping and ignoring:
+
+```
+npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler \
+  --strict --skipLibCheck --typeRoots ../server/node_modules/@types \
+  --types node spritesheet.ts
+```
+
+*And one about the output.* `URL.pathname` percent-encodes, and this repo lives
+under a path with spaces in it — left encoded, node cheerfully creates a
+directory called `Zombie%20simulator%20game` next door and writes every sheet
+into that instead. `decodeURIComponent` before touching the filesystem.
+
+**The reference screenshots this came from are not pixel art**, and that is
+worth being straight about before anybody chases them: they are rendered sprites
+with dynamic lighting, long cast shadows and a heavy red grade. Resolution is
+not what makes the dog read as cartoony — palette, lighting and silhouette are.
+Getting *that* look means 3D models rendered to sprite sheets offline, which is
+a different project from this one.
+
 ### The dog is baked, not drawn
 
 `client/src/dogsprite.ts` paints the dog's parts **once** into offscreen

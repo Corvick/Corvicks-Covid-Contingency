@@ -113,6 +113,21 @@ export interface Settings {
   corpses: boolean;
 
   /**
+   * Draw civilians as generated pixel-art sprites rather than as a disc with a
+   * head and two arm nubs.
+   *
+   * **The only row here that is expected to be *cheaper* on.** A vector body is
+   * about forty path operations; a sprite is one `drawImage` out of an atlas —
+   * which is the same trade `dogsprite.ts` already makes for the dog, and the
+   * shape of the fix for the endgame stall that four hundred bodies produce.
+   *
+   * It is still a switch because it is an art decision as much as a cost one,
+   * and because being able to put the old drawing back beside the new one is
+   * the only honest way to judge it.
+   */
+  pixelSprites: boolean;
+
+  /**
    * How many pixels the frame is painted at, as a multiple of the 1920x1080
    * viewport — see `RENDER_SCALES`.
    *
@@ -167,6 +182,7 @@ export const DEFAULTS: Settings = {
   blood: true,
   permanentBlood: true,
   corpses: true,
+  pixelSprites: true,
   // Deliberately 1 rather than the sharpest on offer: the game is tuned and
   // measured at the viewport's own size, and a fresh install should see what
   // it was designed to look like *and* cost.
@@ -189,6 +205,10 @@ export const LOW: Settings = {
   // few live shapes a frame, which is more than LOW wants to spend.
   permanentBlood: false,
   corpses: false,
+  // Kept ON, and it is the one row in this preset that is not a sacrifice: a
+  // sprite is one blit where the drawing it replaces is forty path operations,
+  // so LOW wants it more than the default does.
+  pixelSprites: true,
   // The only row in the preset that is worth more than the rest put together
   // — 56% of the pixels, against fractions of a millisecond for the others.
   // 0.75 rather than the floor because LOW should still be playable to look

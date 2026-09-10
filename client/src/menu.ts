@@ -671,6 +671,7 @@ export function setupMenu(hooks: MenuHooks): Menu {
     smooth: el<HTMLButtonElement>('opt-smooth'),
     fog: el<HTMLButtonElement>('opt-fog'),
     noFog: el<HTMLButtonElement>('opt-nofog'),
+    pixelSprites: el<HTMLButtonElement>('opt-pixelsprites'),
     ground: el<HTMLButtonElement>('opt-ground'),
     vignette: el<HTMLButtonElement>('opt-vignette'),
     blood: el<HTMLButtonElement>('opt-blood'),
@@ -697,6 +698,7 @@ export function setupMenu(hooks: MenuHooks): Menu {
     // Reads as the *state of the fog*, not of the switch: OFF is the notable
     // condition here, so that is what the green is spent on.
     set(optRows.noFog, settings.noFog ? 'FOG OFF' : 'FOG ON', settings.noFog);
+    set(optRows.pixelSprites, settings.pixelSprites ? 'ON' : 'OFF', settings.pixelSprites);
     set(optRows.ground, settings.groundDetail ? 'ON' : 'OFF', settings.groundDetail);
     set(optRows.vignette, settings.vignette ? 'ON' : 'OFF', settings.vignette);
     set(optRows.blood, settings.blood ? 'ON' : 'OFF', settings.blood);
@@ -736,6 +738,10 @@ export function setupMenu(hooks: MenuHooks): Menu {
   });
   optRows.noFog.addEventListener('click', () => {
     applySettings({ noFog: !settings.noFog });
+    drawOptions();
+  });
+  optRows.pixelSprites.addEventListener('click', () => {
+    applySettings({ pixelSprites: !settings.pixelSprites });
     drawOptions();
   });
   optRows.ground.addEventListener('click', () => {
