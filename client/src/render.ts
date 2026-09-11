@@ -4171,6 +4171,17 @@ export function spawnBulletHole(x: number, y: number, angle: number, now: number
  * both faces — because what was loud was the ink, not the silhouette. The
  * reach is the one size that moved, and only because a third of the bolts is
  * a third of the chance that any of them clears the bar on the way in.
+ *
+ * `pierced` is the wall that stopped it, and it is a different mark from the
+ * ones it went through. Every entry along `Shot.thru` genuinely has a hole
+ * behind it — the beam kept going — so "both faces" is honest there: lightning
+ * on the far side and a core that reaches into the slab are exactly what a
+ * puncture looks like. The wall that finally caught the round (`Shot.wall`,
+ * once `CHARGE_WALL_PIERCE` ran out) never had anything come out the other
+ * side of it, so nothing about that mark may say otherwise: no lightning off
+ * the far face at all, and the solid bar/core clipped to a shallow band off
+ * the near face rather than the wall's whole depth, so the white centre stops
+ * short of the far side instead of reaching it.
  */
 export function spawnPlasmaScorch(
   x: number,
@@ -4179,6 +4190,7 @@ export function spawnPlasmaScorch(
   level: number,
   now: number,
   walls?: readonly Wall[],
+  pierced = true,
 ): void {
   const sctx = ensureWallMarkLayer();
   if (!sctx) return;
@@ -4237,13 +4249,17 @@ export function spawnPlasmaScorch(
   sctx.lineCap = 'round';
   sctx.lineJoin = 'round';
 
-  // 1. Cyan lightning, arcing off *both* faces of the wall (the normal axis),
+  // 1. Cyan lightning, arcing off the near face of the wall (the normal axis),
   //    fanning, reaching well past the bar. Drawn from the face point with no
-  //    clip, so it can reach out over the ground and back into the wall.
+  //    clip, so it can reach out over the open ground it stands on. A pierced
+  //    wall gets the far-side fan too — the beam genuinely came out there —
+  //    but the wall that finally caught the round did not, so nothing may arc
+  //    into or past it.
   sctx.save();
   sctx.translate(fx, fy);
   sctx.globalCompositeOperation = 'lighter';
-  for (const base of [Math.atan2(ny, nx), Math.atan2(-ny, -nx)]) {
+  const boltBases = pierced ? [Math.atan2(ny, nx), Math.atan2(-ny, -nx)] : [Math.atan2(ny, nx)];
+  for (const base of boltBases) {
     const bolts = 3 + Math.floor(level / 2);
     for (let i = 0; i < bolts; i++) {
       const a = base + (i / (bolts - 1) - 0.5) * 1.1 + (rand() - 0.5) * 0.35;
@@ -4275,11 +4291,24 @@ export function spawnPlasmaScorch(
   sctx.restore();
 
   // 2 + 3. The solid bar and the core — clipped to the wall's rect, so the half
-  //        that would fall on open ground is trimmed flush with the face.
+  //        that would fall on open ground is trimmed flush with the face. The
+  //        wall that stopped the round (not `pierced`) gets a shallower clip
+  //        still: a band off the near face rather than the wall's whole depth,
+  //        so the white centre stops short of the far side instead of reading
+  //        as though it reached it.
   sctx.save();
   if (clip) {
     sctx.beginPath();
-    sctx.rect(clip.x - 1, clip.y - 1, clip.w + 2, clip.h + 2);
+    if (pierced) {
+      sctx.rect(clip.x - 1, clip.y - 1, clip.w + 2, clip.h + 2);
+    } else {
+      const depth = nx !== 0 ? clip.w : clip.h;
+      const cut = Math.min(depth * 0.55, bandThick + coreRy * 0.6);
+      if (nx === -1) sctx.rect(clip.x - 1, clip.y - 1, cut + 1, clip.h + 2);
+      else if (nx === 1) sctx.rect(clip.x + clip.w - cut, clip.y - 1, cut + 1, clip.h + 2);
+      else if (ny === -1) sctx.rect(clip.x - 1, clip.y - 1, clip.w + 2, cut + 1);
+      else sctx.rect(clip.x - 1, clip.y + clip.h - cut, clip.w + 2, cut + 1);
+    }
     sctx.clip();
   }
 

@@ -149,13 +149,15 @@ console.log('\n=== the beam, the scorch and the crater ===');
   const b = world.shots[world.shots.length - 1];
   check(b?.thru !== undefined && Math.abs(b.thru[0] - (x + 400)) < 20, 'a through-wall round reports the entry point', `thru ${b?.thru}`);
   // Every wall, not only the first — the whole of "I am not seeing the second
-  // decal". Four walls pierced, so four entry points, in the order it met them.
+  // decal". `CHARGE_WALL_PIERCE` walls pierced, so that many entry points, in
+  // the order it met them.
   const wallXs = b?.thru?.filter((_, i) => i % 2 === 0) ?? [];
+  const expectedXs = Array.from({ length: CHARGE_WALL_PIERCE }, (_, i) => 400 + i * 100);
   check(
     wallXs.length === CHARGE_WALL_PIERCE &&
       wallXs.every((wx, i) => Math.abs(wx - (x + 400 + i * 100)) < 20),
     'and one for every wall it went through, not only the first',
-    `${wallXs.length} entries ${wallXs.map((v) => v - x).join(',')} vs 400,500,600,700`,
+    `${wallXs.length} entries ${wallXs.map((v) => v - x).join(',')} vs ${expectedXs.join(',')}`,
   );
   check(
     Math.abs(b.x2 - (x + 900)) < 20,
@@ -256,12 +258,16 @@ console.log('\n=== a full wind-up clears a corner, not one slab of it ===');
   // reported fault, and it is why a pierce is charged per *wall*: these three
   // must cost one between them.
   for (let i = 0; i < 3; i++) world.map.walls.push({ x: x + 400 + i * 7, y: y - 60, w: 12, h: 120 });
-  // Then four more, each plainly its own wall. Five in all against four
-  // pierces, so the round is stopped by geometry rather than by running out
-  // of reach — without that the check would pass for a beam that goes through
-  // everything. **Counted by the rect the corner alone would spend three of
-  // the four**, and the round would stop at the first of these instead.
-  for (const at of [700, 900, 1100, 1300]) {
+  // Then `CHARGE_WALL_PIERCE - 1` more, each plainly its own wall, to spend
+  // the rest of the budget — and the wall behind them, which is the one that
+  // has to stop it. Three wall-groups against two pierces, so the round is
+  // stopped by geometry rather than by running out of reach — without that
+  // the check would pass for a beam that goes through everything. **Counted
+  // by the rect the corner alone would spend three of the two**, and the
+  // round would stop inside the corner itself instead.
+  const laterWalls = Array.from({ length: CHARGE_WALL_PIERCE - 1 }, (_, i) => 700 + i * 200);
+  const stopAt = 700 + (CHARGE_WALL_PIERCE - 1) * 200;
+  for (const at of [...laterWalls, stopAt]) {
     world.map.walls.push({ x: x + at, y: y - 60, w: 12, h: 120 });
   }
   buildStaticGrids(world);
@@ -287,9 +293,9 @@ console.log('\n=== a full wind-up clears a corner, not one slab of it ===');
   processShooting(world, t, new Set());
   const through = world.shots[world.shots.length - 1];
   check(
-    through !== undefined && Math.abs(through.x2 - (x + 1300)) < 40,
+    through !== undefined && Math.abs(through.x2 - (x + stopAt)) < 40,
     'the corner costs one pierce between its three slabs, not three',
-    `x2 ${through?.x2} vs ${x + 1300} - counted by the rect it would stop at ${x + 900}`,
+    `x2 ${through?.x2} vs ${x + stopAt} - counted by the rect it would stop inside the corner`,
   );
   const cornerXs = through?.thru?.filter((_, i) => i % 2 === 0) ?? [];
   check(
@@ -299,11 +305,12 @@ console.log('\n=== a full wind-up clears a corner, not one slab of it ===');
   );
   // The merge rule reaches the marks as well as the count: the corner is one
   // wall, so it leaves one scar rather than three stacked on each other.
+  const expectedCornerXs = [400, ...laterWalls];
   check(
-    cornerXs.length === 4 &&
-      [400, 700, 900, 1100].every((at, i) => Math.abs(cornerXs[i] - (x + at)) < 30),
+    cornerXs.length === CHARGE_WALL_PIERCE &&
+      expectedCornerXs.every((at, i) => Math.abs(cornerXs[i] - (x + at)) < 30),
     'and the corner leaves one scar between its three slabs, then one per wall',
-    `${cornerXs.length} entries ${cornerXs.map((v) => v - x).join(',')} vs 400,700,900,1100`,
+    `${cornerXs.length} entries ${cornerXs.map((v) => v - x).join(',')} vs ${expectedCornerXs.join(',')}`,
   );
 
   // The control, and it is what says four is a count rather than a free pass:

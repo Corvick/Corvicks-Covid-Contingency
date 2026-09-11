@@ -746,11 +746,14 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
           // off it.
           if (shot.thru) {
             for (let i = 0; i + 1 < shot.thru.length; i += 2) {
-              spawnPlasmaScorch(shot.thru[i], shot.thru[i + 1], travel, shot.plasma, now, map?.walls);
+              spawnPlasmaScorch(shot.thru[i], shot.thru[i + 1], travel, shot.plasma, now, map?.walls, true);
             }
           }
           if (shot.wall) {
-            spawnPlasmaScorch(shot.x2, shot.y2, travel, shot.plasma, now, map?.walls);
+            // The wall that finally caught it — a stop, not a puncture, so it
+            // gets the non-pierced mark: no lightning through to the far side,
+            // no white core reaching it.
+            spawnPlasmaScorch(shot.x2, shot.y2, travel, shot.plasma, now, map?.walls, false);
           } else if (shot.plasma >= CHARGE_BARS) {
             // Full charge, ran out in the open — a blueish crater on the road.
             spawnPlasmaCrater(shot.x2, shot.y2, shot.plasma, now);
