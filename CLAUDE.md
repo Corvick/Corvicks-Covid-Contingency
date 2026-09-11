@@ -8173,6 +8173,119 @@ the skull and **inside its width**, so the two arms met round it and the thing
 read as a body holding its own head. They are clear of the crown in both axes
 now — 0.205 out and ±0.140 across.
 
+#### Seen from above, and going the way it is pointed
+
+Reported over a live frame as *"everyone seems to be walking backwards, it just
+doesn't look right"*, with *"make the sprite models swing their arms further
+forward"* and *"I want to push everything (the layers of what makes the people)
+more on top of each other … closer to a more top down view"*. **Those are three
+symptoms of one thing and were fixed as one**: every piece of the body that a
+player can actually pick out sat *behind* the shoulders, so the eye put the
+front of the figure at the wrong end.
+
+**Nothing about the facing was ever wrong.** `angleIndexFor` and the quarter
+turn are correct and are unchanged — a sprite facing east is drawn facing east.
+It is a readability fault, not a transform one, and it had four causes.
+
+- **`PIVOT_Y` was the head.** At 0.44 the *crown* was pinned on the entity's
+  coordinate and the torso, hips and feet all hung off the back of it, so the
+  mass a player looks at trailed where the game says the body is by **8.4
+  screen pixels** at `CAMERA_ZOOM`. It is 0.49, the middle of the figure.
+  **`charbake.ts` reads it from `charsprite.ts` now** rather than holding a
+  second copy — and `spritesheet.ts` held a *third*, which had already gone
+  stale by the time it was found.
+- **No arm ever got in front of the shoulder line.** They hung at
+  `jointY + 0.150` and swung ±0.088, so the forward extreme was still 0.06
+  *behind* the joint. The only limbs ever visible outside the torso were behind
+  it. `ARM_FWD` (0.185) against `ARM_BACK` (0.062) is deliberately asymmetric:
+  from above, an arm swinging through the shoulder line is most of what says
+  which end is the front, and a symmetric swing buys none of it.
+- **The layers were a three-quarter view.** Head, shoulders, hips and feet
+  spread **0.42 of the box** along the body axis, and a person seen from
+  directly above has them stacked nearly on top of each other — what separates
+  them on screen is perspective and there is none here. `TOPDOWN` (0.62)
+  squashes every layer offset toward the shoulder line. **It is a squash and
+  not a redraw**, which is what was asked for: every layer keeps its shape, its
+  size and its draw order.
+- **And the shadow trailed the shortened body.** It ran to y=0.80 for a figure
+  that now ends at 0.65 — one more lump of mass out the back. The offset is the
+  city's light and stays; only the length came in.
+
+**The squash-vs-swing distinction is the load-bearing idea and it is what makes
+the model right rather than merely tuned.** A layer offset (the head above the
+shoulders, the feet below) is a *vertical* distance in real life, so from
+directly above it is heavily foreshortened — that is what `TOPDOWN` multiplies.
+A swing (an arm or a foot going forward) is a *horizontal* distance, which is
+not foreshortened at all. So `ARM_REST` is squashed and `ARM_FWD`, `ARM_BACK`
+and `LEG_SWING` are not. Squashing the swings too would have taken the walk
+away along with the lean.
+
+- **The head came in 0.128 → 0.106 with them**, and it had to. Compressing the
+  layers under a head that size left the crown covering most of the torso, and
+  from above a head is a *small* circle in a wide shoulder mass — about 40% of
+  the shoulder width in life, against the 61% it was. Swept against `TOPDOWN`
+  on a contact sheet rather than picked.
+- **`LEG_SWING` went 0.030 → 0.046.** At 0.030 the forward foot never cleared
+  the hips, so only the *back* one was ever visible outside the body — the same
+  mass-at-the-back fault the arms had, on the other pair of limbs.
+
+**`STRIDE_PX` is 19 rather than 26, which is the other half of *"I want the
+steps and swinging of the arms to match the movement of the NPC"*.** It is
+derived from the body's own scale now instead of picked: a body is
+`CHAR_BOX_RADII` radii across with shoulders 0.40 of that box — ~24 world px
+for a 13px radius — which against a real adult's 45cm shoulders puts one world
+pixel at about 1.9cm; an adult's gait cycle covers ~1.4m, so four beats is ~74
+world px and one beat is 19. At 26 the body covered a third more ground than
+its own legs accounted for, which is a moonwalk however good the pose is.
+
+`setFlatCharacters` is the gate and it is **kept**, because every figure here is
+a gain against a control and the new number alone says nothing. It restores the
+layer stack, the head, both swings, the shadow and the pivot; **the elbow is the
+one thing it does not reproduce exactly** — the old one sat at a fixed offset
+where this one tracks the hand — so quote it for hands, layers and mass and not
+for elbows. Measured against the pre-change file it is within 52-65 px of 4096
+at the pass frame and ~263 at a step, which is that elbow.
+
+`client/spritesheet.ts` carries the measurement and `preview-walk.png` is the
+picture, which now draws **the travel arrow** — without it a walk sheet is four
+poses nobody can grade, and grading them was the entire report. 24 seeds,
+medians, at the 120 screen px a body is drawn across:
+
+| | BEFORE | NOW |
+|---|---|---|
+| spread, head to foot | 0.422 (51px) | **0.313 (38px)** |
+| mass behind its own coordinate | +8.4px | **+1.4px** |
+| forward-most limb ink vs the shoulders | -7.2px | **-24.0px** |
+
+**That -7.2px is an elbow, and it is the finding rather than a near miss**: no
+*hand* cleared the shoulder line at all, at any point in the cycle, so every
+limb outside the body was behind it.
+
+*Three cuts of that last column lied before one was right, and all three are the
+same trap — a sample that catches something which is not the arm.* Matching the
+**skin colour** caught the head, and for two of the sixteen shirts (the pale
+tans) it caught the shirt. **Diffing a pass frame against a step frame** caught
+the torso `TWIST`, which moves the shoulder's leading edge, and reported the old
+arms as reaching forward when they cannot. And excluding the head at
+`headR * 1.12` was not enough, because **a cap's PEAK reaches `headR * 1.24`**
+— so a hat read as an arm, on a body standing still. It is `1.38` now, and the
+sample is geometric rather than by colour.
+
+**Verified in a real round**, which for this file is not the usual position:
+`computer{action:"screenshot"}` does work in the browser pane here, and a crop
+of the live canvas pulled back through `getImageData` and magnified shows
+compact top-down bodies with an arm plainly swung forward. The frame rate that
+pane reports is meaningless (rAF is throttled), but the *pixels* are the game's.
+
+**Still to do: the faces read as looking at the sky.** Reported in the same
+breath and deliberately not fixed here — *"a lot of the sprites have faces that
+are painted as if they are looking straight up at the sky … his hat at the side
+of his head and his hair making it look like he is craning his head to look
+straight up at the camera"*. It is the hat and hair placement on the crown
+rather than the layer stack, so it is a separate change to the head's own
+drawing; the note beside `drawCharacter`'s head block already records that this
+exact fault was half-fixed once before.
+
 #### And the crowd walks
 
 Asked for in the same breath. Nothing about it is new machinery: `CharLook`

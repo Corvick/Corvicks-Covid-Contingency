@@ -22,7 +22,7 @@
  * framing the whole city first-sights hundreds of bodies on one frame, which
  * is this game's known worst case for anything per-entity.
  */
-import { drawCharacter, look, type CharKind, type CharLook } from './charsprite.js';
+import { characterPivotY, drawCharacter, look, type CharKind, type CharLook } from './charsprite.js';
 
 /**
  * The authored size, and 64 rather than 32 because of the camera.
@@ -71,10 +71,21 @@ const CYCLE = [0, 1, 0, 2];
 /**
  * Ground covered per beat, so the legs keep up with the body rather than
  * running on a clock of their own — the same rule the dog's gait follows.
- * A civilian walks at 35px/s, so a full four-beat stride is about three
- * seconds; an officer at 160 takes about two thirds of one.
+ *
+ * **It is derived from the body's own scale rather than picked**, because a
+ * cadence that does not match the pace is exactly what reads as sliding, and
+ * that was half of the reported *"the steps and swinging of the arms [should]
+ * match the movement of the NPC"*. A body is drawn `CHAR_BOX_RADII` radii
+ * across and its shoulders are 0.40 of that box — about 24 world pixels for a
+ * 13px human radius — which against a real adult's 45cm shoulders puts one
+ * world pixel at roughly 1.9cm. An adult's walking gait cycle (left step, then
+ * right) covers about 1.4m, so a full four-beat cycle is ~74 world pixels and
+ * one beat is about 19.
+ *
+ * At 26 the body covered a third more ground than its own legs accounted for,
+ * which is a moonwalk however good the pose is.
  */
-const STRIDE_PX = 26;
+const STRIDE_PX = 19;
 
 /**
  * A step longer than this is not walking. Interpolated bodies jump when they
@@ -98,12 +109,14 @@ const STILL_PX = 0.25;
 export const CHAR_BOX_RADII = 4.6;
 
 /**
- * Where the sprite's own centre of rotation sits in its box. Must match
- * `PIVOT_Y` in `charsprite.ts` — the sprite is baked already turned about that
- * point, so putting any other point on the entity makes a body wobble as it
- * turns rather than spin.
+ * Where the sprite's own centre of rotation sits in its box.
+ *
+ * **Read from `charsprite.ts` rather than written down again.** The sprite is
+ * baked already turned about that point, so putting any other point on the
+ * entity makes a body wobble as it turns rather than spin — and this was two
+ * copies of one number, which is the arrangement that eventually disagrees.
  */
-const PIVOT_Y = 0.44;
+const PIVOT_Y = characterPivotY();
 
 /**
  * Cells to paint per frame before falling back to an angle already in hand.

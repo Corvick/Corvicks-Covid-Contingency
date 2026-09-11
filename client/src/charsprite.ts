@@ -122,12 +122,17 @@ interface Ctx {
 }
 
 /**
- * The figure is taller than it is wide and does not sit centred in the frame —
- * a raised weapon reaches y=0.07 and the shoes go to y=0.77. Turning it about
- * the canvas centre therefore swings it out of frame at 45 degrees, so it turns
- * about its own middle instead.
+ * Where the body's own middle sits in the box — the point it turns about, and
+ * the point `charbake.ts` puts on the entity's position. **Change it in both.**
+ *
+ * It was 0.44, which is the *head*, and that was a real contributor to the
+ * reported "everyone seems to be walking backwards": the crown was pinned on
+ * the entity and the torso, hips and feet all hung off the back of it, so the
+ * mass a player actually looks at trailed its own coordinate by about four
+ * screen pixels at the camera's zoom. 0.49 is the middle of the compressed
+ * figure below, so a body now sits *on* where the game says it is.
  */
-const PIVOT_Y = 0.44;
+let PIVOT_Y = 0.49;
 
 function pt(ctx: Ctx, x: number, y: number): [number, number] {
   if (!ctx.rot) return [x, y];
@@ -274,19 +279,103 @@ const BLOOD = hex('#6e1616');
 const BLOOD_HI = hex('#94241f');
 const OUTLINE: RGBA = [10, 8, 10, 235];
 
+// ------------------------------------------------------- the layer stack ----
+/**
+ * The shoulder line. Every other layer is authored as a distance in front of
+ * or behind it, so there is exactly one place to squash the figure from.
+ */
+const SH_Y = 0.505;
+
+/**
+ * How much of a side-on layout survives into the top-down one.
+ *
+ * A person seen from **directly above** has their head, shoulders, hips and
+ * feet stacked almost on top of each other — what pulls those apart on screen
+ * is perspective, and there is none here. Authored at 1.0 the layers spread
+ * 0.23 of the box along the body axis, which is a three-quarter view wearing a
+ * top-down hat: the crown leads, the feet trail well out the back, and the
+ * figure reads as somebody leaning into a walk seen from a low camera.
+ *
+ * Reported as *"I want to push everything (the layers of what makes the
+ * people) more on top of each other … closer to a more top down view"*, and it
+ * is deliberately a squash rather than a redraw: every layer keeps its shape,
+ * its size and its draw order, and only the gaps between them come in. At 64px
+ * that is about two pixels off each, which is what was asked for.
+ */
+let TOPDOWN = 0.62;
+
+/** Layer offsets along the body axis, before `TOPDOWN` squashes them. */
+const HEAD_AHEAD = 0.080; // the crown, in front of the shoulders
+const HIP_BEHIND = 0.080;
+const LEG_BEHIND = 0.107;
+const SHOE_BEHIND = 0.147;
+const HAIR_BEHIND = 0.048; // long hair, off the back of the head
+const ZOMBIE_REACH = 0.260; // a shambler's hands, in front of its shoulders
+const AIM_REACH = 0.250; // an officer's hands on a raised weapon
+
 // ------------------------------------------------------------- the walk -----
 /**
  * How far a limb travels between the two ends of a stride, and how far the
  * shoulders turn against the hips.
  *
- * They are small because the whole figure is about 24px across on screen: the
- * arms are what actually read at that size, the feet are a couple of pixels
- * appearing and disappearing either side of the hips, and the counter-rotation
- * is felt rather than seen. Doubling any of them reads as a march.
+ * **An arm swings well forward of the shoulder and only a little way back**,
+ * and that asymmetry is most of what says which end of a top-down body is the
+ * front. Hung at the sides and swung evenly they never once cleared the
+ * shoulder line, so the only limbs ever visible outside the torso were *behind*
+ * it: the eye put the front of the body at the widest, busiest end and the
+ * figure read as reversed. Reported as *"swing their arms further forward"* and
+ * *"everyone seems to be walking backwards"*, which turned out to be two halves
+ * of one thing.
+ *
+ * `ARM_REST` is where a hand sits standing square — at the hip, so a body that
+ * has stopped is still a body with its arms down rather than out.
  */
-const ARM_SWING = 0.055;
-const LEG_SWING = 0.030;
+let ARM_REST = 0.105;
+let ARM_FWD = 0.185;
+let ARM_BACK = 0.062;
+/**
+ * The feet straddle the hip line rather than trailing behind it. At 0.030 the
+ * forward foot never cleared the hips, so only the *back* one was ever visible
+ * outside the body — the same mass-at-the-back fault the arms had.
+ */
+let LEG_SWING = 0.046;
 const TWIST = 0.13; // radians
+
+/** The crown's radius. Small in a wide shoulder mass is what top-down looks like. */
+let HEAD_R = 0.106;
+/** How long the cast shadow runs, and how wide its pool is. */
+let SHADOW_END = 0.655;
+let SHADOW_R = 0.14;
+let SHADOW_POOL = 0.225;
+
+/**
+ * Put the figure back the way it was laid out before the top-down pass.
+ *
+ * **Kept rather than deleted, because the control is the whole value of the
+ * measurement.** "The forward hand reaches 20px in front of the shoulders" says
+ * nothing on its own; "it was 7px, and that 7px was an *elbow* — no hand ever
+ * cleared the shoulder line at all" is the finding. Same for the squash: 38px
+ * of spread only means something against the 51px it replaced.
+ *
+ * It restores the layer stack, the head, the arm swing, the leg swing, the
+ * shadow and the pivot. **The elbow is the one thing it does not reproduce
+ * exactly** — the old one sat at a fixed offset where this one tracks the
+ * hand — so quote it for hands, layers and mass and not for elbows.
+ */
+export function setFlatCharacters(on: boolean): void {
+  TOPDOWN = on ? 1 : 0.62;
+  HEAD_R = on ? 0.128 : 0.106;
+  ARM_REST = on ? 0.150 : 0.105;
+  ARM_FWD = on ? 0.088 : 0.185;
+  ARM_BACK = on ? 0.088 : 0.062;
+  LEG_SWING = on ? 0.030 : 0.046;
+  SHADOW_END = on ? 0.80 : 0.655;
+  SHADOW_R = on ? 0.15 : 0.14;
+  SHADOW_POOL = on ? 0.235 : 0.225;
+  PIVOT_Y = on ? 0.44 : 0.49;
+}
+/** Where `charbake.ts` must put the sprite on the entity, for the mode in force. */
+export const characterPivotY = (): number => PIVOT_Y;
 
 export type CharKind = 'citizen' | 'officer' | 'zombie';
 
@@ -365,11 +454,11 @@ export function drawCharacter(S: number, o: CharLook): Pix {
   // is wide is what makes a top-down figure read as a ball, and it did.
   const shW = 0.2 * b;
   const shD = 0.132 * b;
-  const shY = 0.505;
-  const headR = 0.128 + (b - 1) * 0.03;
+  const shY = SH_Y;
+  const headR = HEAD_R + (b - 1) * 0.03;
   /**
    * The crown sits nearly ON the shoulder line, proud of it by about half a
-   * head radius and no more.
+   * head radius and no more — and `TOPDOWN` then brings even that in.
    *
    * At 0.352 the head centre was a full head radius ahead of the torso centre
    * and barely overlapped it, and the feet trailed to 0.770 — so the figure ran
@@ -378,7 +467,7 @@ export function drawCharacter(S: number, o: CharLook): Pix {
    * hunched too far forward. Standing upright and seen from directly above, a
    * person is wider than they are deep and their feet are mostly under them.
    */
-  const headY = 0.425;
+  const headY = shY - HEAD_AHEAD * TOPDOWN;
   const headX = 0.5 + lean;
   const jointX = shW * 0.92;
   const jointY = shY - shD * 0.3;
@@ -390,9 +479,13 @@ export function drawCharacter(S: number, o: CharLook): Pix {
    */
   const g = o.gait ?? 0;
 
+  // Shortened with the body. The offset is the city's light and stays; the
+  // *length* was sized for a figure that ran to y=0.77, and a shadow reaching
+  // a third of the box further back than anything casting it is one more lump
+  // of mass behind the body — which is the read this whole pass is about.
   if (o.shadow) {
-    capsule(shad, flat, 0.515, 0.55, 0.568, 0.80, 0.15 * b, alpha([0, 0, 0, 255], 0.3));
-    ell(shad, flat, 0.52, 0.545, 0.235 * b, 0.15 * b, alpha([0, 0, 0, 255], 0.34));
+    capsule(shad, flat, 0.515, 0.545, 0.552, SHADOW_END, SHADOW_R * b, alpha([0, 0, 0, 255], 0.3));
+    ell(shad, flat, 0.52, 0.53, SHADOW_POOL * b, 0.145 * b, alpha([0, 0, 0, 255], 0.34));
   }
 
   // The legs swing opposite to the arms — that is what a walk *is*, and getting
@@ -400,12 +493,12 @@ export function drawCharacter(S: number, o: CharLook): Pix {
   for (const s of [-1, 1]) {
     const fx = 0.5 + s * 0.07 * b;
     const step = -s * g * LEG_SWING;
-    blob(body, ctx, fx, 0.612 + step, 0.058 * b, 0.070 * b, o.pants, { n: 2.4, hi: 0 });
-    blob(body, ctx, fx + s * 0.005, 0.652 + step * 1.35, 0.046 * b, 0.052 * b, o.shoe, { n: 2.6, hi: 0.08 });
+    blob(body, ctx, fx, shY + LEG_BEHIND * TOPDOWN + step, 0.058 * b, 0.070 * b, o.pants, { n: 2.4, hi: 0 });
+    blob(body, ctx, fx + s * 0.005, shY + SHOE_BEHIND * TOPDOWN + step * 1.35, 0.046 * b, 0.052 * b, o.shoe, { n: 2.6, hi: 0.08 });
   }
   // Hips and shoulders counter-rotate, which from above is most of what says
   // this is a person walking rather than a person sliding.
-  blob(body, ctx, 0.5, 0.585, 0.15 * b, 0.072 * b, o.pants, { n: 2.6, rot: -g * TWIST, hi: 0.06 });
+  blob(body, ctx, 0.5, shY + HIP_BEHIND * TOPDOWN, 0.15 * b, 0.072 * b, o.pants, { n: 2.6, rot: -g * TWIST, hi: 0.06 });
 
   blob(body, ctx, 0.5, shY, shW, shD, o.shirt, { n: 2.9, rot: g * TWIST, lift: 0.26, hi: 0.13 });
 
@@ -438,7 +531,7 @@ export function drawCharacter(S: number, o: CharLook): Pix {
   }
 
   if (o.hairStyle === 3)
-    blob(body, ctx, headX, headY + 0.048, headR * 1.16, headR * 1.3, o.hair, { hi: 0.07 });
+    blob(body, ctx, headX, headY + HAIR_BEHIND * TOPDOWN, headR * 1.16, headR * 1.3, o.hair, { hi: 0.07 });
 
   // the neck, so the head reads as sitting on the body rather than in it
   ell(body, ctx, headX, headY + headR * 0.86, headR * 0.62, headR * 0.42, dark(o.skin, 0.42));
@@ -454,6 +547,15 @@ export function drawCharacter(S: number, o: CharLook): Pix {
    * exactly that way. So: the hair sits further forward, the head's own
    * highlight is weaker, and the nose is a dark notch breaking the silhouette
    * rather than a feature painted on top of it.
+   *
+   * **And it is only half fixed — this is the open one.** Reported again over a
+   * live frame: *"a lot of the sprites have faces that are painted as if they
+   * are looking straight up at the sky … his hat at the side of his head and
+   * his hair making it look like he is craning his head to look straight up at
+   * the camera."* It is the hat and hair *placement on the crown* rather than
+   * the layer stack — `hairStyle` 3 and 4 both sit off-centre enough to read as
+   * a head tipped back — so it wants its own pass over the block below rather
+   * than another number in the stack above.
    */
   blob(body, ctx, headX, headY, headR, headR * 1.06, o.skin, { lift: 0.34, hi: 0.1 });
   if (o.hairStyle === 1 || o.hairStyle === 3) {
@@ -497,9 +599,10 @@ export function drawCharacter(S: number, o: CharLook): Pix {
       // and only partway, which put the hands level with the top of the skull
       // and inside its width — so the two arms met round it and the whole
       // thing read as a body holding its own head rather than reaching.
-      const ey = jointY - 0.075;
+      const ey = jointY - 0.075 * TOPDOWN;
       const hx = 0.5 + s * (0.140 + drift * 0.6);
-      const hy = 0.205 + Math.abs(lean) * (s > 0 ? 1.4 : 0) + s * g * ARM_SWING * 0.5;
+      const hy =
+        jointY - ZOMBIE_REACH * TOPDOWN + Math.abs(lean) * (s > 0 ? 1.4 : 0) + s * g * ARM_FWD * 0.3;
       arm2(body, ctx, 0.5 + s * jointX, jointY, ex, ey, hx, hy, armR, arm);
       blob(body, ctx, hx, hy - 0.008, armR * 1.04, armR * 1.04, o.skin, { hi: 0.12 });
       if (D) ell(body, ctx, hx, hy - 0.024, armR * 0.55, armR * 0.34, BLOOD_HI);
@@ -507,10 +610,10 @@ export function drawCharacter(S: number, o: CharLook): Pix {
   } else if (cop && o.pose === 'aim') {
     // Hands go clear ABOVE the crown, never across it. Bracketing the head is
     // what reads as aiming; crossing it just deletes the head.
-    const hy = 0.215;
+    const hy = jointY - AIM_REACH * TOPDOWN;
     for (const s of [-1, 1]) {
       const ex = 0.5 + s * (jointX + 0.022);
-      const ey = jointY - 0.048;
+      const ey = jointY - 0.048 * TOPDOWN;
       const hx = 0.5 + s * (o.longGun ? 0.04 : 0.05);
       const hyy = o.longGun && s < 0 ? hy + 0.052 : hy;
       arm2(body, ctx, 0.5 + s * jointX, jointY, ex, ey, hx, hyy, armR, arm);
@@ -527,15 +630,19 @@ export function drawCharacter(S: number, o: CharLook): Pix {
       sup(body, ctx, 0.5, hy - 0.062, 0.019, 0.026, 2.4, lite(GUNMETAL, 0.38));
     }
   } else {
-    // At the sides, and swinging. This is the readable half of the walk: the
-    // feet are two or three pixels either side of the hips, where a hand out
-    // past the shoulder is plainly somewhere different from one at the hip.
+    // At the sides, and swinging *through* the shoulder line rather than
+    // behind it. This is the readable half of the walk: the feet are two or
+    // three pixels either side of the hips, where a hand out in front of the
+    // shoulder is plainly somewhere different from one at the hip.
     for (const s of [-1, 1]) {
-      const swing = s * g * ARM_SWING;
-      const ex = 0.5 + s * (jointX + 0.048);
-      const ey = jointY + 0.072 + swing;
-      const hx = 0.5 + s * (jointX + 0.04);
-      const hy = jointY + 0.150 + swing * 1.6;
+      const sw = s * g; // +1 is this arm at the front of its swing
+      const reach = ARM_REST * TOPDOWN - sw * (sw > 0 ? ARM_FWD : ARM_BACK);
+      // A swung-forward arm comes in toward the centre line as it goes, which
+      // is both what one does and what keeps the hand off the shoulder's edge.
+      const hx = 0.5 + s * (jointX + 0.04 - Math.max(0, sw) * 0.028);
+      const hy = jointY + reach;
+      const ex = 0.5 + s * (jointX + 0.052);
+      const ey = jointY + reach * 0.45;
       arm2(body, ctx, 0.5 + s * jointX, jointY + 0.012, ex, ey, hx, hy, armR, arm);
       blob(body, ctx, hx, hy, armR * 0.9, armR * 0.9, o.skin, { hi: 0.1 });
     }

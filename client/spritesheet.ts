@@ -22,7 +22,13 @@
  */
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
-import { Pix, blit, drawCharacter, look, hex, type CharKind, type RGBA } from './src/charsprite.js';
+import {
+  Pix, blit, drawCharacter, look, hex, setFlatCharacters, characterPivotY,
+  type CharKind, type RGBA,
+} from './src/charsprite.js';
+
+/** `charbake.ts` imports the DOM, so its box constant is restated rather than pulled in. */
+const CHAR_BOX_RADII_LOCAL = 4.6;
 
 // ------------------------------------------------------------ png encoder ---
 const CRC = (() => {
@@ -179,22 +185,49 @@ save('preview-64.png', sheet(64, 3, 'ZOMBIE SIM - 64X64 SPRITES (SHOWN 3X)'));
 // ------------------------------------------------------- the walk cycle -----
 /**
  * The four-beat cycle laid out left to right, with the pass frame appearing
- * twice because that is what three baked poses buy. Four bodies down so the
- * swing can be compared across builds rather than across one lucky seed.
+ * twice because that is what three baked poses buy.
+ *
+ * **The arrow is the point of the sheet.** It is the direction the game says
+ * the body is travelling, sprung from the sprite's own pivot, and the question
+ * it asks is the one that was reported: *does this look like somebody walking
+ * that way*. Without it a walk sheet is four poses nobody can grade. The old
+ * layout is on top for the same reason the gate exists at all.
  */
+const ARROW = hex('#e02424');
+function arrow(p: Pix, cx: number, cy: number, a: number, len: number, from: number): void {
+  const dx = Math.cos(a), dy = Math.sin(a);
+  for (let t = from; t <= len; t++)
+    for (let w = -2; w <= 2; w++)
+      p.set(Math.round(cx + dx * t - dy * w), Math.round(cy + dy * t + dx * w), ARROW);
+  for (let t = 0; t <= 12; t++) {
+    const hw = 8 - t * 0.63;
+    for (let w = -hw; w <= hw; w++)
+      p.set(Math.round(cx + dx * (len - 12 + t) - dy * w), Math.round(cy + dy * (len - 12 + t) + dx * w), ARROW);
+  }
+}
 {
-  const S = 64, scale = 4, gap = 12, padL = 20, padT = 56;
+  const S = 64, scale = 5, gap = 18, padL = 20, padT = 56;
   const GAIT = [0, 1, 0, -1];
   const cell = S * scale;
-  const p = new Pix(padL * 2 + GAIT.length * (cell + gap), padT + 4 * (cell + gap) + 20);
+  const p = new Pix(padL * 2 + GAIT.length * (cell + gap), padT + 4 * (cell + 40) + 20);
   fill(p, GROUND);
-  text(p, 'THE WALK - PASS, STEP, PASS, STEP (THREE BAKED POSES)', padL, 20, 3, INK_HI);
-  for (let row = 0; row < 4; row++)
-    for (let i = 0; i < GAIT.length; i++) {
-      const o = look('citizen', 400 + row);
-      o.gait = GAIT[i];
-      blit(p, drawCharacter(S, o), padL + i * (cell + gap), padT + row * (cell + gap), scale);
+  text(p, 'THE WALK - PASS, STEP, PASS, STEP. THE ARROW IS WHERE THE BODY IS GOING', padL, 20, 3, INK_HI);
+  let row = 0;
+  for (const flatPose of [true, false])
+    for (const seed of [401, 404]) {
+      setFlatCharacters(flatPose);
+      const y = padT + row * (cell + 40);
+      text(p, flatPose ? `BEFORE - SEED ${seed}` : `NOW - SEED ${seed}`, padL, y - 14, 2, INK);
+      for (let i = 0; i < GAIT.length; i++) {
+        const o = look('citizen', seed);
+        o.gait = GAIT[i];
+        const x = padL + i * (cell + gap);
+        blit(p, drawCharacter(S, o), x, y, scale);
+        arrow(p, x + cell * 0.5, y + cell * characterPivotY(), -Math.PI / 2, cell * 0.42, cell * 0.2);
+      }
+      row++;
     }
+  setFlatCharacters(false);
   save('preview-walk.png', p);
 }
 
@@ -212,8 +245,10 @@ save('preview-64.png', sheet(64, 3, 'ZOMBIE SIM - 64X64 SPRITES (SHOWN 3X)'));
   const HUMAN_RADIUS = 13;
   const CAMERA_ZOOM = 2; // what the game frames a player's view at
   const CHAR_SPRITE_PX = 64;
-  const CHAR_BOX_RADII = 4.6;
-  const PIVOT_Y = 0.44;
+  const CHAR_BOX_RADII = CHAR_BOX_RADII_LOCAL;
+  // Asked for rather than written down: this was a third copy of the pivot and
+  // it silently went stale the day the body's middle moved.
+  const PIVOT_Y = characterPivotY();
 
   // A staged crowd: a phyllotaxis spiral so it is evenly spread and identical
   // between the two halves, rather than a grid, which reads as a parade.
@@ -274,6 +309,78 @@ save('preview-64.png', sheet(64, 3, 'ZOMBIE SIM - 64X64 SPRITES (SHOWN 3X)'));
 }
 
 console.log(`wrote 5 sheets to ${OUT}`);
+
+// ------------------------------------------------- does it face where it goes --
+/**
+ * The three claims behind the top-down pass, as numbers.
+ *
+ * `setFlatCharacters` is the gate and it is **kept**: every figure here is a
+ * gain against a control, and "the forward hand reaches 20px in front of the
+ * shoulders" says nothing at all without "it was 7px, and that 7px was an
+ * *elbow*".
+ *
+ * **The arm is isolated geometrically** — ink outside both the torso's own
+ * bounding disc and the head's. Two earlier cuts of this lied and are worth not
+ * repeating: matching the skin colour caught the head, and for two of the
+ * sixteen shirts (the pale tans) it caught the shirt; and diffing a pass frame
+ * against a step frame caught the torso TWIST, which moves the shoulder's
+ * leading edge and reported the old arms as reaching forward when they cannot.
+ * The head disc has to be `headR * 1.38` rather than the crown itself, because
+ * a cap's PEAK reaches `headR * 1.24` and at 1.12 a hat read as an arm.
+ */
+{
+  const S = 64;
+  const SH_Y = 0.505;
+  const BOX = Math.round(13 * CHAR_BOX_RADII_LOCAL * 2); // radius x box x CAMERA_ZOOM
+  const solid = (p: Pix, i: number): boolean =>
+    p.d[i + 3] >= 200 && p.d[i] * 0.3 + p.d[i + 1] * 0.6 + p.d[i + 2] * 0.1 >= 14; // skips shadow + outline
+  const med = (a: number[]): number => [...a].sort((x, y) => x - y)[a.length >> 1];
+  const px = (f: number): string => `${f >= 0 ? '+' : ''}${(f * BOX).toFixed(1)}px`;
+
+  console.log('\nfacing vs travel, 24 seeds, medians. north-facing, so smaller y is FORWARD.');
+  console.log(`a body is ${BOX} screen px across at CAMERA_ZOOM 2; the shoulder line is ${SH_Y}.\n`);
+  console.log('             spread        mass behind its    forward-most limb');
+  console.log('           head to foot    own coordinate     ink vs the shoulders');
+  for (const flatPose of [true, false]) {
+    setFlatCharacters(flatPose);
+    const piv = characterPivotY();
+    const headR0 = flatPose ? 0.128 : 0.106;
+    const headAhead = flatPose ? 0.080 : 0.080 * 0.62;
+    const sp: number[] = [], ms: number[] = [], ar: number[] = [];
+    for (let seed = 400; seed < 424; seed++) {
+      const o = look('citizen', seed);
+      const b = o.build;
+      const torsoR = Math.hypot(0.2 * b, 0.132 * b) * 1.02;
+      const headR = headR0 + (b - 1) * 0.03;
+      const headY = SH_Y - headAhead;
+      let lo = 9, hi = -9, sy = 0, n = 0, arm = 9;
+      for (const gait of [0, 1]) {
+        const spr = drawCharacter(S, { ...o, gait });
+        for (let y = 0; y < S; y++)
+          for (let x = 0; x < S; x++) {
+            const i = (y * S + x) * 4;
+            if (!solid(spr, i)) continue;
+            const u = (x + 0.5) / S, v = (y + 0.5) / S;
+            if (gait === 0) { lo = Math.min(lo, v); hi = Math.max(hi, v); sy += v; n++; }
+            if (
+              gait === 1 &&
+              Math.hypot(u - 0.5, v - SH_Y) > torsoR &&
+              Math.hypot(u - (0.5 + o.lean), v - headY) > headR * 1.38
+            )
+              arm = Math.min(arm, v);
+          }
+      }
+      sp.push(hi - lo); ms.push(sy / n - piv); ar.push(arm - SH_Y);
+    }
+    console.log(
+      `${flatPose ? 'BEFORE' : 'NOW   '}   ${med(sp).toFixed(3)} (${(med(sp) * BOX).toFixed(0)}px)` +
+      `      ${px(med(ms))}             ${px(med(ar))}`);
+  }
+  setFlatCharacters(false);
+  console.log('\na negative last column is limb ink IN FRONT of the shoulder line. Before the');
+  console.log('change that 7px is the ELBOW bulging past the torso; no hand ever cleared the');
+  console.log('shoulders at all, so every limb outside the body was behind it.');
+}
 
 // ------------------------------------------------------------ what it costs --
 // `charbake.ts` bakes lazily, so this is the figure that decides whether that
