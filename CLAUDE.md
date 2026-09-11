@@ -8058,7 +8058,7 @@ crisp as the front view. The same property is what lets one definition serve
 - `client/src/charsprite.ts` — what a person looks like. No DOM and no node, so
   the game and the sheet tool share one definition.
 - `client/src/charbake.ts` — how that reaches a frame. **One atlas per kind,
-  filled lazily**, not 768 loose canvases: a cell per (variant, angle), painted
+  filled lazily**, not a thousand loose canvases: a cell per (variant, frame, angle), painted
   on first sight and never again, with `drawImage` taking a sub-rect.
 - `client/spritesheet.ts` — `npx tsx spritesheet.ts` writes the contact sheets
   into `client/spritesheets/` (gitignored — the code is the source of truth and
@@ -8136,13 +8136,104 @@ front.**
 and the cap merge into a single silhouette and the officer loses his head — the
 sleeves are the *lightest* thing on him for exactly that reason.
 
+#### Standing upright is wider than it is long
+
+Reported off a live frame as *"they also look a little hunched too far
+forward"*, and the constants said it outright. The head sat at `headY` 0.352
+with a radius of 0.128 — **a full head radius ahead of the shoulder centre**, so
+the crown barely overlapped the torso at all — and the feet trailed to 0.770,
+which put the whole figure at **0.55 of the box long against 0.40 wide**.
+
+**Longer than it is wide is the proportion of somebody bent over.** A person
+standing upright and seen from directly above is *wider than they are deep* —
+shoulders about 45cm across against a chest about 25cm — and their feet are
+mostly underneath them rather than trailing behind. The same mistake as the
+original ball-shaped torso, one layer up: side-on proportions used for a
+top-down view.
+
+- **The crown comes back onto the shoulder line**, proud of it by about half a
+  head radius (`headY` 0.425) rather than a whole one.
+- **The feet come in** — hips 0.596 → 0.585, legs 0.625 → 0.612, shoes 0.712 →
+  0.652 and smaller with it, so a couple of pixels of heel show past the torso
+  instead of a whole leg.
+- **The cast shadow came in with them.** It ran to 0.855, well past a body that
+  now ends at 0.70, and a shadow trailing that far behind adds to exactly the
+  read being fixed.
+- Measured over twelve variants, the figure's own bounding box facing north:
+  **38 wide x 29.8 long** standing, 38 x 32.5 mid-step. It was about 38 x 37.
+  The width never moved — the arms set that — so the whole of the change is
+  length coming off the back.
+
+**It moved the two forward poses with it, and one of them was visibly wrong
+before the other.** The zombie's reach and the officer's weapon are measured off
+the crown, so a head that moved back leaves the arms stretched out in front of a
+body no longer leaning into them. Tracking the zombie's hands back *partway*
+(0.172 → 0.238) was worse than leaving them: it put them level with the top of
+the skull and **inside its width**, so the two arms met round it and the thing
+read as a body holding its own head. They are clear of the crown in both axes
+now — 0.205 out and ±0.140 across.
+
+#### And the crowd walks
+
+Asked for in the same breath. Nothing about it is new machinery: `CharLook`
+gained a `gait` in -1..1, the limbs read it, and `charbake.ts` bakes a frame
+dimension into the atlas.
+
+- **Three baked poses are a four-beat cycle**, because the pass position is used
+  twice: neutral, left step, neutral, right step. Baking the repeat would cost a
+  third more memory for a cell already in hand. Four beats is the minimum that
+  reads as a walk rather than a shuffle, and more would be spent on nothing — at
+  this size the arms travel about three pixels between the ends of a stride.
+- **The legs swing opposite to the arms**, which is what a walk *is*; the same
+  way round is a shuffle however big the swing. **The shoulders counter-rotate
+  against the hips** (`TWIST`), which from above is most of what says this is a
+  person walking rather than a person sliding — the torso and hip blobs already
+  took a `rot`, so it was one argument each.
+- **The arms are the readable half and the feet are nearly not.** At 24px across
+  the feet are two or three pixels appearing either side of the hips, where a
+  hand out past the shoulder is plainly somewhere different from one at the hip.
+  `ARM_SWING` is double `LEG_SWING` for that reason.
+- **The cycle is driven off ground covered, not off a clock** — the rule the
+  dog's gait already follows. A body that has stopped stops stepping, one that
+  is sprinting steps faster, and nothing has to be told which. `frameFor`
+  accumulates it in `charbake.ts` from the *interpolated* positions the renderer
+  is already drawing with, so **nothing reaches the wire and `main.ts` is
+  untouched** but for the reset.
+  - **A jump is not a stride.** A body coming back into view, or an id reused by
+    somebody who has turned, moves an arbitrary distance between two frames;
+    banked, that skips the legs forward. `TELEPORT_PX` throws it away.
+  - **A smoothed pace decides "standing", not the last frame's step.** Testing
+    the raw step flickers between the pass frame and a stride at low speed.
+  - **The map is swept from inside `frameFor`**, which is the only thing that
+    runs per body per frame and so the only thing that knows it is filling up.
+    A round otherwise ends with a few hundred dead ids in it.
+- **`clearCharWalks` *is* called on a restart where `clearCharSprites` is
+  not**, and the split is the same rule: the atlas is keyed by variant index and
+  survives a new city, where a walk holds a coordinate and a distance, which are
+  facts about the round that made them.
+
+**What it cost is variety, and the number is worth stating.** Every variant now
+occupies `CHAR_FRAMES` rows rather than one, so `CHAR_VARIANTS` came down
+**48 → 32** to hold the atlas near the blood layer: 32 x 3 x 16 at 64px is
+**1024x6144, 24MB**, against 12.6MB for 48 still poses and 38MB for 48 animated
+ones. A crowd of 500 drawn 24px across does not give up anything anybody can see
+for it, and `CHAR_VARIANTS` is the knob if that turns out to be wrong.
+
+Measured through the real `drawCharBody` on a live dev server: a body walked in
+6px steps cycles through **3 distinct drawings**, one that never moves holds
+**exactly 1**, and a real 525-entity offline round runs at 6.6ms a tick with no
+exceptions. `preview-walk.png` lays the four beats out left to right over four
+bodies. **What is still not measured is the animation in motion** — rAF is
+throttled to nothing while the browser pane is not compositing, so the frame
+that would show it never paints, and that is the playtest.
+
 **What is measured, and what is not.** Through the real `drawEntity` on a live
 dev server: the body draws (941 ink pixels against the vector drawing's 580, 15
 distinct colours against 8), four facings give four different drawings, the
 turning ramp lands on the exact zombie red, the options row toggles and
 persists, and a real 526-entity offline round runs at 3.8ms a tick with no
 exceptions. Bake cost on this box is **0.10ms a cell at 32px and 0.32ms at 64**,
-so a full 48x16 atlas is a quarter of a second spread across a round.
+so a full 32x3x16 atlas is about half a second spread across a round.
 
 **What is not measured is what a frame looks like**, and that is the same
 standard `DOG_CAMERA_ZOOM` and the resolution row are held to: rAF is throttled

@@ -274,6 +274,20 @@ const BLOOD = hex('#6e1616');
 const BLOOD_HI = hex('#94241f');
 const OUTLINE: RGBA = [10, 8, 10, 235];
 
+// ------------------------------------------------------------- the walk -----
+/**
+ * How far a limb travels between the two ends of a stride, and how far the
+ * shoulders turn against the hips.
+ *
+ * They are small because the whole figure is about 24px across on screen: the
+ * arms are what actually read at that size, the feet are a couple of pixels
+ * appearing and disappearing either side of the hips, and the counter-rotation
+ * is felt rather than seen. Doubling any of them reads as a march.
+ */
+const ARM_SWING = 0.055;
+const LEG_SWING = 0.030;
+const TWIST = 0.13; // radians
+
 export type CharKind = 'citizen' | 'officer' | 'zombie';
 
 export interface CharLook {
@@ -293,6 +307,8 @@ export interface CharLook {
   vest: boolean;
   longGun: boolean;
   pose: 'walk' | 'aim';
+  /** -1..1 through a stride. 0 is standing square. */
+  gait: number;
   shadow: boolean;
   rot: number;
 }
@@ -324,6 +340,7 @@ export function look(kind: CharKind, seed: number): CharLook {
     vest: cop && r() < 0.6,
     longGun: cop && r() < 0.35,
     pose: 'walk',
+    gait: 0,
     shadow: true,
     rot: 0,
   };
@@ -350,24 +367,47 @@ export function drawCharacter(S: number, o: CharLook): Pix {
   const shD = 0.132 * b;
   const shY = 0.505;
   const headR = 0.128 + (b - 1) * 0.03;
-  const headY = 0.352; // proud of the shoulders
+  /**
+   * The crown sits nearly ON the shoulder line, proud of it by about half a
+   * head radius and no more.
+   *
+   * At 0.352 the head centre was a full head radius ahead of the torso centre
+   * and barely overlapped it, and the feet trailed to 0.770 — so the figure ran
+   * 0.55 of the box long against 0.40 wide. Longer than it is wide is the
+   * proportion of somebody **bent over**, and it was reported as exactly that:
+   * hunched too far forward. Standing upright and seen from directly above, a
+   * person is wider than they are deep and their feet are mostly under them.
+   */
+  const headY = 0.425;
   const headX = 0.5 + lean;
   const jointX = shW * 0.92;
   const jointY = shY - shD * 0.3;
 
+  /**
+   * How far through a stride this frame is: 0 stands square, ±1 is a full step
+   * with the opposite arm forward. See `charbake.ts` for how a frame becomes a
+   * gait and how the cycle is driven off ground covered.
+   */
+  const g = o.gait ?? 0;
+
   if (o.shadow) {
-    capsule(shad, flat, 0.515, 0.56, 0.575, 0.855, 0.15 * b, alpha([0, 0, 0, 255], 0.3));
+    capsule(shad, flat, 0.515, 0.55, 0.568, 0.80, 0.15 * b, alpha([0, 0, 0, 255], 0.3));
     ell(shad, flat, 0.52, 0.545, 0.235 * b, 0.15 * b, alpha([0, 0, 0, 255], 0.34));
   }
 
+  // The legs swing opposite to the arms — that is what a walk *is*, and getting
+  // it the wrong way round reads as a shuffle however big the swing.
   for (const s of [-1, 1]) {
     const fx = 0.5 + s * 0.07 * b;
-    blob(body, ctx, fx, 0.625, 0.058 * b, 0.072 * b, o.pants, { n: 2.4, hi: 0 });
-    blob(body, ctx, fx + s * 0.005, 0.712, 0.048 * b, 0.058 * b, o.shoe, { n: 2.6, hi: 0.08 });
+    const step = -s * g * LEG_SWING;
+    blob(body, ctx, fx, 0.612 + step, 0.058 * b, 0.070 * b, o.pants, { n: 2.4, hi: 0 });
+    blob(body, ctx, fx + s * 0.005, 0.652 + step * 1.35, 0.046 * b, 0.052 * b, o.shoe, { n: 2.6, hi: 0.08 });
   }
-  blob(body, ctx, 0.5, 0.596, 0.15 * b, 0.078 * b, o.pants, { n: 2.6, hi: 0.06 });
+  // Hips and shoulders counter-rotate, which from above is most of what says
+  // this is a person walking rather than a person sliding.
+  blob(body, ctx, 0.5, 0.585, 0.15 * b, 0.072 * b, o.pants, { n: 2.6, rot: -g * TWIST, hi: 0.06 });
 
-  blob(body, ctx, 0.5, shY, shW, shD, o.shirt, { n: 2.9, lift: 0.26, hi: 0.13 });
+  blob(body, ctx, 0.5, shY, shW, shD, o.shirt, { n: 2.9, rot: g * TWIST, lift: 0.26, hi: 0.13 });
 
   if (z) {
     const tears = 2 + Math.floor(r() * 3);
@@ -450,9 +490,16 @@ export function drawCharacter(S: number, o: CharLook): Pix {
     for (const s of [-1, 1]) {
       const drift = s < 0 ? lean : -lean;
       const ex = 0.5 + s * (jointX + 0.03);
-      const ey = jointY - 0.088;
-      const hx = 0.5 + s * (0.112 + drift * 0.6);
-      const hy = 0.172 + Math.abs(lean) * (s > 0 ? 1.4 : 0);
+      // Tracks the body back with the head — the reach is measured off the
+      // crown, so leaving it where it was would stretch the arms out in front
+      // of an animal that is no longer leaning into them.
+      // Clear of the crown in BOTH axes. Tracked back with the head at first
+      // and only partway, which put the hands level with the top of the skull
+      // and inside its width — so the two arms met round it and the whole
+      // thing read as a body holding its own head rather than reaching.
+      const ey = jointY - 0.075;
+      const hx = 0.5 + s * (0.140 + drift * 0.6);
+      const hy = 0.205 + Math.abs(lean) * (s > 0 ? 1.4 : 0) + s * g * ARM_SWING * 0.5;
       arm2(body, ctx, 0.5 + s * jointX, jointY, ex, ey, hx, hy, armR, arm);
       blob(body, ctx, hx, hy - 0.008, armR * 1.04, armR * 1.04, o.skin, { hi: 0.12 });
       if (D) ell(body, ctx, hx, hy - 0.024, armR * 0.55, armR * 0.34, BLOOD_HI);
@@ -460,7 +507,7 @@ export function drawCharacter(S: number, o: CharLook): Pix {
   } else if (cop && o.pose === 'aim') {
     // Hands go clear ABOVE the crown, never across it. Bracketing the head is
     // what reads as aiming; crossing it just deletes the head.
-    const hy = 0.176;
+    const hy = 0.215;
     for (const s of [-1, 1]) {
       const ex = 0.5 + s * (jointX + 0.022);
       const ey = jointY - 0.048;
@@ -480,12 +527,15 @@ export function drawCharacter(S: number, o: CharLook): Pix {
       sup(body, ctx, 0.5, hy - 0.062, 0.019, 0.026, 2.4, lite(GUNMETAL, 0.38));
     }
   } else {
+    // At the sides, and swinging. This is the readable half of the walk: the
+    // feet are two or three pixels either side of the hips, where a hand out
+    // past the shoulder is plainly somewhere different from one at the hip.
     for (const s of [-1, 1]) {
-      const swing = s > 0 ? 0.03 : -0.03;
+      const swing = s * g * ARM_SWING;
       const ex = 0.5 + s * (jointX + 0.048);
       const ey = jointY + 0.072 + swing;
       const hx = 0.5 + s * (jointX + 0.04);
-      const hy = jointY + 0.155 + swing * 1.6;
+      const hy = jointY + 0.150 + swing * 1.6;
       arm2(body, ctx, 0.5 + s * jointX, jointY + 0.012, ex, ey, hx, hy, armR, arm);
       blob(body, ctx, hx, hy, armR * 0.9, armR * 0.9, o.skin, { hi: 0.1 });
     }

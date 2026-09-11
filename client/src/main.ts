@@ -186,6 +186,7 @@ import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import { setupMenu } from './menu.js';
 import { applyRenderScale, settings } from './settings.js';
+import { clearCharWalks } from './charbake.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { AbilityId } from '../../shared/types.js';
 
@@ -598,6 +599,10 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
     clearBlood();
     clearLashScars();
     clearDogPoses();
+    // The baked sprites are *not* dropped here and that is deliberate — see
+    // `clearCharSprites`. What is round state is where each body was standing
+    // and how far it has walked, which is what drives the legs.
+    clearCharWalks();
     // The corner map is baked from the city it was built for, and the identity
     // check in `dogMapBaseFor` would catch this on its own — dropping it here
     // as well is what stops a whole city's worth of canvas being held alive by

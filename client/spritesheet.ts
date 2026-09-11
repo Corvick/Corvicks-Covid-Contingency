@@ -176,6 +176,28 @@ save('preview-64.png', sheet(64, 3, 'ZOMBIE SIM - 64X64 SPRITES (SHOWN 3X)'));
   save('preview-variety.png', p);
 }
 
+// ------------------------------------------------------- the walk cycle -----
+/**
+ * The four-beat cycle laid out left to right, with the pass frame appearing
+ * twice because that is what three baked poses buy. Four bodies down so the
+ * swing can be compared across builds rather than across one lucky seed.
+ */
+{
+  const S = 64, scale = 4, gap = 12, padL = 20, padT = 56;
+  const GAIT = [0, 1, 0, -1];
+  const cell = S * scale;
+  const p = new Pix(padL * 2 + GAIT.length * (cell + gap), padT + 4 * (cell + gap) + 20);
+  fill(p, GROUND);
+  text(p, 'THE WALK - PASS, STEP, PASS, STEP (THREE BAKED POSES)', padL, 20, 3, INK_HI);
+  for (let row = 0; row < 4; row++)
+    for (let i = 0; i < GAIT.length; i++) {
+      const o = look('citizen', 400 + row);
+      o.gait = GAIT[i];
+      blit(p, drawCharacter(S, o), padL + i * (cell + gap), padT + row * (cell + gap), scale);
+    }
+  save('preview-walk.png', p);
+}
+
 // ----------------------------------------------- what it looks like in game --
 /**
  * The one sheet that answers a question the others cannot: what a crowd of

@@ -12,7 +12,8 @@
  *
  * **One atlas per kind, filled lazily.** Not 768 loose canvases — that is 768
  * objects and 768 textures for the compositor to juggle. It is one canvas per
- * kind with a cell per (variant, angle), and `drawImage` takes a sub-rect. A
+ * kind with a cell per (variant, frame, angle), and `drawImage` takes a
+ * sub-rect. A
  * cell is painted the first time anybody needs it and never again. Measured on
  * this box: **0.10ms a cell at 32px and 0.32ms at 64**, so the whole atlas is
  * a quarter of a second spread across a round rather than a stall at startup.
@@ -41,11 +42,49 @@ export const CHAR_ANGLES = 16;
  * How many distinct people there are per kind.
  *
  * Not a limit on the generator — it can produce tens of thousands — but on how
- * many are *baked at once*, which is memory. 48 x 16 x 64px is about 12.6MB an
- * atlas, in the same order as the blood layer. A city of 500 with 48 looks
- * repeats, and at this size nobody will pick two of them out of a crowd.
+ * many are *baked at once*, which is memory — and it came down 48 to 32 when
+ * the walk arrived, because every variant now costs `CHAR_FRAMES` rows rather
+ * than one. 32 x 3 x 16 x 64px is about **25MB** an atlas, against 12.6MB for
+ * 48 still poses; holding 48 animated would have been 38MB, which is more than
+ * the blood layer at a full city. A crowd of 500 drawn 24px across does not
+ * give up anything anybody can see for it, and this is the knob if it does.
  */
-export const CHAR_VARIANTS = 48;
+export const CHAR_VARIANTS = 32;
+
+/**
+ * Distinct baked poses in the walk, and **three is a four-beat cycle** because
+ * the pass position is used twice: neutral, left step, neutral, right step.
+ * Baking the repeat would cost a third more memory for a cell already in hand.
+ *
+ * Four beats is the minimum that reads as a walk rather than a shuffle, and at
+ * this size more would be spent on nothing — the arms travel about three
+ * pixels between the ends of a stride.
+ */
+export const CHAR_FRAMES = 3;
+
+/** Where in a stride each baked frame sits. Index is the frame. */
+const FRAME_GAIT = [0, 1, -1];
+
+/** The cycle, as frame indices. The pass frame appears twice on purpose. */
+const CYCLE = [0, 1, 0, 2];
+
+/**
+ * Ground covered per beat, so the legs keep up with the body rather than
+ * running on a clock of their own — the same rule the dog's gait follows.
+ * A civilian walks at 35px/s, so a full four-beat stride is about three
+ * seconds; an officer at 160 takes about two thirds of one.
+ */
+const STRIDE_PX = 26;
+
+/**
+ * A step longer than this is not walking. Interpolated bodies jump when they
+ * re-enter view, and an entity id is reused when somebody turns — either way
+ * the distance between two frames is meaningless and must not be banked.
+ */
+const TELEPORT_PX = 140;
+
+/** Below this much movement a frame, the body is standing and stands square. */
+const STILL_PX = 0.25;
 
 /**
  * How big a body is drawn, as a multiple of its collision radius.
@@ -78,9 +117,9 @@ const BAKE_BUDGET = 24;
 interface Atlas {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
-  /** 1 once a cell has been painted. Indexed variant * CHAR_ANGLES + angle. */
+  /** 1 once a cell has been painted. Indexed row * CHAR_ANGLES + angle. */
   done: Uint8Array;
-  /** Any angle known to be painted, per variant, or -1. The fallback. */
+  /** Any angle known to be painted, per row, or -1. The fallback. */
   anyAngle: Int16Array;
 }
 
@@ -93,31 +132,92 @@ function atlasFor(kind: CharKind): Atlas {
   if (a) return a;
   const canvas = document.createElement('canvas');
   canvas.width = CHAR_ANGLES * CHAR_SPRITE_PX;
-  canvas.height = CHAR_VARIANTS * CHAR_SPRITE_PX;
+  canvas.height = CHAR_VARIANTS * CHAR_FRAMES * CHAR_SPRITE_PX;
   const ctx = canvas.getContext('2d')!;
   ctx.imageSmoothingEnabled = false;
   a = {
     canvas,
     ctx,
-    done: new Uint8Array(CHAR_VARIANTS * CHAR_ANGLES),
-    anyAngle: new Int16Array(CHAR_VARIANTS).fill(-1),
+    done: new Uint8Array(CHAR_VARIANTS * CHAR_FRAMES * CHAR_ANGLES),
+    anyAngle: new Int16Array(CHAR_VARIANTS * CHAR_FRAMES).fill(-1),
   };
   atlases.set(kind, a);
   return a;
 }
 
-function paint(kind: CharKind, a: Atlas, variant: number, angle: number): void {
+/** Atlas row for one (variant, frame). Frames of a person sit together. */
+const rowOf = (variant: number, frame: number): number => variant * CHAR_FRAMES + frame;
+
+function paint(kind: CharKind, a: Atlas, row: number, angle: number): void {
+  const variant = (row / CHAR_FRAMES) | 0;
   const o: CharLook = look(kind, variant + 1);
   o.rot = (angle / CHAR_ANGLES) * Math.PI * 2;
+  o.gait = FRAME_GAIT[row % CHAR_FRAMES];
   const pix = drawCharacter(CHAR_SPRITE_PX, o);
   // Via `createImageData` rather than `new ImageData(pix.d, ...)`: the buffer a
   // `Pix` holds is typed `ArrayBufferLike`, which the ImageData constructor
   // will not take. It is a 16KB copy against 0.32ms of drawing.
   const img = a.ctx.createImageData(CHAR_SPRITE_PX, CHAR_SPRITE_PX);
   img.data.set(pix.d);
-  a.ctx.putImageData(img, angle * CHAR_SPRITE_PX, variant * CHAR_SPRITE_PX);
-  a.done[variant * CHAR_ANGLES + angle] = 1;
-  a.anyAngle[variant] = angle;
+  a.ctx.putImageData(img, angle * CHAR_SPRITE_PX, row * CHAR_SPRITE_PX);
+  a.done[row * CHAR_ANGLES + angle] = 1;
+  a.anyAngle[row] = angle;
+}
+
+// -------------------------------------------------------------- the cycle ---
+interface Walk {
+  x: number;
+  y: number;
+  /** Ground covered, in world pixels, since this body was first seen. */
+  dist: number;
+  /** Smoothed pace, so a body that has stopped settles onto the pass frame. */
+  pace: number;
+  seen: number;
+}
+const walks = new Map<string, Walk>();
+let sweptAt = 0;
+
+/**
+ * Which frame a body is on, from how far it has actually walked.
+ *
+ * Driven off ground covered rather than off a clock, which is the rule the
+ * dog's gait already follows: a body that has stopped stops stepping, one
+ * that is sprinting steps faster, and nothing has to be told which. It is
+ * accumulated here from the interpolated positions the renderer is drawing
+ * with, so nothing reaches the wire and `main.ts` is untouched.
+ */
+function frameFor(id: string, x: number, y: number, now: number): number {
+  let w = walks.get(id);
+  if (!w) {
+    w = { x, y, dist: 0, pace: 0, seen: now };
+    walks.set(id, w);
+    return 0;
+  }
+  const step = Math.hypot(x - w.x, y - w.y);
+  w.x = x;
+  w.y = y;
+  w.seen = now;
+  // A jump is a body coming back into view, or an id reused by somebody who
+  // has turned. Neither is a stride, and banking it skips the legs forward.
+  if (step < TELEPORT_PX) {
+    w.dist += step;
+    w.pace += (step - w.pace) * 0.25;
+  }
+  if (w.pace < STILL_PX) return 0;
+
+  // Sweeping here rather than on a timer of its own: this is the only thing
+  // that runs per body per frame, so it is the only thing that knows the map
+  // is filling up. A round ends with a few hundred dead ids in it otherwise.
+  if (now - sweptAt > 4000) {
+    sweptAt = now;
+    for (const [k, v] of walks) if (now - v.seen > 4000) walks.delete(k);
+  }
+  return CYCLE[Math.floor(w.dist / STRIDE_PX) % CYCLE.length];
+}
+
+/** A new round is new bodies, whatever the ids say. */
+export function clearCharWalks(): void {
+  walks.clear();
 }
 
 /** A stable variant for an entity id. The same person all round. */
@@ -141,7 +241,7 @@ export function angleIndexFor(facing: number): number {
 
 /** One cell of a kind's atlas, tinted. Reused, so do not hold on to it. */
 let scratch: HTMLCanvasElement | null = null;
-function tintedCell(a: Atlas, variant: number, angle: number, colour: string, amount: number): HTMLCanvasElement {
+function tintedCell(a: Atlas, row: number, angle: number, colour: string, amount: number): HTMLCanvasElement {
   if (!scratch) {
     scratch = document.createElement('canvas');
     scratch.width = CHAR_SPRITE_PX;
@@ -154,7 +254,7 @@ function tintedCell(a: Atlas, variant: number, angle: number, colour: string, am
   s.clearRect(0, 0, CHAR_SPRITE_PX, CHAR_SPRITE_PX);
   s.drawImage(
     a.canvas,
-    angle * CHAR_SPRITE_PX, variant * CHAR_SPRITE_PX, CHAR_SPRITE_PX, CHAR_SPRITE_PX,
+    angle * CHAR_SPRITE_PX, row * CHAR_SPRITE_PX, CHAR_SPRITE_PX, CHAR_SPRITE_PX,
     0, 0, CHAR_SPRITE_PX, CHAR_SPRITE_PX,
   );
   // `source-atop` so the wash lands on the body and not on the empty corners.
@@ -191,13 +291,13 @@ export function drawCharBody(
     budget = BAKE_BUDGET;
   }
   const a = atlasFor(kind);
-  const variant = variantForId(id);
+  const row = rowOf(variantForId(id), frameFor(id, x, y, now));
   let angle = angleIndexFor(facing);
-  if (!a.done[variant * CHAR_ANGLES + angle]) {
-    const known = a.anyAngle[variant];
+  if (!a.done[row * CHAR_ANGLES + angle]) {
+    const known = a.anyAngle[row];
     if (budget > 0 || known < 0) {
       budget--;
-      paint(kind, a, variant, angle);
+      paint(kind, a, row, angle);
     } else {
       angle = known;
     }
@@ -206,9 +306,9 @@ export function drawCharBody(
   const size = radius * CHAR_BOX_RADII;
   const dx = x - size * 0.5;
   const dy = y - size * PIVOT_Y;
-  const src = tint && tint.amount > 0.01 ? tintedCell(a, variant, angle, tint.colour, tint.amount) : a.canvas;
+  const src = tint && tint.amount > 0.01 ? tintedCell(a, row, angle, tint.colour, tint.amount) : a.canvas;
   const sx = src === a.canvas ? angle * CHAR_SPRITE_PX : 0;
-  const sy = src === a.canvas ? variant * CHAR_SPRITE_PX : 0;
+  const sy = src === a.canvas ? row * CHAR_SPRITE_PX : 0;
 
   // Nearest-neighbour, or the whole point of pixel art is thrown away on the
   // upscale. Saved and restored because the rest of the frame wants smoothing.
