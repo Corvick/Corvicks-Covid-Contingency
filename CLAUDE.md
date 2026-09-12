@@ -8567,13 +8567,11 @@ exact fault was half-fixed once before.
 
 Asked for in the same breath. Nothing about it is new machinery: `CharLook`
 gained a `gait` in -1..1, the limbs read it, and `charbake.ts` bakes a frame
-dimension into the atlas.
+dimension into the atlas. *It started as three poses on a four-beat cycle and a
+per-frame "is it walking" test; both are gone — see **The arms sway with the
+step, and the body steps rather than glides** below, which is where the tracker
+now lives and what the figures in this section became.*
 
-- **Three baked poses are a four-beat cycle**, because the pass position is used
-  twice: neutral, left step, neutral, right step. Baking the repeat would cost a
-  third more memory for a cell already in hand. Four beats is the minimum that
-  reads as a walk rather than a shuffle, and more would be spent on nothing — at
-  this size the arms travel about three pixels between the ends of a stride.
 - **The legs swing opposite to the arms**, which is what a walk *is*; the same
   way round is a shuffle however big the swing. **The shoulders counter-rotate
   against the hips** (`TWIST`), which from above is most of what says this is a
@@ -8585,16 +8583,13 @@ dimension into the atlas.
   `ARM_SWING` is double `LEG_SWING` for that reason.
 - **The cycle is driven off ground covered, not off a clock** — the rule the
   dog's gait already follows. A body that has stopped stops stepping, one that
-  is sprinting steps faster, and nothing has to be told which. `frameFor`
-  accumulates it in `charbake.ts` from the *interpolated* positions the renderer
-  is already drawing with, so **nothing reaches the wire and `main.ts` is
-  untouched** but for the reset.
+  is sprinting steps faster, and nothing has to be told which. It is
+  accumulated from the *interpolated* positions the renderer is already drawing
+  with, so **nothing reaches the wire**.
   - **A jump is not a stride.** A body coming back into view, or an id reused by
     somebody who has turned, moves an arbitrary distance between two frames;
     banked, that skips the legs forward. `TELEPORT_PX` throws it away.
-  - **A smoothed pace decides "standing", not the last frame's step.** Testing
-    the raw step flickers between the pass frame and a stride at low speed.
-  - **The map is swept from inside `frameFor`**, which is the only thing that
+  - **The map is swept from inside the tracker**, which is the only thing that
     runs per body per frame and so the only thing that knows it is filling up.
     A round otherwise ends with a few hundred dead ids in it.
 - **`clearCharWalks` *is* called on a restart where `clearCharSprites` is
@@ -8602,20 +8597,126 @@ dimension into the atlas.
   survives a new city, where a walk holds a coordinate and a distance, which are
   facts about the round that made them.
 
-**What it cost is variety, and the number is worth stating.** Every variant now
+**What it cost is variety, and the number is worth stating.** Every variant
 occupies `CHAR_FRAMES` rows rather than one, so `CHAR_VARIANTS` came down
-**48 → 32** to hold the atlas near the blood layer: 32 x 3 x 16 at 64px is
-**1024x6144, 24MB**, against 12.6MB for 48 still poses and 38MB for 48 animated
-ones. A crowd of 500 drawn 24px across does not give up anything anybody can see
-for it, and `CHAR_VARIANTS` is the knob if that turns out to be wrong.
+**48 → 32** when the walk arrived. A crowd of 500 drawn 24px across does not
+give up anything anybody can see for it, and `CHAR_VARIANTS` is the knob if
+that turns out to be wrong. The memory is under the section below, since seven
+poses changed it.
 
-Measured through the real `drawCharBody` on a live dev server: a body walked in
-6px steps cycles through **3 distinct drawings**, one that never moves holds
-**exactly 1**, and a real 525-entity offline round runs at 6.6ms a tick with no
-exceptions. `preview-walk.png` lays the four beats out left to right over four
-bodies. **What is still not measured is the animation in motion** — rAF is
-throttled to nothing while the browser pane is not compositing, so the frame
-that would show it never paints, and that is the playtest.
+#### The arms sway with the step, and the body steps rather than glides
+
+Reported off a live frame as *"the sprites for the people are jiggling their
+arms too much. their arms should sway with each step. lets overhaul their
+movement so its not a constant smooth speed but follows their gait. so at lower
+speeds their walk shouldn't look like gliding but as they start to run it looks
+smoother. also push their heads a little more to the center"*. Three things, and
+the first was a fault rather than a taste. `client/src/chargait.ts` is all of
+the moving half now, and it has no DOM so it can be measured headlessly.
+
+**The jiggle was the "is it walking" test flipping at render rate.** It was a
+per-*frame* step compared against a quarter of a pixel and smoothed per frame,
+so the same body read as walking at 60Hz and as standing at 144Hz — and
+positions arrive rounded to whole pixels at 30Hz, so a civilian strolling at
+35px/s comes down the wire as alternating one- and two-pixel steps. Interpolated
+at 144Hz that is 0.15 then 0.29 a frame, either side of the threshold, and the
+arms snapped between hanging and full swing every snapshot or two.
+
+- **The pace is pixels a *second*, smoothed on a clock** (`PACE_TAU_MS`, 160 —
+  long enough to average the 33ms whole-pixel alternation away), and it is the
+  length of a smoothed **velocity** rather than a smoothed speed, so a shove
+  there and back in a crowded room cancels out instead of reading as a stride.
+  The stride fades in and out across `GAIT_STILL`..`GAIT_MOVING` rather than
+  switching.
+- **The phase advances off that pace, not off the raw step.** Advanced in raw
+  hops — a pixel, nothing, nothing, a pixel at 13px/s — it dragged the surge
+  below with it, and measured as the drawn body stepping backwards.
+- **Pose and angle both have hysteresis.** A stroll's swing can peak right on
+  the line between two poses and sit there, and a civilian's heading wobbles a
+  degree or two on the line between two baked angles; either flickered.
+
+**The sway is seven baked poses rather than three**, a third of the swing apart
+(`POSE_GAIT`). Three was pass, full step, pass, full step — a hand crossing the
+whole of its swing in one jump, which at 64px is 12 sprite pixels. Evenly spaced
+rather than sampled off a sine, because what matters is the size of the biggest
+jump; the sine still decides how long each pose is held, so the extremes dwell
+the way a pendulum does. The swing amplitude also came in (`ARM_FWD` 0.185 →
+0.150, `ARM_BACK` 0.062 → 0.050, `TWIST` 0.13 → 0.10), and a stroll only
+reaches `SWING_WALK` (0.72) of it — so a stroller uses five of the seven poses
+and only a runner reaches the ends.
+
+- **Seven poses cost what three did, because the corners were never used.**
+  The figure turns about its own middle, so nothing reaches further than about
+  23 pixels from the pivot at any angle — the unturning shadow is the furthest
+  thing out. `CHAR_CELL_PX` keeps a 48px square of the 64px box: 32 x 7 x 16
+  cells at 48px is **33MB**, against 25MB for three poses uncropped and 57MB for
+  seven. `spritesheet.ts` renders every variant, angle and pose of all three
+  kinds, officers aiming included, and counts ink outside the cell: **0**, with
+  the nearest ink 1px inside the edge.
+- **Cadence rises with speed but not in proportion to it.** A step is
+  `16 + 0.2 × pace` world pixels, so a stroll is ~1.5 steps a second and a run
+  ~2.5 — where the old fixed 38px stride put a stroll at 0.9, a slow-motion walk,
+  which is part of why the arms read as swinging rather than stepping.
+
+**The surge is a drawn offset along the line of travel, never a change to where
+anybody is.** The simulation owns position and every NPC speed ratio in it is
+deliberate, so a body that genuinely slowed mid-step would change chases. What
+is drawn instead is the true position plus a zero-mean offset that goes round
+once per step, sized off the step length so the drawn body is slowest at the pass
+and catches up through the stride.
+
+- **`SURGE_WALK` (0.7) to `SURGE_RUN` (0.1)** is how hard it hitches as a share
+  of speed, blended over `WALK_REF`..`RUN_REF` (38..92px/s): a stroll's drawn
+  pace runs from about a sixth to twice its true speed, a flight's barely moves.
+  Above 1 the drawn body would briefly walk backwards, which is the ceiling on
+  it rather than a taste. `SURGE_PHASE` moves the slow point onto the stride if
+  the pass reads worse; `SURGE_SHAPE` trades a sine for a longer linger and a
+  harder push.
+- **Applied in `drawEntity` before anything is drawn**, so the infected ring,
+  the stun ring and the flecks move with the body rather than sitting still under
+  one that is stepping. The tracker is asked of `e.x`/`e.y` — the true position,
+  not the grapple-shaken one, or the shake reads as a stride — but of the shaken
+  *facing*, since a thrashing body swinging about is part of how a grab reads.
+- **At most three pixels** at a stroll, and it fades to nothing with the pace:
+  a body that stops is square and back on its own coordinate **181ms** later.
+
+**The head came in** (`HEAD_AHEAD` 0.080 → 0.030) — about a pixel and a quarter
+ahead of the shoulder line at 64px rather than three. 0.050 was tried first and
+could not be told apart from 0.080 at the size the game draws a body.
+
+`client/spritesheet.ts` is the harness, and `setLegacyGait` is the gate — kept,
+because every figure is a gain against it. It replays the game's own feed: a
+30Hz tick rounded to whole pixels, snapshots arriving up to 8ms late,
+`main.ts`'s interpolation, and the tracker called once per rendered frame:
+
+| | 35px/s @60Hz | 35px/s @144Hz | 83px/s | jostled in place @144Hz |
+|---|---|---|---|---|
+| pose changes a second, OLD → NEW | 1.9 → 6.2 | 7.0 → 6.2 | 4.4 → 15.3 | 9.4 → 2.3 |
+| **…undone inside 100ms** | 0.0 → 0.0 | **4.2 → 0.0** | 0.0 → 0.0 | **6.8 → 1.0** |
+| steps a second | 1.0 → 1.6 | 3.5 → 1.6 | 2.2 → 2.6 | — |
+| drawn pace p5..p95, of true | 0.74..1.44 → 0.16..2.06 | 0.74..1.46 → 0.16..2.05 | 0.77..1.21 → 0.70..1.29 | — |
+
+**"Undone inside 100ms" is the jiggle stated as a number** — a pose that changes
+and changes straight back before the eye can read it as movement — and the
+144Hz column is why nobody measuring at 60Hz would ever have seen it. More pose
+changes a second in the NEW column is the point rather than a regression: it is
+a sway going through its poses in order rather than a snap between two. And 3.5
+steps a second at 144Hz was the old tracker counting its own flicker as steps.
+A heading wobbling 2.5 degrees on an angle boundary turned the sprite **5.6
+times a second → 0**.
+
+`client/gaitrig.html` is the picture: civilians walking at 13, 30, 35, 60 and
+83px/s through the real `drawEntity` on that same feed, `L` to swap old and new,
+`T` for a tick under each body at its true position — which is what makes the
+surge readable as a surge. Its one reading, off a probe canvas: over three
+seconds of a stroll the body's ink moves **6.1px** against its true position
+with the new walk and **0.08px** with the old, which is the offset reaching the
+screen rather than merely being computed.
+
+**What is not measured is how it feels**, for the usual reason — rAF is
+throttled to nothing while the browser pane is not compositing. The rig drives
+itself off `setInterval` so it animates in a real browser; the playtest is
+whether a 0.7 hitch reads as a person stepping or as a stutter.
 
 **What is measured, and what is not.** Through the real `drawEntity` on a live
 dev server: the body draws (941 ink pixels against the vector drawing's 580, 15

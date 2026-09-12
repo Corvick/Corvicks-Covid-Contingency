@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>civilian gait rig</title>
+    <style>
+      body { margin: 0; background: #1b1d20; color: #d8dde2; font: 14px system-ui, sans-serif; }
+      canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+      #bar { position: fixed; top: 8px; right: 12px; display: flex; gap: 8px; align-items: center; }
+      button { background: #2b2f35; color: #d8dde2; border: 1px solid #4b525a; padding: 6px 10px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <span id="mode"></span>
+      <button id="toggle">L - old / new walk</button>
+      <button id="truth">T - true position marks</button>
+    </div>
+    <canvas id="rig" width="1800" height="960"></canvas>
+    <script type="module" src="/src/gaitrig.ts"></script>
+  </body>
+</html>

@@ -23,9 +23,10 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import {
-  Pix, blit, drawCharacter, look, hex, setFlatCharacters, characterPivotY,
+  Pix, blit, drawCharacter, look, hex, setFlatCharacters, characterPivotY, characterHeadAhead,
   type CharKind, type RGBA,
 } from './src/charsprite.js';
+import { POSE_GAIT, charGait, setLegacyGait } from './src/chargait.js';
 
 /** `charbake.ts` imports the DOM, so its box constant is restated rather than pulled in. */
 const CHAR_BOX_RADII_LOCAL = 4.6;
@@ -184,14 +185,14 @@ save('preview-64.png', sheet(64, 3, 'ZOMBIE SIM - 64X64 SPRITES (SHOWN 3X)'));
 
 // ------------------------------------------------------- the walk cycle -----
 /**
- * The four-beat cycle laid out left to right, with the pass frame appearing
- * twice because that is what three baked poses buy.
+ * The seven baked poses laid out left to right through half a stride, from the
+ * left arm fully back to fully forward — the sway the tracker walks a body
+ * through, a third of the swing at a time.
  *
  * **The arrow is the point of the sheet.** It is the direction the game says
  * the body is travelling, sprung from the sprite's own pivot, and the question
  * it asks is the one that was reported: *does this look like somebody walking
- * that way*. Without it a walk sheet is four poses nobody can grade. The old
- * layout is on top for the same reason the gate exists at all.
+ * that way*. Without it a walk sheet is poses nobody can grade.
  */
 const ARROW = hex('#e02424');
 function arrow(p: Pix, cx: number, cy: number, a: number, len: number, from: number): void {
@@ -206,28 +207,24 @@ function arrow(p: Pix, cx: number, cy: number, a: number, len: number, from: num
   }
 }
 {
-  const S = 64, scale = 5, gap = 18, padL = 20, padT = 56;
-  const GAIT = [0, 1, 0, -1];
+  const S = 64, scale = 4, gap = 14, padL = 20, padT = 56;
+  const GAIT = [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1];
+  const SEEDS = [401, 404, 409];
   const cell = S * scale;
-  const p = new Pix(padL * 2 + GAIT.length * (cell + gap), padT + 4 * (cell + 40) + 20);
+  const p = new Pix(padL * 2 + GAIT.length * (cell + gap), padT + SEEDS.length * (cell + 40) + 20);
   fill(p, GROUND);
-  text(p, 'THE WALK - PASS, STEP, PASS, STEP. THE ARROW IS WHERE THE BODY IS GOING', padL, 20, 3, INK_HI);
-  let row = 0;
-  for (const flatPose of [true, false])
-    for (const seed of [401, 404]) {
-      setFlatCharacters(flatPose);
-      const y = padT + row * (cell + 40);
-      text(p, flatPose ? `BEFORE - SEED ${seed}` : `NOW - SEED ${seed}`, padL, y - 14, 2, INK);
-      for (let i = 0; i < GAIT.length; i++) {
-        const o = look('citizen', seed);
-        o.gait = GAIT[i];
-        const x = padL + i * (cell + gap);
-        blit(p, drawCharacter(S, o), x, y, scale);
-        arrow(p, x + cell * 0.5, y + cell * characterPivotY(), -Math.PI / 2, cell * 0.42, cell * 0.2);
-      }
-      row++;
+  text(p, 'THE SWAY - SEVEN POSES, A THIRD OF THE SWING APART. THE ARROW IS WHERE THE BODY IS GOING', padL, 20, 3, INK_HI);
+  SEEDS.forEach((seed, row) => {
+    const y = padT + row * (cell + 40);
+    text(p, `SEED ${seed}`, padL, y - 14, 2, INK);
+    for (let i = 0; i < GAIT.length; i++) {
+      const o = look('citizen', seed);
+      o.gait = GAIT[i];
+      const x = padL + i * (cell + gap);
+      blit(p, drawCharacter(S, o), x, y, scale);
+      arrow(p, x + cell * 0.5, y + cell * characterPivotY(), -Math.PI / 2, cell * 0.42, cell * 0.2);
     }
-  setFlatCharacters(false);
+  });
   save('preview-walk.png', p);
 }
 
@@ -345,7 +342,7 @@ console.log(`wrote 5 sheets to ${OUT}`);
     setFlatCharacters(flatPose);
     const piv = characterPivotY();
     const headR0 = flatPose ? 0.128 : 0.106;
-    const headAhead = flatPose ? 0.080 : 0.080 * 0.62;
+    const headAhead = characterHeadAhead();
     const sp: number[] = [], ms: number[] = [], ar: number[] = [];
     for (let seed = 400; seed < 424; seed++) {
       const o = look('citizen', seed);
@@ -399,4 +396,178 @@ console.log(`wrote 5 sheets to ${OUT}`);
     const ms = performance.now() - t0;
     console.log(`bake ${S}px: ${n} sprites in ${ms.toFixed(0)}ms = ${(ms / n).toFixed(3)}ms each`);
   }
+}
+
+// ---------------------------------------------------------- does it fit the cell --
+/**
+ * `charbake.ts` keeps only a 48px square of the 64px box, centred on the pivot,
+ * which is what let the walk go to seven poses without the atlas doubling. That
+ * is only safe if nothing is ever drawn outside the square, so every variant,
+ * angle and pose of every kind is checked — officers aiming too, since they
+ * reach furthest — rather than the handful a sheet happens to show.
+ */
+{
+  const S = 64;
+  const piv = characterPivotY();
+  const CELL = 48;
+  const X0 = (S - CELL) >> 1;
+  const Y0 = Math.round(S * piv - CELL / 2);
+  let outside = 0;
+  let worst = Infinity;
+  let worstAt = '';
+  for (const kind of ['citizen', 'officer', 'zombie'] as const)
+    for (let v = 1; v <= 32; v++)
+      for (let a = 0; a < 16; a++)
+        for (const gait of POSE_GAIT)
+          for (const pose of kind === 'officer' ? (['walk', 'aim'] as const) : (['walk'] as const)) {
+            const o = look(kind, v);
+            o.rot = (a / 16) * Math.PI * 2;
+            o.gait = gait;
+            o.pose = pose;
+            const spr = drawCharacter(S, o);
+            for (let y = 0; y < S; y++)
+              for (let x = 0; x < S; x++) {
+                if (spr.d[(y * S + x) * 4 + 3] === 0) continue;
+                const edge = Math.max(X0 - x, x - (X0 + CELL - 1), Y0 - y, y - (Y0 + CELL - 1));
+                if (edge > 0) outside++;
+                const margin = Math.min(x - X0, X0 + CELL - 1 - x, y - Y0, Y0 + CELL - 1 - y);
+                if (margin < worst) {
+                  worst = margin;
+                  worstAt = `${kind}${pose === 'aim' ? '/aim' : ''} v${v} angle ${a} gait ${gait.toFixed(2)}`;
+                }
+              }
+          }
+  console.log(`\ncell ${CELL}px from (${X0},${Y0}): ${outside} pixels outside it across every kind, variant, angle and pose;`);
+  console.log(`closest any ink comes to the cell's edge: ${worst}px, ${worstAt}`);
+}
+
+// ------------------------------------------------------------------ the walk --
+/**
+ * The walk, driven the way the game drives it and measured rather than watched.
+ *
+ * rAF is throttled to nothing while the browser pane is not compositing, so a
+ * walk cannot be looked at from here — but `charGait` has no DOM, so the whole
+ * path can be replayed: a server moving a body at a fixed speed on a 30Hz tick,
+ * **rounding it to whole pixels the way the wire does**, snapshots arriving
+ * with a few milliseconds of jitter, the client's own interpolation as
+ * `main.ts` writes it, and the tracker called once per rendered frame at 60Hz
+ * and at 144Hz. `setLegacyGait` is the control.
+ *
+ * *Pose changes a second* is the jiggle; *undone inside 100ms* is the part of it
+ * that is pure flicker — a pose that changes and changes straight back before
+ * the eye could read it as movement. *Steps a second* is how many times the
+ * body passes through the pass pose. *Drawn pace* is the drawn body's speed over
+ * 40ms windows as a share of its true speed, p5 and p95, which is the surge.
+ */
+{
+  const TICK = 1000 / 30;
+  type Run = { changes: number; undone: number; steps: number; lo: number; hi: number; maxOff: number };
+  const simulate = (speed: number, fps: number, legacyOn: boolean, jostle = false): Run => {
+    setLegacyGait(legacyOn);
+    let seed = 12345;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+    const id = 'sim';
+    const dur = 12000;
+    const frameMs = 1000 / fps;
+    // state as main.ts holds it
+    let fromX = 0, toX = 0, drawnX = 0, snapshotAt = 0, snapshotGap = TICK;
+    let nextTick = 0, tickN = 0;
+    let arrival = 0;
+    let serverX = 0;
+    let lastFrame = 0, prevFrame = 0, lastChangeAt = -1e9, changes = 0, undone = 0, steps = 0;
+    const samples: { t: number; drawn: number; truth: number }[] = [];
+    let maxOff = 0;
+    for (let now = 0; now < dur; now += frameMs) {
+      // snapshots that have arrived by now
+      while (arrival <= now) {
+        serverX = jostle ? Math.round(Math.sin(tickN * 1.7) * 2 + (rand() - 0.5) * 2) : Math.round((speed * tickN) / 30);
+        const gap = arrival - snapshotAt;
+        if (snapshotAt > 0 && gap > 4 && gap < 400) snapshotGap = snapshotGap * 0.8 + gap * 0.2;
+        snapshotAt = arrival;
+        fromX = drawnX;
+        toX = serverX;
+        tickN++;
+        nextTick += TICK;
+        arrival = nextTick + rand() * 8;
+      }
+      const t = Math.min(1, Math.max(0, (now - snapshotAt) / snapshotGap));
+      drawnX = fromX + (toX - fromX) * t;
+      const g = charGait(id, drawnX, 0, 0, now);
+      if (now < 2000) { lastFrame = g.frame; continue; }
+      samples.push({ t: now, drawn: drawnX + g.dx, truth: drawnX });
+      maxOff = Math.max(maxOff, Math.abs(g.dx));
+      if (g.frame !== lastFrame) {
+        changes++;
+        if (g.frame === prevFrame && now - lastChangeAt < 100) undone++;
+        if (g.frame === 0) steps++;
+        prevFrame = lastFrame;
+        lastFrame = g.frame;
+        lastChangeAt = now;
+      }
+    }
+    const secs = (dur - 2000) / 1000;
+    const ratios: number[] = [];
+    for (let i = 0, j = 0; i < samples.length; i++) {
+      while (j < samples.length && samples[j].t - samples[i].t < 40) j++;
+      if (j >= samples.length) break;
+      const dt = (samples[j].t - samples[i].t) / 1000;
+      ratios.push((samples[j].drawn - samples[i].drawn) / dt / Math.max(1, speed));
+    }
+    ratios.sort((a, b) => a - b);
+    const q = (f: number) => (ratios.length ? ratios[Math.floor(f * (ratios.length - 1))] : 0);
+    setLegacyGait(false);
+    return { changes: changes / secs, undone: undone / secs, steps: steps / secs, lo: q(0.05), hi: q(0.95), maxOff };
+  };
+
+  const f1 = (n: number) => n.toFixed(1).padStart(5);
+  console.log('\nthe walk, a simulated 30Hz whole-pixel feed with jitter. OLD is setLegacyGait.');
+  console.log('                       pose changes/s   undone <100ms/s   steps/s      drawn pace p5..p95   offset');
+  for (const speed of [13, 30, 35, 60, 83])
+    for (const fps of [60, 144]) {
+      const o = simulate(speed, fps, true);
+      const n = simulate(speed, fps, false);
+      console.log(
+        `${String(speed).padStart(3)}px/s @${String(fps).padStart(3)}Hz` +
+        `      ${f1(o.changes)} -> ${f1(n.changes)}   ${f1(o.undone)} -> ${f1(n.undone)}   ${f1(o.steps)} -> ${f1(n.steps)}` +
+        `   ${o.lo.toFixed(2)}..${o.hi.toFixed(2)} -> ${n.lo.toFixed(2)}..${n.hi.toFixed(2)}   ${n.maxOff.toFixed(1)}px`);
+    }
+  for (const fps of [60, 144]) {
+    const o = simulate(0, fps, true, true);
+    const n = simulate(0, fps, false, true);
+    console.log(`jostled in place @${fps}Hz: pose changes/s ${f1(o.changes)} -> ${f1(n.changes)}, undone ${f1(o.undone)} -> ${f1(n.undone)}, offset ${n.maxOff.toFixed(1)}px`);
+  }
+}
+{
+  /**
+   * Stopping, and a heading wobbling on the line between two baked angles.
+   *
+   * A body that stops must settle square and on its own coordinate — the
+   * offset is a drawing, and one left behind is a body standing a few pixels
+   * from where it is. And a civilian's heading wobbles a degree or two walking
+   * through a crowd; sat on a boundary that flicked the whole sprite 22.5
+   * degrees back and forth, which is a jiggle of its own.
+   */
+  const frameMs = 1000 / 144;
+  for (const legacyOn of [true, false]) {
+    setLegacyGait(legacyOn);
+    let x = 0, settledAt = -1;
+    for (let now = 0; now < 6000; now += frameMs) {
+      if (now < 3000) x += (35 * frameMs) / 1000;
+      const g = charGait('stop', x, 0, 0, now);
+      if (now >= 3000 && settledAt < 0 && g.frame === 0 && Math.abs(g.dx) < 0.25) settledAt = now - 3000;
+      if (now >= 3000 && settledAt >= 0 && (g.frame !== 0 || Math.abs(g.dx) >= 0.25)) settledAt = -1;
+    }
+    let changes = 0, last = -1;
+    for (let now = 0; now < 5000; now += frameMs) {
+      const boundary = ((0.5 + 3) / 16) * Math.PI * 2 - Math.PI / 2; // between angles 3 and 4
+      const wob = Math.sin(now * 0.013) * 0.03 + Math.sin(now * 0.041) * 0.015; // about 2.5 degrees
+      const g = charGait('wobble', 0, 0, boundary + wob, now);
+      if (last >= 0 && g.angle !== last) changes++;
+      last = g.angle;
+    }
+    console.log(
+      `${legacyOn ? 'OLD' : 'NEW'}: stopped from 35px/s, square and on its coordinate after ${settledAt.toFixed(0)}ms;` +
+      ` heading wobbling 2.5 degrees on an angle boundary turns the sprite ${(changes / 5).toFixed(1)} times a second`);
+  }
+  setLegacyGait(false);
 }

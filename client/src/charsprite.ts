@@ -304,8 +304,20 @@ const SH_Y = 0.505;
  */
 let TOPDOWN = 0.62;
 
-/** Layer offsets along the body axis, before `TOPDOWN` squashes them. */
-const HEAD_AHEAD = 0.080; // the crown, in front of the shoulders
+// Layer offsets along the body axis, before `TOPDOWN` squashes them.
+/**
+ * The crown, in front of the shoulders.
+ *
+ * 0.080 put the head's centre about half a head radius ahead of the shoulder
+ * line even after the squash, and reported as *"push their heads a little more
+ * to the center"* it came in to 0.030 — about a pixel and a quarter ahead at
+ * 64px rather than three. 0.050 was tried first and could not be told from the
+ * old figure at the size the game draws a body. From directly above, somebody
+ * standing upright has their head over their shoulders; a crown leading the
+ * torso is somebody leaning into a walk. The nose notch still breaks the
+ * crown's leading edge, which is what says which way the head is turned.
+ */
+let HEAD_AHEAD = 0.030;
 const HIP_BEHIND = 0.080;
 const LEG_BEHIND = 0.107;
 const SHOE_BEHIND = 0.147;
@@ -329,17 +341,29 @@ const AIM_REACH = 0.250; // an officer's hands on a raised weapon
  *
  * `ARM_REST` is where a hand sits standing square — at the hip, so a body that
  * has stopped is still a body with its arms down rather than out.
+ *
+ * **Then it came back in a little** (0.185/0.062 to 0.150/0.050), reported as
+ * *"jiggling their arms too much"*. Most of that was the pose flicker fixed in
+ * `chargait.ts`, but three poses had also sent a hand the full length of its
+ * swing in one jump. The forward bias is kept; a stroll only ever reaches two
+ * thirds of this anyway, and a run the whole of it.
  */
 let ARM_REST = 0.105;
-let ARM_FWD = 0.185;
-let ARM_BACK = 0.062;
+let ARM_FWD = 0.150;
+let ARM_BACK = 0.050;
 /**
  * The feet straddle the hip line rather than trailing behind it. At 0.030 the
  * forward foot never cleared the hips, so only the *back* one was ever visible
  * outside the body — the same mass-at-the-back fault the arms had.
  */
 let LEG_SWING = 0.046;
-const TWIST = 0.13; // radians
+/**
+ * Radians. 0.13 was tuned against three baked poses, where the whole stride
+ * was two frames; with seven, the shoulders turning that far moves the torso's
+ * leading edge a pixel on every pose change, and that edge shimmer is part of
+ * what read as the crowd jiggling.
+ */
+const TWIST = 0.10;
 
 /** The crown's radius. Small in a wide shoulder mass is what top-down looks like. */
 let HEAD_R = 0.106;
@@ -366,8 +390,9 @@ export function setFlatCharacters(on: boolean): void {
   TOPDOWN = on ? 1 : 0.62;
   HEAD_R = on ? 0.128 : 0.106;
   ARM_REST = on ? 0.150 : 0.105;
-  ARM_FWD = on ? 0.088 : 0.185;
-  ARM_BACK = on ? 0.088 : 0.062;
+  ARM_FWD = on ? 0.088 : 0.150;
+  ARM_BACK = on ? 0.088 : 0.050;
+  HEAD_AHEAD = on ? 0.080 : 0.030;
   LEG_SWING = on ? 0.030 : 0.046;
   SHADOW_END = on ? 0.80 : 0.655;
   SHADOW_R = on ? 0.15 : 0.14;
@@ -376,6 +401,8 @@ export function setFlatCharacters(on: boolean): void {
 }
 /** Where `charbake.ts` must put the sprite on the entity, for the mode in force. */
 export const characterPivotY = (): number => PIVOT_Y;
+/** How far the crown leads the shoulder line, squashed, for the mode in force. */
+export const characterHeadAhead = (): number => HEAD_AHEAD * TOPDOWN;
 
 export type CharKind = 'citizen' | 'officer' | 'zombie';
 
@@ -474,8 +501,8 @@ export function drawCharacter(S: number, o: CharLook): Pix {
 
   /**
    * How far through a stride this frame is: 0 stands square, ±1 is a full step
-   * with the opposite arm forward. See `charbake.ts` for how a frame becomes a
-   * gait and how the cycle is driven off ground covered.
+   * with the opposite arm forward. See `chargait.ts` for which of the seven
+   * baked values a body is on and how the cycle is driven off ground covered.
    */
   const g = o.gait ?? 0;
 

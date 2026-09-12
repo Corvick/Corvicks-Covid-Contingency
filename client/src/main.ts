@@ -186,7 +186,7 @@ import { visibilityPolygon, type Point as FogPoint } from './fog.js';
 import { drawTargetCursor, drawWheel, hitTest, newWheelState, wheelOptions } from './wheel.js';
 import { setupMenu } from './menu.js';
 import { applyRenderScale, settings } from './settings.js';
-import { clearCharWalks } from './charbake.js';
+import { clearCharWalks } from './chargait.js';
 import { ITEMS, type ItemId } from '../../shared/items.js';
 import type { AbilityId } from '../../shared/types.js';
 

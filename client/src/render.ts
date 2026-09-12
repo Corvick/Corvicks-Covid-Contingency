@@ -187,6 +187,7 @@ import type { DogHud } from '../../shared/types.js';
 import { dogSprites, drawSprite } from './dogsprite.js';
 import { settings } from './settings.js';
 import { drawCharBody } from './charbake.js';
+import { charGait } from './chargait.js';
 
 const TAU = Math.PI * 2;
 
@@ -1968,6 +1969,25 @@ export function drawEntity(
    * of it) and those want deciding one at a time rather than all at once.
    */
   const pixelBody = settings.pixelSprites && e.type === 'human';
+  /**
+   * The walk: which pose, which baked angle, and where the body is drawn against
+   * where it is — see `chargait.ts`. Asked of the body's true position rather
+   * than of `x`/`y`, which already carry the grapple shake, or the shake would
+   * be read as a stride. The *facing* is the thrashing one on purpose: a
+   * grappled body swinging about is part of how the struggle reads, and it has
+   * nothing to do with the pace. The offset is then applied to `x`/`y` here,
+   * before anything is drawn, so the rings and bars below move with the body
+   * they belong to rather than sitting still under a body that is stepping.
+   */
+  let poseFrame = 0;
+  let poseAngle = 0;
+  if (pixelBody) {
+    const gait = charGait(e.id, e.x, e.y, facing, now);
+    poseFrame = gait.frame;
+    poseAngle = gait.angle;
+    x += gait.dx;
+    y += gait.dy;
+  }
 
   if (e.type === 'zombie') {
     ctx.strokeStyle = limbColor;
@@ -2087,7 +2107,7 @@ export function drawEntity(
      * is untouched and still drawn over the top. Only the *body* changed.
      */
     drawCharBody(
-      ctx, 'citizen', e.id, x, y, facing, radius, now,
+      ctx, 'citizen', e.id, poseFrame, poseAngle, x, y, radius, now,
       e.turning ? { colour: ENTITY_COLOR.zombie, amount: e.turning } : undefined,
     );
   } else {
