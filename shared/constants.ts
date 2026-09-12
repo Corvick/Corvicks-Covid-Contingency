@@ -3947,6 +3947,29 @@ export const BACKUP_LANE_STEP = 24;
 export const BACKUP_LANE_OFFSETS = [0, 150, -150, 300, -300, 460, -460, 620, -620];
 
 /**
+ * How close a squad is allowed to be dropped into an outright swarm.
+ *
+ * "As close as possible to the caller" is the whole point of answering a
+ * radio call — but the caller's own ground is exactly where the outbreak
+ * already is when the call was worth making, and a squad decanted straight
+ * into that is a squad `GRAPPLE_NO_ESCAPE_AT` zombies turn on before it has
+ * taken a step, which is the "immediately swarmed" this exists to stop.
+ * `BACKUP_MUSTER_RADIUS` is how far round a candidate spot counts against it;
+ * `GRAPPLE_NO_ESCAPE_AT` is reused rather than a figure of its own, because
+ * that many converging is already the point past which a grab cannot be
+ * escaped — the same reasoning `DOORWAY_MOB` already leans on.
+ */
+export const BACKUP_MUSTER_RADIUS = 260;
+/**
+ * How far out, and how coarsely, the search for a safer muster point looks
+ * once the caller's own spot fails that count. Kept modest — "the next
+ * closest safest place" is meant to still read as answering the same call,
+ * not a second one somewhere else in the city.
+ */
+export const BACKUP_MUSTER_SEARCH_RINGS = 12;
+export const BACKUP_MUSTER_SEARCH_STEP = 130;
+
+/**
  * The van comes in hot and stops like it. It runs at `VAN_APPROACH_SPEED`,
  * drives **dead straight** until the brake point, then brakes — and the *turn*
  * is a separate event inside that brake, not a lean blended over the whole
