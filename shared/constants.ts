@@ -2386,23 +2386,23 @@ export const CHARGE_BEAM_RADIUS = 14;
  * Slabs a full wind-up drives through — walls and shut doors alike — before it
  * stops at the next one.
  *
- * It was exactly one, and one is not enough to get through a **corner**:
+ * One is enough, and the reason it reads as enough rather than as the old
+ * "stops inside a corner" fault is `CHARGE_WALL_MERGE`, not this number:
  * `mapgen` lays walls as runs of rects, so where two runs meet, a round
  * crossing the join meets two or three slabs within a few pixels of each
- * other. Skipping one and stopping at the next is a beam that pierced the
- * corner and then stopped inside it, which from the outside reads as the gun
- * simply failing against that one bit of wall while working fine a foot
- * either side. Two covers a corner or a wall with a doorway shut in it, and
- * it is still a count rather than a free pass: a beam does not cross a whole
- * building.
+ * other — and the merge groups those into one wall before this count is ever
+ * charged against them. So a corner, a shut door, or an ordinary party wall
+ * each cost exactly one, whichever it is, and the round always clears the
+ * *first* one and is stopped by the next — a count rather than a free pass,
+ * since a beam does not cross a whole building.
  *
- * Was 4. Brought down so a third wall is a real stop rather than a formality
- * — the wall that actually catches the round gets its own decal
- * (`spawnPlasmaScorch`'s `pierced` argument) rather than the through-scorch
- * every pierced wall gets, so a beam that has spent its budget visibly stops
- * instead of reading as though it kept going.
+ * The wall that stops it gets its own decal (`spawnPlasmaScorch`'s `pierced`
+ * argument) rather than the through-scorch a pierced wall gets, so the round
+ * visibly stops there instead of reading as though it kept going. Was 4, then
+ * 2, brought down to the one wall the weapon is actually meant to punch
+ * through.
  */
-export const CHARGE_WALL_PIERCE = 2;
+export const CHARGE_WALL_PIERCE = 1;
 /**
  * How close two slabs have to be, along the round's own line, to be **one
  * wall** rather than two.
