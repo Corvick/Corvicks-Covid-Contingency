@@ -109,6 +109,10 @@ Server modules and what each owns:
 - `rumour.ts` — where zombies have been *seen*, decaying. What the crowd knows,
   as against what `danger.ts` knows, which is everything
 - `danger.ts` — coarse geodesic distance-to-nearest-zombie field
+- `horde.ts` — the outbreak moving as several large groups, six minutes in: who
+  is in which horde, where each is going, and which of them hears about a crowd.
+  The collective half only — a member's own march is one branch in `ai.ts`, and
+  a horde's orders ride `lastSeen` exactly as the dog's roar does
 - `doors.ts` — door state, geometry, open/shut/lock/damage, wire serialisation
 - `doorplayer.ts` — the player's press-and-hold of E at a door, and its prompt
 - `combat.ts` — hitscan, weapons, window damage; `fireHeld` is the one
@@ -2120,6 +2124,279 @@ dominating one extra claim needs the stick below 1/1.85 = 0.54, which would
 require a new target to be 46% closer and would start disabling `spreadsOut`
 for anybody who already has a target. 0.7 damps the bulk and leaves the trait
 its say; below ~0.54 is a different trade, not a stronger version of this one.
+
+### Six minutes in, they move as hordes
+
+Asked for outright: *"AFTER 6 minutes zombies will form several large groups to
+form a horde and travel around the map (the horde will pick an opposite end of
+the map to travel to and then once it gets there will pick another random
+opposite end of the map. Like those TV logo screen savers bouncing on the tv.).
+if the horde sees a human the collective horde will chase them. Hordes can alert
+other nearby hordes of humans if it is a group of humans (more than 6). This
+will prevent multiple hordes going after 1 human in a house."*
+
+`server/src/horde.ts` owns it, and **almost none of what a horde member actually
+*does* is in that file**. Two things already in the zombie AI do all of the
+moving, which is the whole reason this was affordable:
+
+- **A destination rides `headingToward`**, so the march is pathed round
+  buildings, past sandbags and through doorways with nothing in `horde.ts`
+  knowing what a wall is.
+- **A sighting rides `lastSeen`**, which is the dog roar's trick exactly. That
+  branch sits *above* the horde branch and *below* the live chase, so an order
+  is an attack move for free — anything a member meets on the way is chased
+  instead, and it drops on arrival with no bookkeeping. **"The collective horde
+  chases them" needed no field the AI did not already own**, and `updateZombie`
+  gained one line about hordes in total.
+
+So the module is the collective half only: who is in which horde, where each one
+is, where it is going, and who it tells.
+
+- **Everything collective runs on `HORDE_TICK_MS` (500) and nothing runs per
+  tick.** One walk of the zombies at 2Hz to rebuild the membership and the
+  centres, then a handful of records deciding where to go — the same trade
+  `danger.ts` and `world.targetClaims` make, and the only thing that makes this
+  affordable at three hundred zombies. What a *member* pays per tick is one map
+  lookup behind a guard on `world.hordes.size`, so **the whole of a round before
+  the six-minute mark is one integer compare**.
+- **Membership is rebuilt from the live bodies every tick rather than kept as a
+  list.** A zombie ends four ways — shot, burned, blown up, or risen as a dog —
+  and a roster somebody has to remember to strike from is a roster that marches
+  a dead man across the city. Reading last tick's assignment while writing this
+  tick's means a dead id never makes it into the new map and nothing has to
+  prune anything. Same rule as `buildSitesToWire` and the sandbags' nav boxes.
+- **A horde's `x`/`y` is the mean of its members, recomputed — never
+  integrated.** A centre kept as state is a centre that goes on marching after
+  the bodies under it have been shot.
+- **Nothing about any of this reaches the wire.** A horde is zombies moving
+  together, which is already what a zombie looks like; there is no flag to add
+  to `ENTITY_FIELDS` and nothing for the client to learn.
+- **A player's dog is skipped outright.** It is a zombie with a flag on it and
+  is driven by hand, and a horde formed around one would be a horde whose centre
+  is wherever somebody is steering.
+
+#### The bounce
+
+**"Opposite" is a distance, not a compass bearing.** `hordeEnds` is the four
+corners and the four edge midpoints; any end at least
+`HORDE_OPPOSITE_MIN_SHARE` (0.5) of the map's diagonal away qualifies, and one
+of those is drawn uniformly. From a corner that is the three far ends and none
+of the near ones, which is the screensaver bounce — where allowing only the
+*diagonally* opposite end would be a horde ping-ponging between two corners
+forever, which is not "another random opposite end".
+
+- **Eight ends rather than four**, because four corners is a short enough list
+  that the bounce becomes a pattern you can learn; with the midpoints in, a leg
+  can run along an edge as well as across a diagonal.
+- **Computed at the call and never written down**, because `WORLD_WIDTH` and
+  `WORLD_HEIGHT` are `let` and move with the population slider — see **The city
+  is not one size**. A module-level table would freeze the launch size in and
+  then send every horde at a corner outside the map for the rest of the round,
+  the same rule that made `TRACKER_RANGE` a function.
+- **Every end goes through `walkableNear`**, which also insists on the map's
+  main walkable region. The perimeter has buildings built onto it, so a corner
+  is as often as not inside somebody's front room — and a leg into a sealed
+  pocket is a horde grinding at it for the whole of its budget, which is the
+  trap `roarTarget` already records for an order that rides `lastSeen`.
+- **One budget per leg, never extended** (`HORDE_LEG_GIVE_UP_MS`), the shape
+  `HIDE_DEEPER_GIVE_UP_MS` and `RALLY_ROOM_GIVE_UP_MS` both use. A horde that
+  has spent two and a half minutes on one leg has been pulled off it by
+  something, and a fresh end is a better answer than the rest of the round spent
+  on an errand nobody is going to finish.
+- **`HORDE_MARCH_SPEED` (66) sits between `ZOMBIE_SEARCH_SPEED` (48, milling
+  about) and `ZOMBIE_SPEED` (102, coming for you)**, because it is neither: a
+  horde crossing the city is going somewhere on purpose and is not chasing
+  anybody. Flat for every member, so they arrive together — the per-zombie
+  variation that makes a chase strung out is exactly what would smear a march
+  into a queue.
+
+#### The waypoint is a cost decision, and it is the largest one here
+
+**Members do not walk at the far end of the map. They walk at `Horde.aimX/aimY`,
+a shared point `HORDE_STEP_AHEAD` (1000) along the way**, kept on walkable
+ground and recomputed once per horde per horde tick.
+
+Handed the destination directly, every member runs `hasWallClearPath` across
+four thousand pixels of city and then an A\* to match — and **A\* is superlinear
+in the distance**, at three hundred bodies, several times a second. Measured in
+a live round with ~440 zombies marching, alternating all three arrangements in
+one process:
+
+| tick median, 10s windows | |
+|---|---|
+| no hordes | **3.8ms** |
+| hordes, rolling waypoint | **4.9ms** |
+| hordes, walking at the far end | **7.4ms** |
+
+So the waypoint costs about a quarter of what walking at the destination does,
+for the same march. `setHordeAimsAtTheEnd` is the gate and it is **kept**: what
+it costs is the entire reason the waypoint exists, and a saving nobody can
+reproduce is a saving nobody should trust.
+
+It also happens to look better — one point everybody is converging on is a
+column, where three hundred independent routes that happen to share a
+destination is a smear.
+
+**`HORDE_STEP_AHEAD` has to stay comfortably wider than `HORDE_SPREAD`**, or the
+members at the front of the mass are turning round to reach it.
+
+#### One sees, and the horde comes
+
+`hordeSighting` is called from `senseTarget` when a member finds a target, and
+it is **two number writes and nothing else** — no crowd count, no neighbour
+scan, no pushing the word out. That is a 10Hz-per-zombie path; all three of
+those judgements are made at 2Hz over a handful of records instead.
+
+`tellTheHorde` then stamps `lastSeen` on the members **who have nothing of their
+own to be getting on with** — no target, and no live memory of one, which is the
+same precondition `followTheChase` applies. It does two jobs: it stops a member
+being dragged off prey it can see itself in favour of a second-hand report, and
+it makes re-stamping on every horde tick free rather than a path thrash, since a
+member already walking to the spot is skipped and only one that has arrived and
+given up is told again.
+
+- **It composes with the grudge for free, and that was checked rather than
+  assumed.** A provoked zombie has `lastSeenUntil` stretched to `provokedUntil`
+  by `hit`, so the "live memory" skip covers the entire window a grudge stands —
+  there is no gap in which a horde order could overwrite the shooter's spot and
+  have `senseTarget` mistake it for one. See **Being shot is a grudge**.
+- **Measured against the gate, and it has to be**: zombies wander, and
+  `followTheChase` already carries word one hop, so "some of them ended up over
+  there" is satisfied by the old behaviour too. Staged with a scout far enough
+  out in front that *nobody* can see it either — which is what makes the control
+  a control — **1 of 20 came with hordes off against 20 of 20 with them on**.
+
+#### A crowd travels; one man in a house does not
+
+**This is the reported purpose and the refusal is the feature.** When a horde
+has a sighting, `crowdAt` counts the people standing together where it was seen;
+at `HORDE_CROWD_MIN` (7 — "more than 6") or more, `relayCrowd` passes the word
+to every horde within `HORDE_ALERT_RANGE` that has nothing of its own. Under
+that, the horde keeps it to itself.
+
+- One survivor holed up in a house is one horde's business. If every sighting
+  travelled, two or three hordes would converge on one person behind one door
+  and the rest of the city would be empty — which is exactly what was asked to
+  be prevented.
+- **One hop.** A horde that hears this does not pass it on again
+  (`preyRelayed`), for the reason `followTheChase` records for individual
+  zombies: word that propagates freely zips the whole map together the instant
+  anybody is seen, and every horde in the city on one street is the opposite of
+  several groups moving about it.
+- **`crowdAt` uses `queryCircle`, not `each`, and that is not a style
+  choice.** A body is inserted into the entity grid over its *bounding box*, so
+  one standing on a cell boundary sits in two buckets and one on a corner in
+  four — and `each` deliberately does not deduplicate. For a predicate that
+  costs one extra test and cannot change the answer, which is what it is written
+  for; for a *count* it is the answer, and four people on the wrong pixels would
+  read as a crowd of seven and call in every horde in earshot.
+- **A crowd scatters, and that is correct rather than a shortfall.** The relay
+  fires off the first sighting, inside a second of the group being seen and long
+  before it has run. A crowd that *has* scattered is not a crowd, and one horde
+  is the right answer for it.
+
+#### Two that meet become one
+
+Membership is sticky — a zombie stays with the horde it was in — which is what
+stops a group being torn in half every time another passes near it. The price of
+that is that two masses which genuinely converge would otherwise stay two
+forever: **one blob of sixty bodies with half walking north and half walking
+south, interleaved**, which is the one thing on screen that would make the whole
+feature read as broken. So hordes whose centres come within `HORDE_MERGE_RADIUS`
+are folded together, largest absorbing smallest, ahead of the dissolve below so
+two half-sized groups that have met become one real one rather than both being
+struck out.
+
+`HORDE_MERGE_RADIUS` *is* `HORDE_JOIN_RADIUS` rather than a second number: it is
+already this file's statement of how far apart bodies can be and still be one
+group, and two constants that mean the same thing drift.
+
+**It is why the count falls over a round.** Staged four groups and marched them
+for ninety seconds: **4 on forming, 2 left**. That is the merge working, and it
+caught the harness out before it caught anything else — the "several large
+groups" check was counting at the *end* of the march and read the merge as the
+clustering failing.
+
+#### What forms, in a real round
+
+The staged rows all hand the clustering neat clumps, which is what it wants and
+says nothing about whether it gets them. A real city, a real outbreak, ticked to
+150s and then aged past the mark:
+
+| | |
+|---|---|
+| hordes | **8-15**, typically 10-11 |
+| sizes | 8 to 145, biggest usually 60-90 |
+| zombies in one at all | **94-98%** |
+| every one of them at or above `HORDE_MIN_SIZE` | yes |
+
+- **`HORDE_MIN_SIZE` (8) is what makes them *groups*.** Without a floor the
+  clustering cheerfully reports every lone straggler as a horde of one, which
+  would then march across the map on its own and make the whole feature read as
+  ordinary zombies with a longer wander. A dissolved horde's members are simply
+  struck out of the membership map, so they are loose again and whichever real
+  horde comes past picks them up — no separate release, and no way for a
+  membership to outlive its record.
+- **`HORDE_JOIN_RADIUS` is measured against the horde's *centre*, not against
+  the nearest member**, and that is what keeps a horde compact. Single-linkage —
+  join whoever you are nearest to — lets a chain of zombies a stride apart snake
+  across the whole city and come out as one "horde" with no middle to it.
+- **A member further than `HORDE_SPREAD` (900) from its own centre comes back to
+  the mass** instead of finishing the leg alone. Deliberately wider than the
+  join radius, so it is the straggler — held up at a door, shot at, sent the
+  long way round a landmark — rather than the outside of a group that is doing
+  nothing wrong. Measured on open ground with nothing to fight, it fires on
+  **5-7% of member-ticks**; in a live city it is what stops a horde arriving one
+  zombie at a time.
+
+**What it costs the round** is the waypoint table above: **3.8 → 4.9ms** of tick
+at ~440 zombies with 474 entities, so a little over a millisecond, and only once
+most of the city has nothing left to chase — a zombie that can see somebody is
+chasing them and never reaches the march branch at all. Quote the range and
+never a single run; the map is not seeded and how far the outbreak got moves
+everything.
+
+`server/hordecheck.ts` is the harness — headless, no socket, no port.
+`setNoHordes` is the gate and it is **kept**, along with `setHordeAimsAtTheEnd`
+for the cost. 22 checks.
+
+*Four things about measuring this were the rig lying rather than the code
+failing, and the first is the one worth keeping:*
+
+- **The second horde was staged on a random bearing and kept landing on the
+  first.** `relaySpot` picks a spot at alert range from the *crowd*, and the
+  crowd is only ~870px beyond the near horde — so a bearing pointing back down
+  the lane put the "other" horde inside `HORDE_MERGE_RADIUS` of the first, the
+  clustering quite correctly made them **one horde of forty**, and the check
+  then reported that nobody had been told. It failed 4 stagings in 8 and every
+  precondition the rig printed looked perfect: crowd of 9, other horde 1390px
+  off against a 2200px range. The trace is what found it — `#21[a20/b20]s40`,
+  one record with every body in it. The staging now requires two merge radii of
+  separation **and asserts that two distinct hordes actually formed** before
+  measuring anything.
+- **A long clear corridor does not exist on most maps.** The first staging asked
+  for a 1000-2000px run clear to a body's width and staged **nothing at all** on
+  four cities in a row. What the claim rests on is a line of sight from the
+  scout to the prey and room for the clump to stand; walls between the pack and
+  the prey are fine, because the horde paths round them — which is the behaviour
+  rather than an obstacle to measuring it.
+- **A crowd left to itself is not a crowd for long.** Nine civilians shown
+  twenty zombies at three hundred pixels bolt in nine directions, and within a
+  couple of seconds no point on the map has seven of them within
+  `HORDE_CROWD_RADIUS`. Measured that way the rig was asking whether a crowd
+  *stays* a crowd while being walked at, which is a question about flight with a
+  perfectly good answer of "no".
+- **An outbreak that never took hold is the city winning, not the rig
+  failing.** The map is not seeded and the garrison is spread evenly across it,
+  so some rounds simply put the first five down: one run came back `522
+  entities, 0 zombies, 522 survivors` at 150s, and every row below read as the
+  clustering failing when what it was reporting was the round. The live section
+  says so and claims nothing.
+
+**What is not measured is what it looks like.** rAF is throttled to nothing
+while the browser pane is not compositing, so nobody has watched a horde cross a
+city from here — the same standard `DOG_CAMERA_ZOOM` and the resolution row are
+held to. The mechanics and the figures are measured; the feel is the playtest.
 
 ### What the crowd knows
 

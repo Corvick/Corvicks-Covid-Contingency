@@ -345,6 +345,8 @@ import {
   DOOR_WARN_MS,
   DOOR_WARN_LINES,
   DOOR_DEFY_LINES,
+  HORDE_MARCH_SPEED,
+  HORDE_SPREAD,
 } from '../../shared/constants.js';
 import {
   angleDelta,
@@ -417,6 +419,7 @@ import {
 import { fire, fireHeld, forgetsTheShooter, shieldShove } from './combat.js';
 
 import { requestBeacon } from './heli.js';
+import { hordeAimsAtTheEnd, hordeSighting, updateHordes } from './horde.js';
 
 /**
  * The A/B gate for `ZOMBIE_TARGET_STICK`: true puts the pre-margin target
@@ -8240,6 +8243,13 @@ function senseTarget(world: World, e: Entity, state: AiState, now: number): void
 
   if (best) {
     state.targetId = best.id;
+    // The horde this one belongs to hears about anybody it lays eyes on.
+    // Guarded on `size`, so a round before the six-minute mark pays one integer
+    // compare on what is a 10Hz-per-zombie path — and past the guard it is two
+    // number writes. *What the horde does about it* — whether this is a crowd
+    // worth calling a neighbour in on, and which members still need telling —
+    // is decided at 2Hz over a handful of records in `horde.ts`.
+    if (world.hordes.size > 0) hordeSighting(world, e.id, best.x, best.y, now);
     // Whoever shot us owns `lastSeen` while we are on our way to them. Taking a
     // body at arm's length must not cost us the spot we were walking to, or the
     // interception above becomes another way to lose the grudge.
@@ -8711,6 +8721,61 @@ function mindsDoors(world: World, e: Entity, state: AiState, now: number): boole
   return !preyNearby(world, e, DOOR_VS_HUMAN_RANGE);
 }
 
+/**
+ * Walking with the horde — what a member does when there is nothing in front
+ * of it to chase.
+ *
+ * **The collective half is not here**, deliberately. Who is in which horde,
+ * where each one is, where it is going and who it tells all live in
+ * `horde.ts` on a 2Hz clock; this is the one branch that spends it, and it is
+ * a map lookup, a distance and a `headingToward`.
+ *
+ * **And the chase is not here either.** A member that can see somebody is
+ * handled by the chase branch far above, and a member that has been *told*
+ * about somebody is handled by the `lastSeen` branch immediately above —
+ * because that is the field the horde writes into, exactly as the dog's roar
+ * does. So "if the horde sees a human the collective horde will chase them"
+ * costs this function nothing at all: it simply is not reached while there is
+ * anybody to go after.
+ *
+ * Below `zombieStuckTick` and `zombieAtSandbag`, which is what stops a member
+ * shut in a room pressing at the wall for the rest of the leg, and above
+ * `zombieSearchTick`, which is precisely what the march replaces: a horde
+ * crossing the city does not stop to sweep every building it passes.
+ */
+function hordeMarchTick(world: World, e: Entity, state: AiState, now: number, dt: number): boolean {
+  // One integer compare for the whole of a round that has not reached
+  // `HORDE_FORM_AT_MS`, which is most of every round.
+  if (world.hordes.size === 0) return false;
+  const id = world.hordeOf.get(e.id);
+  if (id === undefined) return false;
+  const horde = world.hordes.get(id);
+  if (!horde) return false;
+
+  // A door in the road of a standing order gets taken apart, which is the rule
+  // the remembered-sighting branch above already follows and for the same
+  // reason: a door you are stood against is a door in your way. It stands
+  // aside on its own for prey it can actually reach, which is the only thing
+  // that should outrank a march.
+  if (attackBlockingDoor(world, e, state, now)) return true;
+
+  // Adrift: held up at a door, shot at, or sent the long way round a landmark.
+  // Come back to the mass rather than finish the leg alone — a horde that
+  // arrives one zombie at a time is not a horde. See `HORDE_SPREAD`, which is
+  // deliberately wider than the radius members are recruited at, so this is
+  // the straggler and not merely the outside of the group.
+  const adrift = Math.hypot(horde.x - e.x, horde.y - e.y) > HORDE_SPREAD;
+  // The rolling waypoint rather than the far end — see `Horde.aimX`, which is
+  // a cost decision and a measured one.
+  const atEnd = hordeAimsAtTheEnd();
+  const gx = adrift ? horde.x : atEnd ? horde.destX : horde.aimX;
+  const gy = adrift ? horde.y : atEnd ? horde.destY : horde.aimY;
+
+  const desired = headingToward(world, e, state, gx, gy, now);
+  step(world, e, state, desired, HORDE_MARCH_SPEED, ZOMBIE_TURN_RATE, dt, now);
+  return true;
+}
+
 function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: number): void {
   if (now >= state.nextSenseAt) {
     state.nextSenseAt = now + SENSE_INTERVAL_MS;
@@ -8828,6 +8893,11 @@ function updateZombie(world: World, e: Entity, state: AiState, now: number, dt: 
   // Shut in somewhere with nothing to chase: work out that the door is the
   // problem rather than pacing the room until the round ends.
   if (zombieStuckTick(world, e, state, now, dt)) return;
+
+  // Six minutes in and part of a horde: walk with it. Above the room search,
+  // which is what this replaces — a horde crossing the city does not stop to
+  // sweep every building on the way.
+  if (hordeMarchTick(world, e, state, now, dt)) return;
 
   // Nothing to chase: empty the room it is in, then leave by a way out it
   // actually knows about and go looking for somewhere nobody has swept.
@@ -9427,6 +9497,13 @@ export function updateAi(world: World, now: number, dt: number, frozen: Set<stri
     }
     world.danger.rebuild(sources);
   }
+
+  // Six minutes in, the outbreak stops drifting and starts moving as several
+  // large groups. Beside the danger rebuild because it is the same kind of
+  // thing — one answer built once for everybody, rather than three hundred
+  // bodies each working out where the pack is. On its own 2Hz clock inside,
+  // and it does nothing at all before `HORDE_FORM_AT_MS`.
+  updateHordes(world, now);
 
   for (const [targetId, session] of Array.from(world.grapples)) {
     // A grip that was always going to break, breaking. Checked ahead of the

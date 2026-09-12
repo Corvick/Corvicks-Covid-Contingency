@@ -7,6 +7,9 @@ import {
   BACKUP_LANE_CLEARANCE,
   BACKUP_LANE_OFFSETS,
   BACKUP_LANE_STEP,
+  BACKUP_MUSTER_RADIUS,
+  BACKUP_MUSTER_SEARCH_RINGS,
+  BACKUP_MUSTER_SEARCH_STEP,
   BACKUP_PARK_MAX,
   BACKUP_PARK_MIN,
   BACKUP_SPEED,
@@ -14,6 +17,7 @@ import {
   CAR_LENGTH,
   CAR_WIDTH,
   ENTITY_RADIUS,
+  GRAPPLE_NO_ESCAPE_AT,
   RADIO_BACKUP_COUNT,
   RADIO_CALL_LINE,
   RADIO_CAR_BACKUP_COUNT,
@@ -48,7 +52,7 @@ import {
   type BrakeParams,
 } from '../../shared/vancurve.js';
 import type { Wall } from '../../shared/types.js';
-import { resolveCircleBox, type OrientedBox } from './geometry.js';
+import { clamp, resolveCircleBox, type OrientedBox } from './geometry.js';
 import { addKevlarVest, newInventory } from './inventory.js';
 import {
   buildingIndexAt,
@@ -116,6 +120,17 @@ export interface BackupVehicle {
   heavy: boolean;
   /** Who called it. The crew no longer escort them, but the van remembers. */
   callerId: string;
+  /**
+   * Where the caller actually was standing when they pressed the button — not
+   * necessarily where the vehicle parks. A caller buried in the outbreak gets
+   * the vehicle stopped at the nearest safer ground instead (`musterPoint`),
+   * but the crew still make for the caller's own spot on foot once they are
+   * down, which is what actually answers the call. Fixed at the moment of the
+   * call: this is an order to a point, not an escort, and does not follow the
+   * caller if they move afterwards.
+   */
+  callerX: number;
+  callerY: number;
   dropped: number;
   nextDropAt: number;
   /** How far the back doors and the cab door have swung, 0-1. */
@@ -576,6 +591,55 @@ function parkingSpot(
   };
 }
 
+/** How many zombies stand within `radius` of a point, straight-line. */
+function zombiesNear(world: World, x: number, y: number, radius: number): number {
+  return world.zombieGrid.queryCircle(x, y, radius, new Set<Entity>()).size;
+}
+
+/**
+ * Where the vehicle should actually aim for, given what is standing at the
+ * caller's own feet.
+ *
+ * Answering a radio call means getting there as close as possible — but the
+ * caller's own spot is exactly where the outbreak already is when the call
+ * was worth making, and parking a squad in the middle of that answers it with
+ * a squad that gets swarmed before it has taken a step. So the target is not
+ * always the caller: if their own ground already carries `GRAPPLE_NO_ESCAPE_AT`
+ * zombies or more within `BACKUP_MUSTER_RADIUS`, the nearest ground that
+ * doesn't stands in for it instead. The crew still make their own way to the
+ * caller's actual spot once they are down — see `unload` and
+ * `BackupVehicle.callerX`/`callerY` — this only decides where the vehicle
+ * itself pulls up.
+ *
+ * A spiral outward, the same shape `walkableNear` already uses for "nearest
+ * standable spot" — this is that question with "and not stood in a crowd"
+ * added to it. Falls back to the caller's own position once the search runs
+ * out, for the same reason `walkableNear` falls back to the raw point: a spot
+ * with a few too many zombies on it is still a real place to send help, and
+ * producing nothing at all is the worse answer.
+ */
+function musterPoint(world: World, x: number, y: number): { x: number; y: number } {
+  if (zombiesNear(world, x, y, BACKUP_MUSTER_RADIUS) < GRAPPLE_NO_ESCAPE_AT) {
+    return { x, y };
+  }
+  for (let ring = 1; ring <= BACKUP_MUSTER_SEARCH_RINGS; ring++) {
+    const radius = ring * BACKUP_MUSTER_SEARCH_STEP;
+    const steps = ring * 8;
+    for (let i = 0; i < steps; i++) {
+      const angle = (i / steps) * Math.PI * 2;
+      const sx = clamp(x + Math.cos(angle) * radius, 60, WORLD_WIDTH - 60);
+      const sy = clamp(y + Math.sin(angle) * radius, 60, WORLD_HEIGHT - 60);
+      if (world.nav.isBlocked(sx, sy) || !world.nav.isReachable(sx, sy)) continue;
+      if (zombiesNear(world, sx, sy, BACKUP_MUSTER_RADIUS) < GRAPPLE_NO_ESCAPE_AT) {
+        return { x: sx, y: sy };
+      }
+    }
+  }
+  // Nothing within reach clears the bar. Sending help to a bad spot beats not
+  // sending it at all.
+  return { x, y };
+}
+
 /** The pose `along` px short of the resting spot — `shared/vancurve.ts` owns
  *  the curve, this is just the local alias for it. */
 function brakePose(v: BrakeParams, along: number): { x: number; y: number; facing: number } {
@@ -658,6 +722,12 @@ export function callBackup(
   now: number,
   kind: 'van' | 'car' = 'van',
 ): void {
+  // Where the vehicle actually aims for — the caller's own spot, unless it is
+  // already too dangerous to muster on. See `musterPoint`. The caller's real
+  // position is kept separately below, for the crew to walk to once they're
+  // down.
+  const target = musterPoint(world, caller.x, caller.y);
+
   // Three arrival styles, each a different length of manoeuvre — its own brake,
   // its own turn, its own run-out — and each searched against the **whole
   // parking walk**: the stop and the manoeuvre are not independent, and
@@ -793,7 +863,7 @@ export function callBackup(
     // differ in shape rather than in which side of the street they end up on.
     const first = Math.random() < 0.5 ? 1 : -1;
     let looks = 0;
-    parkingSpot(world, caller.x, caller.y, (spot, entry, stopD) => {
+    parkingSpot(world, target.x, target.y, (spot, entry, stopD) => {
       if (looks++ >= STYLE_SEARCH_LOOKS) return true;
       let outstanding = 0;
       for (let i = 0; i < STYLES.length; i++) {
@@ -854,7 +924,7 @@ export function callBackup(
   } else {
     // Nothing turns here: the plain search, and a dead-straight arrival resting
     // exactly on the spot it picked. Stopping is a perfectly good answer.
-    const plain = parkingSpot(world, caller.x, caller.y)!;
+    const plain = parkingSpot(world, target.x, target.y)!;
     entry = plain.entry;
     heading = Math.atan2(plain.spot.y - entry.y, plain.spot.x - entry.x);
     restX = plain.spot.x;
@@ -881,6 +951,8 @@ export function callBackup(
     turnDone,
     heavy,
     callerId: caller.id,
+    callerX: caller.x,
+    callerY: caller.y,
     dropped: 0,
     nextDropAt: 0,
     rearOpen: 0,
@@ -1000,6 +1072,15 @@ function unload(world: World, vehicle: BackupVehicle, now: number): void {
     // Start the formation's bearing where he is already pointing, or it eases
     // in from zero and the whole squad swings round once on the first corner.
     state.squadBearing = state.heading;
+    // Head for where the caller actually was, not wherever the vehicle
+    // happened to stop — the two differ exactly when `musterPoint` pulled the
+    // vehicle back off a caller who was already swarmed. `wanderX`/`wanderY`
+    // is the same field an ordinary patrol target rides, so this needs no
+    // branch of its own: the "off duty" walk below carries him there, and
+    // `sweepTarget` takes over the moment he arrives, the same as it would
+    // once any other wander target was reached.
+    state.wanderX = vehicle.callerX;
+    state.wanderY = vehicle.callerY;
   } else {
     state.squadSlot = vehicle.dropped;
     state.escortId = vehicle.leaderId;
@@ -1163,6 +1244,10 @@ export function placeCityCar(
       turnDone: 1,
       heavy: false,
       callerId: '',
+      // Nobody called this one in, and nothing ever reads these — `dropped` is
+      // already the full crew, so `unload` never runs for it.
+      callerX: x,
+      callerY: y,
       // Its crew got out long before the round started, so there is nobody
       // left in it to unload.
       dropped: crewSize('car'),
@@ -1255,6 +1340,9 @@ export function placePoliceCars(world: World, now: number): number {
       turnDone: 1,
       heavy: false,
       callerId: '',
+      // Nobody called this one in either — see `placeCityCar`.
+      callerX: bay.x,
+      callerY: bay.y,
       dropped: crewSize('car'),
       nextDropAt: 0,
       rearOpen: 0,
