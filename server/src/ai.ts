@@ -346,6 +346,8 @@ import {
   DOOR_WARN_LINES,
   DOOR_DEFY_LINES,
   HORDE_MARCH_SPEED,
+  HORDE_SLOT_EASE,
+  HORDE_SLOT_HOLD,
   HORDE_SPREAD,
 } from '../../shared/constants.js';
 import {
@@ -419,7 +421,7 @@ import {
 import { fire, fireHeld, forgetsTheShooter, shieldShove } from './combat.js';
 
 import { requestBeacon } from './heli.js';
-import { hordeAimsAtTheEnd, hordeSighting, updateHordes } from './horde.js';
+import { hordeAimsAtTheEnd, hordeOneRallyPoint, hordeSighting, updateHordes } from './horde.js';
 
 /**
  * The A/B gate for `ZOMBIE_TARGET_STICK`: true puts the pre-margin target
@@ -8765,14 +8767,59 @@ function hordeMarchTick(world: World, e: Entity, state: AiState, now: number, dt
   // deliberately wider than the radius members are recruited at, so this is
   // the straggler and not merely the outside of the group.
   const adrift = Math.hypot(horde.x - e.x, horde.y - e.y) > HORDE_SPREAD;
-  // The rolling waypoint rather than the far end — see `Horde.aimX`, which is
-  // a cost decision and a measured one.
+
+  // Its own place in the formation, not the formation's centre — see
+  // `HORDE_SLOT_SPACING`. Fifty bodies told one point arrive on one point, and
+  // `resolveCollisions` then spends every tick shoving them apart while every
+  // one of them walks straight back in: the jiggling, and the bodies phasing
+  // through each other. The far-end and one-point gates put the old targets back
+  // for measurement; neither is how a round plays.
   const atEnd = hordeAimsAtTheEnd();
-  const gx = adrift ? horde.x : atEnd ? horde.destX : horde.aimX;
-  const gy = adrift ? horde.y : atEnd ? horde.destY : horde.aimY;
+  const onePoint = hordeOneRallyPoint() || state.hordeGoalX === null || state.hordeGoalY === null;
+  let gx: number;
+  let gy: number;
+  if (adrift) {
+    gx = horde.x;
+    gy = horde.y;
+  } else if (atEnd) {
+    gx = horde.destX;
+    gy = horde.destY;
+  } else if (onePoint) {
+    gx = horde.aimX;
+    gy = horde.aimY;
+  } else {
+    gx = state.hordeGoalX as number;
+    gy = state.hordeGoalY as number;
+  }
+
+  let speed = HORDE_MARCH_SPEED;
+  if (!adrift && !atEnd && !onePoint) {
+    const d = Math.hypot(gx - e.x, gy - e.y);
+    if (d < HORDE_SLOT_HOLD + HORDE_SLOT_EASE) {
+      // Standing on its spot, or easing into it, looks exactly like being stuck
+      // to `zombieStuckTick` — it sits above this branch, and after a couple of
+      // seconds of no progress it walks a zombie off to claw at the nearest shut
+      // door. A member waiting for its horde is not stuck, so the clock is held.
+      state.stuckSince = 0;
+      state.unstickX = e.x;
+      state.unstickY = e.y;
+    }
+    if (d <= HORDE_SLOT_HOLD) {
+      // Arrived. Stand and face the way the horde is going rather than stepping
+      // at a point it is already on, which is the other half of the jiggle.
+      const facing = Math.atan2(horde.destY - e.y, horde.destX - e.x);
+      e.facing = turnToward(e.facing, facing, ZOMBIE_TURN_RATE * dt);
+      state.heading = e.facing;
+      state.path = null;
+      return true;
+    }
+    // Ease in rather than walking flat out to the edge of the spot: a nudge off
+    // it is then answered by a drift back, not a lurch. See `HORDE_SLOT_EASE`.
+    speed *= Math.min(1, (d - HORDE_SLOT_HOLD) / HORDE_SLOT_EASE);
+  }
 
   const desired = headingToward(world, e, state, gx, gy, now);
-  step(world, e, state, desired, HORDE_MARCH_SPEED, ZOMBIE_TURN_RATE, dt, now);
+  step(world, e, state, desired, speed, ZOMBIE_TURN_RATE, dt, now);
   return true;
 }
 

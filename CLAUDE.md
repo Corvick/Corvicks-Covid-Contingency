@@ -2212,9 +2212,12 @@ forever, which is not "another random opposite end".
 
 #### The waypoint is a cost decision, and it is the largest one here
 
-**Members do not walk at the far end of the map. They walk at `Horde.aimX/aimY`,
-a shared point `HORDE_STEP_AHEAD` (1000) along the way**, kept on walkable
-ground and recomputed once per horde per horde tick.
+**Members do not walk at the far end of the map. They walk at a formation centred
+on `Horde.aimX/aimY`, a shared point `HORDE_STEP_AHEAD` (1000) along the way**,
+kept on walkable ground and recomputed once per horde per horde tick. *It is the
+centre of the formation and nobody stands on it* — see **No horde past fifty,
+and a spot each in it** below, which is what the one-shared-point version turned
+into on screen.
 
 Handed the destination directly, every member runs `hasWallClearPath` across
 four thousand pixels of city and then an A\* to match — and **A\* is superlinear
@@ -2233,12 +2236,12 @@ for the same march. `setHordeAimsAtTheEnd` is the gate and it is **kept**: what
 it costs is the entire reason the waypoint exists, and a saving nobody can
 reproduce is a saving nobody should trust.
 
-It also happens to look better — one point everybody is converging on is a
-column, where three hundred independent routes that happen to share a
-destination is a smear.
-
 **`HORDE_STEP_AHEAD` has to stay comfortably wider than `HORDE_SPREAD`**, or the
 members at the front of the mass are turning round to reach it.
+
+*That table was taken before the ceiling and the formation below went in, and the
+figures after are a range rather than a replacement* — see the cost note at the
+end of **What forms, in a real round**.
 
 #### One sees, and the horde comes
 
@@ -2317,6 +2320,110 @@ caught the harness out before it caught anything else — the "several large
 groups" check was counting at the *end* of the march and read the merge as the
 clustering failing.
 
+**And it was a snowball until it had a ceiling** — which is the next section.
+
+#### No horde past fifty, and a spot each in it
+
+Reported off a late-round frame with **628 zombies in the city and roughly five
+hundred of them in one red smear** down the bottom of the map: *"this is too many
+zombies in a horde. also the zombies are spacing out and phasing through each
+other trying to get to the rally point once most of them reach it. just like the
+swat officers not all the zombies should get ONE point to get to."* Two faults,
+and they fed each other.
+
+**The merge had no ceiling, so it snowballed.** Every horde walks at one of eight
+ends, so hordes meet; two that meet become one bigger one, which is likelier to
+meet the next. The screenshot is where that ends: one horde that had eaten every
+other and could no longer fit on the ground it was walking to.
+
+- **`HORDE_MAX_SIZE` (50) is enforced in all three places a horde grows.** A
+  member is kept only while its horde is under it, a loose zombie only joins a
+  horde with room, and **two hordes merge only if the sum fits**. A group that is
+  over the line — carried from before, or grown past it — splits: the overflow is
+  loose on the next tick, seeds a horde of its own beside the full one, and that
+  new horde picks its own end and walks away. Nothing has to be written about
+  splitting; it falls out of "loose zombies next to a full horde seed a new one".
+- **Fifty is a group that fills a good part of a player's screen at
+  `CAMERA_ZOOM`** and stands in a disc about 150px across. It is the knob.
+- **With a ceiling, two hordes can no longer merge where they meet — so they must
+  not meet on the same spot.** `pickOppositeEnd` takes the other hordes'
+  destinations and draws only among the *least claimed* opposite ends, then
+  scatters the point up to `HORDE_END_SCATTER` off the end so even a shared end is
+  not a shared pixel. A scatter that would carry the point back inside the
+  opposite-end distance is refused, so the bounce keeps its promise.
+- **`HORDE_STALL_MS` (20s) is the answer to a horde wedged into ground it cannot
+  fit**, which is what the red smear was doing. `HORDE_LEG_GIVE_UP_MS` is 150s and
+  is the right budget for a leg that is merely long; a horde that has not got
+  `HORDE_STALL_PROGRESS` (80px) closer in twenty seconds picks another end. The
+  clock is held while the horde is onto somebody — busy is not jammed.
+
+**Every member was told the same point, so they piled on it.** `aimX/aimY` was
+the goal for all fifty, and fifty bodies told one coordinate arrive on one
+coordinate — `resolveCollisions` shoves them apart every tick and every one of
+them walks straight back in. That is the jiggle, and the phasing.
+
+- **A slot each, the way a SWAT operator has a post off his leader.**
+  `AiState.hordeSlot` is an index into a Vogel spiral round the aim,
+  `r = HORDE_SLOT_SPACING * sqrt(i + 0.5)` at the golden angle — an even disc that
+  grows outward a body at a time. `HORDE_SLOT_SPACING` is 1.6 zombie radii, which
+  puts neighbours ~40px apart against a 28px body. The `+ 0.5` is not decoration:
+  from zero, slots 0 and 1 sit 22px apart, which is two zombies in each other.
+- **A member keeps its slot while it is a valid one; anybody without one takes
+  the lowest free.** So a formation shrinks *from the outside* as it takes
+  losses — only the outermost bodies move in to fill a hole — where re-ranking
+  everybody every tick would shuffle the whole horde one place along whenever one
+  was shot.
+- **The goal is drawn back toward the aim until it is standable and reachable
+  from the aim in a straight line** (`slotGoal`), the shape `squadPost` already
+  uses. The straight line is what keeps a formation in one patch of street: a
+  clear slot on the far side of a shop front would send its member round the
+  block, which is a horde tearing itself in two at every corner. Written to
+  `AiState.hordeGoalX/Y` on the horde tick, since the aim only moves at 2Hz.
+- **Arriving is standing still, and the last stretch is eased**
+  (`HORDE_SLOT_HOLD` 8px, `HORDE_SLOT_EASE` 60px). The slots alone do not stop the
+  jiggle: a body at full march pace overshoots a tick's step and is shoved back,
+  and a neighbour's nudge sends it lurching home at 66px/s. Eased, a nudge is
+  answered by a drift; within the hold it just faces the way the horde is going.
+- **And `zombieStuckTick` has to be told**, which is easy to miss because it sits
+  *above* the march branch. A member standing on its slot measures as no progress,
+  and after `ZOMBIE_STUCK_DOOR_MS` that function walks a zombie off to claw at the
+  nearest shut door within 120px. The march branch clears `stuckSince` while a
+  member is within its hold-and-ease distance — waiting is not being stuck.
+- **A sighting is spread too** (`HORDE_PREY_SPREAD`, half the march formation):
+  each member is sent to its own slot round the spot rather than the spot, for the
+  same reason, and because a horde closing round somebody from a spread is what a
+  horde closing round somebody looks like.
+
+`server/hordecheck.ts` carries all of it, 35 checks now. `setHordesUncapped` and
+`setHordeOneRallyPoint` are the new gates and both are **kept**;
+`setHordesHoldTheirEnd` is a measurement lever rather than a behaviour — in play
+arriving is exactly what sends a horde elsewhere, so a formation can only be
+watched *settling* by holding it there.
+
+| | OLD | NEW |
+|---|---|---|
+| 150 zombies in one clump: biggest horde | **150** | **50**, across 3 hordes |
+| two groups of thirty stood on each other | one horde of 60 | **two**, 6/6 |
+| 40 held on a spot: places they were told to go | **1** | **40** |
+| …body speed at p90 once arrived | **6.0-21.6 px/s** | **0.0** |
+| …pairs standing in each other, per tick | **14-17** | **0.0** |
+| …formation centre off the spot | 5.9-6.6px | 7.0px |
+| hordes sent to the same end at forming | — | **0 of 36 pairs** |
+| a pinned horde gives its end up | at 150s | **20.3s, 4/4**, never earlier |
+| the live round's biggest horde | 60-145 | **50** |
+
+*Two things about measuring this were the rig lying rather than the code
+failing:*
+
+- **The median body was standing still in the old pile too.** Measured as a
+  median the one-point pile read **1.1 px/s** — which is not what a screen of
+  zombies shoving at a point looks like. A pile is wedged solid in the middle and
+  churning at the rim, so its jiggle is all in the tail. p90 is the reading.
+- **An "uncapped" arm in the live cost rig measured nothing and was taken out.**
+  It flipped the ceiling off for ten-second windows on a world that had formed
+  under one, and the snowball takes far longer than ten seconds to build — so it
+  was a capped round with the flag set. See the cost note below.
+
 #### What forms, in a real round
 
 The staged rows all hand the clustering neat clumps, which is what it wants and
@@ -2325,10 +2432,14 @@ says nothing about whether it gets them. A real city, a real outbreak, ticked to
 
 | | |
 |---|---|
-| hordes | **8-15**, typically 10-11 |
-| sizes | 8 to 145, biggest usually 60-90 |
-| zombies in one at all | **94-98%** |
+| hordes | **8-13** |
+| sizes | 9 to **50** — the ceiling, usually reached by the biggest one or two |
+| zombies in one at all | **91-97%** |
 | every one of them at or above `HORDE_MIN_SIZE` | yes |
+
+Before the ceiling the sizes read **8 to 145, biggest usually 60-90** at 150s —
+and that is at the moment they form, well before the snowball the screenshot
+caught had had minutes of marching to build.
 
 - **`HORDE_MIN_SIZE` (8) is what makes them *groups*.** Without a floor the
   clustering cheerfully reports every lone straggler as a horde of one, which
@@ -2349,16 +2460,30 @@ says nothing about whether it gets them. A real city, a real outbreak, ticked to
   **5-7% of member-ticks**; in a live city it is what stops a horde arriving one
   zombie at a time.
 
-**What it costs the round** is the waypoint table above: **3.8 → 4.9ms** of tick
-at ~440 zombies with 474 entities, so a little over a millisecond, and only once
-most of the city has nothing left to chase — a zombie that can see somebody is
-chasing them and never reaches the march branch at all. Quote the range and
-never a single run; the map is not seeded and how far the outbreak got moves
-everything.
+**What it costs the round is a range, and it is a wide one.** Alternating 10s
+windows on one live world, hordes against none: **+0.2ms at 227 zombies, +1 to
++4ms at 310-440**, and the far-end arm always dearest. Every figure is paid only
+once most of the city has nothing left to chase — a zombie that can see
+somebody is chasing them and never reaches the march branch at all.
+
+- **A slot each costs nothing that can be measured.** Against one rally point on
+  the same world: **8.9/9.2, 6.9/7.9, 8.8/8.4 and 9.3/7.5ms** across four runs —
+  the sign flips, so it is inside this rig's noise. The horde tick itself, forced
+  and timed alone, is **0.3-0.4ms median and 1.4ms worst** at 308-410 members,
+  every fifteenth tick.
+- **Whether the ceiling made hordes dearer is not settled, and should not be
+  claimed.** The first version measured +1.1ms and later runs read higher, but
+  window-to-window spread on one arm reaches 6.4-10.4ms, and the arm that was
+  meant to answer it could not reproduce the pile (see above). The plausible
+  story — a wedged pile is cheap because nothing in it routes, and hordes that
+  keep marching are not — is a story.
+
+Quote the range and never a single run; the map is not seeded and how far the
+outbreak got moves everything.
 
 `server/hordecheck.ts` is the harness — headless, no socket, no port.
 `setNoHordes` is the gate and it is **kept**, along with `setHordeAimsAtTheEnd`
-for the cost. 22 checks.
+for the cost and the three gates in the section above. 35 checks.
 
 *Four things about measuring this were the rig lying rather than the code
 failing, and the first is the one worth keeping:*

@@ -17,6 +17,11 @@
  *     people together are everybody's. Both halves need measuring, and the
  *     lone-survivor half is the one that matters — "another horde came" is
  *     satisfied just as well by a rule that always relays.
+ *  5. **No horde past `HORDE_MAX_SIZE`, and a spot each in it.** One horde
+ *     had eaten ~500 of 628 zombies and every member was walking at one
+ *     point, jiggling against the rest. Measured against `setHordesUncapped`
+ *     and `setHordeOneRallyPoint`, with `setHordesHoldTheirEnd` to watch a
+ *     formation settle — plus the stall re-pick and hordes not sharing an end.
  *
  * `setNoHordes` is the gate and it is **kept**. Three of the four rows are a
  * gain against a control, and the collective-chase row is measured entirely
@@ -57,7 +62,14 @@ import {
   type Entity,
 } from './src/world.js';
 import { computeFrozen, updateAi } from './src/ai.js';
-import { setHordeAimsAtTheEnd, setNoHordes } from './src/horde.js';
+import {
+  setHordeAimsAtTheEnd,
+  setHordeOneRallyPoint,
+  setHordesHoldTheirEnd,
+  setHordesUncapped,
+  setNoHordes,
+  updateHordes,
+} from './src/horde.js';
 import {
   TICK_RATE,
   PATH_NODE_BUDGET_PER_TICK,
@@ -71,6 +83,9 @@ import {
   HORDE_MERGE_RADIUS,
   ZOMBIE_SIGHT_RADIUS,
   HORDE_CROWD_RADIUS,
+  HORDE_MAX_SIZE,
+  HORDE_STALL_MS,
+  ZOMBIE_RADIUS,
 } from '../shared/constants.js';
 
 const TICK_MS = 1000 / TICK_RATE;
@@ -343,6 +358,8 @@ function formAndBounce(world: World): void {
   const sizes: number[] = [];
   const counts: number[] = [];
   const formed: number[] = [];
+  let sharedEnds = 0;
+  let endPairs = 0;
   const spreads: number[] = [];
   let legs = 0;
   let oppositeLegs = 0;
@@ -406,6 +423,19 @@ function formAndBounce(world: World): void {
         }
       }
       if (i === 60) formed.push(world.hordes.size);
+      if (i === 60) {
+        // Two hordes walking at the same end arrive on the same ground, and with a
+        // ceiling they can no longer merge there. Two different ends are at least
+        // ~1500px apart and one end scattered twice is at most 700, so 800 is a
+        // line with daylight either side of it.
+        const hs = [...world.hordes.values()];
+        for (let a = 0; a < hs.length; a++) {
+          for (let b = a + 1; b < hs.length; b++) {
+            endPairs++;
+            if (Math.hypot(hs[a].destX - hs[b].destX, hs[a].destY - hs[b].destY) < 800) sharedEnds++;
+          }
+        }
+      }
       if (i === 0) {
         for (const horde of world.hordes.values()) {
           const far = Math.hypot(world.map.width, world.map.height) * HORDE_OPPOSITE_MIN_SHARE;
@@ -438,6 +468,7 @@ function formAndBounce(world: World): void {
       `(they merge when they meet), sizes ${Math.min(...sizes)}-${Math.max(...sizes)}`,
   );
   check(med(formed) >= 3, 'several large groups form', `${med(formed)} hordes, median`);
+  check(sharedEnds === 0, 'no two hordes sent to the same end', `${sharedEnds} of ${endPairs} pairs`);
   check(tooSmall === 0, 'every one of them a group', `${tooSmall} under HORDE_MIN_SIZE (${HORDE_MIN_SIZE})`);
   check(legs > 0, 'legs chosen', `${legs}`);
   check(
@@ -944,6 +975,290 @@ function cost(world: World): void {
   );
 }
 
+// ---------------------------------------------------------------- the ceiling
+
+/**
+ * No horde past `HORDE_MAX_SIZE`, however many zombies are standing together.
+ *
+ * Reported off a late round with ~500 of 628 zombies in one red smear. Staged
+ * the obvious way: three times a horde's worth of zombies in one clump, which
+ * with no ceiling is exactly one horde of all of them. And the merge half of the
+ * same fault: two groups whose sum is over the line, standing on each other,
+ * must stay two — against `mergeRow`'s control, where a pair that fits does
+ * merge.
+ */
+function capRow(world: World): void {
+  console.log('\n--- no horde past the ceiling ---');
+  const BIG = HORDE_MAX_SIZE * 3;
+  const oldBiggest: number[] = [];
+  const newBiggest: number[] = [];
+  const newCount: number[] = [];
+  let twoFull = 0;
+  let staged = 0;
+
+  for (let r = 0; r < RUNS; r++) {
+    bareCity(world);
+    const lane = chaseSpot(world, 0, 0);
+    if (!lane) continue;
+    staged++;
+
+    for (const off of [true, false]) {
+      setHordesUncapped(off);
+      const now0 = Date.now();
+      clearBodies(world);
+      clump(world, now0, 'z', lane.x, lane.y, BIG, 23);
+      ageRound(world, now0);
+      let now = now0;
+      // Several horde ticks, so a split has had time to settle into its halves.
+      for (let i = 0; i < 90; i++) {
+        tick(world, now, TICK_MS / 1000);
+        now += TICK_MS;
+      }
+      const sizes = [...world.hordes.values()].map((h) => h.size);
+      const biggest = sizes.length ? Math.max(...sizes) : 0;
+      if (off) oldBiggest.push(biggest);
+      else {
+        newBiggest.push(biggest);
+        newCount.push(sizes.length);
+      }
+    }
+    setHordesUncapped(false);
+
+    // Two groups of thirty on top of each other: sixty will not fit in one.
+    const now0 = Date.now();
+    clearBodies(world);
+    clump(world, now0, 'a', lane.x, lane.y, 30, 23);
+    clump(world, now0, 'b', lane.x + lane.dx * 200, lane.y + lane.dy * 200, 30, 23);
+    ageRound(world, now0);
+    let now = now0;
+    for (let i = 0; i < 60; i++) {
+      tick(world, now, TICK_MS / 1000);
+      now += TICK_MS;
+    }
+    if (world.hordes.size >= 2 && [...world.hordes.values()].every((h) => h.size <= HORDE_MAX_SIZE)) twoFull++;
+  }
+  setHordesUncapped(false);
+
+  if (staged === 0) {
+    console.log('  (nothing staged on these cities; claiming nothing)');
+    return;
+  }
+  console.log(
+    `  ${BIG} zombies in one clump: biggest horde OLD ${med(oldBiggest)}, ` +
+      `NEW ${med(newBiggest)} across ${med(newCount)} hordes`,
+  );
+  check(med(oldBiggest) > HORDE_MAX_SIZE, 'CONTROL: uncapped, it is all one horde', `${med(oldBiggest)}`);
+  check(
+    Math.max(...newBiggest) <= HORDE_MAX_SIZE,
+    `capped, no horde past ${HORDE_MAX_SIZE}`,
+    `biggest ${Math.max(...newBiggest)}`,
+  );
+  check(med(newCount) >= 3, 'and the rest split off into hordes of their own', `${med(newCount)} hordes`);
+  check(twoFull === staged, 'two groups of thirty on each other stay two', `${twoFull}/${staged}`);
+}
+
+// ------------------------------------------------------------- the stall
+
+/**
+ * A horde that cannot get anywhere gives its end up, and not before it has
+ * had `HORDE_STALL_MS` to try.
+ *
+ * The screenshot this came off was a horde wedged into ground it could not fit,
+ * churning there — and `HORDE_LEG_GIVE_UP_MS` would have held it for two and a
+ * half minutes. Staged by pinning every member where it stands, which is the
+ * cleanest "makes no progress" there is: the horde is given a far end, and
+ * nothing it does can bring it closer. Both halves are needed — "it picked a new
+ * end" is satisfied just as well by a horde that re-picks every tick.
+ */
+function stallRow(world: World): void {
+  console.log('\n--- a horde that cannot get there picks somewhere else ---');
+  let early = 0;
+  let late = 0;
+  let staged = 0;
+  for (let r = 0; r < Math.min(RUNS, 4); r++) {
+    bareCity(world);
+    const lane = chaseSpot(world, 0, 0);
+    if (!lane) continue;
+    const now0 = Date.now();
+    clearBodies(world);
+    const bodies = clump(world, now0, 'z', lane.x, lane.y, 20, 23);
+    const pins = bodies.map((b) => ({ b, x: b.x, y: b.y }));
+    ageRound(world, now0);
+    let now = now0;
+    tick(world, now, TICK_MS / 1000);
+    now += TICK_MS;
+    if (world.hordes.size !== 1) continue;
+    staged++;
+    const horde = [...world.hordes.values()][0];
+    const startDest = { x: horde.destX, y: horde.destY };
+    const startAt = now;
+    let changedAt = -1;
+    for (let i = 0; i < 900 && changedAt < 0; i++) {
+      for (const p of pins) {
+        p.b.x = p.x;
+        p.b.y = p.y;
+      }
+      tick(world, now, TICK_MS / 1000);
+      now += TICK_MS;
+      const h = world.hordes.get(horde.id);
+      if (!h) break;
+      if (h.destX !== startDest.x || h.destY !== startDest.y) changedAt = now - startAt;
+    }
+    if (changedAt >= 0 && changedAt < HORDE_STALL_MS - 1000) early++;
+    if (changedAt >= HORDE_STALL_MS - 1000 && changedAt <= HORDE_STALL_MS + 2000) late++;
+    console.log(`    city ${r}: gave the end up after ${changedAt < 0 ? 'never' : f1(changedAt / 1000) + 's'}`);
+  }
+  if (staged === 0) {
+    console.log('  (nothing staged on these cities; claiming nothing)');
+    return;
+  }
+  check(early === 0, 'not before the stall clock', `${early}/${staged} gave up early`);
+  check(late === staged, `and at it, around ${HORDE_STALL_MS / 1000}s`, `${late}/${staged}`);
+}
+
+// ----------------------------------------------------------- the formation
+
+/**
+ * Every member has a spot of its own, and a horde that has got where it is
+ * going stands there rather than churning.
+ *
+ * Reported as *"the zombies are spacing out and phasing through each other
+ * trying to get to the rally point once most of them reach it"*. The rig holds
+ * a horde on one spot — `setHordesHoldTheirEnd`, since in play arriving is
+ * precisely what sends it somewhere else — and watches the last eight seconds of
+ * a twenty-five second run, once everybody has had time to get there.
+ *
+ * Three readings, and the first is the report: **how fast bodies are still
+ * moving** once they have arrived, which is the jiggle; **how many pairs are
+ * standing in each other**, which is the phasing; and **how many distinct
+ * places the members were told to go**, which is the cause. The one-point gate
+ * is the control for all three.
+ */
+function formationRow(world: World): void {
+  console.log('\n--- a spot each, and they settle on it ---');
+  const N = 40;
+  const out = { old: { speed: [] as number[], overlap: [] as number[], goals: [] as number[], off: [] as number[] },
+    now: { speed: [] as number[], overlap: [] as number[], goals: [] as number[], off: [] as number[] } };
+  let staged = 0;
+
+  for (let r = 0; r < RUNS; r++) {
+    bareCity(world);
+    // Room for the whole formation to stand: a 40-slot spiral is ~140px across
+    // its radius, and the clump starts 250px off the spot so it has to walk in.
+    let spot: { x: number; y: number } | null = null;
+    for (let i = 0; i < 6000 && !spot; i++) {
+      const x = 500 + Math.random() * (world.map.width - 1000);
+      const y = 500 + Math.random() * (world.map.height - 1000);
+      if (clearDisc(world, x, y, 190) && clearDisc(world, x - 250, y, 110)) spot = { x, y };
+    }
+    if (!spot) continue;
+    staged++;
+
+    for (const one of [true, false]) {
+      setHordeOneRallyPoint(one);
+      setHordesHoldTheirEnd(true);
+      const now0 = Date.now();
+      clearBodies(world);
+      const bodies = clump(world, now0, 'z', spot.x - 250, spot.y, N, 23);
+      ageRound(world, now0);
+      let now = now0;
+      tick(world, now, TICK_MS / 1000);
+      now += TICK_MS;
+      if (world.hordes.size !== 1) continue;
+      const horde = [...world.hordes.values()][0];
+      horde.destX = spot.x;
+      horde.destY = spot.y;
+      horde.aimX = spot.x;
+      horde.aimY = spot.y;
+      horde.legUntil = now + 1e9;
+      // Make the next horde tick come at once, so the goals are written round
+      // the spot rather than round wherever the first tick sent them.
+      world.nextHordeTick = 0;
+
+      const prev = new Map<string, { x: number; y: number }>();
+      const speeds: number[] = [];
+      let overlapTicks = 0;
+      let overlapPairs = 0;
+      const TICKS = 750;
+      for (let i = 0; i < TICKS; i++) {
+        tick(world, now, TICK_MS / 1000);
+        now += TICK_MS;
+        if (i < TICKS - 240) {
+          for (const b of bodies) prev.set(b.id, { x: b.x, y: b.y });
+          continue;
+        }
+        const live = bodies.filter((b) => world.entities.has(b.id));
+        for (const b of live) {
+          const p = prev.get(b.id);
+          if (p) speeds.push(Math.hypot(b.x - p.x, b.y - p.y) / (TICK_MS / 1000));
+          prev.set(b.id, { x: b.x, y: b.y });
+        }
+        let pairs = 0;
+        for (let a = 0; a < live.length; a++) {
+          for (let c = a + 1; c < live.length; c++) {
+            if (Math.hypot(live[a].x - live[c].x, live[a].y - live[c].y) < ZOMBIE_RADIUS * 2 - 4) pairs++;
+          }
+        }
+        overlapPairs += pairs;
+        overlapTicks++;
+      }
+      // What each member was told to go to, in the new mode; in the old one it
+      // is the aim for every one of them, which is the whole of the fault.
+      const goals = new Set<string>();
+      for (const b of bodies) {
+        const st = world.ai.get(b.id);
+        if (!st) continue;
+        const gx = one || st.hordeGoalX === null ? horde.aimX : st.hordeGoalX;
+        const gy = one || st.hordeGoalY === null ? horde.aimY : st.hordeGoalY;
+        goals.add(`${Math.round(gx)},${Math.round(gy)}`);
+      }
+      const c = centreOf(bodies.filter((b) => world.entities.has(b.id)));
+      const bucket = one ? out.old : out.now;
+      // p90 rather than the median, and that is the reading rather than a
+      // preference: a pile is wedged solid in the middle and churning at the rim,
+      // so its median body is standing still and its jiggle is all in the tail.
+      // Measured as a median the old pile read 1.1 px/s, which is not what a
+      // screen of zombies shoving at one point looks like.
+      const sorted = speeds.slice().sort((a, b) => a - b);
+      bucket.speed.push(sorted.length ? sorted[Math.floor(sorted.length * 0.9)] : 0);
+      bucket.overlap.push(overlapPairs / Math.max(1, overlapTicks));
+      bucket.goals.push(goals.size);
+      bucket.off.push(Math.hypot(c.x - spot.x, c.y - spot.y));
+    }
+  }
+  setHordeOneRallyPoint(false);
+  setHordesHoldTheirEnd(false);
+
+  if (staged === 0 || out.now.speed.length === 0 || out.old.speed.length === 0) {
+    console.log('  (nothing staged on these cities; claiming nothing)');
+    return;
+  }
+  console.log(`  ${staged} cities, ${N} zombies held on a spot, last 8s of 25s:`);
+  console.log(
+    `    body speed, p90      OLD ${f1(med(out.old.speed))} px/s   NEW ${f1(med(out.now.speed))} px/s`,
+  );
+  console.log(
+    `    pairs overlapping    OLD ${f1(med(out.old.overlap))}   NEW ${f1(med(out.now.overlap))}  (per tick)`,
+  );
+  console.log(`    places told to go    OLD ${med(out.old.goals)}   NEW ${med(out.now.goals)}  of ${N}`);
+  console.log(
+    `    centre off the spot  OLD ${f1(med(out.old.off))}px   NEW ${f1(med(out.now.off))}px`,
+  );
+  check(med(out.old.goals) === 1, 'CONTROL: one point, every member told the same place', `${med(out.old.goals)}`);
+  check(med(out.now.goals) >= N * 0.9, 'every member told a place of its own', `${med(out.now.goals)} of ${N}`);
+  check(
+    med(out.now.speed) < med(out.old.speed) * 0.5,
+    'they settle rather than churn',
+    `${f1(med(out.old.speed))} -> ${f1(med(out.now.speed))} px/s`,
+  );
+  check(
+    med(out.now.overlap) < med(out.old.overlap),
+    'and stop standing in each other',
+    `${f1(med(out.old.overlap))} -> ${f1(med(out.now.overlap))} pairs a tick`,
+  );
+  check(med(out.now.off) < 80, 'and the formation is still where the horde was going', `${f1(med(out.now.off))}px`);
+}
+
 // ---------------------------------------------------------- in a real round
 
 /**
@@ -1045,29 +1360,56 @@ function liveRound(world: World): void {
   // the map not being seeded.
   const off: number[] = [];
   const way: number[] = [];
+  const pt: number[] = [];
   const end: number[] = [];
   for (let i = 0; i < 3; i++) {
     off.push(window(true));
     setHordeAimsAtTheEnd(false);
     way.push(window(false));
+    // The one-point arm is the control for the formation's own cost: every
+    // member's slot goal is worked out at 2Hz, against a straight-line test,
+    // and that has to be shown to be affordable rather than assumed.
+    setHordeOneRallyPoint(true);
+    pt.push(window(false));
+    setHordeOneRallyPoint(false);
     setHordeAimsAtTheEnd(true);
     end.push(window(false));
     setHordeAimsAtTheEnd(false);
   }
   let left = 0;
   for (const e of world.entities.values()) if (e.type === 'zombie') left++;
-  console.log(`  no hordes        : ${off.map(f1).join(' / ')}ms   median ${f1(med(off))}`);
-  console.log(`  hordes, waypoint : ${way.map(f1).join(' / ')}ms   median ${f1(med(way))}`);
-  console.log(`  hordes, far end  : ${end.map(f1).join(' / ')}ms   median ${f1(med(end))}`);
+  console.log(`  no hordes                : ${off.map(f1).join(' / ')}ms   median ${f1(med(off))}`);
+  console.log(`  hordes, a slot each      : ${way.map(f1).join(' / ')}ms   median ${f1(med(way))}`);
+  console.log(`  hordes, one rally point  : ${pt.map(f1).join(' / ')}ms   median ${f1(med(pt))}`);
+  console.log(`  hordes, the far end      : ${end.map(f1).join(' / ')}ms   median ${f1(med(end))}`);
   console.log(
     `  (${world.entities.size} entities, ${left} zombies, ${world.hordes.size} hordes, ` +
       `${world.hordeOf.size} marching)`,
+  );
+
+  // The horde tick itself, forced and timed on its own. It only runs every
+  // fifteenth tick, so a tick median averages it away — and a spike every half
+  // second is exactly the cost a median cannot see.
+  const hordeTick: number[] = [];
+  for (let i = 0; i < 20; i++) {
+    world.nextHordeTick = 0;
+    const t0 = performance.now();
+    updateHordes(world, now);
+    hordeTick.push(performance.now() - t0);
+    now += TICK_MS;
+  }
+  console.log(
+    `  the horde tick alone, ${world.hordeOf.size} members: median ${f1(med(hordeTick))}ms, ` +
+      `worst ${f1(Math.max(...hordeTick))}ms`,
   );
   check(
     med(way) <= med(end),
     'the rolling waypoint is no dearer than walking at the far end',
     `${f1(med(way))}ms against ${f1(med(end))}ms`,
   );
+  let tallest = 0;
+  for (const h of world.hordes.values()) tallest = Math.max(tallest, h.size);
+  check(tallest <= HORDE_MAX_SIZE, 'and after all that, no horde past the ceiling', `biggest ${tallest}`);
 }
 
 // ------------------------------------------------------------------ the run
@@ -1081,6 +1423,9 @@ setNoHordes(false);
 beforeAndAfter(world);
 formAndBounce(world);
 mergeRow(world);
+capRow(world);
+stallRow(world);
+formationRow(world);
 chaseRow(world);
 relayRow(world);
 cost(world);

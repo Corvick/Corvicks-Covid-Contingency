@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.35.1';
+export const GAME_VERSION = '0.35.2';
 
 // ---------------------------------------------------------------- world
 /**
@@ -1536,6 +1536,80 @@ export const HORDE_MIN_SIZE = 8;
  * numbers that mean the same thing drift.
  */
 export const HORDE_MERGE_RADIUS = HORDE_JOIN_RADIUS;
+/**
+ * The most a horde may hold. Past this a group is full: it recruits nobody,
+ * merges with nobody, and whoever is over the line is struck out to seed a
+ * horde of their own.
+ *
+ * **Without a ceiling the merge is a snowball, and it was.** Every horde walks
+ * at one of eight ends, so hordes meet; two that meet fold into one bigger one,
+ * which is then likelier to meet the next. Reported off a late-round frame with
+ * 628 zombies in the city and roughly five hundred of them in a single red
+ * smear — one horde that had eaten all the others and could no longer fit on
+ * the ground it was walking to.
+ *
+ * Fifty is a group that fills a good part of a player's screen at
+ * `CAMERA_ZOOM`, stands in a disc about 150px across, and still leaves a busy
+ * city with a dozen of them to cross it.
+ */
+export const HORDE_MAX_SIZE = 50;
+/**
+ * How far apart the slots in a horde's formation sit — the `c` in a
+ * phyllotaxis spiral, `r = c * sqrt(i + 0.5)`.
+ *
+ * **Every member has somewhere of its own to stand**, the way every SWAT
+ * operator has a post off his leader rather than the leader's own pixel. Handed
+ * one point, fifty bodies arrive at it and `resolveCollisions` spends every tick
+ * shoving them apart while every one of them walks straight back in — which is
+ * the jiggling, and the bodies phasing through each other, in the report.
+ *
+ * On a Vogel spiral neighbours sit about `c * sqrt(PI)` apart, so at 1.6 body
+ * radii that is ~40px between centres against a 28px body: a crowd, with daylight
+ * between them.
+ */
+export const HORDE_SLOT_SPACING = ZOMBIE_RADIUS * 1.6;
+/** Inside this of its own slot a member stands still and waits for the horde. */
+export const HORDE_SLOT_HOLD = 8;
+/**
+ * Over this much ground short of its slot a member eases from a march down to
+ * nothing, rather than walking flat out to the edge and stopping dead.
+ *
+ * **That ramp is what stops the jiggle, not the slots alone.** A body at full
+ * pace overshoots by a tick's worth of step and is shoved back, and a neighbour
+ * bumping it a few pixels off its spot sends it lurching back at 66 px/s. Eased,
+ * a nudge is answered by a drift.
+ */
+export const HORDE_SLOT_EASE = 60;
+/**
+ * How wide the word of a sighting is spread over the members it is sent to, as
+ * a share of their march slots. Smaller than the formation — they are closing on
+ * somebody rather than standing about — and not a point, for the same reason
+ * the march is not.
+ */
+export const HORDE_PREY_SPREAD = 0.5;
+/**
+ * How far off the end of the map itself a horde's destination is scattered, and
+ * how near to another horde's destination an end counts as already taken.
+ *
+ * Eight ends is a short list, and two hordes marching at the same one arrive on
+ * the same ground: with a cap on their size they can no longer merge, so they
+ * would stand in each other's formation instead. An end another horde is already
+ * heading for is passed over while there is a free one, and the point within it
+ * is scattered so that even a shared end is not a shared pixel.
+ */
+export const HORDE_END_SCATTER = 350;
+/**
+ * A horde that has made no real progress toward its end for this long gives the
+ * leg up and picks another — `HORDE_STALL_PROGRESS` pixels closer is progress.
+ *
+ * `HORDE_LEG_GIVE_UP_MS` is two and a half minutes, and that is the right budget
+ * for a leg that is merely long. It is far too long for one that has jammed: a
+ * mass wedged into a corner it cannot fit stands there churning for the whole of
+ * it. Not counted while the horde is onto somebody, which is progress of a
+ * different kind.
+ */
+export const HORDE_STALL_MS = 20000;
+export const HORDE_STALL_PROGRESS = 80;
 /**
  * How far a member may get from its horde's centre before it gives up on the
  * destination and comes back to the pack.

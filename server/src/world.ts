@@ -672,6 +672,19 @@ export interface AiState {
   stuckSince: number;
   /** Freshly turned: no interest in doors while there is prey about. */
   freshUntil: number;
+  /**
+   * This zombie's place in its horde's formation, and the ground that place
+   * works out to this horde tick — see `HORDE_SLOT_SPACING`.
+   *
+   * The index is kept across ticks and handed out lowest-free-first, so a
+   * member keeps its spot while others die around it and a newcomer fills the
+   * nearest hole rather than every body shuffling one place along. The goal is
+   * written by the horde tick at 2Hz, which is also the only time the point it
+   * is measured from moves.
+   */
+  hordeSlot: number;
+  hordeGoalX: number | null;
+  hordeGoalY: number | null;
   /** Clawing at a door — drives the animation client-side. */
   breakingUntil: number;
   /** Door just dealt with, left alone until this passes. */
@@ -1615,6 +1628,9 @@ export function newAiState(now: number, x: number, y: number): AiState {
     shelterVia: -1,
     stuckSince: 0,
     freshUntil: 0,
+    hordeSlot: -1,
+    hordeGoalX: null,
+    hordeGoalY: null,
     breakingUntil: 0,
     doorIgnore: -1,
     doorIgnoreUntil: 0,
