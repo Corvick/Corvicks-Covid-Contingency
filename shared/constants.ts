@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.34.1';
+export const GAME_VERSION = '0.35.0';
 
 // ---------------------------------------------------------------- world
 /**
@@ -1474,6 +1474,156 @@ export const ZOMBIE_EXIT_PROGRESS_MS = 1600;
 export const ZOMBIE_EXIT_PROGRESS_MIN = 12;
 /** A zombie this close to prey drops whatever door it was working on. */
 export const ZOMBIE_ABANDON_DOOR_RANGE = 210;
+
+// ------------------------------------------------------------------- hordes
+
+/**
+ * How long into a round before the shamblers stop drifting and start moving
+ * as hordes.
+ *
+ * The first six minutes are the outbreak finding its feet — a handful of
+ * zombies at the breach, the room-to-room search, people turning one at a
+ * time. There is no horde to form because there is barely a crowd. What this
+ * marks is the point where there are enough of them that milling about is the
+ * wrong behaviour: several large groups crossing the city is both a far more
+ * frightening thing to watch and a far harder thing to hide from than the same
+ * bodies spread evenly over it.
+ *
+ * Measured from `world.startedAt`, which `resetWorld` stamps, so a restart
+ * starts the clock again.
+ */
+export const HORDE_FORM_AT_MS = 6 * 60 * 1000;
+/**
+ * How often the hordes are re-formed, re-centred and given their orders.
+ *
+ * Everything collective here happens on this clock and nothing happens per
+ * tick: one walk of the zombies to recompute the centres, then a handful of
+ * records deciding where to go. That is the same trade `danger.ts` and
+ * `world.targetClaims` make — build the answer once for everybody rather than
+ * letting three hundred bodies each go and find it out.
+ *
+ * Slower than the danger field (160ms) because a horde's destination is a
+ * minute-long errand, not a half-second one.
+ */
+export const HORDE_TICK_MS = 500;
+/**
+ * How close to a horde's *centre* a loose zombie has to be to be part of it.
+ *
+ * Against the centre rather than against the nearest member, and that is what
+ * keeps a horde a blob. Single-linkage — join whoever you are nearest to —
+ * lets a chain of zombies a stride apart snake across the whole city and come
+ * out as one "horde" with no middle to it.
+ */
+export const HORDE_JOIN_RADIUS = 700;
+/**
+ * Fewer than this and it is not a horde, it is some zombies. Dissolved, and
+ * its members are loose again for whoever comes past.
+ *
+ * The ask is "several large groups", and without a floor the clustering
+ * cheerfully reports every lone straggler as a horde of one — which would then
+ * march across the map on its own and make the whole feature read as ordinary
+ * zombies with a longer wander.
+ */
+export const HORDE_MIN_SIZE = 8;
+/**
+ * Two horde centres this close are one horde.
+ *
+ * Membership is sticky, which is what stops a group being torn in half every
+ * time another passes near it — and the price of that is that two masses which
+ * genuinely converge would stay two forever. The same figure as
+ * `HORDE_JOIN_RADIUS` and for the same reason: it is already this file's
+ * statement of how far apart bodies can be and still be one group, and two
+ * numbers that mean the same thing drift.
+ */
+export const HORDE_MERGE_RADIUS = HORDE_JOIN_RADIUS;
+/**
+ * How far a member may get from its horde's centre before it gives up on the
+ * destination and comes back to the pack.
+ *
+ * Wider than `HORDE_JOIN_RADIUS`, deliberately: at the join radius it would be
+ * firing on the outermost members of a horde that is doing nothing wrong. What
+ * it is for is the straggler — somebody held up at a door, or shot, or that
+ * took a longer way round a building — and that is a body well outside the
+ * shape rather than at the edge of it.
+ */
+export const HORDE_SPREAD = 900;
+/**
+ * The pace of a horde on the march.
+ *
+ * Between `ZOMBIE_SEARCH_SPEED` (48, milling about) and `ZOMBIE_SPEED` (102,
+ * coming for you), because it is neither: a horde crossing the city is going
+ * somewhere on purpose and is not chasing anybody. Flat for every member, so
+ * they arrive together — the per-zombie variation that makes a chase strung
+ * out is exactly what would smear a march into a queue.
+ */
+export const HORDE_MARCH_SPEED = 66;
+/**
+ * How far in from the boundary an "end of the map" sits.
+ *
+ * The perimeter has buildings built onto it, so the corner itself is as often
+ * as not inside somebody's front room. Every end is put through `walkableNear`
+ * on top of this; the inset is what stops that spiral doing all the work.
+ */
+export const HORDE_END_INSET = 300;
+/**
+ * How far away an end has to be to count as the *opposite* end.
+ *
+ * A share of the map's diagonal rather than a distance, so it means the same
+ * thing at every setting of the population slider. At a half, a horde in a
+ * corner can pick any of the three far ends and none of the near ones — which
+ * is what makes it bounce corner to corner like the screensaver rather than
+ * shuffle between two adjacent ones.
+ */
+export const HORDE_OPPOSITE_MIN_SHARE = 0.5;
+/** Close enough to the end it was making for to call it arrived and pick another. */
+export const HORDE_ARRIVE_DIST = 340;
+/**
+ * How far ahead of itself a horde puts the point its members actually walk at.
+ *
+ * **A cost decision before it is anything else.** Handed the far end of the map
+ * directly, every member runs a wall-clear test across four thousand pixels and
+ * then an A* to match — and A* is superlinear in the distance, at three hundred
+ * bodies, several times a second. Measured in a live round with ~340 zombies
+ * marching, alternating all three arrangements in one process: **no hordes
+ * 3.5ms, this 4.5ms, the far end 7.3ms** — so the waypoint costs a quarter of
+ * what walking at the destination does, for the same march.
+ *
+ * Comfortably wider than `HORDE_SPREAD`, so the members at the front of the
+ * mass are still walking forwards at it rather than turning round to reach it.
+ */
+export const HORDE_STEP_AHEAD = 1000;
+/**
+ * One budget for a leg, never extended — the shape `HIDE_DEEPER_GIVE_UP_MS`
+ * and `RALLY_ROOM_GIVE_UP_MS` both use.
+ *
+ * A horde that has spent this long on one leg has been pulled off it by
+ * something — a fight it never finished, a mass split either side of a
+ * landmark — and the answer is a fresh end rather than the rest of the round
+ * spent on an errand nobody is going to complete.
+ */
+export const HORDE_LEG_GIVE_UP_MS = 150000;
+/**
+ * How long a horde stays onto a body one of its members has laid eyes on.
+ *
+ * Longer than `ZOMBIE_LAST_SEEN_MS` (9s) for the same reason `DOG_ROAR_ORDER_MS`
+ * is: the far side of a horde may have several hundred pixels to cover before
+ * it gets anywhere near, and an order that lapsed on the way would leave most
+ * of the mass having turned round for nothing.
+ */
+export const HORDE_PREY_MS = 14000;
+/**
+ * How many people standing together make a *group* worth calling another horde
+ * in on.
+ *
+ * "More than 6" is the ask, and the reason given for it is the whole design:
+ * it is what stops two hordes converging on one person in a house. A single
+ * survivor is one horde's business. A crowd is worth everybody's.
+ */
+export const HORDE_CROWD_MIN = 7;
+/** How close together those people have to be standing to be one group. */
+export const HORDE_CROWD_RADIUS = 420;
+/** How far the word travels to another horde. */
+export const HORDE_ALERT_RANGE = 2200;
 
 /**
  * Remarking on the first zombie you ever see. Only worth saying early on —

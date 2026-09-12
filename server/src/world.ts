@@ -138,6 +138,7 @@ import type { BackupVehicle } from './backup.js';
 import type { Mine } from './mines.js';
 import type { FirePatch, PendingPatch } from './fire.js';
 import type { DogState, Knockback, Lash, Tentacle } from './dog.js';
+import type { Horde } from './horde.js';
 
 export interface Entity extends EntityState {
   radius: number;
@@ -1218,6 +1219,20 @@ export interface World {
    * actually care read it — see `spreadsOut`.
    */
   targetClaims: Map<string, number>;
+  /**
+   * The outbreak moving as several large groups, six minutes in — see
+   * `server/src/horde.ts`.
+   *
+   * Two maps rather than a member list per horde, and both are rebuilt from
+   * the live bodies on every horde tick: a zombie ends four ways and a roster
+   * somebody has to strike from is a roster that marches a dead man across the
+   * city. `hordeOf` is the authority on who is in what, `hordes` on where each
+   * one is and where it is going.
+   */
+  hordes: Map<number, Horde>;
+  hordeOf: Map<string, number>;
+  nextHordeTick: number;
+  nextHordeId: number;
   /** Ground still alight, and who is on fire until when. */
   fires: FirePatch[];
   /**
@@ -2367,6 +2382,10 @@ export function createWorld(): World {
     emplacements: new Map(),
     barricades: new Map(),
     targetClaims: new Map(),
+    hordes: new Map(),
+    hordeOf: new Map(),
+    nextHordeTick: 0,
+    nextHordeId: 0,
     fires: [],
     pendingFires: [],
     burning: new Map(),
@@ -2518,6 +2537,12 @@ export function resetWorld(world: World): void {
   // exactly the trap `world.corpses` fell into.
   world.barricades.clear();
   world.targetClaims.clear();
+  // A horde is a set of ids and a pair of coordinates, and neither means
+  // anything on a fresh map — the trap `world.corpses` and `world.barricades`
+  // both fell into. The six minutes start again with the round.
+  world.hordes.clear();
+  world.hordeOf.clear();
+  world.nextHordeTick = 0;
   // Keyed by building index, which means nothing on a map that no longer has
   // that building in it — the same trap `world.corpses` fell into with its
   // coordinates. It would expire on its own within the walk-in budget, but
