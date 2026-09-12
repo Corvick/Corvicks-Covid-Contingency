@@ -2392,11 +2392,17 @@ export const CHARGE_BEAM_RADIUS = 14;
  * other. Skipping one and stopping at the next is a beam that pierced the
  * corner and then stopped inside it, which from the outside reads as the gun
  * simply failing against that one bit of wall while working fine a foot
- * either side. Four covers a corner, a wall with a doorway shut in it, and an
- * ordinary party wall between two rooms, and it is still a count rather than
- * a free pass: a beam does not cross a whole building.
+ * either side. Two covers a corner or a wall with a doorway shut in it, and
+ * it is still a count rather than a free pass: a beam does not cross a whole
+ * building.
+ *
+ * Was 4. Brought down so a third wall is a real stop rather than a formality
+ * — the wall that actually catches the round gets its own decal
+ * (`spawnPlasmaScorch`'s `pierced` argument) rather than the through-scorch
+ * every pierced wall gets, so a beam that has spent its budget visibly stops
+ * instead of reading as though it kept going.
  */
-export const CHARGE_WALL_PIERCE = 4;
+export const CHARGE_WALL_PIERCE = 2;
 /**
  * How close two slabs have to be, along the round's own line, to be **one
  * wall** rather than two.

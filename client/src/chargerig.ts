@@ -148,6 +148,9 @@ interface Result {
   wallOffWall: number; // solid bar/core ink outside the wall rect — must be ~0
   wallBoltInto: number; // cyan lightning past the bar, into the wall
   wallBoltOut: number; // cyan lightning past the bar, open side
+  stoppedBoltInto: number; // the non-pierced mark: must have none of the above
+  stoppedFarFaceInk: number; // solid ink near the far face of a thin wall — must be ~0
+  piercedFarFaceInk: number; // the same region on a pierced mark — the control, must be > 0
   wallCoreStraightDy: number; // the core's vertical reach, shot square
   wallCoreAngledDy: number; // …shot at -1.0 — must be taller (the core tilted)
   wallAngledCoreShifts: boolean;
@@ -176,6 +179,9 @@ function run(): void {
     wallOffWall: 0,
     wallBoltInto: 0,
     wallBoltOut: 0,
+    stoppedBoltInto: 0,
+    stoppedFarFaceInk: 0,
+    piercedFarFaceInk: 0,
     wallCoreStraightDy: 0,
     wallCoreAngledDy: 0,
     wallAngledCoreShifts: false,
@@ -303,6 +309,48 @@ function run(): void {
       result.wallBoltOut = boltOut;
     }
 
+    // --- the wall that actually stops it, `pierced = false`: nothing may read
+    //     as though the round came out the other side. No lightning past the
+    //     bar into the wall, and the white/purple ink must not reach the far
+    //     face of this thin (14px) slab — where the pierced mark legitimately
+    //     does, since the beam genuinely went through it.
+    {
+      const WALL = { x: 200, y: 60, w: 14, h: 180 };
+      const measure = (isPierced: boolean): { farFaceInk: number; boltInto: number } => {
+        clear();
+        clearBlood();
+        spawnPlasmaScorch(200, 150, 0, 4, 1, [WALL], isPierced);
+        drawBulletHoles(ctx, VIEW);
+        const bx = 120;
+        const by = 50;
+        const w = 220;
+        const dat = ctx.getImageData(bx, by, w, 200).data;
+        let farFaceInk = 0;
+        let boltInto = 0;
+        for (let i = 0; i < dat.length; i += 4) {
+          const p = i / 4;
+          const dx = (p % w) + bx - 200; // relative to the near face at x=200
+          const dy = Math.floor(p / w) + by - 150;
+          const r = dat[i];
+          const g = dat[i + 1];
+          const b = dat[i + 2];
+          const purple = r > 90 && b > 110 && r > g + 22 && b > g + 22 && Math.abs(r - b) < 100;
+          const barBlueBody = b > 110 && g < 95 && r < 85;
+          const white = r > 140 && g > 120 && b > 150;
+          const cyan = b > 70 && g > 55 && b >= r && g >= r;
+          // right at the wall's far face (the slab is 14px thick, dx=14 is it).
+          if ((purple || barBlueBody || white) && dx >= 11 && dx <= 16 && Math.abs(dy) < 18) farFaceInk++;
+          if (cyan && Math.abs(dy) < 34 && dx > 17 && dx < 46) boltInto++;
+        }
+        return { farFaceInk, boltInto };
+      };
+      const stopped = measure(false);
+      const throughIt = measure(true);
+      result.stoppedBoltInto = stopped.boltInto;
+      result.stoppedFarFaceInk = stopped.farFaceInk;
+      result.piercedFarFaceInk = throughIt.farFaceInk;
+    }
+
     // --- an angled shot tilts the core. Same left-face wall; fire square and
     //     at -1.0 rad, and the purple ring's vertical reach must grow because
     //     its long axis followed the beam.
@@ -373,6 +421,11 @@ function run(): void {
       // cyan lightning arcs off both faces of the wall
       result.wallBoltInto > 4 &&
       result.wallBoltOut > 4 &&
+      // the wall that stops it: no lightning through, and the ink stays well
+      // short of the far face where the pierced mark legitimately reaches it
+      result.stoppedBoltInto === 0 &&
+      result.piercedFarFaceInk > 5 &&
+      result.stoppedFarFaceInk < result.piercedFarFaceInk * 0.5 &&
       // an angled shot tilts the core
       result.wallAngledCoreShifts &&
       result.craterDarkMark > 200 &&
@@ -431,6 +484,20 @@ function run(): void {
   ctx.fillStyle = '#8aa';
   ctx.fillText('scorch straight-in — wall on the RIGHT — 2.7x', 950, 294);
   ctx.fillText('scorch angled ~49° into the same wall — 2.7x', 950, 564);
+  // A third: the wall that finally stops it, `pierced = false`. No lightning
+  // through to the far side and the white core stops short of it, unlike the
+  // two above, which the beam genuinely went through.
+  const dW3 = { x: 250, y: 520, w: 16, h: 120 };
+  ctx.fillStyle = '#242832';
+  ctx.fillRect(dW3.x, dW3.y, dW3.w, dW3.h);
+  spawnPlasmaScorch(250, 580, 0, 4, 7, [dW3], false);
+  drawBulletHoles(ctx, VIEW);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(canvas, 170, 520, 150, 120, 460, 500, 220, 176);
+  ctx.strokeStyle = '#334';
+  ctx.strokeRect(460, 500, 220, 176);
+  ctx.fillStyle = '#8aa';
+  ctx.fillText('scorch, stopped here (pierced = false)', 460, 494);
   ctx.fillStyle = '#8aa';
   ctx.fillText('scorch / crater; cooldown bar 1.0 / 0.5 / 0.15', 40, 700);
   drawChargeCooldown(ctx, 200, 710, 1);
