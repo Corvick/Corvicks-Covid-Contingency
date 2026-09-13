@@ -367,8 +367,8 @@ export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
  * Three patterns — boards for an ordinary house, institutional tile for the
  * police station, big stone flagstones for the corner complex — each a small
  * tile hashed once and handed to the canvas as a pattern, the grime tile's
- * trick and for its reason: a whole city of floors costs one fill per on-screen
- * footprint rather than a scatter per frame. The seams are laid so the tile
+ * trick and for its reason: a whole city of floors costs one path per kind of
+ * floor rather than a scatter per frame. The seams are laid so the tile
  * repeat has no visible grid — full-width course lines, and spacings that
  * divide `FLOOR_TILE`.
  *
@@ -585,6 +585,31 @@ function paintCellFloor(g: CanvasRenderingContext2D): void {
 let armouryPattern: CanvasPattern | null = null;
 let cellPattern: CanvasPattern | null = null;
 
+/**
+ * The per-rect drawing this replaced, kept behind a gate for `mapbench.ts`.
+ * The control is what says the batched version is the same picture for less.
+ */
+let floorsPerRect = false;
+export function setFloorsDrawnPerRect(on: boolean): void {
+  floorsPerRect = on;
+}
+
+/**
+ * **One path per kind of floor, filled twice — never a fill per rect.**
+ *
+ * A pattern fill carries a fixed cost per *call*, whatever size the rect is:
+ * measured at ~0.55ms each on a rasteriser without the GPU, so 600 small
+ * pattern fills cost 374ms where the same 600 rects as one path with one
+ * pattern fill cost 15ms — the price of a single full-screen fill. A city has
+ * ~600 floor rects and each took a solid base and a pattern on top, so a
+ * spectator framing the whole city was paying ~1200 of them a frame, and that
+ * was nearly all of the spectator's `map` phase and most of its `else`.
+ *
+ * It is the same picture. The base colours are opaque, no two footprints
+ * overlap, and the pattern is in user space so a tile lands on the same pixels
+ * whichever call draws it — `mapbench.ts` compares the two frames pixel for
+ * pixel. The station's two rooms and the saddles are batched the same way.
+ */
 export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Viewport): void {
   if (!settings.groundDetail) return;
   if (!housePattern) housePattern = floorTile(ctx, paintHouseFloor);
@@ -593,7 +618,88 @@ export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Vi
   if (!armouryPattern) armouryPattern = floorTile(ctx, paintArmouryFloor);
   if (!cellPattern) cellPattern = floorTile(ctx, paintCellFloor);
   if (!housePattern || !stationPattern || !complexPattern || !armouryPattern || !cellPattern) return;
+  if (floorsPerRect) {
+    drawFloorsPerRect(ctx, map, view);
+    return;
+  }
 
+  const station = map.policeStation;
+  const stationIdx = station ? station.building : -1;
+
+  const house = new Path2D();
+  const complex = new Path2D();
+  const stationFloor = new Path2D();
+  // Which of the three got anything, because the per-call cost is paid by an
+  // empty path too.
+  let houseSeen = false;
+  let complexSeen = false;
+  let stationSeen = false;
+  for (let i = 0; i < map.buildings.length; i++) {
+    const b = map.buildings[i];
+    if (
+      b.x > view.x + view.w ||
+      b.x + b.w < view.x ||
+      b.y > view.y + view.h ||
+      b.y + b.h < view.y
+    ) {
+      continue;
+    }
+    let path = house;
+    if (i === map.cornerBuilding) {
+      path = complex;
+      complexSeen = true;
+    } else if (i === stationIdx) {
+      path = stationFloor;
+      stationSeen = true;
+    } else {
+      houseSeen = true;
+    }
+    for (const r of b.rects) path.rect(r.x, r.y, r.w, r.h);
+  }
+  if (houseSeen) fillFloor(ctx, house, FLOOR_HOUSE_COLOR, housePattern);
+  if (complexSeen) fillFloor(ctx, complex, FLOOR_COMPLEX_COLOR, complexPattern);
+  if (stationSeen && station) {
+    fillFloor(ctx, stationFloor, FLOOR_STATION_COLOR, stationPattern);
+    fillRoom(ctx, station.armoury, FLOOR_ARMOURY_COLOR, armouryPattern);
+    fillRoom(ctx, station.cell, FLOOR_CELL_COLOR, cellPattern);
+    drawCellDrain(ctx, station.cell);
+  }
+
+  drawSaddles(ctx, map, view);
+}
+
+function fillFloor(
+  ctx: CanvasRenderingContext2D,
+  path: Path2D,
+  base: string,
+  pattern: CanvasPattern,
+): void {
+  ctx.fillStyle = base;
+  ctx.fill(path);
+  ctx.fillStyle = pattern;
+  ctx.fill(path);
+}
+
+/** A floor drain in the middle of the cell. */
+function drawCellDrain(ctx: CanvasRenderingContext2D, cell: Wall): void {
+  const dx = cell.x + cell.w / 2;
+  const dy = cell.y + cell.h / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.arc(dx, dy, 7, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(120,124,132,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(dx - 6, dy);
+  ctx.lineTo(dx + 6, dy);
+  ctx.moveTo(dx, dy - 6);
+  ctx.lineTo(dx, dy + 6);
+  ctx.stroke();
+}
+
+function drawFloorsPerRect(ctx: CanvasRenderingContext2D, map: MapData, view: Viewport): void {
+  if (!housePattern || !stationPattern || !complexPattern || !armouryPattern || !cellPattern) return;
   const station = map.policeStation;
   const stationIdx = station ? station.building : -1;
 
@@ -629,27 +735,25 @@ export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Vi
     if (i === stationIdx && station) {
       fillRoom(ctx, station.armoury, FLOOR_ARMOURY_COLOR, armouryPattern);
       fillRoom(ctx, station.cell, FLOOR_CELL_COLOR, cellPattern);
-      // A floor drain in the middle of the cell.
-      const dx = station.cell.x + station.cell.w / 2;
-      const dy = station.cell.y + station.cell.h / 2;
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.beginPath();
-      ctx.arc(dx, dy, 7, 0, TAU);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(120,124,132,0.5)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(dx - 6, dy);
-      ctx.lineTo(dx + 6, dy);
-      ctx.moveTo(dx, dy - 6);
-      ctx.lineTo(dx, dy + 6);
-      ctx.stroke();
+      drawCellDrain(ctx, station.cell);
     }
   }
 
-  // A real threshold saddle laid across every doorway — interior, where one
-  // room's floor meets the next, and the front door, where the floor meets the
-  // street. A short strip of trim, the way a real building does it.
+  drawSaddles(ctx, map, view);
+}
+
+/**
+ * A real threshold saddle laid across every doorway — interior, where one
+ * room's floor meets the next, and the front door, where the floor meets the
+ * street. A short strip of trim, the way a real building does it.
+ *
+ * **Deliberately still a draw per door**, unlike the floors under it. These are
+ * solid fills and strokes, which carry none of a pattern's per-call cost, and
+ * batched into three paths they stop being the same picture: a strip drawn
+ * later no longer covers the strokes of a neighbouring one, which moved ~500
+ * pixels by a few levels near doors for nothing measurable.
+ */
+function drawSaddles(ctx: CanvasRenderingContext2D, map: MapData, view: Viewport): void {
   const half = FLOOR_SADDLE_DEPTH;
   for (const d of map.doors) {
     const span = d.halfSpan + 3;

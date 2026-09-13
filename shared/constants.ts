@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.35.3';
+export const GAME_VERSION = '0.35.4';
 
 // ---------------------------------------------------------------- world
 /**
@@ -4947,7 +4947,7 @@ export const GRIME_CRACKS = 7;
  *
  * Built the grime tile's way and for the grime tile's reason: one small tile
  * hashed once and handed to the canvas as a pattern, so a whole city of floors
- * costs one fill per on-screen footprint rather than a scatter per frame, and
+ * costs one path per kind of floor rather than a scatter per frame, and
  * the seams line up across the tile repeat by construction (every spacing
  * divides `FLOOR_TILE`). It is ground detail, so it rides `settings.groundDetail`
  * and is gone on LOW.
