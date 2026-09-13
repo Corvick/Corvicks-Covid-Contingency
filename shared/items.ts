@@ -225,13 +225,19 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     // only place one exists is a soldier's own hands off `dropSoldier`.
     rarity: 0,
     // Fully automatic, same 110ms cadence as the SMG — same class of weapon,
-    // same rate of fire — with three things separating a trained soldier's
-    // rifle from an officer's sidearm-turned-SMG: a soldier aims for a living,
-    // so the bloom comes down to something worth respecting; the round is a
-    // rifle round rather than a pistol round working overtime, so it staggers
-    // less on the way through; and it is a heavier round to begin with —
-    // (6+10)/2 / 0.11s is ~73dps against the SMG's ~50, so the extra accuracy
-    // isn't the whole of the upgrade.
+    // same rate of fire, for anything that ever fires it off this def directly
+    // (a player or a bot would, through `fireHeld`) — with three things
+    // separating a trained soldier's rifle from an officer's sidearm-turned-SMG:
+    // a soldier aims for a living, so the bloom comes down to something worth
+    // respecting; the round is a rifle round rather than a pistol round working
+    // overtime, so it staggers less on the way through; and it is a heavier
+    // round to begin with.
+    //
+    // **A dropped soldier does not actually fire on this cadence.** Every
+    // dispatched NPC's trigger interval is read off `officerGrade`
+    // (`SOLDIER_SHOOT_INTERVAL_MS`), never off `cooldownMs` here — see that
+    // constant's own note for why, and for the soldier's real DPS against the
+    // SMG's.
     damageMin: 6,
     damageMax: 10,
     bloom: 0.06,

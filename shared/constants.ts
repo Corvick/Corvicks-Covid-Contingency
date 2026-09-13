@@ -3926,9 +3926,23 @@ export const HELI_WASH_RADIUS = HELI_RADIUS * 1.55;
 export const HELI_WASH_PUSH = 11;
 export const HELI_WASH_FLUTTER = 6;
 
-/** Dropped troops shoot far better than the beat officers. */
+/**
+ * Dropped troops shoot far better than the beat officers, and — unlike every
+ * other dispatched tier — carry a fully automatic weapon (`assaultRifle`).
+ * This is the *tier's* cadence, the same as `SWAT_SHOOT_INTERVAL_MS`: an NPC
+ * officer's fire rate is read off `officerGrade`, never off the held item's
+ * own `cooldownMs`, so the gun's 110ms `automatic` cadence is only ever what
+ * a player firing one would feel. It was 850 — barely faster than a bolt
+ * action's cycle time — which read as a soldier working a semi-auto one
+ * round at a time rather than holding a trigger down, and at that rate their
+ * actual DPS (assaultRifle's 6-10 damage / 0.85s, ~9.4) fell well short of
+ * even the SMG a player carries. 150 is still short of the raw 110ms, the
+ * same throttle SWAT's own trigger keeps below their item's 470ms, so four
+ * of them on full auto don't level a street before you can cross it — but
+ * it reads as automatic fire now, and clears the SMG's ~50 DPS (~53.3).
+ */
 export const SOLDIER_BLOOM_RAD = 0.07;
-export const SOLDIER_SHOOT_INTERVAL_MS = 850;
+export const SOLDIER_SHOOT_INTERVAL_MS = 150;
 export const SOLDIER_SIGHT = 520;
 export const SOLDIER_COLOR = '#4d7c3f';
 
