@@ -72,6 +72,22 @@ import type { World } from './world.js';
  * doing exactly what it is documented to do.
  */
 export const STATION_RADIO_ID = 'loot-armoury-radio';
+
+/**
+ * The corner complex's guaranteed smoke grenade, on the same terms as the
+ * armoury radio above: placed directly rather than through `drawItem`, so it
+ * is a fourth landmark placement rather than a draw against a table — rarity
+ * 0 already keeps it out of `ITEM_CITY_CAP` and every other table-driven cap,
+ * and this id keeps it out of `cityCount` and the takeover pool as well, for
+ * the same reason the radio needs to be kept out of both.
+ *
+ * It used to be one of `ONE_OFF_ITEMS`, taking over whatever ordinary spot
+ * the citywide takeover happened to land on. The complex is the one landmark
+ * worth spending it on instead — smoke is what gets a squad or a helicopter
+ * into a fight, and the complex is where a fight worth that is likeliest to
+ * be.
+ */
+export const COMPLEX_SMOKE_ID = 'loot-complex-smoke';
 import { chargeProgress, coolProgress, deployProgress } from './combat.js';
 import { distToPath } from './mapgen.js';
 import { pondRadiusAt } from '../../shared/pond.js';
@@ -458,6 +474,63 @@ export function spawnPickups(world: World): void {
         }
       }
     }
+
+    /**
+     * **And a guaranteed smoke grenade, laid the way the armoury's radio is —
+     * directly, not through `drawItem`.**
+     *
+     * It is a placement of its own rather than one of a room's `count` draws
+     * above: `smokeGrenade` is rarity 0, so the table those draws pull from
+     * never contains it anyway, and asking for one *as* a draw would only
+     * ever come up empty. This is the fourth kind of by-hand placement in the
+     * city (`STATION_RADIO_ID`, the one-offs, the patrol car's pair), and it
+     * shares their reason: something meant to always exist somewhere specific
+     * cannot be left to a roll over the whole table.
+     *
+     * The room is picked at random from whichever of the complex's rooms have
+     * a finite depth — the same filter the per-room loop above already
+     * applies — and the same three rules that loop enforces apply here too:
+     * on walkable, reachable ground, clear of a doorway, clear of anything
+     * already placed. `COMPLEX_SMOKE_ID` is what keeps it out of
+     * `cityCount`, the takeover pool and `ITEM_CITY_CAP` alike.
+     */
+    const smokeRooms = world.rooms
+      .roomsOf(complex)
+      .filter((id) => Number.isFinite(world.rooms.rooms[id]?.depth));
+    for (let tries = 0; tries < 12 && smokeRooms.length > 0; tries++) {
+      const roomId = smokeRooms[Math.floor(Math.random() * smokeRooms.length)];
+      const room = world.rooms.rooms[roomId];
+      const spot = world.rooms.randomPoint(roomId);
+      if (!room || !spot) continue;
+      if (world.nav.isBlocked(spot.x, spot.y) || !world.nav.isReachable(spot.x, spot.y)) continue;
+
+      let inADoorway = false;
+      for (const index of room.exits) {
+        const door = world.map.doors[index];
+        if (door && Math.hypot(door.x - spot.x, door.y - spot.y) < COMPLEX_LOOT_DOOR_GAP) {
+          inADoorway = true;
+          break;
+        }
+      }
+      if (inADoorway) continue;
+
+      let crowded = false;
+      for (const p of world.pickups.values()) {
+        if (Math.hypot(p.x - spot.x, p.y - spot.y) < LOOT_MIN_GAP) {
+          crowded = true;
+          break;
+        }
+      }
+      if (crowded) continue;
+
+      world.pickups.set(COMPLEX_SMOKE_ID, {
+        id: COMPLEX_SMOKE_ID,
+        item: 'smokeGrenade',
+        x: spot.x,
+        y: spot.y,
+      });
+      break;
+    }
   }
 
   // A few things stashed in the park, tucked into the undergrowth rather than
@@ -717,7 +790,8 @@ export function spawnPickups(world: World): void {
     p.id.startsWith('loot-min-') ||
     p.id.startsWith('loot-car-') ||
     p.id.startsWith('loot-armoury-') ||
-    p.id === STATION_RADIO_ID;
+    p.id === STATION_RADIO_ID ||
+    p.id === COMPLEX_SMOKE_ID;
   const freeSpots = () =>
     Array.from(world.pickups.values()).filter((p) => inACity(p) && !byHand(p));
 

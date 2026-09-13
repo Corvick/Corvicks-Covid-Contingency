@@ -1756,13 +1756,15 @@ export const FOLLOW_WAIT_SHOUT = "Wait here!";
 /**
  * The launcher is kept out of the loot table and placed by its own roll, so
  * most cities simply don't have one. Finding it should feel like an event.
+ *
+ * The smoke grenade used to ride here too — one per city, dropped onto
+ * whatever ordinary spot the takeover happened to land on. It has its own
+ * placement now, in the corner complex (`COMPLEX_SMOKE_ID` in
+ * `inventory.ts`), on the same terms as the police armoury's radio: laid
+ * directly rather than through `drawItem`, so it needs no quota here and
+ * nothing about `ITEM_CITY_CAP` touches it either way.
  */
-/**
- * The launcher and the smoke grenade are each placed exactly once, by hand,
- * and kept out of the loot table entirely (rarity 0 leaves them out by
- * construction). One of each per city — finding either should be an event.
- */
-export const ONE_OFF_ITEMS = ['grenadeLauncher', 'smokeGrenade'] as const;
+export const ONE_OFF_ITEMS = ['grenadeLauncher'] as const;
 
 /**
  * At least one of each of these exists in every city. Unlike ONE_OFF_ITEMS
@@ -1791,7 +1793,8 @@ export const GUARANTEE_EVERY_GUN = true;
  * that from inside the round. The scarcity that is worth keeping is the
  * one-offs, which are still exactly one per city.
  *
- * Rarity 0 stays excluded: the smoke grenade is placed by its own roll.
+ * Rarity 0 stays excluded: the smoke grenade is placed directly, in the
+ * corner complex.
  */
 export const GUARANTEE_EVERY_UTILITY = true;
 
