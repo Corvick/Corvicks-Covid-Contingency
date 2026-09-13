@@ -125,6 +125,24 @@ export interface InputTracker {
    * meant, the same way E already works at a door.
    */
   rightDown: boolean;
+  /**
+   * Set by the caller (spectating, and only spectating) to say the canvas
+   * should try to capture the mouse the next time it gets a click. Reading it
+   * lives here rather than importing `spectating` from `main.ts`, so this file
+   * stays free of round state and merely does what it's told.
+   */
+  wantsLock: boolean;
+  /** True while `document.pointerLockElement` is actually this canvas. */
+  locked: boolean;
+  /**
+   * `performance.now()` of the most recent lock → unlock transition. Escape is
+   * what releases a Pointer Lock, and the browser does not swallow the
+   * keydown that caused it — so without this, the very keypress that lets go
+   * of the cursor would also fall through to whatever else Escape means (pause,
+   * or leaving the round). A caller can tell "this Escape was the release" from
+   * "this Escape is a second, ordinary press" by how recent this is.
+   */
+  unlockedAt: number;
 }
 
 export function trackInput(canvas: HTMLCanvasElement): InputTracker {
@@ -139,6 +157,9 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     interact: false,
     slotPressed: -1,
     rightDown: false,
+    wantsLock: false,
+    locked: false,
+    unlockedAt: 0,
   };
 
   /**
@@ -224,15 +245,85 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
     tracker.mouseY = ((e.clientY - rect.top) / rect.height) * VIEWPORT_HEIGHT;
   }
 
+  /**
+   * **Pointer Lock is what actually answers "keep panning past the edge".**
+   * Without it, once the cursor leaves the canvas the browser stops sending
+   * `mousemove` at all — there is no "how far past the edge" left to read, only
+   * a frozen last position — so the honest fix is to stop the cursor from ever
+   * leaving in the first place. Locked, the OS pointer is hidden and pinned
+   * wherever it was, and `movementX`/`movementY` keep arriving however far past
+   * the edge of the screen you keep pushing.
+   *
+   * **Spectating only** (`wantsLock`, set from outside — see `InputTracker`).
+   * A player's cursor is how you click a HUD button and where you aim; taking
+   * it over the moment a round starts would fight both.
+   *
+   * **Requested on the first click**, because `requestPointerLock` needs a
+   * user gesture and cannot be fired the instant `wantsLock` turns true — that
+   * happens off a snapshot arriving, not off anything the browser will accept
+   * as one. Idempotent past the first: once locked, `pointerLockElement`
+   * already answers, and a click does nothing further.
+   */
+  canvas.addEventListener('click', () => {
+    if (!tracker.wantsLock || document.pointerLockElement === canvas) return;
+    // A promise-returning browser rejects this when the page has no
+    // `allow="pointer-lock"` to stand on — inside an embedding iframe, say.
+    // That must not become an unhandled rejection on every single click.
+    Promise.resolve(canvas.requestPointerLock()).catch(() => {});
+  });
+
+  document.addEventListener('pointerlockchange', () => {
+    const was = tracker.locked;
+    tracker.locked = document.pointerLockElement === canvas;
+    if (tracker.locked) {
+      // The cursor is now captured rather than merely resting somewhere over
+      // the canvas — treat it as present from the first frame, or an edge push
+      // already under way waits for a `mousemove` that a still hand never sends.
+      tracker.pointerOver = true;
+    } else if (was) {
+      tracker.unlockedAt = performance.now();
+      // Fall back to the ordinary rule: absent a real `mousemove` proving
+      // otherwise, the pointer is not known to be over the canvas — the same
+      // caution `blur` already takes, so an edge push cannot outlive the lock.
+      tracker.pointerOver = false;
+    }
+  });
+  // Denied outright (no gesture, or the permission was never granted) — leave
+  // `locked` false and let the next click try again.
+  document.addEventListener('pointerlockerror', () => {
+    tracker.locked = false;
+  });
+
   canvas.addEventListener('mousemove', (e) => {
     tracker.pointerOver = true;
+    if (tracker.locked) {
+      // `clientX`/`clientY` are frozen at whatever they were when the lock
+      // engaged — the spec does not update them — so the position has to be
+      // built up from the relative deltas instead. Clamped to the viewport
+      // rather than left to run away: pushed into an edge it is already at the
+      // one distance (0) that gets `edgePush` its maximum, so there is nothing
+      // further out to reach for, and a giant unclamped figure would otherwise
+      // need an equal push the other way — with no visible cursor to judge it
+      // by — before the command card could be clicked again.
+      tracker.mouseX = Math.min(
+        VIEWPORT_WIDTH,
+        Math.max(0, tracker.mouseX + e.movementX * (VIEWPORT_WIDTH / rect.width)),
+      );
+      tracker.mouseY = Math.min(
+        VIEWPORT_HEIGHT,
+        Math.max(0, tracker.mouseY + e.movementY * (VIEWPORT_HEIGHT / rect.height)),
+      );
+      return;
+    }
     updateMouse(e);
   });
   canvas.addEventListener('mouseenter', () => {
     tracker.pointerOver = true;
   });
   canvas.addEventListener('mouseleave', () => {
-    tracker.pointerOver = false;
+    // A lock keeps the pointer here regardless of where the OS cursor visually
+    // sits, so a stray `mouseleave` while locked must not freeze the edge push.
+    if (!tracker.locked) tracker.pointerOver = false;
   });
   canvas.addEventListener('mousedown', (e) => {
     if (e.button === 2) {
@@ -242,7 +333,7 @@ export function trackInput(canvas: HTMLCanvasElement): InputTracker {
       return;
     }
     if (e.button !== 0) return;
-    updateMouse(e);
+    if (!tracker.locked) updateMouse(e);
     tracker.shooting = true;
   });
   window.addEventListener('mouseup', (e) => {

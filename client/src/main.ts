@@ -648,6 +648,12 @@ const { send, goOffline, goOnline, goHost, goGuest } = connect((msg) => {
       syncHeliRotors([]);
     }
     spectating = msg.spectating;
+    // Pointer Lock is the spectator camera's, not a player's — see `input.ts`.
+    // Set every snapshot rather than only on change, and released the moment
+    // spectating ends rather than waiting on Escape, since starting a round no
+    // longer has anyone watching the edges to pan for.
+    input.wantsLock = spectating;
+    if (!spectating && document.pointerLockElement === canvas) document.exitPointerLock();
     survivors = msg.survivors;
     infectedCount = msg.infected;
     zombieCount = msg.zombies;
@@ -833,6 +839,8 @@ function standDown(): void {
   input.rightDown = false;
   input.shooting = false;
   input.slotPressed = -1;
+  input.wantsLock = false;
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
   pushX = 0;
   pushY = 0;
   dogHud = null;
@@ -884,12 +892,28 @@ function quitToMenu(): void {
  */
 const DOG_ABILITY_KEYS = ['KeyQ', 'KeyE', 'KeyR', 'KeyF'];
 
+/**
+ * How long after a Pointer Lock release the same Escape that caused it is
+ * still read as "let go of the cursor" rather than "pause, or quit". The
+ * browser does not swallow the keydown that releases a lock — it fires
+ * normally, same as any other Escape — so without this the one keypress a
+ * spectator uses to get their cursor back would also throw them out of the
+ * round it came from. The order of the browser's own unlock against this
+ * handler is not guaranteed, so both a lock still standing and one that has
+ * just ended are read as the same event.
+ */
+const POINTER_UNLOCK_GRACE_MS = 300;
+
 window.addEventListener('keydown', (e) => {
   // The front end has its own back buttons; this all belongs to a round.
   if (!started) return;
   if (e.code === 'Escape') {
+    if (input.locked || performance.now() - input.unlockedAt < POINTER_UNLOCK_GRACE_MS) {
+      // Nothing to do beyond letting the browser release the cursor — a
+      // second, ordinary Escape is what pauses or quits from here.
+    }
     // Back out of an armed order first, rather than pausing or quitting.
-    if (armedAbility) armedAbility = null;
+    else if (armedAbility) armedAbility = null;
     // A solo round can be stopped and thought about. One with other people in
     // it cannot, so Escape there is still the way out.
     else if (solo) setPaused(!paused);
@@ -3388,13 +3412,21 @@ function render() {
   // Only written when it actually changes. Assigning the same string still
   // dirties layout, and these are counts that move a few times a second at most.
   const counts = `survivors ${survivors} · incubating ${infectedCount} · zombies ${zombieCount}`;
+  // Pointer Lock is what lets the edge pan run past the actual window, rather
+  // than freezing dead at the cursor's last known spot — see `input.ts`. It
+  // needs a click to engage and it needs saying, or "click to lock" reads as
+  // nothing happened the first few times somebody tries the edge of the screen.
+  const lockHint = input.locked
+    ? ' · Esc lets go of the cursor'
+    : ' · click to lock the cursor here so panning past the edge keeps going';
   const line = spectating
     ? `SPECTATING — ${counts}` +
       (sandbagGhost
         ? ` · siting a wall · scroll to turn it · click to build · shift-click for several · right-click cancels`
         : selectedOfficers.size > 0
           ? ` · ${selectedOfficers.size} officer${selectedOfficers.size > 1 ? 's' : ''} selected · right-click move · double right-click pulls one off a wall · H hold · R release`
-          : ` · arrows or screen edge pan · scroll zoom · drag-select grey officers`)
+          : ` · arrows or screen edge pan · scroll zoom · drag-select grey officers`) +
+      lockHint
     // The cure gun is the only thing that tells you about yourself. The server
     // sends null unless one is in hand, so there is nothing to read otherwise.
     : inventory?.selfInfected === true
