@@ -31,6 +31,7 @@ import {
   rebuildEntityGrid,
   resolveCollisions,
   buildingIndexAt,
+  hasLineOfSight,
   makeEntity,
   type World,
   type Entity,
@@ -52,7 +53,14 @@ const TICKS = Number(process.env.TICKS ?? 400);
  * turn and run, and inside `backAt` so it gives ground instead. A bolt goes
  * through `step` and was never the broken case.
  */
-const KITE_GAP = 230;
+const KITE_GAP = 170;
+/**
+ * How far in from the door the bot starts. The staging is indoors now, and every
+ * pixel of this and `KITE_GAP` is straight clear floor a building has to have in
+ * a line from its front door — so the gap came in from the 230 it was out in the
+ * street, and is still comfortably inside the band.
+ */
+const BACK_OFF = 60;
 
 const f1 = (n: number): string => n.toFixed(1);
 function med(xs: number[]): number {
@@ -144,7 +152,12 @@ interface Spot {
  * spot reports the city rather than the code — the lesson `acidcheck` and
  * `deathcheck` have each already paid for once.
  */
-function doorway(world: World, deep: number, out = 90): Spot | null {
+function doorway(
+  world: World,
+  deep: number,
+  out = 90,
+  accept: (spot: Spot) => boolean = () => true,
+): Spot | null {
   const specs = world.map.doors;
   // In index order rather than shuffled, so the same city hands both modes the
   // same door — see `paired`.
@@ -170,7 +183,9 @@ function doorway(world: World, deep: number, out = 90): Spot | null {
       if (world.nav.isBlocked(ox, oy) || buildingIndexAt(world, ox, oy) >= 0) ok = false;
     }
     if (!ok) continue;
-    return { index, nx, ny, x: spec.x, y: spec.y };
+    const spot = { index, nx, ny, x: spec.x, y: spec.y };
+    if (!accept(spot)) continue;
+    return spot;
   }
   return null;
 }
@@ -218,17 +233,44 @@ interface Out {
  */
 function giveGroundRun(seed: number): Out | null {
   const { world, bot } = withSeed(seed, stagedWorld);
-  const spot = doorway(world, 120, 330);
+  // Deep enough indoors for the bot and the zombie behind it, and street outside.
+  // **And the bot has to be able to see the zombie from where it stands.**
+  // Doors are not in the nav grid, so the clear-floor walk in `doorway` sails
+  // straight through a shut interior door — and this rig shuts every door in
+  // the city — so in a partitioned landmark one could stand between the bot and
+  // the zombie. A bot that cannot see what it is backing away from is not the
+  // reported case: measured without this, the old behaviour "opened the door"
+  // on 5 cities of 24 by never having noticed the zombie at all.
+  const spot = doorway(world, BACK_OFF + KITE_GAP + 20, 90, (s) =>
+    hasLineOfSight(
+      world,
+      s.x + s.nx * BACK_OFF,
+      s.y + s.ny * BACK_OFF,
+      s.x + s.nx * (BACK_OFF + KITE_GAP),
+      s.y + s.ny * (BACK_OFF + KITE_GAP),
+      true,
+    ),
+  );
   if (!spot) return null;
 
-  bot.x = spot.x - spot.nx * 60;
-  bot.y = spot.y - spot.ny * 60;
+  // **Indoors, with the door behind it leading out.** This staging used to be
+  // the other way round — a bot in the street backed into a *front* door — and
+  // it stopped measuring anything the day "A bot runs down the street, not into
+  // a house" went in, two days after this rig was written. That rule refuses
+  // exactly the step it was staging: the bot slid along the frontage every
+  // tick, never reached the door in either mode, and read 0/10 against 0/10.
+  // Put the indoor rule back and the old figures come straight back (OLD opened
+  // 0/10 with 3951 ticks on the slab, NEW 10/10 in 0.2s), which is what says it
+  // was the staging and not a regression. The report was always this way round
+  // anyway: *"he didn't leave through the door when zombies came in"*.
+  bot.x = spot.x + spot.nx * BACK_OFF;
+  bot.y = spot.y + spot.ny * BACK_OFF;
   // **Facing the zombie to start with, which is the case being described.**
   // Left on whatever `populate` rolled, a bot whose heading happened to point
   // at the door opened it on the first tick before it had perceived anything —
   // measured, 14 of 24 of the old behaviour's opens were that, and none of them
   // is the reported moment.
-  const toZombie = Math.atan2(-spot.ny, -spot.nx);
+  const toZombie = Math.atan2(spot.ny, spot.nx);
   bot.facing = toZombie;
   const state = world.ai.get('bot-0');
   if (state) {
@@ -237,6 +279,13 @@ function giveGroundRun(seed: number): Out | null {
     state.lastY = bot.y;
     state.wanderX = bot.x;
     state.wanderY = bot.y;
+    // **It has already seen it**, which is the report — the same staging
+    // `botrooms.ts` uses. Left to the staggered first perception tick, the bot
+    // spent its first few ticks patrolling off before it had noticed anything,
+    // walked behind a partition, and the zombie — pinned at a fixed offset from
+    // it — was then out of sight for the whole run. It never gave ground at all,
+    // in either mode: 2 cities of 24 read "never reached the door".
+    state.nextSenseAt = 0;
   }
 
   const z = makeEntity('chaser', 'zombie', bot.x, bot.y);
@@ -256,12 +305,13 @@ function giveGroundRun(seed: number): Out | null {
   // Measured that way: seeds that plainly worked one at a time came back
   // "never reached the door" inside the rig.
   let now = Date.now();
+
   for (let i = 0; i < TICKS; i++) {
-    // Out in the street on the line through the door, far enough not to be
-    // bolted from and near enough to be given ground to.
-    z.x = bot.x - spot.nx * KITE_GAP;
-    z.y = bot.y - spot.ny * KITE_GAP;
-    z.facing = Math.atan2(spot.ny, spot.nx);
+    // Further in on the line through the door, far enough not to be bolted
+    // from and near enough to be given ground to.
+    z.x = bot.x + spot.nx * KITE_GAP;
+    z.y = bot.y + spot.ny * KITE_GAP;
+    z.facing = Math.atan2(-spot.ny, -spot.nx);
 
     const wasX = bot.x;
     const wasY = bot.y;
@@ -288,7 +338,14 @@ function giveGroundRun(seed: number): Out | null {
       if (onTheSlab(world, spot.index, bot)) out.onSlab++;
       if (Math.hypot(spot.x - bot.x, spot.y - bot.y) < 46) out.reached = true;
     }
-    if (buildingIndexAt(world, bot.x, bot.y) === world.map.doors[spot.index].building) {
+    // Out in the street, having come through *this* door — not a shove along a
+    // wall, and not out of some other way the building has.
+    if (
+      out.opened &&
+      buildingIndexAt(world, bot.x, bot.y) < 0 &&
+      (bot.x - spot.x) * spot.nx + (bot.y - spot.y) * spot.ny < 0 &&
+      Math.hypot(spot.x - bot.x, spot.y - bot.y) < 120
+    ) {
       out.through = true;
       break;
     }

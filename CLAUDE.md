@@ -7353,6 +7353,43 @@ and the third is new:*
   the bug under test. Measured that way, seeds that plainly worked one at a time
   came back "never reached the door".
 
+**The staging is indoors now, and it went quietly dead for eleven days before
+that.** It was written with the bot *in the street*, backed into a building's
+front door. Two days later **A bot runs down the street, not into a house** went
+in, which refuses exactly that step — so the bot slid along the frontage every
+tick, never reached the door in either mode, and the rig read **0/10 reached
+against 0/10**: a check that could no longer fail or pass. Put the indoor rule
+back behind its gate and the table above returns to the figure, which is what
+says it was the staging rather than a regression. It is the other way round now —
+the bot inside, the zombie further in, the shut door behind it leading out —
+which is also the way round the report was: *"he didn't leave through the door
+when zombies came in"*. Re-measured:
+
+| a bot backed out of a building through its shut front door, 24 cities | OLD | NEW |
+|---|---|---|
+| reached the door | 24/24 | 24/24 |
+| **opened it** | **0/24** | **24/24**, median 0.1s |
+| went through it | 0/24 | **24/24** |
+| ticks pressed on a shut slab | **9264** | **0** |
+| control: a rifle behind a shut door | 24/24 | 24/24 |
+
+*And restaging it indoors found two more ways for the rig to lie:*
+
+- **The bot has to have already seen the zombie** (`nextSenseAt = 0`, as
+  `botrooms.ts` stages it). Left to the staggered first perception tick it
+  patrolled off before noticing anything, stepped behind a partition, and the
+  zombie — pinned at a fixed offset from the bot — stayed out of sight for the
+  whole run: 2 cities of 24 "never reached the door" in both modes.
+- **And it has to be able to see it at all.** Doors are not in the nav grid, so
+  the clear-floor walk that finds the staging sails through a shut interior door,
+  and this rig shuts every door in the city. Without a line-of-sight precondition
+  the old behaviour "opened the door" on **5 of 24** cities by never having
+  noticed there was a zombie to back away from.
+
+**Worth knowing for every rig written before a behaviour change**: a harness that
+reads the same in both of its modes is not passing, it has stopped measuring.
+Nothing here errored; it printed a tidy table of zeros.
+
 #### An officer listens before it opens a door
 
 A shut door is a room you cannot see into, and walking through one is how a bot
