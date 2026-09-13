@@ -13,6 +13,7 @@ export type ItemId =
   | 'pistol'
   | 'dualPistols'
   | 'smg'
+  | 'assaultRifle'
   | 'shotgun'
   | 'boltRifle'
   | 'semiAutoRifle'
@@ -210,6 +211,33 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     automatic: true,
     slowMs: 700,
     slowMul: 0.45,
+  },
+  assaultRifle: {
+    id: 'assaultRifle',
+    grip: 'rifle',
+    kind: 'gun',
+    label: 'Assault Rifle',
+    short: 'ASLT',
+    color: '#6b8e23',
+    // Not a droppable loot item yet — rarity 0 keeps it out of `GUN_LOOT`,
+    // `ALL_LOOT`, `rarestOf('gun')` and the every-gun floor, the same way the
+    // launcher and the beacon are held out of the ordinary roll. Right now the
+    // only place one exists is a soldier's own hands off `dropSoldier`.
+    rarity: 0,
+    // Same numbers as the SMG — same class of weapon, same rate of fire — with
+    // the two things that separate a trained soldier's rifle from an officer's
+    // sidearm-turned-SMG: a soldier aims for a living, so the bloom comes down
+    // to something worth respecting, and the round is a rifle round rather than
+    // a pistol round working overtime, so it staggers less on the way through.
+    damageMin: 4,
+    damageMax: 7,
+    bloom: 0.06,
+    cooldownMs: 110,
+    range: 700,
+    ammo: 140,
+    automatic: true,
+    slowMs: 350,
+    slowMul: 0.75,
   },
   shotgun: {
     id: 'shotgun',

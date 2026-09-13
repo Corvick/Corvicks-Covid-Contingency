@@ -211,7 +211,9 @@ function aimFor(world: World, id: string, command: { aim: number }): number {
  * officer's own 9mm and has its own recording, where `heavyMg` and the pocket
  * gunner's mounted gun (a synthetic def in `emplacement.ts`, carrying this
  * same `heavyMg` id for exactly this reason) are both belt-fed and share
- * `'mg'`.
+ * `'mg'`. `assaultRifle` — a soldier's own gun, off the helicopter — shares
+ * `smg` too: same class of automatic weapon, same cadence, no recording of its
+ * own to reach for.
  *
  * The Garand is its own voice rather than joining the bolt/charge `'rifle'`
  * pool — see the note on `GunVoice` in `shared/types.ts`. Sharing worked fine
@@ -236,6 +238,7 @@ function gunVoice(def: ItemDef | undefined): GunVoice | undefined {
     case 'shotgun':
       return 'shotgun';
     case 'smg':
+    case 'assaultRifle':
       return 'smg';
     case 'heavyMg':
       return 'mg';

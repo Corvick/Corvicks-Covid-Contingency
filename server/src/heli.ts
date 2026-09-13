@@ -294,14 +294,15 @@ function dropSoldier(world: World, heli: Helicopter, now: number): void {
   world.ai.set(id, state);
   world.soldiers.add(id);
 
-  // They come off the helicopter with a semi-automatic, the same way the van's
-  // crew come out of the back with one: a real gun in a real slot, so `fire`
-  // reads its damage and reach off the item, the wire takes the shouldered
-  // profile off it, and running dry drops them to a sidearm with no special
-  // case anywhere. Before this they shot the unnamed default that grey
-  // officers fall back on.
+  // They come off the helicopter with an assault rifle, the same way the van's
+  // crew come out of the back with a semi-auto: a real gun in a real slot, so
+  // `fire` reads its damage and reach off the item, the wire takes the
+  // shouldered profile off it, and running dry drops them to a sidearm with no
+  // special case anywhere. Before this they shot the unnamed default that grey
+  // officers fall back on. It is not a loot drop (`rarity: 0`), so this is the
+  // only place it exists — soldiers, not SWAT, carry it.
   const inv = newInventory();
-  inv.guns[0] = { item: 'semiAutoRifle', ammo: SOLDIER_RIFLE_AMMO };
+  inv.guns[0] = { item: 'assaultRifle', ammo: SOLDIER_RIFLE_AMMO };
   inv.activeSlot = 1;
   world.inventories.set(id, inv);
 
