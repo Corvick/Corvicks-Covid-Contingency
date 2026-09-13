@@ -467,6 +467,15 @@ export interface AiState {
   wayOutY: number;
   wayOutAt: number;
   /**
+   * Bots only: caught between packs coming from more than one direction, and
+   * the line out it has committed to. `pincerHeading` is null until one is
+   * chosen and whenever the latch lets go. See `pincerLine`.
+   */
+  pincered: boolean;
+  pincerHeading: number | null;
+  /** When the arc last looked like a pincer; the latch lets go `BOT_PINCER_HOLD_MS` after. */
+  pincerSeenAt: number;
+  /**
    * Dispatched squads. `squadSlot` 0 leads and `sweeps`; the rest keep station
    * on the leader through `escortId`, at a bearing derived from their slot so
    * the four of them move as a group rather than stacking on one point.
@@ -1573,6 +1582,9 @@ export function newAiState(now: number, x: number, y: number): AiState {
     wayOutX: 0,
     wayOutY: 0,
     wayOutAt: 0,
+    pincered: false,
+    pincerHeading: null,
+    pincerSeenAt: 0,
     squadSlot: -1,
     sweeps: false,
     squadBearing: 0,

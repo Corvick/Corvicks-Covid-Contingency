@@ -7869,6 +7869,111 @@ failing, and the first three are the useful ones:*
   same; the front rank stands at the slab with the rest backed out into the
   street, which puts it at **280-300px**.
 
+#### Between two packs it picks a line and holds it
+
+Reported as *"bot officers are indecisive when two or more large groups of
+zombies are converging on them, we need to allow them to pick a path to thread
+between these groups or pick a safe path instead of jumping back and forth until
+the last second or until it is too late"*. Traced tick by tick, the bot's
+heading went **south, north, south, north every three to four ticks** while two
+packs 150° apart closed from 440px to 120, and then it was grabbed in the
+middle. Two faults, and the second made the first certain.
+
+- **Giving ground was "away from the one I am shooting".** Right with every
+  zombie on one side. With a pack on each side it points at the other pack, and
+  `BOT_GIVE_GROUND_BIAS` (110) outweighs the clearance a 130px probe can see.
+- **The officer target stick never held a target.** `senseThreats` kept the old
+  target only if `nearestDist > heldDist * TARGET_SWITCH_MARGIN` — whether the
+  *nearest* body is further than the held one, which it cannot be, since
+  `nearest` is the minimum over everything in sight. So every perception tick
+  took the nearest outright, the two front zombies traded places as nearest as
+  they closed, the target flipped between packs, and "away" turned half a circle
+  with it. It also swung the gun back and forth, on neither pack long enough to
+  fire. The test is `nearestDist * TARGET_SWITCH_MARGIN > heldDist` now, which is
+  what the constant's own doc always said. **Officers only**: a civilian's target
+  is what it tracks while running, and taking the nearest is what the crowd has
+  in practice always done, so it is left that way.
+
+**`pincerLine` is the line, and it does not look at the target at all.** It asks
+the one question that tells a gap from a trap: *could anything in sight be
+standing on this line by the time I get there?* Each of 24 bearings is walked as
+far as it is walkable, the bot is moved down it at the pace it is actually
+running, and every zombie gets a disc of what it could have reached by each
+moment in `BOT_PINCER_HORIZON` at the fastest pace a shambler rolls
+(`ZOMBIE_SPEED * ZOMBIE_SPEED_MUL_MAX`). The score is how close the nearest disc
+ever comes. **Threading and running are the same measurement**: a gap between
+two closing packs scores well if the bot is through before the discs meet, and a
+street away from both scores well on its own.
+
+- **A short lane is priced by that same measurement.** The body stops where the
+  lane ends while the discs keep growing, so a bearing into a wall forty pixels
+  off gets caught without a rule saying so. Outdoors a lane stops at a building,
+  for `botFleeStep`'s reason.
+- **The far end is read off the danger field** (`BOT_PINCER_FAR_WEIGHT`, a
+  tiebreak), which knows about zombies nobody can see yet.
+- **`BOT_PINCER_STICK` is the margin**, the sixth time this file has reached for
+  one. The chosen line is re-scored from where the bot is each tick and kept
+  until another beats it by 70. What changes its mind is the chosen gap actually
+  closing, and then it changes it once.
+- **Latched on the arc the threats take up** — the smallest slice of the circle
+  holding every threat within `BOT_PINCER_RANGE` — in at ~100°, held down to
+  ~60°, and **let go only after `BOT_PINCER_HOLD_MS` narrow.** The hold is not
+  optional: `threatPoints` is what the bot can see, and a pack gone behind a shop
+  corner for a second is still a pack. Without it the latch dropped, the bot fell
+  back to "away from the target" — toward the pack it had just lost sight of —
+  saw it again and turned round. That flap was most of the reversals left once
+  the line was in.
+- **It takes over all three flight branches** — kiting, the bolt and the
+  post-grapple flight — and in the bolt it replaces the escape destination, the
+  near-field dodge and the unstick breakout together. Each of those was a
+  separate way to turn round between two groups: the destination is scored on
+  where they are *now* and re-picked every `ESCAPE_COMMIT_MS`, the dodge swings
+  to whichever side has more room this tick, and the breakout commits to a
+  bearing that knows about walls and nothing about packs. `wayOutOfHere` still
+  goes first indoors.
+- **Nothing about when a bot fights changed.** The bolt band, the kite band and
+  every shot are where they were; this is only where the legs go meanwhile — see
+  **Fighting is how a bot survives** for what breaking off sooner cost.
+
+`server/botpincer.ts` is the harness — headless, no socket, no port.
+`setBotIgnoresPincer` and `setOfficerTargetStickBroken` are the gates and both
+are **kept**, separately: one is the legs and one is the gun, and the middle arm
+with only the stick fixed is what attributes the result. Every arm runs the same
+seeded city from the same start; the packs chase and cannot be shot down.
+126 runs over four bands (bolt action with packs 150°, 180° and 100° apart, and a
+shotgun at 150°):
+
+| two packs of eight converging | OLD | stick only | NEW |
+|---|---|---|---|
+| **turned round while between them** | **81** | 27 | **2** |
+| grabbed | 41 | 40 | **23** |
+| turned | 36/126 | 34/126 | **15/126** |
+| got out, still an officer | 86/126 | 86/126 | **106/126** |
+
+**The stick fix alone does not save anybody** — it takes most of the flip-flop
+out of the gun, and the bot still walks toward whichever pack it is not shooting.
+The line is what gets them out.
+
+**What it costs is 0.01-0.02ms a tick per bot caught between packs** — the
+harness's whole tick, one bot and sixteen zombies, reads 0.10-0.12ms either way.
+It is paid only while the latch is on, and the building filter is taken once a
+call off the footprints near the bot rather than by `buildingIndexAt` per lane
+sample, for `bodyFits`'s reason.
+
+**The control is one pack of eight**, and it is load-bearing: the latch must not
+be a new way to kite a single pack. Over 32 cities it fired in 2, both with the
+nearest zombie at **30-40px** — the pack had closed round the bot and genuinely
+was on more than one side of it — and grabs there went 3 → 2. Everywhere else
+the bot's end position is **byte-for-byte identical** with and without the line.
+
+*One thing about measuring it was the rig lying before it was the code.* A bot
+kiting a single pursuer at the edge of its own 420px sight turns round every time
+the pursuer drops out of view and back in — `botGiving` only lets go past 432,
+beyond what it can see — and in the first cut of the harness that counted as a
+reversal even after both packs were behind it. It is a real behaviour and not
+this one, so a reversal is only counted while both packs are inside 400px and on
+different sides of the bot.
+
 #### The radio is not a smoke grenade, and a sling is why it was
 
 Reported as *"bot officers keep trying to use the radio like a weapon when it is

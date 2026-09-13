@@ -242,6 +242,20 @@ import {
   DODGE_SWING_MAX,
   BOT_GIVE_GROUND_PROBE,
   BOT_GIVE_GROUND_BIAS,
+  BOT_PINCER_ENTER_ARC,
+  BOT_PINCER_EXIT_ARC,
+  BOT_PINCER_HOLD_MS,
+  BOT_PINCER_RANGE,
+  BOT_PINCER_BEARINGS,
+  BOT_PINCER_HORIZON,
+  BOT_PINCER_LANE_MAX,
+  BOT_PINCER_LANE_MIN,
+  BOT_PINCER_LANE_STEP,
+  BOT_PINCER_MARGIN_CAP,
+  BOT_PINCER_FAR_WEIGHT,
+  BOT_PINCER_STICK,
+  ZOMBIE_RADIUS,
+  ZOMBIE_SPEED_MUL_MAX,
   BOT_DOOR_LISTEN_RANGE,
   BOT_DOOR_STANDOFF,
   BOT_DOOR_WATCH_MS,
@@ -675,6 +689,32 @@ export function setBotIgnoresRooms(v: boolean): void {
 }
 
 /**
+ * True is a bot officer caught between packs that picks its line the old way:
+ * "away from the one I am shooting", which with a pack on each side points at
+ * the other pack. `server/botpincer.ts` reads it, and it is kept — "it went
+ * between them" means nothing without "and it used to walk back and forth".
+ */
+let botIgnoresPincer = false;
+
+export function setBotIgnoresPincer(v: boolean): void {
+  botIgnoresPincer = v;
+}
+
+/**
+ * True puts back the officer target stick as it was written, which could never
+ * hold a target: `nearestDist > heldDist * TARGET_SWITCH_MARGIN` asks whether
+ * the *nearest* body is further than the held one, and it cannot be. Its own
+ * gate rather than part of `botIgnoresPincer`, because it is about where the
+ * gun points and that one is about where the legs go — folded together, either
+ * measurement would read as the other. `server/botpincer.ts` reads it.
+ */
+let officerTargetStickBroken = false;
+
+export function setOfficerTargetStickBroken(v: boolean): void {
+  officerTargetStickBroken = v;
+}
+
+/**
  * **The first utility slot number for *this* bag.**
  *
  * `GUN_SLOTS` is the constant; `gunSlots(inv)` is what this bag can actually
@@ -1069,12 +1109,31 @@ function senseThreats(
   // closer. Taking the nearest outright made officers flick between two
   // zombies at near-equal range, re-aiming every perception tick and hitting
   // neither of them.
-  if (state.targetId !== null && nearest !== null && state.targetId !== nearest.id) {
+  //
+  // **This never held a target, for as long as it had been written.** The test
+  // was `nearestDist > heldDist * TARGET_SWITCH_MARGIN` — is the nearest body
+  // further than the held one — and `nearest` is the minimum over everything in
+  // sight, held one included, so it cannot be. Every perception tick took the
+  // nearest outright, which is exactly the flicking described above. It showed
+  // worst with a pack on each side of an officer: the two front zombies trade
+  // places as nearest every few ticks as they close, so the gun swung half a
+  // circle back and forth and was on neither long enough to fire. The switch is
+  // for something that many times *closer*, which is what the constant says.
+  //
+  // Officers only now that it does something. A civilian's "target" is the
+  // thing it tracks while running, and taking the nearest is what the crowd has
+  // in practice always done — putting a margin on that is a change nobody asked
+  // for to four hundred people.
+  const sticks = officerTargetStickBroken || e.type === 'officer';
+  if (sticks && state.targetId !== null && nearest !== null && state.targetId !== nearest.id) {
     const held = world.entities.get(state.targetId);
     if (held && held.type === 'zombie') {
       const heldDist = Math.hypot(held.x - e.x, held.y - e.y);
       if (heldDist <= sight && hasLineOfSight(world, e.x, e.y, held.x, held.y, throughBushes, e.type)) {
-        if (nearestDist > heldDist * TARGET_SWITCH_MARGIN) {
+        const keep = officerTargetStickBroken
+          ? nearestDist > heldDist * TARGET_SWITCH_MARGIN
+          : nearestDist * TARGET_SWITCH_MARGIN > heldDist;
+        if (keep) {
           nearest = held;
           nearestDist = heldDist;
         }
@@ -6798,6 +6857,195 @@ function giveGroundHeading(world: World, e: Entity, state: AiState, away: number
   return bestScore === -Infinity ? away : bestAngle;
 }
 
+/** Scratch for `pincerLine`, so a bot between two packs allocates nothing a tick. */
+const pincerBearings: number[] = [];
+const pincerRects: Array<{ x: number; y: number; w: number; h: number }> = [];
+
+/**
+ * **Which way out of a closing ring** — a bot officer's line when zombies are
+ * coming at it from more than one direction. Null when they are not, and the
+ * caller carries on exactly as it did.
+ *
+ * Reported as *"bot officers are indecisive when two or more large groups of
+ * zombies are converging on them … pick a path to thread between these groups
+ * or pick a safe path instead of jumping back and forth until the last second
+ * or until it is too late"*. Two things were doing the jumping, and neither was
+ * wrong for the case it was written for:
+ *
+ * - **Giving ground was "away from the one I am shooting".** With every zombie
+ *   on one side that is the right bearing. With a pack on each side it points
+ *   at the other pack, and `BOT_GIVE_GROUND_BIAS` outweighs the clearance the
+ *   ring of probes can see at 130px.
+ * - **The target flipped between the packs**, because the officer target stick
+ *   never held (see `senseThreats`), so "away" turned half a circle every few
+ *   ticks as the two front zombies traded places as nearest. The bot walked
+ *   toward pack A, then toward pack B, and stood in the middle until they met.
+ *
+ * So the line here does not depend on the target at all, and it asks the one
+ * question that tells a gap from a trap: **could anything in sight be standing
+ * on this line by the time I get there?** Each bearing is walked as far as it
+ * is walkable, the bot is moved down it at the pace it is actually running, and
+ * every zombie is given a disc of what it could have reached by each moment at
+ * the fastest pace a shambler rolls. The bearing's score is how close the
+ * nearest disc ever comes to the bot on it. A gap between two packs that are
+ * closing scores well if the bot gets through before the discs meet and badly
+ * if it does not; a street away from both scores well on its own. There is no
+ * rule choosing between threading and running — they are the same measurement.
+ *
+ * - **A short lane is priced by the same measurement.** The bot stops where the
+ *   lane ends while the discs keep growing, so a bearing into a wall forty
+ *   pixels off is a bearing that gets caught, and nothing else has to say so.
+ * - **Outdoors, a lane stops at a building**, for the reason `botFleeStep`
+ *   refuses the step: a bot has no business running into a house with a pack
+ *   behind it.
+ * - **The far end is read off the danger field**, lightly, which knows about
+ *   zombies nobody can see yet — so of two lines both clear of the packs in
+ *   sight, the one that leads toward a third pack round a corner loses.
+ * - **And it is a decision.** The line chosen is kept until another beats it by
+ *   `BOT_PINCER_STICK`, re-scored from where the bot is now every tick. What
+ *   changes its mind is the chosen gap actually closing, and then it changes it
+ *   once rather than every time the two packs trade places.
+ *
+ * Latched in and out on the arc the threats take up (`BOT_PINCER_ENTER_ARC`,
+ * `BOT_PINCER_EXIT_ARC`), so a single pack — however large — never reaches it,
+ * and a bot that has threaded out with both packs now behind it drops back to
+ * ordinary kiting.
+ *
+ * **Nothing about when a bot fights changed.** The bolt band, the kite band and
+ * every shot are exactly where they were; this is only where the legs go while
+ * those are happening. That line is drawn on purpose — see "Fighting is how a
+ * bot survives" for what breaking off sooner cost.
+ */
+function pincerLine(
+  world: World,
+  e: Entity,
+  state: AiState,
+  speed: number,
+  now: number,
+): number | null {
+  if (botIgnoresPincer) return null;
+
+  // The arc: the smallest slice of the circle holding every threat in range.
+  const bearings = pincerBearings;
+  bearings.length = 0;
+  for (const p of state.threatPoints) {
+    const dx = p.x - e.x;
+    const dy = p.y - e.y;
+    if (dx * dx + dy * dy > BOT_PINCER_RANGE * BOT_PINCER_RANGE) continue;
+    bearings.push(Math.atan2(dy, dx));
+  }
+  let arc = 0;
+  if (bearings.length >= 2) {
+    bearings.sort((a, b) => a - b);
+    let widest = bearings[0] + Math.PI * 2 - bearings[bearings.length - 1];
+    for (let i = 1; i < bearings.length; i++) {
+      widest = Math.max(widest, bearings[i] - bearings[i - 1]);
+    }
+    arc = Math.PI * 2 - widest;
+  }
+  // In on the wide arc, held on anything short of the narrow one, and let go
+  // only once it has been narrow for a while — see `BOT_PINCER_HOLD_MS`. The
+  // lapse is checked first, so a latch left standing from a fight a minute ago
+  // has to be earned again on the wide arc rather than carried on the narrow.
+  if (state.pincered && now - state.pincerSeenAt >= BOT_PINCER_HOLD_MS) {
+    state.pincered = false;
+    state.pincerHeading = null;
+  }
+  if (arc >= (state.pincered ? BOT_PINCER_EXIT_ARC : BOT_PINCER_ENTER_ARC)) {
+    state.pincerSeenAt = now;
+    if (!state.pincered) {
+      state.pincered = true;
+      state.pincerHeading = null;
+      // A flight destination picked before the second pack showed up is very
+      // likely the other pack. Let go of it, so dropping back out of here does
+      // not walk straight into it.
+      state.escapeUntil = 0;
+    }
+  }
+  if (!state.pincered) return null;
+
+  const outside = !botFleesIndoors && buildingIndexAt(world, e.x, e.y) < 0;
+  const laneMax = Math.min(BOT_PINCER_LANE_MAX, speed * BOT_PINCER_HORIZON[BOT_PINCER_HORIZON.length - 1]);
+  // Only the footprints that could be under a lane at all. `buildingIndexAt`
+  // walks every building in the city, which a few hundred lane samples a tick
+  // would feel; this is the filter `bodyFits` uses, for the same reason.
+  const rects = pincerRects;
+  rects.length = 0;
+  if (outside) {
+    for (const b of world.map.buildings) {
+      if (b.x > e.x + laneMax || b.x + b.w < e.x - laneMax) continue;
+      if (b.y > e.y + laneMax || b.y + b.h < e.y - laneMax) continue;
+      for (const r of b.rects) rects.push(r);
+    }
+  }
+  const indoors = (x: number, y: number): boolean => {
+    for (const r of rects) {
+      if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) return true;
+    }
+    return false;
+  };
+
+  const reach = ZOMBIE_SPEED * ZOMBIE_SPEED_MUL_MAX;
+  const contact = e.radius + ZOMBIE_RADIUS + GRAPPLE_REACH_BONUS;
+  const score = (angle: number): number => {
+    const cx = Math.cos(angle);
+    const cy = Math.sin(angle);
+    let lane = 0;
+    for (let d = BOT_PINCER_LANE_STEP; d <= laneMax; d += BOT_PINCER_LANE_STEP) {
+      const x = e.x + cx * d;
+      const y = e.y + cy * d;
+      if (shutTo(world, e, x, y) || (outside && indoors(x, y))) break;
+      lane = d;
+    }
+    if (lane < BOT_PINCER_LANE_MIN) return -Infinity;
+
+    let margin = BOT_PINCER_MARGIN_CAP;
+    for (const t of BOT_PINCER_HORIZON) {
+      const s = Math.min(speed * t, lane);
+      const x = e.x + cx * s;
+      const y = e.y + cy * s;
+      const grown = reach * t + contact;
+      for (const p of state.threatPoints) {
+        const m = Math.hypot(p.x - x, p.y - y) - grown;
+        if (m < margin) margin = m;
+      }
+    }
+
+    const endX = e.x + cx * lane;
+    const endY = e.y + cy * lane;
+    let far = world.danger.distanceAt(endX, endY);
+    if (far === Infinity) far = DANGER_MAX_DISTANCE;
+    let total = margin + Math.min(far, DANGER_MAX_DISTANCE) * BOT_PINCER_FAR_WEIGHT;
+    const edgeGap = Math.min(endX, endY, WORLD_WIDTH - endX, WORLD_HEIGHT - endY);
+    if (edgeGap < BOUNDARY_AVOID_DIST) total -= (BOUNDARY_AVOID_DIST - edgeGap) * 2.4;
+    return total;
+  };
+
+  let bestAngle = 0;
+  let bestScore = -Infinity;
+  for (let i = 0; i < BOT_PINCER_BEARINGS; i++) {
+    const angle = (i / BOT_PINCER_BEARINGS) * Math.PI * 2 - Math.PI;
+    const s = score(angle);
+    if (s > bestScore) {
+      bestScore = s;
+      bestAngle = angle;
+    }
+  }
+  // Boxed in by walls on every bearing: nothing here can help, and the ordinary
+  // flight below at least knows how to route round a corner.
+  if (bestScore === -Infinity) {
+    state.pincerHeading = null;
+    return null;
+  }
+
+  if (state.pincerHeading !== null) {
+    const held = score(state.pincerHeading);
+    if (held !== -Infinity && held + BOT_PINCER_STICK >= bestScore) return state.pincerHeading;
+  }
+  state.pincerHeading = bestAngle;
+  return bestAngle;
+}
+
 /**
  * The way out of the building, one room at a time — a bot officer's answer to
  * a pack coming in through a door behind it.
@@ -7648,18 +7896,25 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
 
       // Out in the street, not into the nearest house — see `botFleeStep`,
       // and once already in one, out of it a room at a time — see
-      // `wayOutOfHere`.
-      const to =
-        wayOutOfHere(world, e, state, now) ??
-        escapeDestination(world, e, state, now, !botFleesIndoors);
-      const desired = to
-        ? headingToward(world, e, state, to.x, to.y, now)
-        : safestHeading(world, e, state);
+      // `wayOutOfHere`. Between two packs, a line through or away from them —
+      // see `pincerLine`.
+      const out = wayOutOfHere(world, e, state, now);
+      const line = out ? null : pincerLine(world, e, state, speed, now);
+      const to = out ?? (line === null ? escapeDestination(world, e, state, now, !botFleesIndoors) : null);
+      const desired =
+        line !== null
+          ? line
+          : dodgeThreats(
+              world,
+              e,
+              state,
+              to ? headingToward(world, e, state, to.x, to.y, now) : safestHeading(world, e, state),
+            );
       botFleeStep(
         world,
         e,
         state,
-        dodgeThreats(world, e, state, desired),
+        desired,
         speed,
         dt,
         now,
@@ -7785,20 +8040,39 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
        * by it. The replan budget is what covers a route that genuinely will
        * not work; the breakout was making work.
        */
-      if (!out && unstickTick(world, e, state, now, dt, speed, !botFleesIndoors)) return;
+      /*
+       * **Between two packs the line is `pincerLine`'s**, and it takes the place
+       * of all three of the things below. The escape destination is scored on
+       * where the zombies are now and re-picked every `ESCAPE_COMMIT_MS`, the
+       * near-field dodge swings to whichever side has more room this tick, and
+       * the breakout commits to a bearing that knows about walls and nothing
+       * about packs — every one of them a separate way to turn round between two
+       * groups closing on you. The line already scores every zombie in sight
+       * along its whole length, and it only ever picks a lane it has walked.
+       */
+      const line = out ? null : pincerLine(world, e, state, speed, now);
+      if (!out && line === null && unstickTick(world, e, state, now, dt, speed, !botFleesIndoors)) {
+        return;
+      }
       // And the destination is somewhere in the street — see `botFleeStep`.
-      const to = out ?? escapeDestination(world, e, state, now, !botFleesIndoors);
-      const desired = to
-        ? headingToward(world, e, state, to.x, to.y, now)
-        : safestHeading(world, e, state);
+      const to = out ?? (line === null ? escapeDestination(world, e, state, now, !botFleesIndoors) : null);
       // Whatever is stood in the first hundred pixels of that line is gone
       // round rather than run at — the destination was scored on the danger
       // field, which is far too coarse to have noticed it.
+      const desired =
+        line !== null
+          ? line
+          : dodgeThreats(
+              world,
+              e,
+              state,
+              to ? headingToward(world, e, state, to.x, to.y, now) : safestHeading(world, e, state),
+            );
       botFleeStep(
         world,
         e,
         state,
-        dodgeThreats(world, e, state, desired),
+        desired,
         speed,
         dt,
         now,
@@ -7925,11 +8199,6 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
        * and is the whole of the city's ordinary blocks.
        */
       const out = state.botGiving ? wayOutOfHere(world, e, state, now) : null;
-      const bearing = state.botClosing
-        ? aim
-        : out
-          ? dodgeThreats(world, e, state, headingToward(world, e, state, out.x, out.y, now))
-          : giveGroundHeading(world, e, state, Math.atan2(-dy, -dx));
       // **Giving ground is a sprint.** Kiting used to back off at a fraction of
       // a *walk*, which is slower than everything it was backing away from — so
       // the gap it was trying to keep closed anyway and the kite was a slower
@@ -7939,6 +8208,21 @@ function updateBotOfficer(world: World, e: Entity, state: AiState, now: number, 
       const pace = state.botGiving
         ? botStaminaTick(state, true, dt, inv)
         : botWalkSpeed(inv);
+      /*
+       * **And with a pack on each side, "away from the one I am shooting" is
+       * toward the other one.** This is the branch the report lives in — two
+       * groups walking in from 360px is exactly the kite band — so giving ground
+       * there takes `pincerLine`'s bearing instead: through the gap if it can be
+       * made, away from both if not, and held rather than re-decided every time
+       * the two front zombies trade places. The gun stays on the target either
+       * way; only the legs changed.
+       */
+      const line = state.botGiving && !out ? pincerLine(world, e, state, pace, now) : null;
+      const bearing = state.botClosing
+        ? aim
+        : out
+          ? dodgeThreats(world, e, state, headingToward(world, e, state, out.x, out.y, now))
+          : (line ?? giveGroundHeading(world, e, state, Math.atan2(-dy, -dx)));
       // **Where the legs are going, written down.** This branch moves the body
       // itself rather than going through `step`, so it is the one place that
       // has to keep `state.heading` honest by hand — and it never did, which

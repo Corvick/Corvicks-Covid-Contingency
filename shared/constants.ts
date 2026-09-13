@@ -19,7 +19,7 @@ import type { EntityType } from './types.js';
  * Roughly: patch for a fix or a tuning pass, minor for a new mechanic or
  * anything that changes how a round plays, major when it is a different game.
  */
-export const GAME_VERSION = '0.35.2';
+export const GAME_VERSION = '0.35.3';
 
 // ---------------------------------------------------------------- world
 /**
@@ -2786,6 +2786,82 @@ export const DODGE_SWING_MAX = 1.3;
 export const BOT_GIVE_GROUND_PROBE = 130;
 /** How hard it prefers "directly away" over "roomiest" while doing it. */
 export const BOT_GIVE_GROUND_BIAS = 110;
+/**
+ * **Caught between two packs**, and how a bot knows it is.
+ *
+ * "Away from the one I am shooting" is a perfectly good bearing while every
+ * zombie in sight is on one side. With a pack coming from each side it points
+ * straight at the other pack, and since the target flips between them as they
+ * close, the bot walked back and forth between the two until they met on top
+ * of it. Reported as *"bot officers are indecisive when two or more large
+ * groups of zombies are converging on them"*.
+ *
+ * The test is the **arc** the threats in range take up round the bot: the
+ * smallest slice of the circle that holds all of them. One pack is a narrow
+ * slice; two from different directions is a wide one. Latched between two
+ * figures, like every other threshold a bot decides on, so a pack drifting
+ * across the line does not flip it in and out.
+ */
+export const BOT_PINCER_ENTER_ARC = 1.75; // ~100°
+export const BOT_PINCER_EXIT_ARC = 1.05; // ~60°
+/**
+ * **And the arc has to stay narrow this long before the latch lets go.**
+ * `threatPoints` is what the bot can *see*, and a pack that has gone behind a
+ * shop corner for a second is still a pack. Let go on the first tick, the bot
+ * dropped back to "away from the one I am shooting" — which is back toward the
+ * pack it had just lost sight of — and then saw it again and turned round.
+ * Measured, that flap was most of the turning round left once the line was in.
+ */
+export const BOT_PINCER_HOLD_MS = 1500;
+/**
+ * Only threats this close are counted into the arc. A bot's own sight is 420;
+ * one carrying a scope sees to 1200, and a pack across the city is not a jaw
+ * closing on anybody.
+ */
+export const BOT_PINCER_RANGE = 460;
+/** Bearings tried when choosing a line out. Fifteen degrees apart. */
+export const BOT_PINCER_BEARINGS = 24;
+/**
+ * How far ahead the choice looks, in seconds, and where along that it checks.
+ *
+ * **What it asks is whether a zombie could be standing on the line by the time
+ * the bot gets there**, not how far the line is from them now — which is the
+ * whole difference between threading a gap and running into one that is
+ * closing. Each zombie is given a disc it could have reached by then at the
+ * fastest pace a shambler rolls (`ZOMBIE_SPEED * ZOMBIE_SPEED_MUL_MAX`), which
+ * is a worst case rather than a guess at where it is heading; a line that stays
+ * clear of every disc is a line nothing in sight can cut off.
+ */
+export const BOT_PINCER_HORIZON = [0.25, 0.5, 0.8, 1.2, 1.6, 2.0] as const;
+/**
+ * How far down a line has to be walkable. A lane that ends against a wall
+ * after forty pixels is somewhere to be caught, and the look-ahead says so on
+ * its own — the body stops at the end of the lane while the discs keep growing.
+ */
+export const BOT_PINCER_LANE_MAX = 520;
+export const BOT_PINCER_LANE_MIN = 48;
+export const BOT_PINCER_LANE_STEP = 24;
+/**
+ * Clearance past this is as good as any: a line that is 300px clear of
+ * anything that could reach it is safe, and scoring 500 above 300 would let the
+ * far field below decide between two lines that are both fine.
+ */
+export const BOT_PINCER_MARGIN_CAP = 300;
+/**
+ * How much the far end of the line counts, off the danger field — which knows
+ * about zombies nobody can see yet. A tiebreak between lines that are both
+ * clear of the packs in sight, so the one chosen leads somewhere open rather
+ * than toward a third pack round the corner.
+ */
+export const BOT_PINCER_FAR_WEIGHT = 0.15;
+/**
+ * **The margin that makes it a decision.** The line already chosen is kept
+ * until another is this much better, which is the cure for dithering this file
+ * reaches for every time — the bolt band, the gun swap, `ZOMBIE_TARGET_STICK`,
+ * `BOT_WAY_OUT_STICK`. What changes its mind is the chosen gap genuinely
+ * closing, and then it changes it once.
+ */
+export const BOT_PINCER_STICK = 70;
 /**
  * Backing off with the gun still up, *inside the fight branch*. Slower than a
  * walk on purpose — holding a range you have chosen should not also be free —
