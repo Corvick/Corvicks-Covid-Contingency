@@ -346,10 +346,47 @@ function grimeTile(ctx: CanvasRenderingContext2D): CanvasPattern | null {
   g.fill();
 
   grimePattern = ctx.createPattern(tile, 'repeat');
+  groundTile = tile;
   return grimePattern;
 }
 
+/**
+ * The grime tile laid onto the road colour once, so the ground is one opaque
+ * fill instead of a solid fill with a translucent one over it.
+ */
+let groundTile: HTMLCanvasElement | null = null;
+let groundPattern: CanvasPattern | null = null;
+
+function opaqueGround(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  if (groundPattern) return groundPattern;
+  if (!grimeTile(ctx) || !groundTile) return null;
+  const tile = document.createElement('canvas');
+  tile.width = GRIME_TILE;
+  tile.height = GRIME_TILE;
+  const g = tile.getContext('2d');
+  if (!g) return null;
+  g.fillStyle = GROUND_COLOR;
+  g.fillRect(0, 0, GRIME_TILE, GRIME_TILE);
+  g.drawImage(groundTile, 0, 0);
+  groundPattern = ctx.createPattern(tile, 'repeat');
+  return groundPattern;
+}
+
+/** The two-pass ground this replaced, kept behind a gate for `mapbench.ts`. */
+let groundInTwoPasses = false;
+export function setGroundDrawnInTwoPasses(on: boolean): void {
+  groundInTwoPasses = on;
+}
+
 export function drawGround(ctx: CanvasRenderingContext2D, map: MapData): void {
+  if (settings.groundDetail && !groundInTwoPasses) {
+    const pattern = opaqueGround(ctx);
+    if (pattern) {
+      ctx.fillStyle = pattern;
+      ctx.fillRect(0, 0, map.width, map.height);
+      return;
+    }
+  }
   ctx.fillStyle = GROUND_COLOR;
   ctx.fillRect(0, 0, map.width, map.height);
   if (!settings.groundDetail) return;
@@ -388,15 +425,25 @@ let housePattern: CanvasPattern | null = null;
 let stationPattern: CanvasPattern | null = null;
 let complexPattern: CanvasPattern | null = null;
 
+/**
+ * A floor tile. With `base`, the tile is laid onto that colour first and comes
+ * out opaque — which is how the floors are drawn now, one fill a rect. Without
+ * it, the translucent tile the two-pass drawing laid over a solid fill.
+ */
 function floorTile(
   ctx: CanvasRenderingContext2D,
   paint: (g: CanvasRenderingContext2D) => void,
+  base?: string,
 ): CanvasPattern | null {
   const tile = document.createElement('canvas');
   tile.width = FLOOR_TILE;
   tile.height = FLOOR_TILE;
   const g = tile.getContext('2d');
   if (!g) return null;
+  if (base) {
+    g.fillStyle = base;
+    g.fillRect(0, 0, FLOOR_TILE, FLOOR_TILE);
+  }
   paint(g);
   return ctx.createPattern(tile, 'repeat');
 }
@@ -585,9 +632,16 @@ function paintCellFloor(g: CanvasRenderingContext2D): void {
 let armouryPattern: CanvasPattern | null = null;
 let cellPattern: CanvasPattern | null = null;
 
+// The same five tiles laid onto their base colours, so each is opaque.
+let houseSolid: CanvasPattern | null = null;
+let stationSolid: CanvasPattern | null = null;
+let complexSolid: CanvasPattern | null = null;
+let armourySolid: CanvasPattern | null = null;
+let cellSolid: CanvasPattern | null = null;
+
 /**
- * The per-rect drawing this replaced, kept behind a gate for `mapbench.ts`.
- * The control is what says the batched version is the same picture for less.
+ * The drawing this replaced — a solid fill and a translucent pattern per rect —
+ * kept behind a gate for `mapbench.ts`.
  */
 let floorsPerRect = false;
 export function setFloorsDrawnPerRect(on: boolean): void {
@@ -595,20 +649,23 @@ export function setFloorsDrawnPerRect(on: boolean): void {
 }
 
 /**
- * **One path per kind of floor, filled twice — never a fill per rect.**
+ * **One opaque pattern fill a rect.**
  *
- * A pattern fill carries a fixed cost per *call*, whatever size the rect is:
- * measured at ~0.55ms each on a rasteriser without the GPU, so 600 small
- * pattern fills cost 374ms where the same 600 rects as one path with one
- * pattern fill cost 15ms — the price of a single full-screen fill. A city has
- * ~600 floor rects and each took a solid base and a pattern on top, so a
- * spectator framing the whole city was paying ~1200 of them a frame, and that
- * was nearly all of the spectator's `map` phase and most of its `else`.
+ * Each floor tile is laid onto its base colour when it is built, so a rect is
+ * one `fillRect` rather than a solid fill with a translucent pattern over it —
+ * half the draw calls, and the same arithmetic, since compositing the tile onto
+ * the colour before sampling it is what sampling it and compositing afterwards
+ * does.
  *
- * It is the same picture. The base colours are opaque, no two footprints
- * overlap, and the pattern is in user space so a tile lands on the same pixels
- * whichever call draws it — `mapbench.ts` compares the two frames pixel for
- * pixel. The station's two rooms and the saddles are batched the same way.
+ * **Not one path per kind of floor, and that was tried and shipped for a day.**
+ * Measured on the software rasteriser a pattern fill carries ~0.55ms a *call*,
+ * which made batching ~600 rects into three paths look like a 20x win — but
+ * that rasteriser was only ever in play because the bench read its canvas back,
+ * and Chrome moves a canvas that is read back onto the CPU. On the GPU a path
+ * of many rects is dearer than the rects. Measured on an Iris Xe, a player's
+ * zoom over the corner complex: two fills a rect **2.9ms**, one path a kind
+ * **5.4ms**, this **2.3ms**; the whole city framed: 13.2, 8.3 and 9.3. See
+ * `mapbench.ts`.
  */
 export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Viewport): void {
   if (!settings.groundDetail) return;
@@ -617,7 +674,13 @@ export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Vi
   if (!complexPattern) complexPattern = floorTile(ctx, paintComplexFloor);
   if (!armouryPattern) armouryPattern = floorTile(ctx, paintArmouryFloor);
   if (!cellPattern) cellPattern = floorTile(ctx, paintCellFloor);
+  if (!houseSolid) houseSolid = floorTile(ctx, paintHouseFloor, FLOOR_HOUSE_COLOR);
+  if (!stationSolid) stationSolid = floorTile(ctx, paintStationFloor, FLOOR_STATION_COLOR);
+  if (!complexSolid) complexSolid = floorTile(ctx, paintComplexFloor, FLOOR_COMPLEX_COLOR);
+  if (!armourySolid) armourySolid = floorTile(ctx, paintArmouryFloor, FLOOR_ARMOURY_COLOR);
+  if (!cellSolid) cellSolid = floorTile(ctx, paintCellFloor, FLOOR_CELL_COLOR);
   if (!housePattern || !stationPattern || !complexPattern || !armouryPattern || !cellPattern) return;
+  if (!houseSolid || !stationSolid || !complexSolid || !armourySolid || !cellSolid) return;
   if (floorsPerRect) {
     drawFloorsPerRect(ctx, map, view);
     return;
@@ -625,15 +688,6 @@ export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Vi
 
   const station = map.policeStation;
   const stationIdx = station ? station.building : -1;
-
-  const house = new Path2D();
-  const complex = new Path2D();
-  const stationFloor = new Path2D();
-  // Which of the three got anything, because the per-call cost is paid by an
-  // empty path too.
-  let houseSeen = false;
-  let complexSeen = false;
-  let stationSeen = false;
   for (let i = 0; i < map.buildings.length; i++) {
     const b = map.buildings[i];
     if (
@@ -644,40 +698,17 @@ export function drawFloors(ctx: CanvasRenderingContext2D, map: MapData, view: Vi
     ) {
       continue;
     }
-    let path = house;
-    if (i === map.cornerBuilding) {
-      path = complex;
-      complexSeen = true;
-    } else if (i === stationIdx) {
-      path = stationFloor;
-      stationSeen = true;
-    } else {
-      houseSeen = true;
+    ctx.fillStyle = i === map.cornerBuilding ? complexSolid : i === stationIdx ? stationSolid : houseSolid;
+    for (const r of b.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
+    if (i === stationIdx && station) {
+      ctx.fillStyle = armourySolid;
+      ctx.fillRect(station.armoury.x, station.armoury.y, station.armoury.w, station.armoury.h);
+      ctx.fillStyle = cellSolid;
+      ctx.fillRect(station.cell.x, station.cell.y, station.cell.w, station.cell.h);
+      drawCellDrain(ctx, station.cell);
     }
-    for (const r of b.rects) path.rect(r.x, r.y, r.w, r.h);
   }
-  if (houseSeen) fillFloor(ctx, house, FLOOR_HOUSE_COLOR, housePattern);
-  if (complexSeen) fillFloor(ctx, complex, FLOOR_COMPLEX_COLOR, complexPattern);
-  if (stationSeen && station) {
-    fillFloor(ctx, stationFloor, FLOOR_STATION_COLOR, stationPattern);
-    fillRoom(ctx, station.armoury, FLOOR_ARMOURY_COLOR, armouryPattern);
-    fillRoom(ctx, station.cell, FLOOR_CELL_COLOR, cellPattern);
-    drawCellDrain(ctx, station.cell);
-  }
-
   drawSaddles(ctx, map, view);
-}
-
-function fillFloor(
-  ctx: CanvasRenderingContext2D,
-  path: Path2D,
-  base: string,
-  pattern: CanvasPattern,
-): void {
-  ctx.fillStyle = base;
-  ctx.fill(path);
-  ctx.fillStyle = pattern;
-  ctx.fill(path);
 }
 
 /** A floor drain in the middle of the cell. */
@@ -747,11 +778,10 @@ function drawFloorsPerRect(ctx: CanvasRenderingContext2D, map: MapData, view: Vi
  * room's floor meets the next, and the front door, where the floor meets the
  * street. A short strip of trim, the way a real building does it.
  *
- * **Deliberately still a draw per door**, unlike the floors under it. These are
- * solid fills and strokes, which carry none of a pattern's per-call cost, and
- * batched into three paths they stop being the same picture: a strip drawn
+ * **A draw per door, not three paths for the lot.** Batched, a strip drawn
  * later no longer covers the strokes of a neighbouring one, which moved ~500
- * pixels by a few levels near doors for nothing measurable.
+ * pixels by a few levels near doors — and a path of many shapes is dearer on
+ * the GPU than the shapes, which is the lesson the floors above learned.
  */
 function drawSaddles(ctx: CanvasRenderingContext2D, map: MapData, view: Viewport): void {
   const half = FLOOR_SADDLE_DEPTH;

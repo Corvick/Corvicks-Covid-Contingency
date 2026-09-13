@@ -1,20 +1,36 @@
 /**
- * What the spectator frame's `map` phase is made of, on a real generated city.
+ * What the `map` phase is made of, on a real generated city — timed on the
+ * renderer the game actually uses.
  *
  * `paintbench.ts` measures a synthetic scatter of 620 wall rects with no
- * buildings, floors, doors or loot, which was honest when walls were the
- * dearest layer and stopped being honest when floors and door saddles went in.
- * This one builds the city the real way — `createWorld` + `resetWorld`, the
- * same engine the offline worker runs — and times each call in the `map` block
- * of `main.ts`'s frame on its own, at the spectator's whole-city framing.
+ * buildings, floors, doors or loot. This one builds the city the real way —
+ * `createWorld` + `resetWorld`, the same engine the offline worker runs — and
+ * times the calls in the `map` block of `main.ts`'s frame one at a time, at a
+ * spectator's whole-city framing and at a player's zoom.
  *
- * `issue` is what the HUD's `map` figure counts; `paint` is what lands in the
- * frame gap as `else`. The CONTROL row runs one case twice, and anything
- * smaller than it is not a result.
+ * **It forces the rasteriser with a WebGL upload, never with `getImageData`,
+ * and that is the most important line in this file.** Chrome moves a 2D canvas
+ * that is read back onto the *CPU*, and every earlier bench here reads back —
+ * so what they measured was the software rasteriser, on a machine whose game
+ * canvas is on the GPU. The same ground fill measured **11-42ms** that way and
+ * **~1.5ms** this way on an Intel Iris Xe, and a floor change measured 20x on
+ * one and ~1.2x on the other. `texImage2D` of the canvas makes it render and
+ * `readPixels` of one texel waits for the GPU, without ever reading the 2D
+ * canvas itself. The game never reads back its own canvas, so this is the
+ * figure a player gets — unless the browser has no GPU at all, which the
+ * renderer line at the top says.
+ *
+ * Each sample is one frame and one flush — not several frames behind one
+ * flush, because a GPU canvas throws away everything under a full-canvas
+ * opaque fill and would report the repeats as free. The flush itself costs
+ * milliseconds, which is what the CONTROL rows are: the same empty frame
+ * twice, so their difference is the noise floor and their value is subtracted.
+ *
+ * The pixel comparisons run on a separate canvas that *is* read back.
  *
  * Open `/mapbench.html`.
  */
-import { VIEWPORT_WIDTH, VIEWPORT_HEIGHT, setWorldSize } from '../../shared/constants.js';
+import { VIEWPORT_WIDTH, VIEWPORT_HEIGHT, CAMERA_ZOOM, setWorldSize } from '../../shared/constants.js';
 import { createWorld, resetWorld } from '../../server/src/world.js';
 import { allDoorsToWire } from '../../server/src/doors.js';
 import {
@@ -29,17 +45,13 @@ import {
   drawPickups,
   drawBushes,
   setFloorsDrawnPerRect,
+  setGroundDrawnInTwoPasses,
 } from './render.js';
 import type { Viewport } from './render.js';
 import { settings } from './settings.js';
 import type { DoorState, PickupState } from '../../shared/types.js';
 
 const out = document.getElementById('out') as HTMLElement;
-const canvas = document.createElement('canvas');
-canvas.width = VIEWPORT_WIDTH;
-canvas.height = VIEWPORT_HEIGHT;
-document.body.appendChild(canvas);
-const ctx = canvas.getContext('2d')!;
 
 // A bench that reads the saved settings of the box it runs on lies on exactly
 // the box being investigated — LOW GRAPHICS would report floors as free.
@@ -67,196 +79,240 @@ const specView: Viewport = {
   w: VIEWPORT_WIDTH / specScale,
   h: VIEWPORT_HEIGHT / specScale,
 };
+const viewAt = (x: number, y: number, zoom: number): Viewport => ({
+  x: x - VIEWPORT_WIDTH / zoom / 2,
+  y: y - VIEWPORT_HEIGHT / zoom / 2,
+  w: VIEWPORT_WIDTH / zoom,
+  h: VIEWPORT_HEIGHT / zoom,
+});
+// A player in the thick of it: centred on the corner complex, so the floors
+// under the camera are as many as a player ever has.
+const corner = map.buildings[map.cornerBuilding];
+const playerView = viewAt(corner.x + corner.w / 2, corner.y + corner.h / 2, CAMERA_ZOOM);
+
+// ---- the GPU flush
+
+const glCanvas = document.createElement('canvas');
+glCanvas.width = 4;
+glCanvas.height = 4;
+const gl = (glCanvas.getContext('webgl2') ?? glCanvas.getContext('webgl')) as WebGLRenderingContext | null;
+const texel = new Uint8Array(4);
+let renderer = 'no WebGL — timings below are not GPU timings';
+if (gl) {
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  renderer = String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+}
+function flush(c: HTMLCanvasElement): void {
+  if (!gl) return;
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, texel);
+}
+
+// Never read back, so it stays wherever the browser would put the game's.
+const canvas = document.createElement('canvas');
+canvas.width = VIEWPORT_WIDTH;
+canvas.height = VIEWPORT_HEIGHT;
+const ctx = canvas.getContext('2d')!;
 
 type Case = [string, () => void];
 const now = 1000;
 
-const cases: Case[] = [
-  ['CONTROL: clear only', () => {}],
-  ['CONTROL: clear only (again)', () => {}],
-  ['drawGround', () => drawGround(ctx, map)],
-  ['drawPark', () => map.park && drawPark(ctx, map.park, specView)],
-  ['drawPond', () => map.pond && drawPond(ctx, map.pond, specView)],
-  [
-    'drawFloors, per rect (OLD)',
-    () => {
-      setFloorsDrawnPerRect(true);
-      drawFloors(ctx, map, specView);
-      setFloorsDrawnPerRect(false);
-    },
-  ],
-  ['drawFloors', () => drawFloors(ctx, map, specView)],
-  ['drawParkingBays', () => drawParkingBays(ctx, map.policeStation, specView)],
-  ['drawWalls', () => drawWalls(ctx, map.walls, specView)],
-  ['drawWindows', () => drawWindows(ctx, map.windows, broken, specView)],
-  ['drawDoors', () => drawDoors(ctx, map.doors, doorStates, specView)],
-  ['drawPickups', () => drawPickups(ctx, pickups, specView, now, specScale)],
-  ['drawBushes', () => drawBushes(ctx, map.bushes, specView, [], now)],
-];
+function casesFor(view: Viewport, scale: number): Case[] {
+  return [
+    ['CONTROL: clear only', () => {}],
+    ['CONTROL: clear only (again)', () => {}],
+    [
+      'drawGround, two passes (OLD)',
+      () => {
+        setGroundDrawnInTwoPasses(true);
+        drawGround(ctx, map);
+        setGroundDrawnInTwoPasses(false);
+      },
+    ],
+    ['drawGround', () => drawGround(ctx, map)],
+    [
+      'drawFloors, per rect (OLD)',
+      () => {
+        setFloorsDrawnPerRect(true);
+        drawFloors(ctx, map, view);
+        setFloorsDrawnPerRect(false);
+      },
+    ],
+    ['drawFloors', () => drawFloors(ctx, map, view)],
+    ['drawPark', () => map.park && drawPark(ctx, map.park, view)],
+    ['drawPond', () => map.pond && drawPond(ctx, map.pond, view)],
+    ['drawParkingBays', () => drawParkingBays(ctx, map.policeStation, view)],
+    ['drawWalls', () => drawWalls(ctx, map.walls, view)],
+    ['drawWindows', () => drawWindows(ctx, map.windows, broken, view)],
+    ['drawDoors', () => drawDoors(ctx, map.doors, doorStates, view)],
+    ['drawPickups', () => drawPickups(ctx, pickups, view, now, scale)],
+    ['drawBushes', () => drawBushes(ctx, map.bushes, view, [], now)],
+  ];
+}
 
-function frame(fn: () => void): void {
+function sample(view: Viewport, scale: number, fn: () => void): { issue: number; total: number } {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#0b0d10';
   ctx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+  flush(canvas);
+  const t0 = performance.now();
   ctx.save();
-  ctx.scale(specScale, specScale);
-  ctx.translate(-specView.x, -specView.y);
+  ctx.scale(scale, scale);
+  ctx.translate(-view.x, -view.y);
   fn();
   ctx.restore();
-}
-
-/**
- * Cheapest whole sample of many, in a rotating order — the two traps
- * `layerbench.ts` records (a fixed order penalises whichever case runs last;
- * the median carries one-sided interference).
- */
-const REPEATS = 6;
-const ROUNDS = 14;
-const best = new Map<string, { issue: number; paint: number }>();
-
-function sample(fn: () => void): { issue: number; paint: number } {
-  const t0 = performance.now();
-  for (let r = 0; r < REPEATS; r++) frame(fn);
   const t1 = performance.now();
-  ctx.getImageData(0, 0, 1, 1);
-  const t2 = performance.now();
-  return { issue: (t1 - t0) / REPEATS, paint: (t2 - t1) / REPEATS };
+  flush(canvas);
+  return { issue: t1 - t0, total: performance.now() - t0 };
 }
 
 /**
- * The batched floors against the per-rect ones, pixel for pixel — the claim is
- * "same picture", and a claim about pixels is settled by reading them.
- * Ground under both so the pattern's translucency lands on what it lands on in
- * the game. At the whole-city framing, and at a player's zoom over a dozen
- * spots including the station and the corner complex.
+ * Cheapest sample of many, in a rotating order — the two traps `layerbench.ts`
+ * records (a fixed order penalises whichever case runs last; the median carries
+ * one-sided interference).
  */
-function compareFloors(): string[] {
-  const read = (perRect: boolean, view: Viewport, scale: number): Uint8ClampedArray => {
-    setFloorsDrawnPerRect(perRect);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#0b0d10';
-    ctx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
-    ctx.save();
-    ctx.scale(scale, scale);
-    ctx.translate(-view.x, -view.y);
-    drawGround(ctx, map);
-    drawFloors(ctx, map, view);
-    ctx.restore();
-    setFloorsDrawnPerRect(false);
-    return ctx.getImageData(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT).data;
-  };
-  const views: Array<[string, Viewport, number]> = [['whole city', specView, specScale]];
-  const zoom = 2;
-  const at = (label: string, x: number, y: number) =>
-    views.push([
-      label,
-      { x: x - VIEWPORT_WIDTH / zoom / 2, y: y - VIEWPORT_HEIGHT / zoom / 2, w: VIEWPORT_WIDTH / zoom, h: VIEWPORT_HEIGHT / zoom },
-      zoom,
-    ]);
-  const corner = map.buildings[map.cornerBuilding];
-  at('corner complex', corner.x + corner.w / 2, corner.y + corner.h / 2);
-  if (map.policeStation) {
-    const s = map.buildings[map.policeStation.building];
-    at('police station', s.x + s.w / 2, s.y + s.h / 2);
-  }
-  for (let i = 0; i < 10; i++) {
-    const b = map.buildings[(i * 7 + 3) % map.buildings.length];
-    at(`building ${(i * 7 + 3) % map.buildings.length}`, b.x + b.w / 2, b.y + b.h / 2);
-  }
-  /**
-   * Every floor rect's outline, 3 screen pixels wide. Footprint rects never
-   * overlap but thousands share an edge on non-integer coordinates, and one fill
-   * per rect antialiases that edge from both sides — the road shows through as
-   * a hairline seam the union path does not have. If that is the whole of the
-   * difference, nothing differs off this mask.
-   *
-   * Measured: 0 off the mask at a player's zoom, in every view of two cities.
-   * At the whole-city framing a residue remains that shrinks as the mask widens
-   * (1360 px at 3px wide, 258 at 5px) — rects a couple of screen pixels apart,
-   * which the mask is too coarse to separate — never more than 8/255.
-   * The saddles are drawn per door on both sides for this reason: batched, they
-   * moved a few hundred pixels near doors that are not seams.
-   */
-  const edgeMask = (view: Viewport, scale: number): Uint8ClampedArray => {
-    const m = document.createElement('canvas');
-    m.width = VIEWPORT_WIDTH;
-    m.height = VIEWPORT_HEIGHT;
-    const g = m.getContext('2d')!;
-    g.scale(scale, scale);
-    g.translate(-view.x, -view.y);
-    g.strokeStyle = '#fff';
-    g.lineWidth = (scale < 1 ? 5 : 3) / scale;
-    for (const b of map.buildings) for (const r of b.rects) g.strokeRect(r.x, r.y, r.w, r.h);
-    return g.getImageData(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT).data;
-  };
+const ROUNDS = 40;
 
-  const lines: string[] = ['\n=== batched floors against per-rect, pixel for pixel ==='];
-  let worst = 0;
-  let worstOff = 0;
-  for (const [label, view, scale] of views) {
-    const a = read(true, view, scale);
-    const b = read(false, view, scale);
-    const mask = edgeMask(view, scale);
-    let diff = 0;
-    let max = 0;
-    let offEdge = 0;
-    for (let p = 0; p < a.length; p += 4) {
-      let d = 0;
-      for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(a[p + c] - b[p + c]));
-      if (d === 0) continue;
-      diff++;
-      if (d > max) max = d;
-      if (mask[p + 3] === 0) offEdge++;
+async function timeView(label: string, view: Viewport, scale: number): Promise<string[]> {
+  const cases = casesFor(view, scale);
+  const best = new Map<string, { issue: number; total: number }>();
+  for (const [, fn] of cases) sample(view, scale, fn); // warm patterns and paths
+  for (let round = 0; round < ROUNDS; round++) {
+    for (let i = 0; i < cases.length; i++) {
+      const [name, fn] = cases[(i + round) % cases.length];
+      const s = sample(view, scale, fn);
+      const prev = best.get(name);
+      if (!prev || s.total < prev.total) best.set(name, s);
     }
-    worst = Math.max(worst, max);
-    worstOff = Math.max(worstOff, offEdge);
-    lines.push(
-      `  ${label.padEnd(20)} ${String(diff).padStart(6)} px differ · worst ${max}/255 · ` +
-        `${offEdge} of them off a rect edge`,
-    );
+    if (round % 5 === 4) await new Promise((r) => setTimeout(r, 0));
   }
-  lines.push(`  worst anywhere: ${worst}/255 · most off an edge in one view: ${worstOff}`);
+  const a = best.get('CONTROL: clear only')!.total;
+  const b = best.get('CONTROL: clear only (again)')!.total;
+  const base = Math.min(a, b);
+  const lines = [
+    `\n=== ${label} (scale ${scale.toFixed(3)}) · noise floor ${Math.abs(a - b).toFixed(2)}ms ===`,
+    '  case                            issue   cost less the clear',
+  ];
+  for (const [name] of cases) {
+    const s = best.get(name)!;
+    lines.push(`  ${name.padEnd(30)} ${s.issue.toFixed(2).padStart(6)}   ${(s.total - base).toFixed(2).padStart(6)}`);
+  }
   return lines;
 }
 
-async function run(): Promise<void> {
-  const compared = compareFloors();
-  out.textContent = compared.join('\n') + '\n\ntiming…';
-  await new Promise((r) => setTimeout(r, 0));
-  // Warm every path (patterns, bakes) before anything is timed.
-  for (const [, fn] of cases) sample(fn);
-  for (let round = 0; round < ROUNDS; round++) {
-    const order = cases.map((c, i) => cases[(i + round) % cases.length]);
-    for (const [label, fn] of order) {
-      const s = sample(fn);
-      const prev = best.get(label);
-      if (!prev || s.issue + s.paint < prev.issue + prev.paint) best.set(label, s);
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
+// ---- pixels, on a canvas that is read back
 
-  const ctrl = best.get('CONTROL: clear only')!;
-  const ctrl2 = best.get('CONTROL: clear only (again)')!;
-  const floor = Math.abs(ctrl.issue + ctrl.paint - (ctrl2.issue + ctrl2.paint));
-  const lines: string[] = [];
-  lines.push(
+const readCanvas = document.createElement('canvas');
+readCanvas.width = VIEWPORT_WIDTH;
+readCanvas.height = VIEWPORT_HEIGHT;
+const rctx = readCanvas.getContext('2d', { willReadFrequently: true })!;
+
+function read(view: Viewport, scale: number, draw: () => void): Uint8ClampedArray {
+  rctx.setTransform(1, 0, 0, 1, 0, 0);
+  rctx.fillStyle = '#0b0d10';
+  rctx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+  rctx.save();
+  rctx.scale(scale, scale);
+  rctx.translate(-view.x, -view.y);
+  draw();
+  rctx.restore();
+  return rctx.getImageData(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT).data;
+}
+
+function comparisonViews(): Array<[string, Viewport, number]> {
+  const views: Array<[string, Viewport, number]> = [['whole city', specView, specScale]];
+  const zoom = CAMERA_ZOOM;
+  views.push(['corner complex', playerView, zoom]);
+  if (map.policeStation) {
+    const s = map.buildings[map.policeStation.building];
+    views.push(['police station', viewAt(s.x + s.w / 2, s.y + s.h / 2, zoom), zoom]);
+  }
+  for (let i = 0; i < 10; i++) {
+    const n = (i * 7 + 3) % map.buildings.length;
+    const b = map.buildings[n];
+    views.push([`building ${n}`, viewAt(b.x + b.w / 2, b.y + b.h / 2, zoom), zoom]);
+  }
+  return views;
+}
+
+/**
+ * An old drawing against its replacement, pixel for pixel, at the whole-city
+ * framing and at a player's zoom over a dozen spots.
+ *
+ * Both replacements lay a translucent tile onto an opaque colour once, when the
+ * tile is built, instead of on every frame — and compositing before sampling is
+ * the same arithmetic as sampling and compositing after, so the only difference
+ * allowed is 8-bit rounding. Measured: **worst 2/255** for the ground and
+ * **4/255** for the floors, anywhere.
+ */
+function comparePixels(title: string, old: (view: Viewport) => void, now: (view: Viewport) => void): string[] {
+  const lines = [`\n=== ${title}, pixel for pixel ===`];
+  let worst = 0;
+  for (const [label, view, scale] of comparisonViews()) {
+    const a = read(view, scale, () => old(view));
+    const b = read(view, scale, () => now(view));
+    let diff = 0;
+    let max = 0;
+    for (let p = 0; p < a.length; p += 4) {
+      let d = 0;
+      for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(a[p + c] - b[p + c]));
+      if (d > 0) diff++;
+      if (d > max) max = d;
+    }
+    worst = Math.max(worst, max);
+    lines.push(`  ${label.padEnd(20)} ${String(diff).padStart(7)} px differ · worst ${max}/255`);
+  }
+  lines.push(`  worst anywhere: ${worst}/255`);
+  return lines;
+}
+
+const gated = (set: (on: boolean) => void, draw: () => void) => {
+  set(true);
+  draw();
+  set(false);
+};
+
+async function run(): Promise<void> {
+  const header = [
+    `renderer: ${renderer}`,
     `city ${map.width}x${map.height} · ${map.buildings.length} buildings · ` +
       `${map.buildings.reduce((n, b) => n + b.rects.length, 0)} floor rects · ` +
       `${map.walls.length} walls · ${map.windows.length} windows · ${map.doors.length} doors · ` +
       `${pickups.length} pickups · ${map.bushes.length} bushes`,
+  ];
+  const lines = [...header];
+  const show = (note = '') => (out.textContent = lines.join('\n') + note);
+  show('\n\ntiming…');
+  await new Promise((r) => setTimeout(r, 0));
+  lines.push(...(await timeView('SPECTATOR, whole city', specView, specScale)));
+  show('\n\ntiming…');
+  lines.push(...(await timeView('PLAYER, over the corner complex', playerView, CAMERA_ZOOM)));
+  show('\n\ncomparing pixels…');
+  await new Promise((r) => setTimeout(r, 0));
+  lines.push(
+    ...comparePixels(
+      'one-pass ground against two-pass',
+      () => gated(setGroundDrawnInTwoPasses, () => drawGround(rctx, map)),
+      () => drawGround(rctx, map),
+    ),
   );
-  lines.push(`spectator scale ${specScale.toFixed(3)} · noise floor ${floor.toFixed(2)}ms\n`);
-  lines.push('  case                          issue   paint   total   (less the clear)');
-  const base = ctrl.issue + ctrl.paint;
-  for (const [label] of cases) {
-    const b = best.get(label)!;
-    const total = b.issue + b.paint;
-    lines.push(
-      `  ${label.padEnd(28)} ${b.issue.toFixed(2).padStart(6)}  ${b.paint.toFixed(2).padStart(6)}  ` +
-        `${total.toFixed(2).padStart(6)}   ${(total - base).toFixed(2).padStart(6)}`,
-    );
-  }
-  out.textContent = lines.concat(compared).join('\n');
+  // Ground under both, so the floors land on what they land on in the game.
+  lines.push(
+    ...comparePixels(
+      'one fill a floor rect against two',
+      (view) => {
+        drawGround(rctx, map);
+        gated(setFloorsDrawnPerRect, () => drawFloors(rctx, map, view));
+      },
+      (view) => {
+        drawGround(rctx, map);
+        drawFloors(rctx, map, view);
+      },
+    ),
+  );
+  lines.push('\n(done)');
+  show();
 }
 
 setTimeout(() => void run(), 200);

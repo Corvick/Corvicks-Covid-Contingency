@@ -8225,9 +8225,9 @@ the dog, and all three are built the cheap way on purpose.
   **institutional tile** for the police station, **big stone flagstones in a
   running bond** for the corner complex, chosen by `i === map.cornerBuilding` /
   `i === map.policeStation.building`. Three small tiles hashed once at first use
-  and handed to the canvas as patterns, and **every footprint of one kind goes
-  into one path filled once** — see **A pattern fill costs per call** under
-  performance, which is what one fill per footprint rect cost. Seams line up
+  and handed to the canvas as patterns, **laid onto their base colours so each
+  footprint rect is one opaque fill** — see **The floors were batched on the
+  strength of a software figure** under performance. Seams line up
   across the repeat by construction: full-width course lines, and every tile
   spacing divides `FLOOR_TILE` (128). **The complex was a 45° parquet lattice
   first and it read as scratches** — the flagstone replaced it, a plain slab
@@ -9524,42 +9524,60 @@ should buy.
   HUD writes is **0.3ms**. So a client reporting `else 24ms` is not spending it
   on any of these, and the next place to look is the browser itself — whether
   canvas is GPU-accelerated, and what else on the box wants the CPU.
-- **A pattern fill costs per call, not per pixel, and the floors were paying it
-  twelve hundred times a frame.** Reported off a laptop spectating a late round
-  at 24fps: `tick 11.02 / 33.3`, `render 10.2` of which **`map 9.8`**, `else
-  30.4`, entities 0.2. The AI was inside its budget on the worker; the frame was
-  lost in the `map` phase, and `client/mapbench.ts` — the phase broken out call
-  by call on a real `createWorld` city at the whole-city framing — put nearly
-  all of it on `drawFloors`.
-  - **Each pattern fill carries ~0.55ms of fixed cost whatever its size**, on a
-    rasteriser without the GPU. 600 small pattern `fillRect`s: **374ms**. The
-    same 600 rects as one path with one pattern fill: **15ms**, the price of a
-    single full-screen fill. `drawFloors` filled every one of a city's ~600
-    footprint rects twice — an opaque base and the pattern — so a spectator,
-    who sees all of them, paid ~1200.
-  - **One path per kind of floor now**: houses, the complex and the station,
-    each a base fill and a pattern fill. Measured in one run: **306 → 10.5ms**
-    and **506 → 27.7ms** on another, 19-29x. Quote the ratio; the absolute
-    figures moved 2-3x between runs on a busy box, which the CONTROL row showed.
-  - **It is the same picture, and the difference that remains is a fix.**
-    Footprint rects never overlap, but ~3000 pairs a city share an edge on
-    non-integer coordinates, and one fill per rect antialiases that edge from
-    both sides — the road showed through as a hairline seam. The union path
-    covers it. `mapbench.ts` compares both frames pixel for pixel: at a
-    player's zoom **every differing pixel is on a shared rect edge**, across
-    twenty-four views of two cities, worst 8/255.
-  - **The saddles were batched too and put back.** They are solid fills and
-    strokes with no per-call penalty, and three paths instead of a draw per
-    door let one strip stop covering its neighbour's strokes — a few hundred
-    pixels near doors that were not seams, for nothing measurable.
-  - **The laptop is probably not rasterising on the CPU, and that is inference
-    rather than measurement.** This pane's software rasteriser put the old floors at
-    300-500ms, which would be 2-3fps, not 24; the laptop's cost showed up as
-    *recording* instead (`map 9.8`, about 8us an op). So the GPU half of the
-    same fault is op count, which batching fixes the same way. If a machine
-    ever is on software raster, `drawGround` is next: its one full-world
-    pattern fill measures **14-42ms** here. `setFloorsDrawnPerRect` is the gate
-    and it is kept.
+- **A bench that reads its canvas back measures the CPU, and the game's canvas
+  is on the GPU.** Chrome moves a 2D canvas onto the software rasteriser once
+  it is read back with `getImageData` — and `paintbench.ts`, `layerbench.ts`
+  and `fogbench.ts` all force rendering exactly that way. So every figure they
+  produced is a *software* figure, on machines whose game canvas never reads
+  back and stays on the GPU. It cost a wrong fix before it was caught.
+  - **The tell was a blit.** A never-read offscreen canvas drawn onto the bench
+    canvas took **25ms** where the same blit had taken 2ms: one side was on the
+    GPU and the other had been demoted, so every frame paid a readback between
+    them. `createImageBitmap` is not a way round it — it snapshots the command
+    list and forces nothing.
+  - **`mapbench.ts` forces the canvas through a WebGL upload instead**:
+    `texImage2D` of the 2D canvas makes it render and `readPixels` of one texel
+    waits for the GPU, without reading the 2D canvas itself. It prints the
+    renderer first (an Intel Iris Xe on the work laptop), times the `map` phase
+    call by call on a real `createWorld` city at the whole-city framing and at a
+    player's zoom, and does its pixel comparisons on a separate canvas.
+  - **One frame, one flush.** Several frames behind one flush reads as free on
+    the GPU, because a full-canvas opaque fill discards everything recorded
+    under it.
+- **The floors were batched on the strength of a software figure, and it made
+  the player's view slower.** Reported off the laptop spectating a late round
+  at 24fps — `tick 11.02 / 33.3`, `map 9.8`, `else 30.4` — so the AI was inside
+  its budget and the frame was lost drawing. On the demoted canvas a pattern
+  fill carried **~0.55ms a call**: 600 pattern `fillRect`s cost 374ms against
+  15ms for one path of the same rects, and `drawFloors` made ~1200 (a solid
+  base and a translucent pattern per footprint rect). One path per kind of
+  floor went out as a 20x win. On the GPU:
+
+  | Iris Xe, cost of the call, two cities | whole city | player, over the complex |
+  |---|---|---|
+  | floors, two fills a rect (original) | 12.3-13.2ms | 2.7-2.9ms |
+  | floors, one path a kind (shipped a day) | 8.3ms | **5.4ms** |
+  | **floors, one opaque fill a rect** | **8.1-9.3ms** | **2.2-2.3ms** |
+  | ground, solid + translucent pattern | 1.8ms | 1.7-1.8ms |
+  | **ground, one opaque pattern** | **1.2-1.3ms** | **1.3-1.5ms** |
+
+  - **A path of many rects is dearer on the GPU than the rects**, so the batch
+    came out. What went in instead is the half of the idea that helps both
+    rasterisers: each floor tile is laid onto its base colour when it is
+    built, so a rect is one opaque `fillRect` — and the grime tile onto
+    `GROUND_COLOR`, so the road is one fill. Compositing before sampling is the
+    same arithmetic as after, and `mapbench.ts` reads both frames back: **worst
+    2/255** for the ground and **4/255** for the floors, rounding, anywhere.
+  - **The saddles stay a draw per door.** Batched, a strip drawn later stopped
+    covering its neighbour's strokes and moved ~500 pixels near doors.
+  - **On the GPU the whole-city frame is shapes, not textures.** The rest of
+    the `map` phase measured walls **7.5ms**, pickups 4.2, bushes 2.7, doors
+    2.3, park 1.8 — which is the laptop's `else 30` accounted for. Nothing
+    there is a single dear call; it is ~2000 of them. The lever that would move
+    it is not drawing the static half of the city again while the camera is
+    still, and it has not been built.
+  - `setFloorsDrawnPerRect` and `setGroundDrawnInTwoPasses` are the gates and
+    both are kept.
 - **The endgame stall was paint, not simulation.** Four hundred entities each
   cost ~41 canvas path operations, all rasterised at once with the whole map
   framed. Below `ENTITY_DETAIL_SCALE` an entity draws as a single dot, and
