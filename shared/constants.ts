@@ -3813,6 +3813,20 @@ export const SHIELD_BACK_ARC = 1.0;
 export const SHIELD_BASH_RANGE = 62;
 export const SHIELD_BASH_ARC = 1.1;
 export const SHIELD_BASH_PUSH = 46;
+/**
+ * **How close a zombie has to be before an NPC decides the shield is worth
+ * throwing — not `SHIELD_BASH_RANGE` itself.** That figure is what a swing
+ * actually reaches once it goes, and deciding to swing on it alone let an
+ * operator bash a zombie the better part of two body-lengths off: the grab
+ * distance itself is `radius*2 + GRAPPLE_REACH_BONUS`, about 33px, so 62 is
+ * nearly double it. The shield went off at something that was never close
+ * enough to grab, the push mostly crossed empty ground it had already
+ * covered, and by the time the zombie actually closed the shield was on
+ * cooldown and did nothing for the grab that followed. This is arm's length
+ * instead — a few pixels past the grab itself, so the shove pre-empts the
+ * hands going on rather than answering a threat that isn't there yet.
+ */
+export const SHIELD_BASH_TRIGGER_REACH = GRAPPLE_REACH_BONUS + 6;
 export const SHIELD_BASH_SLOW_MS = 1400;
 export const SHIELD_BASH_SLOW_MUL = 0.35;
 /** How long the shove animation is shown for. */

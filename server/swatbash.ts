@@ -48,8 +48,11 @@ import {
   setCityPopulation,
   PATH_NODE_BUDGET_PER_TICK,
   ZOMBIE_RADIUS,
+  PLAYER_RADIUS,
+  GRAPPLE_REACH_BONUS,
   SHIELD_BASH_RANGE,
   SHIELD_BASH_PUSH,
+  SHIELD_BASH_TRIGGER_REACH,
   SHIELD_POINTS,
   SWAT_BASH_COOLDOWN_MS,
   SHIELD_BASH_COOLDOWN_MS,
@@ -251,6 +254,46 @@ function bashRun(seed: number, kind: Kind = 'swat'): Bash | null {
     bearing = Math.atan2(op.y - z.y, op.x - z.x) + Math.PI;
   }
   return out;
+}
+
+/**
+ * Reported again, once the cooldown itself worked: *"swat are using their
+ * shield bash too early and its not really pushing zombies back. or they use
+ * it so early it barely touches the zombie."* `worthShoving` used to ask the
+ * same question `shieldShove`'s own hit query does — anything inside
+ * `SHIELD_BASH_RANGE` (62px) — which is nearly double the distance a zombie
+ * actually needs to grab (`PLAYER_RADIUS + ZOMBIE_RADIUS + GRAPPLE_REACH_BONUS`,
+ * ~33px). An operator threw the shove at something that had no way to reach
+ * him yet, the push mostly crossed ground the zombie hadn't got to, and the
+ * shield was cooling by the time anything was actually close.
+ *
+ * Held at a fixed distance for a few seconds rather than orbiting, so "never
+ * bashed" is a claim about that one distance rather than about however the
+ * orbit in `bashRun` happened to sweep past it.
+ */
+function standoffRun(seed: number, gap: number, ticks: number): boolean | null {
+  const staged = withSeed(seed, () => stagedOfficer('swat'));
+  if (!staged) return null;
+  const { world, op, id } = staged;
+
+  const z = makeEntity('chaser', 'zombie', op.x + gap, op.y);
+  z.radius = ZOMBIE_RADIUS;
+  z.health = 1e9;
+  z.maxHealth = 1e9;
+  world.entities.set('chaser', z);
+  world.ai.delete('chaser');
+
+  let now = Date.now();
+  let bashed = false;
+  for (let i = 0; i < ticks; i++) {
+    world.grappleImmune.set(id, now + 60_000);
+    z.x = op.x + gap;
+    z.y = op.y;
+    now += TICK_MS;
+    tick(world, now, TICK_MS / 1000);
+    if ((world.bashUntil.get(id) ?? 0) > now) bashed = true;
+  }
+  return bashed;
 }
 
 interface Pinned {
@@ -507,6 +550,50 @@ check(
   SWAT_BASH_COOLDOWN_MS > SHIELD_BASH_COOLDOWN_MS,
   "and it is slower than a player's  (control)",
   `${SWAT_BASH_COOLDOWN_MS}ms against ${SHIELD_BASH_COOLDOWN_MS}`,
+);
+
+// **"Too early", stated as a distance.** The actual grab distance — where a
+// zombie held here would take hold, if it could take hold at all — and the
+// old trigger, which was the shove's own reach and nearly double it.
+const GRAB_DIST = PLAYER_RADIUS + ZOMBIE_RADIUS + GRAPPLE_REACH_BONUS;
+const TRIGGER_DIST = PLAYER_RADIUS + ZOMBIE_RADIUS + SHIELD_BASH_TRIGGER_REACH;
+const STANDOFF_TICKS = TICK_RATE * 10; // comfortably past SWAT_BASH_COOLDOWN_MS
+
+console.log(`\nhow close before it's worth throwing  (grab at ${GRAB_DIST}px, range ${SHIELD_BASH_RANGE}px)\n`);
+const farGap = (SHIELD_BASH_RANGE + TRIGGER_DIST) / 2; // inside the old range, outside the new trigger
+const farBashed: boolean[] = [];
+for (let s = 0; s < RUNS; s++) {
+  const r = standoffRun(3000 + s, farGap, STANDOFF_TICKS);
+  if (r !== null) farBashed.push(r);
+}
+console.log(`  held at ${f1(farGap)}px, ${STANDOFF_TICKS / TICK_RATE}s   bashed ${farBashed.filter(Boolean).length}/${farBashed.length}`);
+check(
+  TRIGGER_DIST < SHIELD_BASH_RANGE,
+  'the new trigger distance is tighter than the old one  (control)',
+  `${f1(TRIGGER_DIST)}px against ${SHIELD_BASH_RANGE}px`,
+);
+check(
+  farBashed.length > 0 && farBashed.every((b) => !b),
+  "held just past arm's length, it never throws the shield",
+  `${farBashed.filter(Boolean).length}/${farBashed.length} runs bashed at ${f1(farGap)}px`,
+);
+
+const closeGap = TRIGGER_DIST - 4; // inside the new trigger, still outside the grab itself
+const closeBashed: boolean[] = [];
+for (let s = 0; s < RUNS; s++) {
+  const r = standoffRun(3000 + s, closeGap, STANDOFF_TICKS);
+  if (r !== null) closeBashed.push(r);
+}
+console.log(`  held at ${f1(closeGap)}px, ${STANDOFF_TICKS / TICK_RATE}s   bashed ${closeBashed.filter(Boolean).length}/${closeBashed.length}`);
+check(
+  closeGap > GRAB_DIST,
+  'and that gap is still outside the grab itself  (control)',
+  `${f1(closeGap)}px against a ${f1(GRAB_DIST)}px grab`,
+);
+check(
+  closeBashed.length > 0 && closeBashed.every(Boolean),
+  'but once a zombie is actually closing in, it does',
+  `${closeBashed.filter(Boolean).length}/${closeBashed.length} runs bashed at ${f1(closeGap)}px`,
 );
 
 console.log(`\nsomething already has hold of him  (${RUNS} cities each, grip ${GRAPPLE_MAX_MS}ms)\n`);

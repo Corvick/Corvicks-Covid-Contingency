@@ -274,6 +274,7 @@ import {
   STAMINA_SPRINT_FLOOR,
   SHIELD_BASH_RANGE,
   SHIELD_BASH_ARC,
+  SHIELD_BASH_TRIGGER_REACH,
   SHIELD_BASH_STAMINA,
   SWAT_BASH_COOLDOWN_MS,
   STAMINA_RECOVERY_THRESHOLD,
@@ -6529,15 +6530,28 @@ function botShieldBash(
 }
 
 /**
- * Is there anything in the shield's arc worth throwing it at?
+ * Is there anything close enough that the shield is actually worth throwing
+ * at it right now?
  *
  * **Only when there is.** A player may bash thin air and pay for it; an NPC
  * deciding to do that is one spending its getaway — or, for a dispatched
  * officer, five seconds of its only answer to being surrounded — on nothing.
  *
- * The same reach and the same arc `shieldShove` itself uses, and read off
- * `e.facing` for the same reason: that is the side the shield is on, and a
- * bash aimed where the officer's feet were pointing hits nobody.
+ * **Not `SHIELD_BASH_RANGE`.** That is what `shieldShove` itself reaches once
+ * it goes — the swing's own extent, and it stays that wide so a shove still
+ * catches a second zombie a stride past the one that triggered it. Deciding
+ * to *throw* the shove on that same figure is a different question and it was
+ * answering it wrong: 62px is nearly double a body's own grab distance
+ * (`SHIELD_BASH_TRIGGER_REACH`, arm's length past touching), so an operator
+ * would bash at something that had no way to reach him yet — the push mostly
+ * crossed ground the zombie hadn't got to, and by the time it actually closed
+ * the shield was cooling and did nothing for the grab that followed. This
+ * checks the zombie is nearly on top of him before deciding it is worth it;
+ * `shieldShove`'s own query still reaches the full range once it swings.
+ *
+ * Read off `e.facing` for the same reason `shieldShove` does: that is the
+ * side the shield is on, and a bash aimed where the officer's feet were
+ * pointing hits nobody.
  */
 function worthShoving(world: World, e: Entity): boolean {
   for (const other of world.entityGrid.queryCircle(e.x, e.y, SHIELD_BASH_RANGE, new Set<Entity>())) {
@@ -6545,7 +6559,7 @@ function worthShoving(world: World, e: Entity): boolean {
     const dx = other.x - e.x;
     const dy = other.y - e.y;
     const d = Math.hypot(dx, dy);
-    if (d > SHIELD_BASH_RANGE || d === 0) continue;
+    if (d > e.radius + other.radius + SHIELD_BASH_TRIGGER_REACH || d === 0) continue;
     if (Math.abs(angleDelta(Math.atan2(dy, dx), e.facing)) > SHIELD_BASH_ARC) continue;
     return true;
   }
